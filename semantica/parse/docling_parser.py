@@ -85,7 +85,9 @@ class DoclingParser:
 
         Args:
             **config: Parser configuration:
-                - export_format: Export format ("markdown", "html", "json") (default: "markdown")
+                - export_format: Export format ("markdown", "html", "json", "doctags")
+                - converter: Optional converter with a convert(path) method returning
+                  a result whose document is a DoclingDocument.
                 - enable_ocr: Enable OCR for scanned documents (default: False)
                   Note: OCR is handled via PdfPipelineOptions if needed
         """
@@ -99,7 +101,9 @@ class DoclingParser:
         # Store config for lazy initialization
         self.export_format = config.get("export_format", "markdown")
         self.enable_ocr = config.get("enable_ocr", False)
-        self._converter = None
+        # A supplied converter must return Docling's conversion-result shape.
+        # This lets hosts select local execution or their admitted gateway.
+        self._converter = config.get("converter")
 
     def parse(self, file_path: Union[str, Path], **options) -> Dict[str, Any]:
         """
@@ -111,7 +115,9 @@ class DoclingParser:
                 - extract_text: Whether to extract text (default: True)
                 - extract_tables: Whether to extract tables (default: True)
                 - extract_images: Whether to extract images (default: False)
-                - export_format: Export format ("markdown", "html", "json") (default: from config)
+                - export_format: Export format ("markdown", "html", "json", "doctags")
+                - include_document: Include complete document JSON and DocTags from
+                  the same conversion (default: False).
                 - pages: Specific page numbers to parse (None = all pages) - PDF only
 
         Returns:
@@ -217,6 +223,8 @@ class DoclingParser:
                 # JSON export returns structured data
                 doc_dict = result.document.export_to_dict()
                 full_text = self._extract_text_from_dict(doc_dict)
+            elif export_format == "doctags":
+                full_text = result.document.export_to_doctags()
             else:
                 full_text = result.document.export_to_markdown()
 
@@ -302,6 +310,11 @@ class DoclingParser:
                 "images": images,
                 "total_pages": metadata.page_count,
                 "export_format": export_format,
+                **({
+                    "document": result.document.export_to_dict(),
+                    "doctags": result.document.export_to_doctags(),
+                    "conversion_status": str(getattr(result, "status", "unknown")),
+                } if options.get("include_document", False) else {}),
             }
 
         except (ImportError, OSError):
@@ -726,4 +739,3 @@ class DoclingParser:
             metadata.format = file_path.suffix.lower().lstrip('.')
 
         return metadata
-

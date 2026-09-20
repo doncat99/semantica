@@ -62,7 +62,7 @@ License: MIT
 
 import re
 from dataclasses import dataclass
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 from ..utils.exceptions import ProcessingError
 from ..utils.logging import get_logger
@@ -90,31 +90,77 @@ class LLMResponse:
     metadata: Dict[str, Any]
 
 
-def _find_span_in_text(needle: str, text: str, occupied: set) -> tuple:
-    """Return the ``(start, end)`` character span for the first occurrence of
-    *needle* in *text* that is not already in *occupied*.
+def _is_ascii_word_char(value: str) -> bool:
+    return bool(value) and (value[0].isascii() and (value[0].isalnum() or value[0] == "_"))
 
-    Uses the same word-boundary pattern as
-    :meth:`~.ner_extractor.NERExtractor._align_entities_to_text` so that
-    ``Apple`` does not match inside ``Applesauce``.
 
-    Returns ``(0, 0)`` — the conventional "unknown span" sentinel — when no
-    unoccupied match is found rather than fabricating a position.
-    """
+def _overlaps(span: Tuple[int, int], occupied: Set[Tuple[int, int]]) -> bool:
+    start, end = span
+    return any(start < occ_end and end > occ_start for occ_start, occ_end in occupied)
+
+
+def _find_span_occurrence(
+    needle: str,
+    text: str,
+    occupied: set,
+    occurrence: Optional[int] = None,
+) -> Tuple[int, int, Optional[int]]:
+    """Return ``(start, end, occurrence_index)`` for a provable occurrence."""
     if not needle or not text:
-        return (0, 0)
+        return (0, 0, None)
 
-    left_boundary = r"(?<!\w)" if (needle[0].isalnum() or needle[0] == "_") else ""
-    right_boundary = r"(?!\w)" if (needle[-1].isalnum() or needle[-1] == "_") else ""
+    left_boundary = r"(?<![A-Za-z0-9_])" if _is_ascii_word_char(needle[0]) else ""
+    right_boundary = r"(?![A-Za-z0-9_])" if _is_ascii_word_char(needle[-1]) else ""
     pattern = re.compile(
         left_boundary + re.escape(needle) + right_boundary,
-        re.IGNORECASE,
+        re.IGNORECASE if needle.isascii() else 0,
     )
+    wanted = 0 if occurrence is None else max(0, occurrence)
+    seen = 0
     for m in pattern.finditer(text):
         span = (m.start(), m.end())
-        if span not in occupied:
-            return span
-    return (0, 0)
+        if span in occupied or _overlaps(span, occupied):
+            continue
+        if seen == wanted:
+            return (span[0], span[1], seen)
+        seen += 1
+    return (0, 0, None)
+
+
+
+def _span_occurrence_index(needle: str, text: str, span: Tuple[int, int]) -> Optional[int]:
+    if not needle or not text or span == (0, 0):
+        return None
+    left_boundary = r"(?<![A-Za-z0-9_])" if _is_ascii_word_char(needle[0]) else ""
+    right_boundary = r"(?![A-Za-z0-9_])" if _is_ascii_word_char(needle[-1]) else ""
+    pattern = re.compile(
+        left_boundary + re.escape(needle) + right_boundary,
+        re.IGNORECASE if needle.isascii() else 0,
+    )
+    for index, match in enumerate(pattern.finditer(text)):
+        if (match.start(), match.end()) == span:
+            return index
+    return None
+
+def _find_span_in_text(
+    needle: str,
+    text: str,
+    occupied: set,
+    occurrence: Optional[int] = None,
+) -> tuple:
+    """Return a deterministic ``(start, end)`` span for *needle* in *text*.
+
+    ASCII words use ASCII-only boundaries so ``Apple`` does not match inside
+    ``Applesauce``.  Non-ASCII text, including Chinese, is matched literally;
+    Python ``\\w`` treats adjacent CJK characters as one word and would miss
+    ``北京大学`` inside ``北京大学位于北京``.
+
+    ``occurrence`` is zero-based among unoccupied matches.  ``None`` means the
+    first unoccupied occurrence.  Returns ``(0, 0)`` when no such occurrence can
+    be proven.
+    """
+    start, end, _ = _find_span_occurrence(needle, text, occupied, occurrence)
+    return (start, end)
 
 
 class LLMExtraction:
@@ -133,6 +179,7 @@ class LLMExtraction:
         """
         self.logger = get_logger("llm_extraction")
         self.config = config
+        self.fail_closed = bool(config.get("fail_closed", False))
         self.progress_tracker = get_progress_tracker()
         # Ensure progress tracker is enabled
         if not self.progress_tracker.enabled:
@@ -225,15 +272,17 @@ class LLMExtraction:
         )
 
         try:
+            fail_closed = bool(options.get("fail_closed", getattr(self, "fail_closed", False)))
             if not self.provider or not self.provider.is_available():
-                self.logger.warning(
-                    "LLM provider not available. Returning original entities."
-                )
+                message = "LLM provider not available"
+                self.logger.warning("%s. Returning original entities.", message)
                 self.progress_tracker.stop_tracking(
                     tracking_id,
-                    status="completed",
-                    message="LLM provider not available",
+                    status="failed" if fail_closed else "completed",
+                    message=message,
                 )
+                if fail_closed:
+                    raise ProcessingError(message)
                 return entities
 
             if not _SCHEMAS_AVAILABLE:
@@ -243,9 +292,11 @@ class LLMExtraction:
                 )
                 self.progress_tracker.stop_tracking(
                     tracking_id,
-                    status="completed",
+                    status="failed" if fail_closed else "completed",
                     message="Schemas unavailable",
                 )
+                if fail_closed:
+                    raise ProcessingError("Pydantic schemas unavailable")
                 return entities
 
             self.progress_tracker.update_tracking(
@@ -282,6 +333,10 @@ class LLMExtraction:
             self.progress_tracker.stop_tracking(
                 tracking_id, status="failed", message=str(e)
             )
+            if bool(options.get("fail_closed", getattr(self, "fail_closed", False))):
+                if isinstance(e, ProcessingError):
+                    raise
+                raise ProcessingError(f"LLM entity enhancement failed: {e}") from e
             return entities
 
     def enhance_relations(
@@ -320,10 +375,12 @@ class LLMExtraction:
         Returns:
             list: Enhanced relations
         """
+        fail_closed = bool(options.get("fail_closed", getattr(self, "fail_closed", False)))
         if not self.provider or not self.provider.is_available():
-            self.logger.warning(
-                "LLM provider not available. Returning original relations."
-            )
+            message = "LLM provider not available"
+            self.logger.warning("%s. Returning original relations.", message)
+            if fail_closed:
+                raise ProcessingError(message)
             return relations
 
         if not _SCHEMAS_AVAILABLE:
@@ -331,6 +388,8 @@ class LLMExtraction:
                 "Pydantic schemas not available; cannot perform typed LLM "
                 "enhancement. Returning original relations."
             )
+            if fail_closed:
+                raise ProcessingError("Pydantic schemas unavailable")
             return relations
 
         prompt = self._build_relation_prompt(text, relations)
@@ -348,6 +407,10 @@ class LLMExtraction:
             return enhanced_relations
         except Exception as e:
             self.logger.error(f"Failed to enhance relations with LLM: {e}")
+            if bool(options.get("fail_closed", getattr(self, "fail_closed", False))):
+                if isinstance(e, ProcessingError):
+                    raise
+                raise ProcessingError(f"LLM relation enhancement failed: {e}") from e
             return relations
 
     def _build_entity_prompt(self, text: str, entities: List[Entity]) -> str:
@@ -460,6 +523,11 @@ Example: {{"relations": [{{"subject": "Apple", "predicate": "founded_by", "objec
         for entity in original_entities:
             idx = len(working)
             new_meta = dict(entity.metadata) if entity.metadata else {}
+            occurrence = _span_occurrence_index(
+                entity.text, text, (entity.start_char, entity.end_char)
+            )
+            if occurrence is not None:
+                new_meta.setdefault("span_occurrence", occurrence)
             working.append(Entity(
                 text=entity.text,
                 label=entity.label,
@@ -500,20 +568,25 @@ Example: {{"relations": [{{"subject": "Apple", "predicate": "founded_by", "objec
                     seen_new.add(key)
                     # Attempt to locate the entity in the source text so
                     # downstream span-dependent code receives a usable offset.
-                    start, end = _find_span_in_text(e_out.text, text, occupied_spans)
+                    start, end, found_occurrence = _find_span_occurrence(
+                        e_out.text, text, occupied_spans
+                    )
                     if start != 0 or end != 0:
                         occupied_spans.add((start, end))
+                    metadata = {
+                        "enhanced_by": self.provider_name,
+                        "model": self.model,
+                        "extraction_method": "llm_enhancement",
+                    }
+                    if found_occurrence is not None:
+                        metadata["span_occurrence"] = found_occurrence
                     working.append(Entity(
                         text=e_out.text,
                         label=e_out.label or "UNKNOWN",
                         start_char=start,
                         end_char=end,
                         confidence=e_out.confidence,
-                        metadata={
-                            "enhanced_by": self.provider_name,
-                            "model": self.model,
-                            "extraction_method": "llm_enhancement",
-                        },
+                        metadata=metadata,
                     ))
 
         # Stamp any original entities not touched by the LLM
@@ -677,27 +750,33 @@ Example: {{"relations": [{{"subject": "Apple", "predicate": "founded_by", "objec
                     # document.  Only synthetic (unresolved) endpoints need this;
                     # pool-resolved endpoints already carry correct spans.
                     if subj_entity is None:
-                        s_start, s_end = _find_span_in_text(
+                        s_start, s_end, s_occurrence = _find_span_occurrence(
                             subj_text, text, occupied_endpoint_spans
                         )
                         if s_start != 0 or s_end != 0:
                             occupied_endpoint_spans.add((s_start, s_end))
+                        metadata = {"synthetic": True}
+                        if s_occurrence is not None:
+                            metadata["span_occurrence"] = s_occurrence
                         subj_entity = Entity(
                             text=subj_text, label="UNKNOWN",
                             start_char=s_start, end_char=s_end,
-                            confidence=0.8, metadata={"synthetic": True},
+                            confidence=0.8, metadata=metadata,
                         )
 
                     if obj_entity is None:
-                        o_start, o_end = _find_span_in_text(
+                        o_start, o_end, o_occurrence = _find_span_occurrence(
                             obj_text, text, occupied_endpoint_spans
                         )
                         if o_start != 0 or o_end != 0:
                             occupied_endpoint_spans.add((o_start, o_end))
+                        metadata = {"synthetic": True}
+                        if o_occurrence is not None:
+                            metadata["span_occurrence"] = o_occurrence
                         obj_entity = Entity(
                             text=obj_text, label="UNKNOWN",
                             start_char=o_start, end_char=o_end,
-                            confidence=0.8, metadata={"synthetic": True},
+                            confidence=0.8, metadata=metadata,
                         )
 
                     working.append(Relation(

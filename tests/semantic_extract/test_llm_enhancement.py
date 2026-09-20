@@ -881,3 +881,49 @@ class TestCaseInsensitiveMatching:
         assert len(result) == 1
         assert result[0].predicate == "founded_by"
         assert result[0].confidence == pytest.approx(0.97)
+
+class TestFailClosedAndDeterministicSpans:
+    def test_fail_closed_provider_failure_raises_for_entities(self):
+        extractor = _make_failing_extractor()
+        with pytest.raises(Exception, match="LLM entity enhancement failed"):
+            extractor.enhance_entities("Apple", [_make_entity("Apple", "ORG")], fail_closed=True)
+
+    def test_chinese_entity_span_is_located(self):
+        source = "北京大学位于北京。"
+        llm_resp = EntitiesResponse(entities=[
+            EntityOut(text="北京大学", label="ORG", confidence=0.98),
+        ])
+        extractor = _make_extractor(llm_resp)
+        result = extractor.enhance_entities(source, [])
+
+        entity = next(e for e in result if e.text == "北京大学")
+        assert (entity.start_char, entity.end_char) == (0, 4)
+        assert entity.metadata["span_occurrence"] == 0
+
+    def test_repeated_new_entities_get_distinct_occurrences(self):
+        source = "苹果发布产品。苹果上涨。"
+        llm_resp = EntitiesResponse(entities=[
+            EntityOut(text="苹果", label="ORG", confidence=0.9),
+            EntityOut(text="苹果", label="ORG", confidence=0.8),
+        ])
+        extractor = _make_extractor(llm_resp)
+        result = extractor.enhance_entities(source, [])
+
+        apples = [e for e in result if e.text == "苹果"]
+        assert len(apples) == 1
+        assert (apples[0].start_char, apples[0].end_char) == (0, 2)
+        assert apples[0].metadata["span_occurrence"] == 0
+
+    def test_repeated_existing_entities_record_occurrence_index(self):
+        source = "苹果发布产品。苹果上涨。"
+        original = [
+            _make_entity("苹果", "PRODUCT", start=0, end=2),
+            _make_entity("苹果", "PRODUCT", start=7, end=9),
+        ]
+        llm_resp = EntitiesResponse(entities=[
+            EntityOut(text="苹果", label="ORG", confidence=0.9),
+        ])
+        extractor = _make_extractor(llm_resp)
+        result = extractor.enhance_entities(source, original)
+
+        assert [e.metadata["span_occurrence"] for e in result] == [0, 1]

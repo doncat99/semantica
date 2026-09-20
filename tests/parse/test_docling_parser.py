@@ -1,9 +1,25 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from pathlib import Path
 from semantica.parse.docling_parser import DoclingParser, DoclingMetadata
 
 class TestDoclingParser(unittest.TestCase):
+    def test_complete_document_uses_one_conversion_and_survives_reload(self):
+        from docling_core.types.doc import DoclingDocument, DocItemLabel
+        document = DoclingDocument(name="one-conversion")
+        document.add_text(label=DocItemLabel.TEXT, text="北京大学位于北京。")
+        converter = MagicMock()
+        converter.convert.return_value = SimpleNamespace(document=document, status="success")
+        parser = DoclingParser(converter=converter)
+        with patch.object(Path, 'exists', return_value=True):
+            result = parser.parse("fixture.pdf", include_document=True, export_format="doctags")
+        converter.convert.assert_called_once_with("fixture.pdf")
+        restored = DoclingDocument.model_validate(result["document"])
+        self.assertEqual(result["doctags"], restored.export_to_doctags())
+        self.assertEqual(result["full_text"], result["doctags"])
+        self.assertEqual(restored.texts[0].text, "北京大学位于北京。")
+
     def setUp(self):
         # Patch DOCLING_AVAILABLE to True for testing logic
         self.available_patcher = patch('semantica.parse.docling_parser.DOCLING_AVAILABLE', True)
