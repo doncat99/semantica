@@ -114,7 +114,7 @@ def _structured_extract(text: str, relay: Any) -> tuple[dict[str, Any], ModelRec
 
 
 def _embed_text(text: str, relay: Any) -> tuple[list[float], ModelReceipt]:
-    response, receipt = _relay_json(relay, {"input": [text]}, "embedding")
+    response, receipt = _relay_json(relay, {"input": [text], "model": relay.model_id}, "embedding")
     if response.get("model") != relay.model_id:
         raise SnapshotBuildError("embedding response model does not match the admitted relay model")
     if isinstance(response.get("usage"), dict):

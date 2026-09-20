@@ -155,6 +155,7 @@ def test_model_recipe_uses_bifrost_chat_and_embedding_and_records_receipts(tmp_p
                     "usage": {"prompt_tokens": 10, "completion_tokens": 8},
                 }
             elif self.path == "/v1/embeddings":
+                assert payload["model"] == "embedding-1"
                 response = {"data": [{"embedding": [0.25, 0.5, 0.75], "index": 0}], "model": "embedding-1", "usage": {"prompt_tokens": 4, "total_tokens": 4}}
             else:
                 self.send_response(404)
