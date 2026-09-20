@@ -354,6 +354,7 @@ all = [
 semantica = "semantica.cli:main"
 semantica-server = "semantica.server:main"
 semantica-worker = "semantica.worker:main"
+semantica-project-worker = "semantica.project_snapshot_worker:main"
 semantica-explorer = "semantica.explorer:main"
 semantica-mcp = "semantica.mcp_server:main"
 
