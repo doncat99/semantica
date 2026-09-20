@@ -588,6 +588,10 @@ class ReleaseRef(DigestModel):
     @field_validator("media_types", mode="after")
     @classmethod
     def validate_media_types(cls, value: Dict[str, str]) -> Dict[str, str]:
+        required = {"document-representation", "retrieval-index", "snapshot"}
+        missing = required - set(value)
+        if missing:
+            raise ValueError(f"release mediaTypes missing required keys: {sorted(missing)}")
         normalized = {key: _validate_media_type(media_type, f"release mediaTypes[{key}]") for key, media_type in value.items()}
         if not normalized["document-representation"].endswith("+json"):
             raise ValueError("document-representation artifact must be JSON")
