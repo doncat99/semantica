@@ -53,7 +53,11 @@ def test_worker_builds_complete_snapshot_from_real_text_file(tmp_path):
     assert snapshot.relations == []
     assert snapshot.assertions == []
     assert snapshot.identity_decisions == []
-    assert snapshot.reports == []
+    assert len(snapshot.communities) == len(snapshot.entities)
+    assert len(snapshot.topics) == len(snapshot.communities)
+    assert len(snapshot.reports) == len(snapshot.communities)
+    assert snapshot.retrieval_manifests[0].community_ids
+    assert snapshot.change_delta.added_ids
     assert snapshot.evidence_spans
     assert snapshot.model_receipts == []
     assert all(span.quote == span.locator.quote for span in snapshot.evidence_spans)
@@ -73,6 +77,33 @@ def test_worker_fails_closed_for_unsupported_source_format(tmp_path):
     assert response["ok"] is False
     assert response["error"]["type"] == "SnapshotBuildError"
     assert "dedicated adapter" in response["error"]["message"] or "does not match" in response["error"]["message"]
+
+
+def test_cross_source_same_name_stays_unresolved(tmp_path):
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("Ada Lovelace designed the Analytical Engine.", encoding="utf-8")
+    second.write_text("Ada Lovelace studied mathematics.", encoding="utf-8")
+    request = _request(first, tmp_path)
+    request["params"]["sources"].append({
+        "filePath": str(second),
+        "materialRevision": "material-2",
+        "mimeType": "text/plain",
+        "name": second.name,
+        "sourceId": "source-2",
+    })
+    stdout = io.StringIO()
+    assert serve(io.StringIO(json.dumps(request) + "\n"), stdout) == 0
+    response = json.loads(stdout.getvalue())
+    assert response["ok"] is True
+    snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "snapshot")
+    snapshot = ProjectSnapshot.model_validate_json(snapshot_path.read_bytes())
+    ada_candidates = [entity for entity in snapshot.entities if entity.canonical_name == "Ada Lovelace"]
+    assert len(ada_candidates) == 2
+    assert ada_candidates[0].id != ada_candidates[1].id
+    assert snapshot.identity_decisions == []
+    assert len(snapshot.conflicts) == 1
+    assert snapshot.conflicts[0].conflict_type == "identity"
 
 
 def test_model_recipe_uses_bifrost_chat_and_embedding_and_records_receipts(tmp_path):

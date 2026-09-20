@@ -11,6 +11,7 @@ import mimetypes
 import os
 import urllib.error
 import urllib.request
+from collections import defaultdict
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -22,10 +23,15 @@ from .project_snapshot_schema import (
     DocumentLocator,
     DocumentRepresentation,
     EvidenceSpan,
+    IdentityDecision,
     KernelLineage,
     KnowledgeAssertion,
+    KnowledgeCommunity,
+    KnowledgeConflict,
     KnowledgeRelation,
     KnowledgeEntity,
+    KnowledgeReport,
+    KnowledgeTopic,
     ModelReceipt,
     ProjectSnapshot,
     ProjectSnapshotBuildRequest,
@@ -162,8 +168,10 @@ def _span_id(source_id: str, start: int, end: int) -> str:
     return f"evidence:{_safe_id(source_id)}:{start}:{end}"
 
 
-def _entity_id(name: str, entity_type: str) -> str:
-    return f"entity:{sha256(f'{entity_type}:{name.casefold()}'.encode()).hexdigest()[:24]}"
+def _entity_id(source_id: str, name: str, entity_type: str) -> str:
+    """Keep extracted candidates source-scoped until identity is proven."""
+    key = f"{source_id}:{entity_type}:{name.casefold()}"
+    return f"entity:{sha256(key.encode()).hexdigest()[:24]}"
 
 
 def _find_span(text: str, quote: str, start: int = 0) -> tuple[int, int]:
@@ -215,7 +223,7 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
             quote=text[start:end],
             confidence=item.get("confidence"),
         )
-        entity_id = _entity_id(name, entity_type)
+        entity_id = _entity_id(source.source_id, name, entity_type)
         current = entities.get(entity_id)
         if current is None:
             entities[entity_id] = KnowledgeEntity(
@@ -280,6 +288,199 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
     return {"source": source, "text": text, "representation": representation, "evidence": list(evidence.values()), "entities": list(entities.values()), "assertions": assertions, "relations": relations, "artifact_id": representation_artifact_id, "document": document}
 
 
+def _semantic_organization(
+    entities: list[KnowledgeEntity],
+    assertions: list[KnowledgeAssertion],
+    relations: list[KnowledgeRelation],
+    evidence: list[EvidenceSpan],
+    model_receipts: list[ModelReceipt],
+) -> tuple[list[IdentityDecision], list[KnowledgeCommunity], list[KnowledgeTopic], list[KnowledgeReport], list[KnowledgeConflict]]:
+    """Create the project-level organization owned by the Semantica kernel.
+
+    This is deliberately graph-native and deterministic. It does not invent
+    facts or use a second extractor: every output points back to the candidate
+    entities, assertions, relations, and evidence produced above.
+    """
+    evidence_by_id = {item.id: item for item in evidence}
+    # Source-scoped candidates are intentionally left unresolved. A durable
+    # cross-source merge requires an identity model decision or human evidence;
+    # a matching label alone is not sufficient.
+    identities: list[IdentityDecision] = []
+
+    # Connected components are the stable project graph communities. Isolated
+    # entities remain visible as singleton communities instead of disappearing.
+    adjacency: dict[str, set[str]] = {entity.id: set() for entity in entities}
+    for relation in relations:
+        adjacency.setdefault(relation.source_entity_id, set()).add(relation.target_entity_id)
+        adjacency.setdefault(relation.target_entity_id, set()).add(relation.source_entity_id)
+
+    components: list[list[str]] = []
+    unseen = set(adjacency)
+    while unseen:
+        root = min(unseen)
+        queue = [root]
+        unseen.remove(root)
+        component: list[str] = []
+        while queue:
+            current = queue.pop()
+            component.append(current)
+            for neighbor in sorted(adjacency.get(current, ())):
+                if neighbor in unseen:
+                    unseen.remove(neighbor)
+                    queue.append(neighbor)
+        components.append(sorted(component))
+
+    entity_by_id = {entity.id: entity for entity in entities}
+    communities: list[KnowledgeCommunity] = []
+    topics: list[KnowledgeTopic] = []
+    reports: list[KnowledgeReport] = []
+    for component in components:
+        member_set = set(component)
+        internal_relations = [
+            relation
+            for relation in relations
+            if relation.source_entity_id in member_set and relation.target_entity_id in member_set
+        ]
+        member_assertions = [
+            assertion
+            for assertion in assertions
+            if assertion.subject_id in member_set or assertion.object_entity_id in member_set
+        ]
+        evidence_ids = sorted(
+            {
+                evidence_id
+                for item in [*member_assertions, *internal_relations]
+                for evidence_id in item.evidence_ids
+                if evidence_id in evidence_by_id
+            }
+        )
+        community_digest = sha256("|".join(component).encode("utf-8")).hexdigest()[:24]
+        community_id = f"community:{community_digest}"
+        names = [entity_by_id[item].canonical_name for item in component]
+        title = " / ".join(names[:3])
+        if len(names) > 3:
+            title += f" +{len(names) - 3}"
+        communities.append(
+            KnowledgeCommunity(
+                id=community_id,
+                level=0,
+                title=title,
+                entity_ids=component,
+                relation_ids=[relation.id for relation in internal_relations],
+                metrics={"entity_count": len(component), "relation_count": len(internal_relations)},
+            )
+        )
+        topic_id = f"topic:{community_digest}"
+        topics.append(
+            KnowledgeTopic(
+                id=topic_id,
+                title=title,
+                community_ids=[community_id],
+                entity_ids=component,
+                assertion_ids=[assertion.id for assertion in member_assertions],
+                evidence_ids=evidence_ids,
+            )
+        )
+        relation_text = ", ".join(
+            f"{entity_by_id[item.source_entity_id].canonical_name} {item.type} {entity_by_id[item.target_entity_id].canonical_name}"
+            for item in internal_relations[:8]
+        )
+        summary = f"{len(component)} entities form one connected knowledge community."
+        if relation_text:
+            summary += f" Supported relations: {relation_text}."
+        reports.append(
+            KnowledgeReport(
+                id=f"report:community:{community_digest}",
+                report_type="community",
+                title=title,
+                summary=summary,
+                community_id=community_id,
+                topic_id=topic_id,
+                evidence_ids=evidence_ids,
+                model_receipt_ids=[receipt.id for receipt in model_receipts],
+                content_hash=stable_digest({"title": title, "summary": summary, "evidence": evidence_ids}),
+                metadata={"producer": "semantica", "assertion_count": len(member_assertions)},
+            )
+        )
+
+    conflicts: list[KnowledgeConflict] = []
+    by_normalized_name: dict[str, list[KnowledgeEntity]] = defaultdict(list)
+    for entity in entities:
+        by_normalized_name[" ".join(entity.canonical_name.casefold().split())].append(entity)
+    for normalized_name, same_name in by_normalized_name.items():
+        source_ids = {
+            source_id
+            for entity in same_name
+            for source_id in entity.metadata.get("source_ids", [])
+        }
+        if len(source_ids) < 2:
+            continue
+        entity_ids = sorted(entity.id for entity in same_name)
+        evidence_ids = sorted({evidence_id for entity in same_name for evidence_id in entity.evidence_ids if evidence_id in evidence_by_id})
+        conflict_digest = sha256(normalized_name.encode("utf-8")).hexdigest()[:24]
+        conflicts.append(
+            KnowledgeConflict(
+                id=f"conflict:identity:{conflict_digest}",
+                conflict_type="identity",
+                status="open",
+                entity_ids=entity_ids,
+                evidence_ids=evidence_ids,
+                reason="same normalized mention appears in multiple sources; identity is unresolved",
+            )
+        )
+    return identities, communities, topics, reports, conflicts
+
+
+def _change_delta(
+    base_snapshot: ProjectSnapshot | None,
+    snapshot_id: str,
+    representations: list[DocumentRepresentation],
+    entities: list[KnowledgeEntity],
+    assertions: list[KnowledgeAssertion],
+    relations: list[KnowledgeRelation],
+    reports: list[KnowledgeReport],
+    retrieval_manifest_ids: list[str],
+) -> ChangeDelta:
+    if base_snapshot is None:
+        return ChangeDelta(
+            changed_representation_ids=[item.id for item in representations],
+            added_ids=[item.id for item in [*entities, *assertions, *relations, *reports]],
+            affected_report_ids=[item.id for item in reports],
+            affected_retrieval_manifest_ids=retrieval_manifest_ids,
+            reason="initial Semantica project build",
+        )
+
+    def keyed(items: list[Any]) -> dict[str, str]:
+        return {item.id: stable_digest(item.model_dump(mode="json", by_alias=True)) for item in items}
+
+    current = {"representation": keyed(representations), "entity": keyed(entities), "assertion": keyed(assertions), "relation": keyed(relations), "report": keyed(reports)}
+    previous = {"representation": keyed(base_snapshot.document_representations), "entity": keyed(base_snapshot.entities), "assertion": keyed(base_snapshot.assertions), "relation": keyed(base_snapshot.relations), "report": keyed(base_snapshot.reports)}
+    added: list[str] = []
+    updated: list[str] = []
+    retracted: list[str] = []
+    for kind in current:
+        current_ids = set(current[kind])
+        previous_ids = set(previous[kind])
+        added.extend(sorted(current_ids - previous_ids))
+        retracted.extend(sorted(previous_ids - current_ids))
+        updated.extend(sorted(item_id for item_id in current_ids & previous_ids if current[kind][item_id] != previous[kind][item_id]))
+    representation_ids = set(current["representation"]) | set(previous["representation"])
+    changed_representation_ids = sorted(set(added + updated + retracted) & representation_ids)
+    affected_report_ids = sorted({item.id for item in reports if item.id in set(added + updated) or item.id in set(retracted)})
+    if changed_representation_ids:
+        affected_report_ids = sorted(set(affected_report_ids) | {item.id for item in reports})
+    return ChangeDelta(
+        base_snapshot_id=base_snapshot.id,
+        changed_representation_ids=changed_representation_ids,
+        added_ids=sorted(set(added)),
+        updated_ids=sorted(set(updated)),
+        retracted_ids=sorted(set(retracted)),
+        affected_report_ids=affected_report_ids,
+        affected_retrieval_manifest_ids=retrieval_manifest_ids if (added or updated or retracted) else [],
+        reason=f"diff from Semantica snapshot {base_snapshot.id} to {snapshot_id}",
+    )
+
+
 def build_project_snapshot(request: ProjectSnapshotBuildRequest) -> dict[str, Any]:
     """Build, validate, and materialize one immutable snapshot and its artifacts."""
     if request.recipe.id not in {"deterministic", "model"}:
@@ -289,6 +490,7 @@ def build_project_snapshot(request: ProjectSnapshotBuildRequest) -> dict[str, An
         )
     output_dir = Path(request.output_dir).resolve()
     output_dir.mkdir(parents=True, exist_ok=True)
+    base_snapshot: ProjectSnapshot | None = None
     if request.base_snapshot:
         base_path = Path(request.base_snapshot.snapshot_path).resolve()
         if not base_path.is_file():
@@ -326,15 +528,30 @@ def build_project_snapshot(request: ProjectSnapshotBuildRequest) -> dict[str, An
         path = output_dir / f"representation-{_safe_id(item['source'].source_id)}.json"
         item["artifact_digest"] = _write_json(path, item["document"])
         item["artifact_path"] = path
-    communities: list[Any] = []
-    topics: list[Any] = []
-    identity_decisions: list[Any] = []
-    reports: list[Any] = []
-    retrieval_payload = {"entities": [entity.model_dump(mode="json", by_alias=True) for entity in entities_by_id.values()], "relations": [relation.model_dump(mode="json", by_alias=True) for relation in relations], "evidence": [span.model_dump(mode="json", by_alias=True) for span in evidence], "communities": [], "topics": [], "embeddings": [{"source_id": item["source"].source_id, "vector": item["embedding"]} for item in source_builds if "embedding" in item]}
+    snapshot_id = f"snapshot:{_safe_id(request.project_id)}:{request.input_revision.split(':')[-1][:16]}"
+    entities = list(entities_by_id.values())
+    identity_decisions, communities, topics, reports, conflicts = _semantic_organization(
+        entities,
+        assertions,
+        relations,
+        evidence,
+        model_receipts,
+    )
+    retrieval_payload = {
+        "snapshot_id": snapshot_id,
+        "entities": [entity.model_dump(mode="json", by_alias=True) for entity in entities],
+        "assertions": [assertion.model_dump(mode="json", by_alias=True) for assertion in assertions],
+        "relations": [relation.model_dump(mode="json", by_alias=True) for relation in relations],
+        "evidence": [span.model_dump(mode="json", by_alias=True) for span in evidence],
+        "communities": [community.model_dump(mode="json", by_alias=True) for community in communities],
+        "topics": [topic.model_dump(mode="json", by_alias=True) for topic in topics],
+        "reports": [report.model_dump(mode="json", by_alias=True) for report in reports],
+        "embeddings": [{"source_id": item["source"].source_id, "vector": item["embedding"]} for item in source_builds if "embedding" in item],
+        "model_receipt_ids": [receipt.id for receipt in model_receipts],
+    }
     retrieval_path = output_dir / "retrieval.json"
     retrieval_digest = _write_json(retrieval_path, retrieval_payload)
     retrieval_artifact_id = "artifact:retrieval"
-    snapshot_id = f"snapshot:{_safe_id(request.project_id)}:{request.input_revision.split(':')[-1][:16]}"
     representation_artifacts = [ArtifactManifest(id=item["artifact_id"], artifact_type="representation", artifact_ref=str(item["artifact_path"]), artifact_hash=item["artifact_digest"]) for item in source_builds]
     # The snapshot bytes are self-referential: putting their own digest inside
     # the bytes would require a fixed-point hash. The external worker manifest
@@ -343,7 +560,45 @@ def build_project_snapshot(request: ProjectSnapshotBuildRequest) -> dict[str, An
     retrieval_artifact = ArtifactManifest(id=retrieval_artifact_id, artifact_type="retrieval", artifact_ref=str(retrieval_path), artifact_hash=retrieval_digest, depends_on=[item.id for item in representation_artifacts])
     receipt_ids = [receipt.id for receipt in model_receipts]
     lineage = KernelLineage(schema_digest=request.release.schema_digest, recipe_id=request.recipe.id, recipe_digest=stable_digest(request.recipe.model_dump(mode="json", by_alias=True)), rule_version="semantica-project-snapshot-v1", rule_digest=stable_digest({"pipeline": request.recipe.id}), ontology_version="semantica-default", ontology_digest=stable_digest({"ontology": "default"}), model_receipt_ids=receipt_ids)
-    snapshot = ProjectSnapshot(snapshot_id=snapshot_id, project_id=request.project_id, base_snapshot_id=request.base_snapshot.snapshot_id if request.base_snapshot else None, lineage=lineage, artifact_manifest=representation_artifacts + [retrieval_artifact], document_representations=representations, evidence_spans=evidence, entities=list(entities_by_id.values()), assertions=assertions, relations=relations, identity_decisions=identity_decisions, communities=communities, topics=topics, reports=reports, conflicts=[], retrieval_manifests=[RetrievalArtifactManifest(id="retrieval:graph", retrieval_type="graph", artifact_hash=retrieval_digest, artifact_ref_id=retrieval_artifact_id, source_snapshot_id=snapshot_id, record_count=len(entities_by_id) + len(relations), entity_ids=list(entities_by_id), relation_ids=[r.id for r in relations], community_ids=[], evidence_ids=[e.id for e in evidence], model_receipt_ids=receipt_ids)], change_delta=ChangeDelta(base_snapshot_id=request.base_snapshot.snapshot_id if request.base_snapshot else None, changed_representation_ids=[r.id for r in representations], added_ids=[e.id for e in entities_by_id.values()], affected_report_ids=[], affected_retrieval_manifest_ids=["retrieval:graph"], reason=f"{request.recipe.id} Semantica build"), model_receipts=model_receipts, metadata={"pipeline": "semantica", "recipe": request.recipe.id, "source_count": len(source_builds)})
+    retrieval_manifests = [
+        RetrievalArtifactManifest(
+            id="retrieval:graph",
+            retrieval_type="graph",
+            artifact_hash=retrieval_digest,
+            artifact_ref_id=retrieval_artifact_id,
+            source_snapshot_id=snapshot_id,
+            record_count=len(entities) + len(assertions) + len(relations),
+            entity_ids=[entity.id for entity in entities],
+            relation_ids=[relation.id for relation in relations],
+            community_ids=[community.id for community in communities],
+            evidence_ids=[item.id for item in evidence],
+            model_receipt_ids=receipt_ids,
+        ),
+        RetrievalArtifactManifest(
+            id="retrieval:source",
+            retrieval_type="source",
+            artifact_hash=retrieval_digest,
+            artifact_ref_id=retrieval_artifact_id,
+            source_snapshot_id=snapshot_id,
+            record_count=len(representations) + len(evidence),
+            entity_ids=[],
+            relation_ids=[],
+            community_ids=[],
+            evidence_ids=[item.id for item in evidence],
+            model_receipt_ids=receipt_ids,
+        ),
+    ]
+    change_delta = _change_delta(
+        base_snapshot,
+        snapshot_id,
+        representations,
+        entities,
+        assertions,
+        relations,
+        reports,
+        [item.id for item in retrieval_manifests],
+    )
+    snapshot = ProjectSnapshot(snapshot_id=snapshot_id, project_id=request.project_id, base_snapshot_id=request.base_snapshot.snapshot_id if request.base_snapshot else None, lineage=lineage, artifact_manifest=representation_artifacts + [retrieval_artifact], document_representations=representations, evidence_spans=evidence, entities=entities, assertions=assertions, relations=relations, identity_decisions=identity_decisions, communities=communities, topics=topics, reports=reports, conflicts=conflicts, retrieval_manifests=retrieval_manifests, change_delta=change_delta, model_receipts=model_receipts, metadata={"pipeline": "semantica", "recipe": request.recipe.id, "source_count": len(source_builds), "stages": ["document", "evidence", "identity", "knowledge", "organization", "retrieval", "change"]})
     snapshot_path = output_dir / "snapshot.json"
     snapshot_digest = _write_json(snapshot_path, snapshot.model_dump(mode="json", by_alias=True))
     return {"snapshot": snapshot, "snapshot_path": snapshot_path, "snapshot_digest": snapshot_digest, "representation_artifacts": source_builds, "retrieval_path": retrieval_path, "retrieval_digest": retrieval_digest, "model_receipts": model_receipts}
