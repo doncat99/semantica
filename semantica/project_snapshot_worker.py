@@ -66,9 +66,13 @@ def handle_request(raw: Dict[str, Any]) -> Dict[str, Any]:
         "path": str(built["snapshot_path"]),
         "revision": snapshot.id,
     })
+    receipts = built["model_receipts"]
     return _response(request.id, True, result={
         "artifacts": artifacts,
-        "relayReceipts": {"embedding": [], "model": []},
+        "relayReceipts": {
+            "embedding": [receipt.id for receipt in receipts if receipt.operation == "embedding"],
+            "model": [receipt.id for receipt in receipts if receipt.operation == "structured_extraction"],
+        },
         "snapshot": {
             "baseSnapshotId": snapshot.base_snapshot_id,
             "inputRevision": build_request.input_revision,
