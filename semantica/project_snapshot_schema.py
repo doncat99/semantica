@@ -103,7 +103,7 @@ class DigestModel(StrictModel):
 
 class DocumentLocator(StrictModel):
     representation_id: str
-    origin: Literal["native", "ocr", "derived", "external"]
+    origin: Literal["native", "ocr", "derived", "external", "adapter"]
     quote: str
     start_char: Optional[int] = Field(default=None, ge=0)
     end_char: Optional[int] = Field(default=None, ge=0)

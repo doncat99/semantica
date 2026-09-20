@@ -1,5 +1,6 @@
 import io
 import json
+from zipfile import ZipFile
 import os
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -104,6 +105,33 @@ def test_cross_source_same_name_stays_unresolved(tmp_path):
     assert snapshot.identity_decisions == []
     assert len(snapshot.conflicts) == 1
     assert snapshot.conflicts[0].conflict_type == "identity"
+
+
+def test_epub_adapter_preserves_adapter_locator_origin(tmp_path):
+    source = tmp_path / "book.epub"
+    with ZipFile(source, "w") as archive:
+        archive.writestr(
+            "META-INF/container.xml",
+            '<?xml version="1.0"?><container version="1.0" xmlns="urn:oasis:names:tc:opendocument:xmlns:container"><rootfiles><rootfile full-path="OEBPS/content.opf" media-type="application/oebps-package+xml"/></rootfiles></container>',
+        )
+        archive.writestr(
+            "OEBPS/content.opf",
+            '<?xml version="1.0"?><package xmlns="http://www.idpf.org/2007/opf"><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>',
+        )
+        archive.writestr(
+            "OEBPS/chapter.xhtml",
+            "<html><body><h1>Ada Lovelace</h1><p>Designed the Analytical Engine.</p></body></html>",
+        )
+    request = _request(source, tmp_path)
+    request["params"]["sources"][0]["mimeType"] = "application/epub+zip"
+    stdout = io.StringIO()
+    assert serve(io.StringIO(json.dumps(request) + "\n"), stdout) == 0
+    response = json.loads(stdout.getvalue())
+    assert response["ok"] is True
+    snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "snapshot")
+    snapshot = ProjectSnapshot.model_validate_json(snapshot_path.read_bytes())
+    assert snapshot.evidence_spans
+    assert {item.locator.origin for item in snapshot.evidence_spans} == {"adapter"}
 
 
 def test_model_recipe_uses_bifrost_chat_and_embedding_and_records_receipts(tmp_path):
