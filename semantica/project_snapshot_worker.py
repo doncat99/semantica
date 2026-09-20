@@ -14,11 +14,17 @@ from typing import Any, Dict, Optional, TextIO
 from pydantic import ValidationError as PydanticValidationError
 
 from .project_snapshot_schema import (
-    ProjectSnapshotBuildParams,
+    ProjectSnapshot,
+    ProjectSnapshotBuildRequest,
     WorkerRequest,
     WorkerResponse,
+    build_request_json_schema,
     project_snapshot_json_schema,
 )
+
+
+class UnsupportedBuildError(RuntimeError):
+    pass
 
 
 def _response(request_id: Optional[str], ok: bool, *, result: Optional[Dict[str, Any]] = None, error: Optional[Exception] = None) -> Dict[str, Any]:
@@ -33,10 +39,24 @@ def _response(request_id: Optional[str], ok: bool, *, result: Optional[Dict[str,
 def handle_request(raw: Dict[str, Any]) -> Dict[str, Any]:
     request = WorkerRequest.model_validate(raw)
     if request.method == "schema":
-        return _response(request.id, True, result=project_snapshot_json_schema())
-    params = ProjectSnapshotBuildParams.model_validate(request.params)
-    snapshot = params.to_snapshot()
-    return _response(request.id, True, result=snapshot.model_dump())
+        return _response(
+            request.id,
+            True,
+            result={
+                "snapshot": project_snapshot_json_schema(),
+                "build_request": build_request_json_schema(),
+            },
+        )
+    if request.method == "validate_snapshot":
+        snapshot = ProjectSnapshot.model_validate(request.params)
+        return _response(request.id, True, result={"valid": True, "snapshot_id": snapshot.id})
+
+    ProjectSnapshotBuildRequest.model_validate(request.params)
+    raise UnsupportedBuildError(
+        "build_project_snapshot is not implemented until the Semantica kernel pipeline "
+        "computes document representations, evidence, identities, graph, communities, "
+        "retrieval artifacts, change deltas, and model receipts from source inputs"
+    )
 
 
 def serve(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> int:
@@ -49,7 +69,7 @@ def serve(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> int:
             if isinstance(raw, dict):
                 request_id = raw.get("id")
             response = handle_request(raw)
-        except (json.JSONDecodeError, PydanticValidationError, ValueError, TypeError) as exc:
+        except (json.JSONDecodeError, PydanticValidationError, ValueError, TypeError, UnsupportedBuildError) as exc:
             response = _response(request_id, False, error=exc)
         stdout.write(json.dumps(response, ensure_ascii=False, sort_keys=True) + "\n")
         stdout.flush()
