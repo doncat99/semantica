@@ -1,10 +1,9 @@
-"""JSONL protocol worker for Semantica ProjectSnapshot validation.
+"""JSONL worker for the Semantica project snapshot build protocol.
 
-This is not the legacy polling worker. The host owns process lifecycle and sends
-one JSON request per line on stdin; this module validates Semantica's snapshot
-contract and returns one JSON response per line on stdout.
+The host resolves source authorization and owns process lifecycle. This worker
+receives host-granted absolute paths and relay references without bearer tokens;
+cancellation is process-level termination rather than an in-band command.
 """
-
 from __future__ import annotations
 
 import json
@@ -13,6 +12,7 @@ from typing import Any, Dict, Optional, TextIO
 
 from pydantic import ValidationError as PydanticValidationError
 
+from .project_snapshot_pipeline import SnapshotBuildError, build_project_snapshot
 from .project_snapshot_schema import (
     ProjectSnapshot,
     ProjectSnapshotBuildRequest,
@@ -21,10 +21,6 @@ from .project_snapshot_schema import (
     build_request_json_schema,
     project_snapshot_json_schema,
 )
-
-
-class UnsupportedBuildError(RuntimeError):
-    pass
 
 
 def _response(request_id: Optional[str], ok: bool, *, result: Optional[Dict[str, Any]] = None, error: Optional[Exception] = None) -> Dict[str, Any]:
@@ -39,24 +35,49 @@ def _response(request_id: Optional[str], ok: bool, *, result: Optional[Dict[str,
 def handle_request(raw: Dict[str, Any]) -> Dict[str, Any]:
     request = WorkerRequest.model_validate(raw)
     if request.method == "schema":
-        return _response(
-            request.id,
-            True,
-            result={
-                "snapshot": project_snapshot_json_schema(),
-                "build_request": build_request_json_schema(),
-            },
-        )
+        return _response(request.id, True, result={"snapshot": project_snapshot_json_schema(), "build_request": build_request_json_schema()})
     if request.method == "validate_snapshot":
         snapshot = ProjectSnapshot.model_validate(request.params)
         return _response(request.id, True, result={"valid": True, "snapshot_id": snapshot.id})
-
-    ProjectSnapshotBuildRequest.model_validate(request.params)
-    raise UnsupportedBuildError(
-        "build_project_snapshot is not implemented until the Semantica kernel pipeline "
-        "computes document representations, evidence, identities, graph, communities, "
-        "retrieval artifacts, change deltas, and model receipts from source inputs"
-    )
+    build_request = ProjectSnapshotBuildRequest.model_validate(request.params)
+    built = build_project_snapshot(build_request)
+    snapshot: ProjectSnapshot = built["snapshot"]
+    artifacts = []
+    for item in built["representation_artifacts"]:
+        artifacts.append({
+            "digest": item["artifact_digest"],
+            "kind": "document-representation",
+            "mediaType": build_request.release.media_types["document-representation"],
+            "path": str(item["artifact_path"]),
+            "revision": item["representation"].material_revision_id,
+            "sourceId": item["source"].source_id,
+        })
+    artifacts.append({
+        "digest": built["retrieval_digest"],
+        "kind": "retrieval-index",
+        "mediaType": build_request.release.media_types["retrieval-index"],
+        "path": str(built["retrieval_path"]),
+        "revision": f"retrieval:{snapshot.id}",
+    })
+    artifacts.append({
+        "digest": built["snapshot_digest"],
+        "kind": "snapshot",
+        "mediaType": build_request.release.media_types["snapshot"],
+        "path": str(built["snapshot_path"]),
+        "revision": snapshot.id,
+    })
+    return _response(request.id, True, result={
+        "artifacts": artifacts,
+        "relayReceipts": {"embedding": [], "model": []},
+        "snapshot": {
+            "baseSnapshotId": snapshot.base_snapshot_id,
+            "inputRevision": build_request.input_revision,
+            "projectId": snapshot.project_id,
+            "schemaDigest": build_request.release.schema_digest,
+            "semanticaArtifactDigest": build_request.release.artifact_digest,
+            "snapshotId": snapshot.id,
+        },
+    })
 
 
 def serve(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> int:
@@ -69,7 +90,7 @@ def serve(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> int:
             if isinstance(raw, dict):
                 request_id = raw.get("id")
             response = handle_request(raw)
-        except (json.JSONDecodeError, PydanticValidationError, ValueError, TypeError, UnsupportedBuildError) as exc:
+        except (json.JSONDecodeError, PydanticValidationError, ValueError, TypeError, SnapshotBuildError, OSError) as exc:
             response = _response(request_id, False, error=exc)
         stdout.write(json.dumps(response, ensure_ascii=False, sort_keys=True) + "\n")
         stdout.flush()

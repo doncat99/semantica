@@ -109,12 +109,17 @@ def _snapshot_payload():
 
 def _build_request_payload():
     return {
-        "project_id": "project-1",
-        "base_snapshot": {"snapshot_id": "snapshot:base", "artifact_ref": "object://base", "artifact_hash": H8},
-        "sources": [{"id": "source-input-1", "source_id": "source-1", "material_revision_id": "material-rev-1", "input_revision": H1, "media_type": "application/pdf", "content_hash": H1, "artifact_ref_id": "artifact-repr"}],
-        "executors": [{"id": "executor-parser", "executor_type": "parser", "artifact_hash": H2, "version": "1"}],
-        "artifact_manifest": [{"id": "artifact-repr", "artifact_type": "representation", "artifact_ref": "object://repr", "artifact_hash": H1}],
-        "lineage": {"schema_digest": H3, "recipe_id": "recipe:default", "recipe_digest": H4, "rule_version": "rules-v1", "rule_digest": H5, "ontology_version": "ontology-v1", "ontology_digest": H6},
+        "projectId": "project-1",
+        "baseSnapshot": {"snapshotId": "snapshot:base", "snapshotPath": "/tmp/base.json", "artifactDigest": H8, "schemaDigest": H3},
+        "inputRevision": H1,
+        "outputDir": "/tmp/semantica-output",
+        "sources": [{"filePath": "/tmp/source.pdf", "materialRevision": "material-rev-1", "mimeType": "application/pdf", "name": "source.pdf", "sourceId": "source-1"}],
+        "recipe": {"forceOcrSourceIds": [], "id": "deterministic", "version": "1"},
+        "relays": {
+            "embedding": {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/embeddings", "capability": "knowledge.snapshot.embed", "modelId": "embedding-1", "receipts": "required"},
+            "model": {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/chat/completions", "capability": "knowledge.snapshot.generate", "modelId": "model-1", "receipts": "required"},
+        },
+        "release": {"artifactDigest": H2, "schemaDigest": H3, "mediaTypes": {"document-representation": "application/vnd.semantica.document-representation+json", "retrieval-index": "application/vnd.semantica.retrieval+json", "snapshot": "application/vnd.semantica.project-snapshot+json"}},
     }
 
 
@@ -167,29 +172,55 @@ def test_project_snapshot_rejects_unknown_community_topic_conflict_retrieval_ref
 
 def test_build_request_accepts_sources_not_semantic_objects():
     request = ProjectSnapshotBuildRequest.model_validate(_build_request_payload())
-    assert request.sources[0].input_revision == H1
-    assert request.base_snapshot.artifact_hash == H8
+    assert request.sources[0].source_id == "source-1"
+    assert request.base_snapshot.artifact_digest == H8
 
     bad = _build_request_payload()
     bad["entities"] = [{"id": "host-entity"}]
     with pytest.raises(ValidationError):
         ProjectSnapshotBuildRequest.model_validate(bad)
 
+
+def test_build_request_rejects_unsafe_release_and_source_boundaries():
     bad = _build_request_payload()
-    bad["options"] = {"entities": [{"id": "host-entity"}]}
-    with pytest.raises(ValidationError, match="computed semantic results"):
+    bad["sources"][0]["filePath"] = "relative/source.pdf"
+    with pytest.raises(ValidationError, match="absolute"):
+        ProjectSnapshotBuildRequest.model_validate(bad)
+
+    bad = _build_request_payload()
+    bad["sources"][0]["mimeType"] = "pdf"
+    with pytest.raises(ValidationError, match="MIME type"):
+        ProjectSnapshotBuildRequest.model_validate(bad)
+
+    bad = _build_request_payload()
+    bad["release"]["artifactDigest"] = "not-a-digest"
+    with pytest.raises(ValidationError, match="sha256"):
+        ProjectSnapshotBuildRequest.model_validate(bad)
+
+    bad = _build_request_payload()
+    bad["relays"]["model"]["authorizationEnv"] = "secret-token-value"
+    with pytest.raises(ValidationError, match="environment variable name"):
+        ProjectSnapshotBuildRequest.model_validate(bad)
+
+    bad = _build_request_payload()
+    bad["relays"]["model"]["baseUrl"] = "https://api.example.com/v1"
+    with pytest.raises(ValidationError, match="loopback"):
+        ProjectSnapshotBuildRequest.model_validate(bad)
+
+    bad = _build_request_payload()
+    bad["relays"]["model"]["baseUrl"] = "http://127.0.0.1:9021/v1/responses"
+    with pytest.raises(ValidationError, match="chat/completions"):
         ProjectSnapshotBuildRequest.model_validate(bad)
 
 
-def test_jsonl_worker_build_is_unsupported_not_fake_snapshot():
+def test_jsonl_worker_build_requires_a_real_source_file():
     request = {"protocol": "semantica.project-worker.v1", "id": "req-1", "method": "build_project_snapshot", "params": _build_request_payload()}
     stdin = io.StringIO(json.dumps(request) + "\n")
     stdout = io.StringIO()
     assert serve(stdin, stdout) == 0
     response = json.loads(stdout.getvalue())
     assert response["ok"] is False
-    assert response["error"]["type"] == "UnsupportedBuildError"
-    assert "not implemented" in response["error"]["message"]
+    assert response["error"]["type"] in {"SnapshotBuildError", "FileNotFoundError"}
 
 
 def test_jsonl_worker_validate_snapshot_method():

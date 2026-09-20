@@ -5,7 +5,9 @@ from __future__ import annotations
 import re
 from datetime import datetime, timezone
 from hashlib import sha256
+from os.path import isabs
 from typing import Any, Dict, List, Literal, Optional, Union
+from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -13,6 +15,8 @@ SNAPSHOT_PROTOCOL = "semantica.project-snapshot.v1"
 WORKER_PROTOCOL = "semantica.project-worker.v1"
 SHA256_RE = re.compile(r"^(sha256:)?[0-9a-f]{64}$")
 ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{1,127}$")
+MEDIA_TYPE_RE = re.compile(r"^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$")
+ENV_VAR_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
 
 
 def utc_now_iso() -> str:
@@ -37,6 +41,12 @@ def _unique(items: List[Any], label: str) -> None:
 
 def _missing(values: List[str], known: set[str]) -> List[str]:
     return sorted(set(values) - known)
+
+
+def _validate_media_type(value: str, field: str) -> str:
+    if not MEDIA_TYPE_RE.fullmatch(value):
+        raise ValueError(f"{field} must be a MIME type")
+    return value.lower()
 
 
 class StrictModel(BaseModel):
@@ -73,6 +83,7 @@ class DigestModel(StrictModel):
     @field_validator(
         "content_hash",
         "artifact_hash",
+        "artifact_digest",
         "input_digest",
         "output_digest",
         "schema_digest",
@@ -480,14 +491,30 @@ class ProjectSnapshot(KernelModel):
         return self
 
 
-class SourceBuildInput(KernelModel, DigestModel):
-    id: str
-    source_id: str
-    material_revision_id: str
-    input_revision: str
-    media_type: str
-    content_hash: str
-    artifact_ref_id: str
+class SourceBuildInput(KernelModel):
+    """Immutable absolute-path source granted by the host for one build.
+
+    The host resolves authorization, symlinks, and file existence before launch;
+    this contract intentionally carries no bearer token or remote URL.
+    """
+
+    file_path: str = Field(alias="filePath")
+    material_revision: str = Field(alias="materialRevision")
+    mime_type: str = Field(alias="mimeType")
+    name: str
+    source_id: str = Field(alias="sourceId")
+
+    @field_validator("file_path", mode="after")
+    @classmethod
+    def validate_absolute_file_path(cls, value: str) -> str:
+        if not isabs(value):
+            raise ValueError("source filePath must be absolute")
+        return value
+
+    @field_validator("mime_type", mode="after")
+    @classmethod
+    def validate_mime_type(cls, value: str) -> str:
+        return _validate_media_type(value, "source mimeType")
 
 
 class ExecutorRef(KernelModel, DigestModel):
@@ -498,43 +525,108 @@ class ExecutorRef(KernelModel, DigestModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
-class SnapshotRef(KernelModel, DigestModel):
-    id: str = Field(alias="snapshot_id")
-    artifact_ref: str
-    artifact_hash: str
+class SnapshotRef(DigestModel):
+    artifact_digest: str = Field(alias="artifactDigest")
+    schema_digest: str = Field(alias="schemaDigest")
+    snapshot_id: str = Field(alias="snapshotId")
+    snapshot_path: str = Field(alias="snapshotPath")
+
+    @field_validator("snapshot_path", mode="after")
+    @classmethod
+    def validate_absolute_snapshot_path(cls, value: str) -> str:
+        if not isabs(value):
+            raise ValueError("base snapshotPath must be absolute")
+        return value
 
 
-class ProjectSnapshotBuildRequest(StrictModel):
-    project_id: str
-    base_snapshot: Optional[SnapshotRef] = None
-    sources: List[SourceBuildInput]
-    executors: List[ExecutorRef]
-    artifact_manifest: List[ArtifactManifest]
-    lineage: KernelLineage
-    options: Dict[str, Any] = Field(default_factory=dict)
+class RecipeRef(StrictModel):
+    force_ocr_source_ids: List[str] = Field(default_factory=list, alias="forceOcrSourceIds")
+    id: str
+    version: str
+
+
+class RelayRef(StrictModel):
+    authorization_env: str = Field(alias="authorizationEnv")
+    base_url: str = Field(alias="baseUrl")
+    capability: Literal["knowledge.snapshot.embed", "knowledge.snapshot.generate"]
+    model_id: str = Field(alias="modelId")
+    receipts: Literal["required"]
+
+    @field_validator("authorization_env", mode="after")
+    @classmethod
+    def validate_authorization_env(cls, value: str) -> str:
+        if not ENV_VAR_RE.fullmatch(value):
+            raise ValueError("authorizationEnv must be an environment variable name")
+        return value
 
     @model_validator(mode="after")
-    def reject_host_semantic_results(self) -> "ProjectSnapshotBuildRequest":
-        forbidden = {
-            "document_representations",
-            "evidence_spans",
-            "entities",
-            "assertions",
-            "relations",
-            "identity_decisions",
-            "communities",
-            "topics",
-            "reports",
-            "conflicts",
-            "retrieval_manifests",
-            "change_delta",
-            "model_receipts",
-            "snapshot",
-            "knowledge_graph",
-        }
-        present = sorted(forbidden & set(self.options))
-        if present:
-            raise ValueError(f"options cannot carry computed semantic results: {present}")
+    def validate_loopback_url(self) -> "RelayRef":
+        parsed = urlsplit(self.base_url)
+        if (
+            parsed.scheme != "http"
+            or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+            or parsed.username
+            or parsed.password
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError("relay baseUrl must be an unauthenticated loopback HTTP URL")
+        expected_path = {
+            "knowledge.snapshot.embed": "/v1/embeddings",
+            "knowledge.snapshot.generate": "/v1/chat/completions",
+        }[self.capability]
+        if parsed.path.rstrip("/") != expected_path:
+            raise ValueError(f"relay baseUrl path must be {expected_path} for {self.capability}")
+        return self
+
+
+class ReleaseRef(DigestModel):
+    artifact_digest: str = Field(alias="artifactDigest")
+    media_types: Dict[str, str] = Field(alias="mediaTypes")
+    schema_digest: str = Field(alias="schemaDigest")
+
+    @field_validator("media_types", mode="after")
+    @classmethod
+    def validate_media_types(cls, value: Dict[str, str]) -> Dict[str, str]:
+        normalized = {key: _validate_media_type(media_type, f"release mediaTypes[{key}]") for key, media_type in value.items()}
+        if not normalized["document-representation"].endswith("+json"):
+            raise ValueError("document-representation artifact must be JSON")
+        if not normalized["retrieval-index"].endswith("+json"):
+            raise ValueError("retrieval-index artifact is JSON and must use a +json media type")
+        if not normalized["snapshot"].endswith("+json"):
+            raise ValueError("snapshot artifact must be JSON")
+        return normalized
+
+
+class ProjectSnapshotBuildRequest(DigestModel):
+    project_id: str = Field(alias="projectId")
+    base_snapshot: Optional[SnapshotRef] = Field(default=None, alias="baseSnapshot")
+    input_revision: str = Field(alias="inputRevision")
+    output_dir: str = Field(alias="outputDir")
+    recipe: RecipeRef
+    relays: Dict[str, RelayRef]
+    release: ReleaseRef
+    sources: List[SourceBuildInput]
+
+    @model_validator(mode="after")
+    def validate_inputs(self) -> "ProjectSnapshotBuildRequest":
+        if not self.sources:
+            raise ValueError("at least one source is required")
+        if not isabs(self.output_dir):
+            raise ValueError("outputDir must be absolute")
+        source_ids = {source.source_id for source in self.sources}
+        if len(source_ids) != len(self.sources):
+            raise ValueError("source ids must be unique")
+        if set(self.recipe.force_ocr_source_ids) - source_ids:
+            raise ValueError("OCR recipe references an unknown source")
+        if set(self.release.media_types) != {"document-representation", "retrieval-index", "snapshot"}:
+            raise ValueError("release media types must cover all artifact kinds")
+        if set(self.relays) != {"embedding", "model"}:
+            raise ValueError("relays must contain embedding and model")
+        if self.relays["embedding"].capability != "knowledge.snapshot.embed":
+            raise ValueError("embedding relay capability is invalid")
+        if self.relays["model"].capability != "knowledge.snapshot.generate":
+            raise ValueError("model relay capability is invalid")
         return self
 
 
