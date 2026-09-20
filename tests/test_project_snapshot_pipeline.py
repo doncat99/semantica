@@ -6,7 +6,8 @@ import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from semantica.project_snapshot_schema import ProjectSnapshot
+from semantica.project_snapshot_pipeline import _canonical_graph_projection
+from semantica.project_snapshot_schema import KnowledgeEntity, KnowledgeRelation, ProjectSnapshot
 from semantica.project_snapshot_worker import serve
 
 H1 = "sha256:" + "1" * 64
@@ -63,6 +64,29 @@ def test_worker_builds_complete_snapshot_from_real_text_file(tmp_path):
     assert snapshot.model_receipts == []
     assert all(span.quote == span.locator.quote for span in snapshot.evidence_spans)
     assert all(span.locator.representation_id == span.representation_id for span in snapshot.evidence_spans)
+
+
+def test_canonical_graph_projection_preserves_snapshot_identity():
+    entities = [
+        KnowledgeEntity(id="entity:ada", canonical_name="Ada Lovelace", type="PERSON"),
+        KnowledgeEntity(id="entity:engine", canonical_name="Analytical Engine", type="CONCEPT"),
+    ]
+    relations = [
+        KnowledgeRelation(
+            id="relation:source-1:0",
+            source_entity_id="entity:ada",
+            target_entity_id="entity:engine",
+            type="designed",
+            evidence_ids=["evidence:source-1:0:42"],
+        )
+    ]
+
+    graph_relationships, context_edges = _canonical_graph_projection(entities, relations)
+
+    assert {item["id"] for item in graph_relationships} == {relations[0].id}
+    assert {edge.edge_id for edge in context_edges} == {relations[0].id}
+    assert {edge.source_id for edge in context_edges} == {entities[0].id}
+    assert {edge.target_id for edge in context_edges} == {entities[1].id}
 
 
 def test_worker_fails_closed_for_unsupported_source_format(tmp_path):
@@ -202,7 +226,16 @@ def test_model_recipe_uses_bifrost_chat_and_embedding_and_records_receipts(tmp_p
     assert snapshot.relations[0].evidence_ids
     assert snapshot.retrieval_manifests[0].model_receipt_ids == [receipt.id for receipt in snapshot.model_receipts]
     retrieval_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "retrieval-index")
-    assert json.loads(retrieval_path.read_text())["embeddings"] == [{"source_id": "source-1", "vector": [0.25, 0.5, 0.75]}]
+    retrieval = json.loads(retrieval_path.read_text())
+    assert retrieval["embeddings"] == [{"source_id": "source-1", "vector": [0.25, 0.5, 0.75]}]
+    assert retrieval["provenance"]["evidence"]
+    evidence_lineage = next(iter(retrieval["provenance"]["evidence"].values()))
+    assert evidence_lineage["source_documents"] == ["source-1"]
+    assert evidence_lineage["metadata"]["origin"] == "native"
+    assert evidence_lineage["lineage_chain"][0]["source_quote"] == "Ada Lovelace"
+    assert evidence_lineage["lineage_chain"][0]["source_location"] == "char:0-12"
+    relation_id = snapshot.relations[0].id
+    assert retrieval["provenance"]["relations"][relation_id]["source_documents"] == ["source-1"]
 
 
 def test_model_recipe_fails_closed_without_relay_token(tmp_path):

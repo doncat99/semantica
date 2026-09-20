@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import mimetypes
 import os
+import tempfile
 import urllib.error
 import urllib.request
 from collections import defaultdict
@@ -288,6 +289,172 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
     return {"source": source, "text": text, "representation": representation, "evidence": list(evidence.values()), "entities": list(entities.values()), "assertions": assertions, "relations": relations, "artifact_id": representation_artifact_id, "document": document}
 
 
+def _canonical_graph_projection(
+    entities: list[KnowledgeEntity],
+    relations: list[KnowledgeRelation],
+) -> tuple[list[dict[str, Any]], list[Any]]:
+    """Validate one snapshot graph through Semantica's canonical graph owners.
+
+    The project snapshot schema remains the stable interchange contract. The
+    graph components receive explicit candidates produced by this pipeline;
+    they never receive source text and therefore cannot open a second
+    extraction path or silently replace evidence IDs.
+    """
+    from .context import ContextGraph
+    from .kg import GraphBuilder
+
+    graph = GraphBuilder(
+        merge_entities=False,
+        resolve_conflicts=False,
+        fail_closed=True,
+    ).build({
+        "entities": [
+            {
+                "id": entity.id,
+                "text": entity.canonical_name,
+                "type": entity.type,
+                "metadata": entity.metadata,
+            }
+            for entity in entities
+        ],
+        "relationships": [
+            {
+                "id": relation.id,
+                "source": relation.source_entity_id,
+                "target": relation.target_entity_id,
+                "type": relation.type,
+                "metadata": {
+                    **relation.metadata,
+                    "evidence_ids": relation.evidence_ids,
+                },
+            }
+            for relation in relations
+        ],
+    })
+    graph_entities = graph.get("entities")
+    graph_relationships = graph.get("relationships")
+    if not isinstance(graph_entities, list) or not isinstance(graph_relationships, list):
+        raise SnapshotBuildError("Semantica GraphBuilder returned an invalid graph")
+    expected_entity_ids = {entity.id for entity in entities}
+    expected_relation_ids = {relation.id for relation in relations}
+    actual_entity_ids = {item.get("id") for item in graph_entities if isinstance(item, dict)}
+    actual_relation_ids = {item.get("id") for item in graph_relationships if isinstance(item, dict)}
+    if actual_entity_ids != expected_entity_ids or actual_relation_ids != expected_relation_ids:
+        raise SnapshotBuildError("Semantica graph components changed snapshot identities")
+
+    context = ContextGraph(
+        extract_entities=False,
+        extract_relationships=False,
+        advanced_analytics=False,
+    )
+    added_nodes = context.add_nodes([
+        {"id": item["id"], "type": item.get("type", "entity"), "content": item.get("text", item["id"])}
+        for item in graph_entities
+        if isinstance(item, dict) and isinstance(item.get("id"), str)
+    ])
+    added_edges = context.add_edges([
+        {
+            "id": item["id"],
+            "source": item["source"],
+            "target": item["target"],
+            "type": item.get("type", "related_to"),
+            "metadata": item.get("metadata", {}),
+        }
+        for item in graph_relationships
+        if isinstance(item, dict)
+        and isinstance(item.get("id"), str)
+        and isinstance(item.get("source"), str)
+        and isinstance(item.get("target"), str)
+    ])
+    if added_nodes != len(expected_entity_ids) or added_edges != len(expected_relation_ids):
+        raise SnapshotBuildError("Semantica ContextGraph rejected a snapshot graph candidate")
+    return graph_relationships, list(context.edges)
+
+
+def _provenance_projection(
+    representations: list[DocumentRepresentation],
+    evidence: list[EvidenceSpan],
+    entities: list[KnowledgeEntity],
+    relations: list[KnowledgeRelation],
+) -> dict[str, Any]:
+    """Materialize source lineage with the canonical provenance manager."""
+    from .provenance import ProvenanceManager
+
+    representation_by_id = {item.id: item for item in representations}
+    with tempfile.TemporaryDirectory(prefix="semantica-provenance-") as directory:
+        manager = ProvenanceManager(storage_path=str(Path(directory) / "provenance.db"))
+        for span in evidence:
+            representation = representation_by_id.get(span.representation_id)
+            if not representation:
+                raise SnapshotBuildError(f"evidence references unknown representation: {span.id}")
+            locator = span.locator
+            location = (
+                f"char:{locator.start_char}-{locator.end_char}"
+                if locator.start_char is not None and locator.end_char is not None
+                else f"page:{locator.page}"
+                if locator.page is not None
+                else "structural"
+            )
+            if manager.track_entity(
+                span.id,
+                representation.source_id,
+                entity_type="evidence",
+                source_location=location,
+                source_quote=span.quote,
+                confidence=span.confidence if span.confidence is not None else 1.0,
+                metadata={"origin": locator.origin, "evidence_kind": span.origin, "quality": locator.quality},
+            ) is None:
+                raise SnapshotBuildError(f"failed to persist provenance for evidence: {span.id}")
+        for entity in entities:
+            source_ids = entity.metadata.get("source_ids", [])
+            source = source_ids[0] if isinstance(source_ids, list) and source_ids and isinstance(source_ids[0], str) else "snapshot"
+            if manager.track_entity(entity.id, source, entity_type=entity.type, metadata={"evidence_ids": entity.evidence_ids}) is None:
+                raise SnapshotBuildError(f"failed to persist provenance for entity: {entity.id}")
+        for relation in relations:
+            source = "snapshot"
+            if relation.evidence_ids:
+                evidence_entry = manager.get_lineage(relation.evidence_ids[0])
+                source_documents = evidence_entry.get("source_documents", []) if isinstance(evidence_entry, dict) else []
+                if source_documents and isinstance(source_documents[0], str):
+                    source = source_documents[0]
+            if manager.track_relationship(
+                relation.id,
+                source,
+                metadata={"evidence_ids": relation.evidence_ids},
+            ) is None:
+                raise SnapshotBuildError(f"failed to persist provenance for relation: {relation.id}")
+        return {
+            "evidence": {span.id: manager.get_lineage(span.id) for span in evidence},
+            "entities": {entity.id: manager.get_lineage(entity.id) for entity in entities},
+            "relations": {relation.id: manager.get_lineage(relation.id) for relation in relations},
+        }
+
+
+def _validate_embedding_projection(source_builds: list[dict[str, Any]]) -> None:
+    """Exercise the canonical vector runtime without replacing stable IDs."""
+    vectors = [item.get("embedding") for item in source_builds if item.get("embedding") is not None]
+    if not vectors:
+        return
+    import numpy as np
+    from .vector_store import VectorStore
+
+    if any(not isinstance(vector, list) or not vector for vector in vectors):
+        raise SnapshotBuildError("embedding projection contains an invalid vector")
+    dimension = len(vectors[0])
+    if any(len(vector) != dimension for vector in vectors):
+        raise SnapshotBuildError("embedding projection contains inconsistent dimensions")
+    store = VectorStore(backend="inmemory", config={"dimension": dimension}, max_workers=1)
+    stored_ids = store.store_vectors(
+        [np.asarray(vector, dtype=np.float32) for vector in vectors],
+        metadata=[{"source_id": item["source"].source_id} for item in source_builds if item.get("embedding") is not None],
+    )
+    if len(stored_ids) != len(vectors):
+        raise SnapshotBuildError("vector runtime projection stored an incomplete embedding set")
+    for vector in vectors:
+        if not store.search_vectors(np.asarray(vector, dtype=np.float32), k=1):
+            raise SnapshotBuildError("vector runtime projection cannot retrieve its stored embedding")
+
+
 def _semantic_organization(
     entities: list[KnowledgeEntity],
     assertions: list[KnowledgeAssertion],
@@ -302,6 +469,10 @@ def _semantic_organization(
     entities, assertions, relations, and evidence produced above.
     """
     evidence_by_id = {item.id: item for item in evidence}
+    canonical_relationships, context_edges = _canonical_graph_projection(entities, relations)
+    relation_by_id = {relation.id: relation for relation in relations}
+    if {item.get("id") for item in canonical_relationships if isinstance(item, dict)} != set(relation_by_id):
+        raise SnapshotBuildError("Semantica graph projection lost a relation candidate")
     # Source-scoped candidates are intentionally left unresolved. A durable
     # cross-source merge requires an identity model decision or human evidence;
     # a matching label alone is not sufficient.
@@ -310,9 +481,9 @@ def _semantic_organization(
     # Connected components are the stable project graph communities. Isolated
     # entities remain visible as singleton communities instead of disappearing.
     adjacency: dict[str, set[str]] = {entity.id: set() for entity in entities}
-    for relation in relations:
-        adjacency.setdefault(relation.source_entity_id, set()).add(relation.target_entity_id)
-        adjacency.setdefault(relation.target_entity_id, set()).add(relation.source_entity_id)
+    for edge in context_edges:
+        adjacency.setdefault(edge.source_id, set()).add(edge.target_id)
+        adjacency.setdefault(edge.target_id, set()).add(edge.source_id)
 
     components: list[list[str]] = []
     unseen = set(adjacency)
@@ -337,9 +508,11 @@ def _semantic_organization(
     for component in components:
         member_set = set(component)
         internal_relations = [
-            relation
-            for relation in relations
-            if relation.source_entity_id in member_set and relation.target_entity_id in member_set
+            relation_by_id[edge.edge_id]
+            for edge in context_edges
+            if edge.edge_id in relation_by_id
+            and edge.source_id in member_set
+            and edge.target_id in member_set
         ]
         member_assertions = [
             assertion
@@ -537,6 +710,8 @@ def build_project_snapshot(request: ProjectSnapshotBuildRequest) -> dict[str, An
         evidence,
         model_receipts,
     )
+    _validate_embedding_projection(source_builds)
+    provenance = _provenance_projection(representations, evidence, entities, relations)
     retrieval_payload = {
         "snapshot_id": snapshot_id,
         "entities": [entity.model_dump(mode="json", by_alias=True) for entity in entities],
@@ -548,6 +723,7 @@ def build_project_snapshot(request: ProjectSnapshotBuildRequest) -> dict[str, An
         "reports": [report.model_dump(mode="json", by_alias=True) for report in reports],
         "embeddings": [{"source_id": item["source"].source_id, "vector": item["embedding"]} for item in source_builds if "embedding" in item],
         "model_receipt_ids": [receipt.id for receipt in model_receipts],
+        "provenance": provenance,
     }
     retrieval_path = output_dir / "retrieval.json"
     retrieval_digest = _write_json(retrieval_path, retrieval_payload)
