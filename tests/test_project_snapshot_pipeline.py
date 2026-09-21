@@ -308,7 +308,7 @@ def test_model_recipe_uses_bifrost_chat_and_embedding_and_records_receipts(tmp_p
     assert snapshot.retrieval_manifests[0].model_receipt_ids == [receipt.id for receipt in snapshot.model_receipts]
     retrieval_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "retrieval-index")
     retrieval = json.loads(retrieval_path.read_text())
-    assert retrieval["embeddings"] == [{"source_id": "source-1", "vector": [0.25, 0.5, 0.75]}]
+    assert retrieval["embeddings"] == [{"source_id": "source-1", "start_char": 0, "end_char": len(source.read_text()), "vector": [0.25, 0.5, 0.75]}]
     assert retrieval["provenance"]["evidence"]
     evidence_lineage = next(iter(retrieval["provenance"]["evidence"].values()))
     assert evidence_lineage["source_documents"] == ["source-1"]

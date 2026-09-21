@@ -51,6 +51,7 @@ def resolve_project_identities(*, project_id: str, mentions: list[KnowledgeEntit
     canonical: list[KnowledgeEntity] = []
     decisions: list[IdentityDecision] = []
     remap: dict[str, str] = {}
+    receipt_sets = {tuple(sorted(item["mention_ids"])): item.get("_receipt_ids", [receipt_id]) for item in judgments}
     for ids, reason, evidence_ids in groups:
         predecessors = sorted({previous[item] for item in ids if item in previous})
         available = [item for item in predecessors if item not in assigned]
@@ -73,11 +74,12 @@ def resolve_project_identities(*, project_id: str, mentions: list[KnowledgeEntit
             remap[mention_id] = entity_id
         if len(ids) > 1 or predecessors:
             decision_type = "split" if predecessors and not available else "merge" if len(ids) > 1 else "accept"
+            model_receipt_ids = receipt_sets.get(tuple(ids), [receipt_id]) if receipt_id else []
             decision = IdentityDecision(
                 id="identity:" + stable_digest([ids, entity_id, decision_type]).split(":")[1][:32],
                 decision_type=decision_type, from_entity_ids=ids, to_entity_id=entity_id,
                 evidence_ids=evidence_ids, reason=reason,
-                metadata={"model_receipt_id": receipt_id, "previous_entity_ids": predecessors},
+                metadata={"model_receipt_id": model_receipt_ids[0] if model_receipt_ids else None, "model_receipt_ids": model_receipt_ids, "previous_entity_ids": predecessors},
             )
             decisions.append(decision)
     return canonical, remap, decisions
