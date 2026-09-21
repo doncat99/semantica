@@ -195,6 +195,38 @@ pip install -e ".[dev]"
 pre-commit install
 ```
 
+Semantica supports Python **3.10–3.13** (`requires-python = ">=3.10"`). CI runs
+on 3.11 and the Install Matrix covers the whole range.
+
+#### Reproducible environment with uv (recommended)
+
+The repository commits a `uv.lock`, so `uv` can build the exact same
+environment for every contributor:
+
+```bash
+pip install uv==0.12.1        # same version CI uses
+uv sync --extra dev           # creates .venv from uv.lock (add --python 3.11 to match CI)
+uv sync --extra dev --extra explorer   # add whichever extras you are working on
+uv run pytest tests/
+```
+
+A plain `uv sync` installs only the core dependencies; extras are opt-in via
+`--extra <name>`, exactly like `pip install -e ".[<name>]"`.
+
+`uv.lock` is a *universal* lock: it must resolve for every Python version in
+`requires-python` and covers every optional extra (including `crewai`, which is
+excluded from `all`). After changing dependencies in `pyproject.toml`, refresh
+and commit it:
+
+```bash
+uv lock          # regenerate
+uv lock --check  # what CI runs: fails if uv.lock is stale or unresolvable
+```
+
+`uv.lock` is for local development. It is separate from the hash-pinned
+`requirements-ci.txt` below, which remains the source of truth for CI and
+release builds.
+
 ### Pinned CI dependencies
 
 `requirements-ci.txt` pins every transitive dependency at exact versions so CI,

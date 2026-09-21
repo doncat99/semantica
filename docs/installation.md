@@ -9,14 +9,14 @@ icon: "download"
 </Check>
 
 <Note>
-  Python 3.8 or higher is required. Python 3.11+ is recommended.
+  Python 3.10 or higher is required (3.10–3.13 are supported). Python 3.11+ is recommended.
 </Note>
 
 ## System Requirements
 
 | Component | Minimum | Recommended |
 | :--------- | :------- | :----------- |
-| Python | 3.8 | 3.11+ |
+| Python | 3.10 | 3.11+ |
 | OS | Windows / Linux / Mac | Linux / Mac |
 | RAM | 4 GB | 16 GB+ |
 | Storage | 2 GB | 20 GB+ (models and data) |
