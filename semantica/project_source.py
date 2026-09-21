@@ -22,7 +22,7 @@ class SourceDocument:
 
     text: str
     document: dict[str, Any]
-    origin: Literal["native", "ocr", "mixed", "adapter"]
+    origin: Literal["native", "ocr", "mixed", "adapter", "external"]
     parser: str
     parser_version: str
 
@@ -41,7 +41,7 @@ _DOCLING_SUFFIXES = {
     ".xml",
     ".csv",
 }
-_ADAPTER_PENDING_SUFFIXES = {".doc", ".wpd", ".wp", ".wp4", ".wp5", ".wp6"}
+from .project_office import OFFICE_SUFFIXES
 _MEDIA_TYPES_BY_SUFFIX = {
     ".txt": {"text/plain"},
     ".text": {"text/plain"},
@@ -59,6 +59,10 @@ _MEDIA_TYPES_BY_SUFFIX = {
     ".xml": {"application/xml", "text/xml"},
     ".csv": {"text/csv"},
     ".epub": {"application/epub+zip"},
+    ".doc": {"application/msword"},
+    ".ppt": {"application/vnd.ms-powerpoint"},
+    ".xls": {"application/vnd.ms-excel"},
+    **{suffix: {"application/wordperfect", "application/vnd.wordperfect", "application/x-wordperfect"} for suffix in OFFICE_SUFFIXES if suffix.startswith(".wp")},
 }
 
 
@@ -151,12 +155,12 @@ def _parse_epub(path: Path, name: str) -> SourceDocument:
         raise UnsupportedSourceFormatError(f"invalid EPUB source: {name}") from exc
 
 
-def parse_source(path: Path, *, name: str, mime_type: str, force_ocr: bool) -> SourceDocument:
+def parse_source(path: Path, *, name: str, mime_type: str, force_ocr: bool, document_processing: dict | None = None) -> SourceDocument:
     """Parse one source exactly once through its admitted format adapter.
 
     Text files use the standard library. Structured formats use the single
-    Docling adapter. Special formats require a future dedicated adapter that
-    must return ``SourceDocument`` directly; they are never routed through
+    Docling adapter. Binary Office and WordPerfect use bundled LibreOffice
+    and EPUB uses its dedicated adapter; they are never routed through
     ``DocumentParser`` or converted a second time by Docling.
     """
 
@@ -181,6 +185,13 @@ def parse_source(path: Path, *, name: str, mime_type: str, force_ocr: bool) -> S
             parser_version="1",
         )
     if suffix in _DOCLING_SUFFIXES:
+        profile = document_processing or {"mode": "local"}
+        if profile["mode"] == "disabled":
+            raise UnsupportedSourceFormatError("Docling processing is disabled for this build")
+        if profile["mode"] == "remote":
+            from .project_remote_docling import parse_remote_docling
+            result = parse_remote_docling(path, name=name, force_ocr=force_ocr, profile=profile)
+            return SourceDocument(text=result["text"], document=result["document"], origin="external", parser="docling-serve", parser_version="v1")
         # Keep the worker protocol and text-only builds independent from the
         # legacy parse package's eager imports; load Docling only for this adapter.
         from .parse.docling_parser import DoclingParser
@@ -210,9 +221,11 @@ def parse_source(path: Path, *, name: str, mime_type: str, force_ocr: bool) -> S
         )
     if suffix == ".epub":
         return _parse_epub(path, name)
-    if suffix in _ADAPTER_PENDING_SUFFIXES:
-        raise UnsupportedSourceFormatError(
-            f"source format {suffix} requires a dedicated adapter that emits "
-            "SourceDocument; legacy DocumentParser and second-pass Docling are not allowed"
-        )
+    if suffix in OFFICE_SUFFIXES:
+        from .project_office import parse_office
+        try:
+            document, version = parse_office(path, name=name)
+        except (OSError, ValueError) as exc:
+            raise UnsupportedSourceFormatError(f"dedicated Office adapter failed: {exc}") from exc
+        return SourceDocument(text=document["text"], document=document, origin="adapter", parser="semantica.libreoffice", parser_version=version)
     raise UnsupportedSourceFormatError(f"unsupported source format for Semantica: {name}")

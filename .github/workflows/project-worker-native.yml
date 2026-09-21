@@ -9,61 +9,82 @@ permissions:
   contents: read
 
 jobs:
-  darwin-arm64:
-    runs-on: macos-14
-    timeout-minutes: 60
+  wheel:
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
+        with:
+          version: '0.9.10'
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="ontoscience-project-worker-${GITHUB_SHA:0:12}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            uv build --wheel --out-dir native-dist
+            gh release create "$tag" --target "$GITHUB_SHA" --title "OntoScience project worker ${GITHUB_SHA:0:12}" --notes 'Immutable worker and native runtime bundles. Platform acceptance and inventories are attached.' native-dist/*.whl
+          fi
+  native:
+    needs: wheel
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: darwin-arm64
+            python: python/bin/python3
+          - runner: ubuntu-24.04
+            target: linux-x64
+            python: python/bin/python3
+          - runner: windows-2022
+            target: win-x64
+            python: python/python.exe
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
     env:
-      UV_CONSTRAINT: ${{ github.workspace }}/.github/requirements/project-worker-darwin-arm64.lock
+      UV_CONSTRAINT: ${{ github.workspace }}/.github/requirements/project-worker-${{ matrix.target }}.lock
+      UV_TORCH_BACKEND: cpu
       DOCLING_DEVICE: cpu
       ORT_DISABLE_TELEMETRY: '1'
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff # v6
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
         with:
           version: '0.9.10'
-      - name: Fetch immutable standalone interpreter
-        run: |
-          test "$(uname -m)" = arm64
-          mkdir -p native-inputs
-          curl --fail --location --retry 3 'https://github.com/astral-sh/python-build-standalone/releases/download/20250612/cpython-3.12.11%2B20250612-aarch64-apple-darwin-install_only.tar.gz' --output native-inputs/python.tar.gz
-          echo 'c6d4843e8af496f034176908ae3384556680284653a4bff45eff07e43fe4ae34  native-inputs/python.tar.gz' | shasum -a 256 --check
-          tar -xzf native-inputs/python.tar.gz -C native-inputs
-      - name: Build immutable wheel and locked model inputs
+      - name: Fetch immutable native inputs
+        run: uv run --no-project --python 3.12 .github/scripts/project_worker_native.py '${{ matrix.target }}' native-inputs
+      - name: Fetch wheel and locked model inputs
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           tag="ontoscience-project-worker-${GITHUB_SHA:0:12}"
           mkdir -p native-dist
-          if gh release view "$tag" >/dev/null 2>&1; then
-            gh release download "$tag" --pattern '*.whl' --dir native-dist
-          else
-            uv build --wheel --out-dir native-dist
-          fi
-          native-inputs/python/bin/python3 -I -B .github/scripts/project_worker_models.py .github/requirements/project-worker-models.json native-inputs/models
+          gh release download "$tag" --pattern '*.whl' --dir native-dist
+          native-inputs/${{ matrix.python }} -I -B .github/scripts/project_worker_models.py .github/requirements/project-worker-models.json native-inputs/models
       - name: Build native bundle
         run: |
-          native-inputs/python/bin/python3 -I -B semantica/project_bundle.py --python-root native-inputs/python --wheel native-dist/semantica-0.7.0-py3-none-any.whl --models-root native-inputs/models --output native-bundle --source-revision "$GITHUB_SHA"
+          native-inputs/${{ matrix.python }} -I -B semantica/project_bundle.py --python-root native-inputs/python --wheel native-dist/semantica-0.7.0-py3-none-any.whl --models-root native-inputs/models --office-root native-inputs/office --office-receipt native-inputs/office-release.json --output native-bundle --source-revision "$GITHUB_SHA"
       - name: Relocate and validate installed worker
         run: |
           mv native-bundle "$RUNNER_TEMP/semantica-relocated"
-          export DOCLING_ARTIFACTS_PATH="$RUNNER_TEMP/semantica-relocated/models"
-          export HF_HUB_OFFLINE=1 TRANSFORMERS_OFFLINE=1
-          "$RUNNER_TEMP/semantica-relocated/python/bin/python3" -I -B .github/scripts/project_worker_acceptance.py "$RUNNER_TEMP/semantica-relocated" native-dist/native-acceptance.json
+          "$RUNNER_TEMP/semantica-relocated/${{ matrix.python }}" -I -B .github/scripts/project_worker_acceptance.py "$RUNNER_TEMP/semantica-relocated" native-dist/${{ matrix.target }}-acceptance.json
       - name: Archive and publish immutable native release
         env:
           GH_TOKEN: ${{ github.token }}
+          COPYFILE_DISABLE: '1'
         run: |
           tag="ontoscience-project-worker-${GITHUB_SHA:0:12}"
-          archive="semantica-darwin-arm64-${GITHUB_SHA:0:12}.tar.gz"
-          COPYFILE_DISABLE=1 tar -czf "native-dist/$archive" -C "$RUNNER_TEMP/semantica-relocated" .
-          cp "$RUNNER_TEMP/semantica-relocated/manifest.json" native-dist/native-manifest.json
-          shasum -a 256 native-dist/*.whl "native-dist/$archive" > native-dist/SHA256SUMS
-          if ! gh release view "$tag" >/dev/null 2>&1; then
-            gh release create "$tag" --target "$GITHUB_SHA" --title "OntoScience project worker ${GITHUB_SHA:0:12}" --notes 'Immutable worker wheel and relocated native runtime. Acceptance and inventory are attached.'
-          fi
+          archive="semantica-${{ matrix.target }}-${GITHUB_SHA:0:12}.tar.gz"
+          tar -czf "native-dist/$archive" -C "$RUNNER_TEMP/semantica-relocated" .
+          cp "$RUNNER_TEMP/semantica-relocated/manifest.json" native-dist/${{ matrix.target }}-manifest.json
           for artifact in native-dist/*; do
             name="$(basename "$artifact")"
             if gh release view "$tag" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then

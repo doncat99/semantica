@@ -15,7 +15,7 @@ def digest_file(path: Path) -> str:
         return "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, output: Path, uv: str, source_revision: str) -> dict:
+def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, office_root: Path, office_receipt: Path, output: Path, uv: str, source_revision: str) -> dict:
     """Inputs are release artifacts, never a Semantica source checkout or venv."""
     if output.exists():
         raise ValueError("bundle output must not already exist")
@@ -28,11 +28,16 @@ def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, output: P
     python_name = "python.exe" if os.name == "nt" else "bin/python3"
     if not (python_root / python_name).is_file():
         raise ValueError("CPython distribution has no interpreter")
+    office_release = json.loads(office_receipt.read_text(encoding="utf-8"))
+    if not (office_root / office_release["executable"]).is_file():
+        raise ValueError("the dedicated Office adapter requires its immutable executable")
     model_names = ("RapidOcr", "docling-project--docling-layout-heron", "docling-project--docling-models")
     for name in model_names:
         if not (models_root / name).is_dir():
             raise ValueError(f"required offline Docling model is absent: {name}")
     shutil.copytree(python_root, output / "python", symlinks=False)
+    shutil.copytree(office_root, output / "office", symlinks=False)
+    shutil.copy2(office_receipt, output / "office-release.json")
     python = output / "python" / python_name
     # This interpreter is our private copy, not the managed source distribution.
     subprocess.run([uv, "pip", "install", "--python", str(python), "--system", "--break-system-packages", f"{wheel.resolve()}[project-worker]"], check=True)
@@ -92,6 +97,8 @@ def main() -> None:
     parser.add_argument("--python-root", required=True, type=Path)
     parser.add_argument("--wheel", required=True, type=Path)
     parser.add_argument("--models-root", required=True, type=Path)
+    parser.add_argument("--office-root", required=True, type=Path)
+    parser.add_argument("--office-receipt", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--uv", default="uv")
     parser.add_argument("--source-revision", required=True)

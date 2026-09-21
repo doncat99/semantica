@@ -61,11 +61,11 @@ def test_epub_adapter_reads_spine_without_a_second_parser(tmp_path: Path):
 
 
 @pytest.mark.parametrize("suffix", [".doc", ".wpd"])
-def test_special_formats_require_one_dedicated_adapter(tmp_path: Path, suffix: str):
+def test_special_formats_validate_mime_before_dedicated_adapter(tmp_path: Path, suffix: str):
     source = tmp_path / f"legacy{suffix}"
     source.write_bytes(b"fixture")
 
-    with pytest.raises(UnsupportedSourceFormatError, match="dedicated adapter"):
+    with pytest.raises(UnsupportedSourceFormatError, match="does not match"):
         parse_source(
             source,
             name=source.name,

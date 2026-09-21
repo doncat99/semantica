@@ -20,6 +20,11 @@ ENV_VAR_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
 
 
 def utc_now_iso() -> str:
+    # Reconstructing a completed build must preserve its artifact bytes and identity.
+    from .project_checkpoint import active_checkpoint
+    checkpoint = active_checkpoint.get()
+    if checkpoint:
+        return checkpoint.created_at
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
@@ -146,7 +151,7 @@ class DocumentRepresentation(KernelModel, DigestModel):
     parser_version: str
     recipe_id: str
     recipe_digest: str
-    origin: Literal["native", "ocr", "mixed", "adapter"]
+    origin: Literal["native", "ocr", "mixed", "adapter", "external"]
     artifact_ref_id: str
     created_at: str = Field(default_factory=utc_now_iso)
     metadata: Dict[str, Any] = Field(default_factory=dict)
@@ -701,6 +706,20 @@ class ReleaseRef(DigestModel):
         return normalized
 
 
+class DocumentProcessingProfile(StrictModel):
+    mode: Literal["disabled", "local", "remote"] = "local"
+    endpoint: Optional[str] = None
+    binding_id: Optional[str] = Field(default=None, alias="bindingId")
+    authorization_env: Optional[str] = Field(default=None, alias="authorizationEnv")
+    remote_cancellation: Literal["unsupported"] = Field(default="unsupported", alias="remoteCancellation")
+
+    @model_validator(mode="after")
+    def validate_remote(self) -> "DocumentProcessingProfile":
+        if self.mode == "remote" and (not self.endpoint or not self.binding_id or not self.authorization_env):
+            raise ValueError("remote document processing requires endpoint, bindingId and authorizationEnv")
+        return self
+
+
 class ProjectSnapshotBuildRequest(DigestModel):
     project_id: str = Field(alias="projectId")
     base_snapshot: Optional[SnapshotRef] = Field(default=None, alias="baseSnapshot")
@@ -710,6 +729,7 @@ class ProjectSnapshotBuildRequest(DigestModel):
     relays: Dict[str, RelayRef]
     release: ReleaseRef
     sources: List[SourceBuildInput]
+    document_processing: DocumentProcessingProfile = Field(default_factory=DocumentProcessingProfile, alias="documentProcessing")
 
     @model_validator(mode="after")
     def validate_inputs(self) -> "ProjectSnapshotBuildRequest":

@@ -167,7 +167,7 @@ def test_worker_fails_closed_for_unsupported_source_format(tmp_path):
     response = json.loads(stdout.getvalue())
     assert response["ok"] is False
     assert response["error"]["type"] == "SnapshotBuildError"
-    assert "dedicated adapter" in response["error"]["message"] or "does not match" in response["error"]["message"]
+    assert "dedicated Office adapter" in response["error"]["message"] or "does not match" in response["error"]["message"]
 
 
 def test_cross_source_same_name_stays_unresolved(tmp_path):

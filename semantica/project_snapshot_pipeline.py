@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any
 
 from .project_source import UnsupportedSourceFormatError, parse_source
+from .project_checkpoint import SnapshotCheckpoint, active_checkpoint
 from .project_identity import resolve_project_identities
 from .project_snapshot_schema import (
     ArtifactManifest,
@@ -124,6 +125,11 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any):
 
 
 def _relay_json(relay: Any, payload: dict[str, Any], operation: str) -> tuple[dict[str, Any], ModelReceipt]:
+    checkpoint = active_checkpoint.get()
+    cache_key = {"operation": operation, "bindingId": getattr(relay, "binding_id", None), "modelId": relay.model_id, "payload": payload}
+    cached = checkpoint.read("relay", cache_key) if checkpoint else None
+    if cached is not None:
+        return cached["response"], ModelReceipt.model_validate(cached["receipt"])
     token = os.environ.get(relay.authorization_env)
     if not token:
         raise SnapshotBuildError(f"missing relay authorization environment: {relay.authorization_env}")
@@ -159,6 +165,8 @@ def _relay_json(relay: Any, payload: dict[str, Any], operation: str) -> tuple[di
         output_digest=_digest_bytes(response_bytes),
         parameters={"relay_url": relay.base_url},
     )
+    if checkpoint:
+        checkpoint.write("relay", cache_key, {"response": decoded, "receipt": receipt.model_dump(mode="json", by_alias=True)})
     return decoded, receipt
 
 
@@ -533,22 +541,31 @@ def _write_json(path: Path, payload: Any) -> str:
     return _digest_bytes(encoded)
 
 
-def _parse_source(source: Any, force_ocr: bool) -> tuple[str, dict[str, Any], str, str, str, str]:
+def _parse_source(source: Any, force_ocr: bool, document_processing: dict | None = None) -> tuple[str, dict[str, Any], str, str, str, str]:
     path = Path(source.file_path).resolve()
     if not path.is_file():
         raise SnapshotBuildError(f"source is not a file: {source.source_id}")
     content_hash = _digest_file(path)
+    checkpoint = active_checkpoint.get()
+    cache_key = {"sourceId": source.source_id, "contentHash": content_hash, "forceOcr": force_ocr, "documentProcessing": document_processing}
+    cached = checkpoint.read("document", cache_key) if checkpoint else None
+    if cached is not None:
+        return tuple(cached)
     try:
         parsed = parse_source(
             path,
             name=source.name,
             mime_type=source.mime_type,
             force_ocr=force_ocr,
+            document_processing=document_processing,
         )
     except UnsupportedSourceFormatError as exc:
         raise SnapshotBuildError(str(exc)) from exc
     document = {**parsed.document, "text": parsed.text, "content_hash": content_hash, "mime_type": source.mime_type}
-    return parsed.text, document, parsed.origin, content_hash, parsed.parser, parsed.parser_version
+    result = (parsed.text, document, parsed.origin, content_hash, parsed.parser, parsed.parser_version)
+    if checkpoint:
+        checkpoint.write("document", cache_key, result)
+    return result
 
 
 def _span_id(source_id: str, start: int, end: int) -> str:
@@ -760,6 +777,23 @@ def _canonical_graph_projection(
 
 
 def _provenance_projection(
+    representations: list[DocumentRepresentation],
+    evidence: list[EvidenceSpan],
+    entities: list[KnowledgeEntity],
+    relations: list[KnowledgeRelation],
+) -> dict[str, Any]:
+    checkpoint = active_checkpoint.get()
+    key = [[item.model_dump(mode="json") for item in group] for group in (representations, evidence, entities, relations)]
+    cached = checkpoint.read("provenance", key) if checkpoint else None
+    if cached is not None:
+        return cached
+    result = _build_provenance_projection(representations, evidence, entities, relations)
+    if checkpoint:
+        checkpoint.write("provenance", key, result)
+    return result
+
+
+def _build_provenance_projection(
     representations: list[DocumentRepresentation],
     evidence: list[EvidenceSpan],
     entities: list[KnowledgeEntity],
@@ -1053,6 +1087,14 @@ def _change_delta(
 
 def build_project_snapshot(request: ProjectSnapshotBuildRequest) -> dict[str, Any]:
     """Build, validate, and materialize one immutable snapshot and its artifacts."""
+    token = active_checkpoint.set(SnapshotCheckpoint(request))
+    try:
+        return _build_project_snapshot(request)
+    finally:
+        active_checkpoint.reset(token)
+
+
+def _build_project_snapshot(request: ProjectSnapshotBuildRequest) -> dict[str, Any]:
     if request.recipe.id not in {"deterministic", "model"}:
         raise SnapshotBuildError(
             f"unsupported project snapshot recipe: {request.recipe.id}; "
@@ -1080,7 +1122,7 @@ def build_project_snapshot(request: ProjectSnapshotBuildRequest) -> dict[str, An
     source_classifications: list[SourceClassification] = []
     for source in request.sources:
         force_ocr = source.source_id in request.recipe.force_ocr_source_ids
-        parsed = _parse_source(source, force_ocr)
+        parsed = _parse_source(source, force_ocr, request.document_processing.model_dump(mode="json", by_alias=True))
         if request.recipe.id == "model":
             model_result, embeddings, source_receipts = _extract_and_embed(parsed[0], request.relays["model"], request.relays["embedding"])
             built_source = _build_source(source, force_ocr, model_result, parsed)

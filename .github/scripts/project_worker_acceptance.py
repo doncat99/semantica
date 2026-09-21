@@ -10,6 +10,9 @@ from zipfile import ZipFile
 
 from docx import Document
 from PIL import Image, ImageDraw, ImageFont
+from pptx import Presentation
+from openpyxl import Workbook
+from semantica.project_office import bundled_office, convert_office
 from semantica.project_source import parse_source
 
 
@@ -39,14 +42,49 @@ with tempfile.TemporaryDirectory(prefix="semantica-native-acceptance-") as direc
     ImageDraw.Draw(picture).text((100, 160), "\u5317\u4eac\u5927\u5b66\u7814\u7a76\u62a5\u544a 73", fill="black",
         font=ImageFont.truetype(str(root / "models/RapidOcr/fonts/FZYTK.TTF"), 70))
     picture.save(scratch / "scan.pdf", resolution=150)
+    picture.save(scratch / "scan.png")
+    slides = Presentation()
+    slides.slides.add_slide(slides.slide_layouts[5]).shapes.title.text = "Knowledge Evidence 73"
+    slides.save(scratch / "slides.pptx")
+    workbook = Workbook()
+    workbook.active.append(["Knowledge Evidence", 73])
+    workbook.save(scratch / "sheet.xlsx")
+    (scratch / "page.html").write_text('<html><body><h1>Knowledge Evidence 73</h1></body></html>', encoding="utf-8")
+    (scratch / "table.csv").write_text('name,value\nKnowledge Evidence,73\n', encoding="utf-8")
+    (scratch / "article.xml").write_text('<?xml version="1.0"?><!DOCTYPE article PUBLIC "-//NLM//DTD JATS (Z39.96) Journal Publishing DTD v1.3 20210610//EN" "JATS-journalpublishing1-3.dtd"><article><front><article-meta><title-group><article-title>Knowledge Evidence 73</article-title></title-group></article-meta></front><body><sec><title>Evidence</title><p>Knowledge Evidence 73</p></sec></body></article>', encoding="utf-8")
     parsed = []
-    for name, mime, force in [("native.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", False), ("scan.pdf", "application/pdf", True)]:
+    for name, mime, force, expected in [
+        ("native.docx", "application/vnd.openxmlformats-officedocument.wordprocessingml.document", False, "\u5317\u4eac\u5927\u5b66"),
+        ("scan.pdf", "application/pdf", True, "\u5317\u4eac\u5927\u5b66"),
+        ("scan.png", "image/png", True, "\u5317\u4eac\u5927\u5b66"),
+        ("slides.pptx", "application/vnd.openxmlformats-officedocument.presentationml.presentation", False, "Knowledge Evidence"),
+        ("sheet.xlsx", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet", False, "Knowledge Evidence"),
+        ("page.html", "text/html", False, "Knowledge Evidence"),
+        ("table.csv", "text/csv", False, "Knowledge Evidence"),
+        ("article.xml", "application/xml", False, "Knowledge Evidence"),
+    ]:
         result = parse_source(scratch / name, name=name, mime_type=mime, force_ocr=force)
-        assert "\u5317\u4eac\u5927\u5b66" in result.text and "73" in result.text, result.text
+        assert expected in result.text and "73" in result.text, result.text
         assert result.document["document"] and result.document["doctags"]
         if force:
             assert result.origin == "ocr"
         parsed.append({"name": name, "origin": result.origin, "textLength": len(result.text)})
+    executable, version = bundled_office()
+    for source, target, mime, expected in [
+        ("native.docx", "doc:MS Word 97", "application/msword", "\u5317\u4eac\u5927\u5b66"),
+        ("slides.pptx", "ppt:MS PowerPoint 97", "application/vnd.ms-powerpoint", "Knowledge Evidence"),
+        ("sheet.xlsx", "xls:MS Excel 97", "application/vnd.ms-excel", "Knowledge Evidence"),
+    ]:
+        path = convert_office(scratch / source, scratch, scratch / (source + "-profile"), executable, target)
+        result = parse_source(path, name=path.name, mime_type=mime, force_ocr=False)
+        assert expected in result.text and "73" in result.text, result.text
+        assert result.parser == "semantica.libreoffice" and result.parser_version == version
+        assert result.document["sections"] and result.document["flat_odf"]
+        parsed.append({"name": path.name, "origin": result.origin, "textLength": len(result.text), "sections": len(result.document["sections"])})
+    wpd = Path("native-inputs/wp6.wpd").resolve()
+    result = parse_source(wpd, name=wpd.name, mime_type="application/vnd.wordperfect", force_ocr=False)
+    assert result.text == "Foo\n\nfoo" and len(result.document["sections"]) == 2
+    parsed.append({"name": wpd.name, "origin": result.origin, "textLength": len(result.text), "sections": len(result.document["sections"])})
     source = scratch / "source.txt"
     source.write_text("Ada Lovelace designed the Analytical Engine.")
     epub = scratch / "book.epub"
