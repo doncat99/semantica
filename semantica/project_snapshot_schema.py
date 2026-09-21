@@ -103,7 +103,7 @@ class DigestModel(StrictModel):
 
 class DocumentLocator(StrictModel):
     representation_id: str
-    origin: Literal["native", "ocr", "derived", "external", "adapter"]
+    origin: Literal["native", "ocr", "mixed", "derived", "external", "adapter"]
     quote: str
     start_char: Optional[int] = Field(default=None, ge=0)
     end_char: Optional[int] = Field(default=None, ge=0)
@@ -335,6 +335,7 @@ class ProjectSnapshot(KernelModel):
     artifact_manifest: List[ArtifactManifest]
     document_representations: List[DocumentRepresentation]
     evidence_spans: List[EvidenceSpan]
+    entity_mentions: List[KnowledgeEntity] = Field(default_factory=list)
     entities: List[KnowledgeEntity] = Field(default_factory=list)
     assertions: List[KnowledgeAssertion] = Field(default_factory=list)
     relations: List[KnowledgeRelation] = Field(default_factory=list)
@@ -354,6 +355,7 @@ class ProjectSnapshot(KernelModel):
             "artifact": self.artifact_manifest,
             "representation": self.document_representations,
             "evidence": self.evidence_spans,
+            "entity_mention": self.entity_mentions,
             "entity": self.entities,
             "assertion": self.assertions,
             "relation": self.relations,
@@ -372,6 +374,7 @@ class ProjectSnapshot(KernelModel):
         representation_ids = {item.id for item in self.document_representations}
         evidence_ids = {item.id for item in self.evidence_spans}
         entity_ids = {item.id for item in self.entities}
+        mention_ids = {item.id for item in self.entity_mentions}
         assertion_ids = {item.id for item in self.assertions}
         relation_ids = {item.id for item in self.relations}
         community_ids = {item.id for item in self.communities}
@@ -396,7 +399,7 @@ class ProjectSnapshot(KernelModel):
                 raise ValueError(f"unknown evidence representation_id: {evidence.representation_id}")
             if evidence.locator.representation_id != evidence.representation_id:
                 raise ValueError("evidence locator representation_id must match evidence representation_id")
-        for entity in self.entities:
+        for entity in [*self.entities, *self.entity_mentions]:
             missing = set(entity.evidence_ids) - evidence_ids
             if missing:
                 raise ValueError(f"entity {entity.id} references unknown evidence ids: {sorted(missing)}")
@@ -430,7 +433,7 @@ class ProjectSnapshot(KernelModel):
             if missing:
                 raise ValueError(f"report {report.id} references unknown model receipt ids: {sorted(missing)}")
         for decision in self.identity_decisions:
-            missing = _missing(decision.from_entity_ids, entity_ids)
+            missing = _missing(decision.from_entity_ids, entity_ids | mention_ids)
             if missing:
                 raise ValueError(f"identity decision {decision.id} references unknown from_entity_ids: {missing}")
             if decision.to_entity_id and decision.to_entity_id not in entity_ids:
@@ -485,7 +488,7 @@ class ProjectSnapshot(KernelModel):
             ("affected report", self.change_delta.affected_report_ids, report_ids),
             ("affected retrieval manifest", self.change_delta.affected_retrieval_manifest_ids, retrieval_ids),
         ):
-            missing = _missing(values, known)
+            missing = _missing(values, known | set(self.change_delta.retracted_ids))
             if missing:
                 raise ValueError(f"change_delta references unknown {label} ids: {missing}")
         return self

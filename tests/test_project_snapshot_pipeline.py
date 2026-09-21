@@ -7,7 +7,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from semantica.project_snapshot_pipeline import _canonical_graph_projection
-from semantica.project_snapshot_schema import KnowledgeEntity, KnowledgeRelation, ProjectSnapshot
+from semantica.project_snapshot_pipeline import build_project_snapshot
+from semantica.project_snapshot_schema import ProjectSnapshotBuildRequest
+from semantica.project_snapshot_schema import KnowledgeEntity, KnowledgeRelation, ModelReceipt, ProjectSnapshot, stable_digest
 from semantica.project_snapshot_worker import serve
 
 H1 = "sha256:" + "1" * 64
@@ -257,3 +259,80 @@ def test_model_recipe_fails_closed_without_relay_token(tmp_path):
     assert response["ok"] is False
     assert response["error"]["type"] == "SnapshotBuildError"
     assert "authorization" in response["error"]["message"]
+
+
+def test_incremental_delta_ignores_audit_time_and_tracks_only_dependent_reports(tmp_path):
+    first = tmp_path / "first.txt"
+    second = tmp_path / "second.txt"
+    first.write_text("Ada Lovelace studied mathematics.", encoding="utf-8")
+    second.write_text("Charles Babbage designed machines.", encoding="utf-8")
+    request = _request(first, tmp_path / "first-build")["params"]
+    request["sources"].append({"filePath": str(second), "materialRevision": "material-2", "mimeType": "text/plain", "name": second.name, "sourceId": "source-2"})
+    initial = build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(request))
+    request["baseSnapshot"] = {"snapshotId": initial["snapshot"].id, "snapshotPath": str(initial["snapshot_path"]), "artifactDigest": initial["snapshot_digest"], "schemaDigest": H3}
+    request["inputRevision"] = H2
+    request["outputDir"] = str(tmp_path / "identical-build")
+    identical = build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(request))["snapshot"]
+    assert identical.change_delta.updated_ids == []
+    assert identical.change_delta.affected_report_ids == []
+    assert all(report.evidence_ids for report in identical.reports)
+
+    first.write_text("Grace Hopper studied mathematics.", encoding="utf-8")
+    request["outputDir"] = str(tmp_path / "changed-build")
+    updated = build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(request))["snapshot"]
+    unchanged_reports = {report.id for report in initial["snapshot"].reports if "Charles Babbage" in report.title}
+    assert unchanged_reports
+    assert updated.change_delta.changed_representation_ids == ["representation:source-1"]
+    assert not unchanged_reports.intersection(updated.change_delta.affected_report_ids)
+    removed_reports = {report.id for report in initial["snapshot"].reports if "Ada Lovelace" in report.title}
+    assert removed_reports.issubset(set(updated.change_delta.affected_report_ids))
+
+
+def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, monkeypatch):
+    first, second = tmp_path / "first.txt", tmp_path / "second.txt"
+    text = "Ada Lovelace designed the Analytical Engine."
+    first.write_text(text, encoding="utf-8")
+    second.write_text(text + " Ada Lovelace was a mathematician.", encoding="utf-8")
+
+    def relay_response(relay, payload, operation):
+        if operation == "embedding":
+            result = {"data": [{"embedding": [0.25, 0.5, 0.75]}], "model": relay.model_id}
+        else:
+            if operation == "identity_resolution":
+                candidates = json.loads(payload["messages"][1]["content"])
+                groups = [[item for item in candidates if item["name"] == name] for name in {item["name"] for item in candidates}]
+                content = {"merges": [{"mention_ids": [item["mention_id"] for item in group],
+                    "evidence_ids": [span["id"] for item in group for span in item["evidence"]],
+                    "reason": "The same named mathematician and designed machine are corroborated by both source contexts."} for group in groups]}
+            else:
+                content = {"entities": [{"name": "Ada Lovelace", "type": "PERSON"}, {"name": "Analytical Engine", "type": "CONCEPT"}],
+                    "relations": [{"subject": "Ada Lovelace", "predicate": "designed", "object": "Analytical Engine", "evidence": text}]}
+            result = {"choices": [{"message": {"content": json.dumps(content)}}], "model": relay.model_id}
+        receipt = ModelReceipt(id="receipt:" + stable_digest([operation, payload]).split(":")[1], operation=operation,
+            provider="fixture", model=relay.model_id, input_digest=stable_digest(payload), output_digest=stable_digest(result))
+        return result, receipt
+
+    monkeypatch.setattr("semantica.project_snapshot_pipeline._relay_json", relay_response)
+    request = _request(first, tmp_path / "build", recipe="model")
+    request["params"]["sources"].append({"filePath": str(second), "materialRevision": "material-2", "mimeType": "text/plain", "name": second.name, "sourceId": "source-2"})
+    stdout = io.StringIO()
+    assert serve(io.StringIO(json.dumps(request) + "\n"), stdout) == 0
+    response = json.loads(stdout.getvalue())
+    assert response["ok"] is True, response
+    snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "snapshot")
+    snapshot = ProjectSnapshot.model_validate_json(snapshot_path.read_bytes())
+    assert len(snapshot.entity_mentions) == 4
+    assert len(snapshot.entities) == 2
+    assert snapshot.conflicts == []
+    assert len(snapshot.identity_decisions) == 2
+    identity_receipt = next(receipt for receipt in snapshot.model_receipts if receipt.operation == "identity_resolution")
+    assert identity_receipt.id in response["result"]["relayReceipts"]["model"]
+    assert all(decision.metadata["model_receipt_id"] == identity_receipt.id for decision in snapshot.identity_decisions)
+    canonical_ids = {entity.id for entity in snapshot.entities}
+    assert {relation.source_entity_id for relation in snapshot.relations}.issubset(canonical_ids)
+    assert {relation.target_entity_id for relation in snapshot.relations}.issubset(canonical_ids)
+    assert {assertion.subject_id for assertion in snapshot.assertions}.issubset(canonical_ids)
+    retrieval_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "retrieval-index")
+    retrieval = json.loads(retrieval_path.read_text())
+    for entity in snapshot.entities:
+        assert set(retrieval["provenance"]["entities"][entity.id]["source_documents"]) == {"source-1", "source-2"}

@@ -34,7 +34,8 @@ def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, output: P
             raise ValueError(f"required offline Docling model is absent: {name}")
     shutil.copytree(python_root, output / "python", symlinks=False)
     python = output / "python" / python_name
-    subprocess.run([uv, "pip", "install", "--python", str(python), "--system", f"{wheel.resolve()}[project-worker]"], check=True)
+    # This interpreter is our private copy, not the managed source distribution.
+    subprocess.run([uv, "pip", "install", "--python", str(python), "--system", "--break-system-packages", f"{wheel.resolve()}[project-worker]"], check=True)
     packages = subprocess.run([str(python), "-I", "-B", "-c",
         "import importlib.metadata as m, json; print(json.dumps(sorted((d.metadata['Name'], d.version) for d in m.distributions())))"],
         capture_output=True, text=True, check=True)

@@ -71,7 +71,7 @@ def handle_request(raw: Dict[str, Any]) -> Dict[str, Any]:
         "artifacts": artifacts,
         "relayReceipts": {
             "embedding": [receipt.id for receipt in receipts if receipt.operation == "embedding"],
-            "model": [receipt.id for receipt in receipts if receipt.operation == "structured_extraction"],
+            "model": [receipt.id for receipt in receipts if receipt.operation in {"structured_extraction", "identity_resolution"}],
         },
         "snapshot": {
             "baseSnapshotId": snapshot.base_snapshot_id,
