@@ -648,6 +648,7 @@ class RelayRef(StrictModel):
     base_url: str = Field(alias="baseUrl")
     capability: Literal["knowledge.snapshot.embed", "knowledge.snapshot.generate"]
     model_id: str = Field(alias="modelId")
+    binding_id: Optional[str] = Field(default=None, alias="bindingId")
     receipts: Literal["required"]
 
     @field_validator("authorization_env", mode="after")

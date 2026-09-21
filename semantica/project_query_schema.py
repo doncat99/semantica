@@ -3,9 +3,10 @@
 from __future__ import annotations
 
 from os.path import isabs
+import math
 from typing import Dict, List, Literal, Optional
 
-from pydantic import Field, field_validator
+from pydantic import Field, field_validator, model_validator
 
 from .project_snapshot_schema import DigestModel, StrictModel, _validate_media_type
 
@@ -31,6 +32,19 @@ class QueryArtifactRef(DigestModel):
         return _validate_media_type(value, "query artifact mediaType")
 
 
+class QueryEmbedding(StrictModel):
+    binding_id: str = Field(alias="bindingId", min_length=1)
+    model_id: str = Field(alias="modelId", min_length=1)
+    vector: List[float] = Field(min_length=1)
+
+    @field_validator("vector", mode="before")
+    @classmethod
+    def validate_vector(cls, value):
+        if not isinstance(value, list) or not all(isinstance(item, (int, float)) and not isinstance(item, bool) and math.isfinite(item) for item in value):
+            raise ValueError("query embedding must contain finite numbers")
+        return value
+
+
 class ProjectQueryRequest(StrictModel):
     protocol: Literal[QUERY_PROTOCOL] = QUERY_PROTOCOL
     id: str
@@ -40,7 +54,16 @@ class ProjectQueryRequest(StrictModel):
     snapshot: QueryArtifactRef
     retrieval: QueryArtifactRef
     query: Optional[str] = None
-    limit: int = Field(default=20, ge=1, le=100)
+    limit: int = Field(default=20, ge=1, le=1000)
+    mode: Literal["keyword", "semantic"] = "keyword"
+    embedding: Optional[QueryEmbedding] = None
+    source_ids: Optional[List[str]] = Field(default=None, alias="sourceIds")
+
+    @model_validator(mode="after")
+    def validate_mode(self):
+        if (self.mode == "semantic") != (self.embedding is not None):
+            raise ValueError("semantic mode requires a query embedding; keyword mode does not accept one")
+        return self
 
     @field_validator("query", mode="after")
     @classmethod
@@ -86,4 +109,3 @@ class QueryWorkerResponse(StrictModel):
     ok: bool
     result: Optional[Dict[str, object]] = None
     error: Optional[QueryWorkerError] = None
-

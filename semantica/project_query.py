@@ -1,8 +1,9 @@
-"""Read-only lexical query over one Semantica retrieval artifact."""
+"""Snapshot-bound keyword and vector retrieval with grounded evidence."""
 
 from __future__ import annotations
 
 import json
+import math
 import re
 from hashlib import sha256
 from pathlib import Path
@@ -71,6 +72,53 @@ def _source_ids(evidence_ids: Iterable[str], evidence_by_id: dict[str, Any], rep
     return sorted(source_ids)
 
 
+def _semantic_evidence_scores(request, retrieval, evidence_by_id, representations):
+    embedding = request.embedding
+    space = retrieval.get("embedding_space")
+    if not isinstance(space, dict) or embedding is None:
+        raise QueryError("snapshot has no compatible embedding space; rebuild is required")
+    if space.get("model_id") != embedding.model_id or space.get("binding_id") != embedding.binding_id:
+        raise QueryError("query embedding model does not match the snapshot embedding space")
+    vector = embedding.vector
+    dimension = space.get("dimensions")
+    if not isinstance(dimension, int) or dimension < 1 or len(vector) != dimension:
+        raise QueryError("query embedding dimensions do not match the snapshot")
+
+    def norm(values):
+        if not all(isinstance(value, (float, int)) and not isinstance(value, bool) and math.isfinite(value) for value in values):
+            raise QueryError("embedding vector contains invalid values")
+        length = math.sqrt(math.fsum(value * value for value in values))
+        if not math.isfinite(length) or length <= 0:
+            raise QueryError("embedding vector has no valid norm")
+        return length
+
+    query_norm = norm(vector)
+    chunks = _records(retrieval.get("embeddings"), "embeddings")
+    if not chunks:
+        raise QueryError("snapshot contains no embedding vectors; rebuild is required")
+    source_scores = {}
+    for chunk in chunks:
+        values = chunk.get("vector")
+        start, end = chunk.get("start_char"), chunk.get("end_char")
+        if not isinstance(values, list) or len(values) != dimension:
+            raise QueryError("snapshot embedding dimensions are inconsistent")
+        if not isinstance(start, int) or not isinstance(end, int) or start < 0 or end <= start:
+            raise QueryError("snapshot embedding has invalid evidence coordinates")
+        cosine = math.fsum(a * b for a, b in zip(vector, values)) / (query_norm * norm(values))
+        score = (max(-1.0, min(1.0, cosine)) + 1.0) / 2.0
+        source_scores.setdefault(chunk.get("source_id"), []).append((start, end, score))
+    scores = {}
+    for evidence_id, evidence in evidence_by_id.items():
+        representation = representations.get(evidence.get("representation_id"), {})
+        locator = evidence.get("locator", {})
+        start, end = locator.get("start_char"), locator.get("end_char")
+        if isinstance(start, int) and isinstance(end, int):
+            matches = [score for lo, hi, score in source_scores.get(representation.get("source_id"), []) if lo < end and hi > start]
+            if matches:
+                scores[evidence_id] = max(matches)
+    return scores
+
+
 def query_project_snapshot(request: ProjectQueryRequest) -> ProjectQueryResult:
     if request.method != "query":
         raise QueryError("query_project_snapshot requires method=query")
@@ -126,11 +174,24 @@ def query_project_snapshot(request: ProjectQueryRequest) -> ProjectQueryResult:
     for evidence in evidence_records:
         candidates.append((str(evidence["id"]), "evidence", str(evidence.get("quote", "")), [str(evidence["id"])]))
 
+    allowed_sources = set(request.source_ids) if request.source_ids is not None else None
+    evidence_scores = _semantic_evidence_scores(request, retrieval_payload, evidence_by_id, representation_by_id) if request.mode == "semantic" else None
     hits = []
     for item_id, kind, text, evidence in candidates:
-        score = _score(request.query or "", text)
-        if score <= 0:
+        sources = _source_ids(evidence, evidence_by_id, representation_by_id)
+        if not evidence or not sources:
             continue
+        if allowed_sources is not None and not set(sources).issubset(allowed_sources):
+            continue
+        if evidence_scores is not None:
+            matches = [evidence_scores[item] for item in evidence if item in evidence_scores]
+            if not matches:
+                continue
+            score = max(matches)
+        else:
+            score = _score(request.query or "", text)
+            if score <= 0:
+                continue
         hits.append(QueryHit(
             id=item_id,
             kind=kind,
@@ -138,7 +199,7 @@ def query_project_snapshot(request: ProjectQueryRequest) -> ProjectQueryResult:
             text=text,
             score=score,
             evidence_ids=evidence,
-            source_ids=_source_ids(evidence, evidence_by_id, representation_by_id),
+            source_ids=sources,
         ))
     hits.sort(key=lambda item: (-item.score, item.kind, item.id))
     return ProjectQueryResult(
