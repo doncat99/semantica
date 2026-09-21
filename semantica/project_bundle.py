@@ -15,12 +15,14 @@ def digest_file(path: Path) -> str:
         return "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, output: Path, uv: str) -> dict:
+def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, output: Path, uv: str, source_revision: str) -> dict:
     """Inputs are release artifacts, never a Semantica source checkout or venv."""
     if output.exists():
         raise ValueError("bundle output must not already exist")
     if wheel.suffix != ".whl" or not wheel.is_file():
         raise ValueError("an immutable Semantica wheel is required")
+    if len(source_revision) != 40 or any(char not in "0123456789abcdef" for char in source_revision):
+        raise ValueError("source revision must be a complete Git commit")
     if (python_root / "pyvenv.cfg").exists():
         raise ValueError("a relocatable CPython distribution is required, not a venv")
     python_name = "python.exe" if os.name == "nt" else "bin/python3"
@@ -33,6 +35,13 @@ def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, output: P
     shutil.copytree(python_root, output / "python", symlinks=False)
     python = output / "python" / python_name
     subprocess.run([uv, "pip", "install", "--python", str(python), "--system", f"{wheel.resolve()}[project-worker]"], check=True)
+    packages = subprocess.run([str(python), "-I", "-B", "-c",
+        "import importlib.metadata as m, json; print(json.dumps(sorted((d.metadata['Name'], d.version) for d in m.distributions())))"],
+        capture_output=True, text=True, check=True)
+    (output / "release.json").write_text(json.dumps({
+        "sourceRevision": source_revision, "wheel": wheel.name, "wheelDigest": digest_file(wheel),
+        "packages": json.loads(packages.stdout),
+    }, indent=2) + "\n", encoding="utf-8")
     for name in model_names:
         shutil.copytree(models_root / name, output / "models" / name, symlinks=False,
                         ignore=shutil.ignore_patterns(".cache", ".git"))
@@ -84,6 +93,7 @@ def main() -> None:
     parser.add_argument("--models-root", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--uv", default="uv")
+    parser.add_argument("--source-revision", required=True)
     args = parser.parse_args()
     manifest = build_bundle(**vars(args))
     print(json.dumps({"artifactDigest": manifest["artifactDigest"], "files": len(manifest["files"])}))
