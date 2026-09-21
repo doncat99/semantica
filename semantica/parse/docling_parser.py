@@ -53,7 +53,7 @@ PdfFormatOption = None
 try:
     from docling.document_converter import DocumentConverter, PdfFormatOption
     from docling.datamodel.base_models import InputFormat
-    from docling.datamodel.pipeline_options import PdfPipelineOptions
+    from docling.datamodel.pipeline_options import PdfPipelineOptions, RapidOcrOptions
     DOCLING_AVAILABLE = True
     DOCLING_IMPORT_ERROR = None
 except (ImportError, OSError) as e:
@@ -89,7 +89,8 @@ class DoclingParser:
                 - converter: Optional converter with a convert(path) method returning
                   a result whose document is a DoclingDocument.
                 - enable_ocr: Enable OCR for scanned documents (default: False)
-                  Note: OCR is handled via PdfPipelineOptions if needed
+                - force_full_page_ocr: Replace native PDF text with full-page OCR.
+                - artifacts_path: Directory containing packaged Docling models.
         """
         self.logger = get_logger("docling_parser")
         self.config = config
@@ -101,6 +102,7 @@ class DoclingParser:
         # Store config for lazy initialization
         self.export_format = config.get("export_format", "markdown")
         self.enable_ocr = config.get("enable_ocr", False)
+        self.force_full_page_ocr = config.get("force_full_page_ocr", False)
         # A supplied converter must return Docling's conversion-result shape.
         # This lets hosts select local execution or their admitted gateway.
         self._converter = config.get("converter")
@@ -158,19 +160,17 @@ class DoclingParser:
 
             # Lazy initialization of converter
             if self._converter is None:
-                # Initialize with proper format_options if OCR is needed
-                if self.enable_ocr:
-                    # Configure PDF pipeline options for OCR
-                    pipeline_options = PdfPipelineOptions()
-                    # OCR will be automatically used when needed
-                    self._converter = DocumentConverter(
-                        format_options={
-                            InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options)
-                        }
-                    )
-                else:
-                    # Use default converter without special options
-                    self._converter = DocumentConverter()
+                pipeline_options = PdfPipelineOptions()
+                pipeline_options.do_ocr = self.enable_ocr or self.force_full_page_ocr
+                pipeline_options.ocr_options = RapidOcrOptions(backend="onnxruntime", force_full_page_ocr=self.force_full_page_ocr)
+                # Keep cell provenance from this conversion; no second parse is needed.
+                pipeline_options.generate_parsed_pages = True
+                if self.config.get("artifacts_path"):
+                    pipeline_options.artifacts_path = Path(self.config["artifacts_path"])
+                self._converter = DocumentConverter(format_options={
+                    InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
+                    InputFormat.IMAGE: PdfFormatOption(pipeline_options=pipeline_options),
+                })
 
             # Determine export format
             export_format = options.get("export_format", self.export_format)
@@ -256,6 +256,14 @@ class DoclingParser:
                 message="Extracting page structure..."
             )
             pages = self._extract_pages(result, options)
+            cell_origins = {
+                bool(cell.from_ocr)
+                for page in getattr(result, "pages", [])
+                for cell in getattr(page, "cells", [])
+                if getattr(cell, "text", "").strip() and isinstance(getattr(cell, "from_ocr", None), bool)
+            }
+            origin = ("mixed" if len(cell_origins) == 2 else "ocr" if True in cell_origins else "native"
+                      if False in cell_origins or file_path.suffix.lower() not in {".pdf", ".png", ".jpg", ".jpeg"} else None)
 
             # Stage 8: Image extraction (98-100%)
             images = []
@@ -310,9 +318,11 @@ class DoclingParser:
                 "images": images,
                 "total_pages": metadata.page_count,
                 "export_format": export_format,
+                "origin": origin,
                 **({
                     "document": result.document.export_to_dict(),
                     "doctags": result.document.export_to_doctags(),
+                    "plain_text": result.document.export_to_text(),
                     "conversion_status": str(getattr(result, "status", "unknown")),
                 } if options.get("include_document", False) else {}),
             }

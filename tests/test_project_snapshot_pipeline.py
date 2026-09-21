@@ -156,6 +156,10 @@ def test_epub_adapter_preserves_adapter_locator_origin(tmp_path):
     snapshot = ProjectSnapshot.model_validate_json(snapshot_path.read_bytes())
     assert snapshot.evidence_spans
     assert {item.locator.origin for item in snapshot.evidence_spans} == {"adapter"}
+    representation_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "document-representation")
+    persisted = json.loads(representation_path.read_text())
+    assert "Ada Lovelace" in persisted["text"]
+    assert all(persisted["text"][span.locator.start_char:span.locator.end_char] == span.quote for span in snapshot.evidence_spans)
 
 
 def test_model_recipe_uses_bifrost_chat_and_embedding_and_records_receipts(tmp_path):

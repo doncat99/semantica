@@ -161,7 +161,7 @@ def _parse_source(source: Any, force_ocr: bool) -> tuple[str, dict[str, Any], st
         )
     except UnsupportedSourceFormatError as exc:
         raise SnapshotBuildError(str(exc)) from exc
-    document = {**parsed.document, "content_hash": content_hash, "mime_type": source.mime_type}
+    document = {**parsed.document, "text": parsed.text, "content_hash": content_hash, "mime_type": source.mime_type}
     return parsed.text, document, parsed.origin, content_hash, parsed.parser, parsed.parser_version
 
 
@@ -282,7 +282,7 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
         parser_version=parser_version,
         recipe_id="model" if model_result is not None else "deterministic",
         recipe_digest=stable_digest({"parser": document.get("format"), "ocr": force_ocr}),
-        origin="mixed" if force_ocr else origin,
+        origin=origin,
         artifact_ref_id=representation_artifact_id,
         metadata={"text_length": len(text), "source_name": source.name, "document": document},
     )

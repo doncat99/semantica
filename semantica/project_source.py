@@ -185,13 +185,16 @@ def parse_source(path: Path, *, name: str, mime_type: str, force_ocr: bool) -> S
         # legacy parse package's eager imports; load Docling only for this adapter.
         from .parse.docling_parser import DoclingParser
 
-        result = DoclingParser(enable_ocr=force_ocr, export_format="doctags").parse(
+        result = DoclingParser(enable_ocr=True, force_full_page_ocr=force_ocr, export_format="doctags").parse(
             path,
             export_format="doctags",
             include_document=True,
         )
+        origin = result.get("origin")
+        if origin not in {"native", "ocr", "mixed"}:
+            raise UnsupportedSourceFormatError("Docling conversion did not retain text-cell provenance")
         return SourceDocument(
-            text=result.get("full_text", ""),
+            text=result["plain_text"],
             document={
                 "format": "docling",
                 "document": result.get("document"),
@@ -201,7 +204,7 @@ def parse_source(path: Path, *, name: str, mime_type: str, force_ocr: bool) -> S
                 "metadata": result.get("metadata", {}),
                 "source": name,
             },
-            origin="ocr" if force_ocr else "native",
+            origin=origin,
             parser="docling",
             parser_version="2",
         )
