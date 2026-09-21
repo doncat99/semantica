@@ -74,7 +74,7 @@ def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, output: P
                 shutil.copytree(target, item, symlinks=False)
             else:
                 shutil.copy2(target, item)
-    for item in sorted(output.rglob("*")):
+    for item in sorted(output.rglob("*"), key=lambda path: path.relative_to(output).as_posix()):
         if item.is_file():
             manifest["files"].append({"path": item.relative_to(output).as_posix(), "size": item.stat().st_size, "sha256": digest_file(item)})
     descriptor = [manifest["protocol"], schema_digest, manifest["pythonPath"],
