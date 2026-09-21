@@ -150,8 +150,11 @@ jobs:
           # changes intentionally). Compare only version lines (pkg==ver),
           # ignoring the -c constraint comments and the `\` line continuations
           # that --generate-hashes emits.
+          # --group dev: the contributor tooling (pytest, black, ...) lives in
+          # the PEP 735 `dev` dependency group, not in the `all` extra.
           uv pip compile pyproject.toml --python-version 3.11 --extra all \
-            --constraint requirements-ci.txt -o /tmp/requirements-ci-check.txt
+            --group dev --constraint requirements-ci.txt \
+            -o /tmp/requirements-ci-check.txt
           diff \
             <(grep -E '^[a-zA-Z0-9._-]+==' requirements-ci.txt | sed 's/ \\$//') \
             <(grep -E '^[a-zA-Z0-9._-]+==' /tmp/requirements-ci-check.txt)

@@ -1555,7 +1555,7 @@ For production deployments, use Docker or Kubernetes rather than a local `pip in
 ```bash
 # From source
 git clone https://github.com/semantica-agi/semantica.git
-cd semantica && pip install -e ".[dev]" && pytest tests/
+cd semantica && pip install -e . --group dev && pytest tests/
 ```
 
 ### CI & Deployment
@@ -1622,7 +1622,7 @@ On-premises deployment · Private cloud · Custom domain implementations · SLA-
 All contributions are welcome: bug fixes, features, tests, and documentation.
 
 1. Fork the repo and create a branch
-2. `pip install -e ".[dev]"`
+2. `pip install -e . --group dev` (pip 25.1+) or `uv sync`
 3. Write tests alongside your changes (`pytest tests/`)
 4. Open a PR and tag `@KaifAhmad1` for review
 

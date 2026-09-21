@@ -12,12 +12,18 @@ license = { text = "MIT" }
 authors = [{ name = "Semantica", email = "kaif@getsemantica.ai" }]
 maintainers = [{ name = "Semantica", email = "kaif@getsemantica.ai" }]
 
-# Supported: 3.10-3.13 (the Install Matrix and the Docker image cover exactly
-# this range). 3.8/3.9 are dropped: every dependency floor below already
-# requires 3.10+ (pyarrow>=24, requests>=2.33, click>=8.2, ...), so a lower
-# floor only made `uv lock` / `uv sync` fail to resolve the universal
-# (all-Python-versions) lock. See #1506.
-requires-python = ">=3.10"
+# Supported: 3.10-3.13. The Install Matrix, the classifiers below and the
+# Docker image (python:3.13) cover exactly this range; keep them in sync
+# (tests/test_python_support_policy.py enforces it).
+#   - Floor: 3.8/3.9 are dropped. Every dependency floor below already
+#     requires 3.10+ (pyarrow>=24, requests>=2.33, click>=8.2, ...), so a lower
+#     floor only made `uv lock` / `uv sync` fail to resolve the universal
+#     (all-Python-versions) lock. See #1506.
+#   - Ceiling: 3.14 is not yet supported. gensim (extras `graph-embeddings`
+#     and `split-topic`, both in `all`) ships no cp314 wheel, so those extras
+#     and the Docker build need a C compiler there. Raise the cap together
+#     with the Install Matrix and the Docker image once 3.14 is verified.
+requires-python = ">=3.10,<3.14"
 
 classifiers = [
   "Development Status :: 5 - Production/Stable",
@@ -256,20 +262,6 @@ split-all = [
   "semantica[split-tiktoken,split-community,split-topic]"
 ]
 
-# ---- Dev ----
-dev = [
-  "pytest>=7.1.0",
-  "pytest-cov>=7.1.0",
-  "pytest-asyncio>=0.19.0",
-  "black>=22.6.0",
-  "isort>=6.1.0",
-  "flake8>=4.0.0",
-  "mypy>=0.971",
-  "pre-commit>=4.6.0",
-  "jupyter>=1.0.0",
-  "ipykernel>=6.15.0"
-]
-
 # Explorer Dashboard
 explorer = [
   "fastapi>=0.109.2",
@@ -290,7 +282,26 @@ explorer-lite = [
 # (CVE-2026-45829) with no fixed release — including it here would fail the CI
 # dependency-audit/security gates.  Install it explicitly via ``semantica[crewai]``.
 all = [
-  "semantica[dev,viz,media,infra,cloud,monitoring,watch,llm-all,models-huggingface,embeddings-local,nlp-spacy,documents,ingest-git,graph-embeddings,split-all,graph-all,tripletstore-oxigraph,vectorstore-all,parse-docling,parse-pdf,ingest-parquet,ingest-arrow,shacl,explorer,agno,langchain,google-adk]"
+  "semantica[viz,media,infra,cloud,monitoring,watch,llm-all,models-huggingface,embeddings-local,nlp-spacy,documents,ingest-git,graph-embeddings,split-all,graph-all,tripletstore-oxigraph,vectorstore-all,parse-docling,parse-pdf,ingest-parquet,ingest-arrow,shacl,explorer,agno,langchain,google-adk]"
+]
+
+# ---------------- DEVELOPMENT DEPENDENCIES (PEP 735) ----------------
+# Contributor-only tooling. Not part of the published package metadata, so it is
+# never installed by `pip install semantica[...]` (including `[all]`).
+#   uv:  `uv sync` installs this group by default (locked in uv.lock)
+#   pip: `pip install -e . --group dev` (pip 25.1+)
+[dependency-groups]
+dev = [
+  "pytest>=7.1.0",
+  "pytest-cov>=7.1.0",
+  "pytest-asyncio>=0.19.0",
+  "black>=22.6.0",
+  "isort>=6.1.0",
+  "flake8>=4.0.0",
+  "mypy>=0.971",
+  "pre-commit>=4.6.0",
+  "jupyter>=1.0.0",
+  "ipykernel>=6.15.0"
 ]
 
 # ---------------- ENTRYPOINTS ----------------

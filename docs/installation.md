@@ -108,7 +108,7 @@ cd semantica
 
 pip install -e .         # core only
 pip install -e ".[all]"  # all extras
-pip install -e ".[dev]"  # dev tools (pytest, black, etc.)
+pip install -e . --group dev  # dev tools (pytest, black, etc.); needs pip 25.1+, or use `uv sync`
 ```
 
 Install directly from the main branch if the PyPI release has issues:
