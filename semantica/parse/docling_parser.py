@@ -499,15 +499,12 @@ class DoclingParser:
                         
                         # Iterate through document items to find those on this page
                         for item, level in doc.iterate_items():
-                            # Check if item is on this page
-                            item_page = 1
-                            if hasattr(item, 'prov') and item.prov:
-                                if hasattr(item.prov, 'page_no'):
-                                    item_page = item.prov.page_no
-                                elif isinstance(item.prov, dict) and 'page_no' in item.prov:
-                                    item_page = item.prov['page_no']
-                            
-                            if item_page == page_no:
+                            provenance = getattr(item, "prov", [])
+                            item_pages = {
+                                entry.get("page_no") if isinstance(entry, dict) else getattr(entry, "page_no", None)
+                                for entry in provenance
+                            }
+                            if page_no in item_pages:
                                 # Extract text from text items
                                 if hasattr(item, 'text'):
                                     page_text_parts.append(item.text)

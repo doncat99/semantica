@@ -5,6 +5,18 @@ from pathlib import Path
 from semantica.parse.docling_parser import DoclingParser, DoclingMetadata
 
 class TestDoclingParser(unittest.TestCase):
+    def test_page_projection_uses_all_docling_provenance_entries(self):
+        first = SimpleNamespace(text="First page", prov=[SimpleNamespace(page_no=1)])
+        second = SimpleNamespace(text="Second page", prov=[SimpleNamespace(page_no=2)])
+        shared = SimpleNamespace(text="Spanning item", prov=[SimpleNamespace(page_no=1), SimpleNamespace(page_no=2)])
+        document = SimpleNamespace(
+            pages={number: SimpleNamespace(size=SimpleNamespace(width=100, height=200)) for number in [1, 2]},
+            iterate_items=lambda: iter([(first, 0), (second, 0), (shared, 0)]),
+        )
+        pages = self.parser._extract_pages(SimpleNamespace(document=document), {})
+        self.assertEqual(pages[0]["text"], "First page\nSpanning item")
+        self.assertEqual(pages[1]["text"], "Second page\nSpanning item")
+
     def test_force_ocr_configures_full_page_and_reports_actual_cell_origin(self):
         document = MagicMock()
         document.tables = []
