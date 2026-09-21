@@ -228,11 +228,19 @@ class KnowledgeTopic(KernelModel):
     evidence_ids: List[str] = Field(default_factory=list)
 
 
+class ReportSection(StrictModel):
+    title: str = Field(min_length=1)
+    text: str = Field(min_length=1)
+    evidence_ids: List[str] = Field(min_length=1)
+
+
 class KnowledgeReport(KernelModel, DigestModel):
     id: str
-    report_type: Literal["community", "topic", "conflict", "retrieval", "change"]
+    report_type: Literal["overview", "concept", "community", "topic", "conflict", "retrieval", "change"]
     title: str
     summary: str
+    entity_id: Optional[str] = None
+    sections: List[ReportSection] = Field(default_factory=list)
     community_id: Optional[str] = None
     topic_id: Optional[str] = None
     conflict_id: Optional[str] = None
@@ -343,6 +351,8 @@ class ProjectSnapshot(KernelModel):
     communities: List[KnowledgeCommunity] = Field(default_factory=list)
     topics: List[KnowledgeTopic] = Field(default_factory=list)
     reports: List[KnowledgeReport] = Field(default_factory=list)
+    source_classifications: List["SourceClassification"] = Field(default_factory=list)
+    classification_profile: Optional["ClassificationProfile"] = None
     conflicts: List[KnowledgeConflict] = Field(default_factory=list)
     retrieval_manifests: List[RetrievalArtifactManifest] = Field(default_factory=list)
     change_delta: ChangeDelta = Field(default_factory=ChangeDelta)
@@ -418,6 +428,10 @@ class ProjectSnapshot(KernelModel):
             if missing:
                 raise ValueError(f"relation {relation.id} references unknown evidence ids: {sorted(missing)}")
         for report in self.reports:
+            if report.entity_id and report.entity_id not in entity_ids:
+                raise ValueError(f"report {report.id} references unknown entity_id")
+            if any(set(section.evidence_ids) - set(report.evidence_ids) for section in report.sections):
+                raise ValueError(f"report {report.id} section evidence is absent from its dependencies")
             if report.community_id and report.community_id not in community_ids:
                 raise ValueError(f"report {report.id} references unknown community_id")
             if report.topic_id and report.topic_id not in topic_ids:
@@ -432,6 +446,35 @@ class ProjectSnapshot(KernelModel):
             missing = set(report.model_receipt_ids) - model_receipt_ids
             if missing:
                 raise ValueError(f"report {report.id} references unknown model receipt ids: {sorted(missing)}")
+        sources_by_representation = {item.id: item.source_id for item in self.document_representations}
+        evidence_by_id = {item.id: item for item in self.evidence_spans}
+        classified_sources = set()
+        dimensions = {item.id: item for item in self.classification_profile.dimensions} if self.classification_profile else {}
+        for classification in self.source_classifications:
+            if classification.source_id in classified_sources:
+                raise ValueError("duplicate source classification")
+            classified_sources.add(classification.source_id)
+            if classification.source_id not in set(sources_by_representation.values()):
+                raise ValueError("classification references unknown source")
+            if set(classification.model_receipt_ids) - model_receipt_ids:
+                raise ValueError("classification references unknown model receipt")
+            if not self.classification_profile or (classification.profile_id, classification.profile_version) != (self.classification_profile.id, self.classification_profile.version):
+                raise ValueError("classification does not match snapshot profile")
+            assigned = set()
+            for assignment in classification.assignments:
+                dimension = dimensions.get(assignment.dimension_id)
+                key = (assignment.dimension_id, assignment.item_id)
+                if dimension is None or assignment.item_id not in {item.id for item in dimension.vocabulary}:
+                    raise ValueError("classification invents dimension or vocabulary")
+                if key in assigned or (dimension.cardinality == "single" and any(pair[0] == dimension.id for pair in assigned)):
+                    raise ValueError("classification violates cardinality")
+                assigned.add(key)
+                if any(ref not in evidence_by_id or sources_by_representation[evidence_by_id[ref].representation_id] != classification.source_id for ref in assignment.evidence_ids):
+                    raise ValueError("classification evidence does not belong to its source")
+            if set(classification.unclassified_dimension_ids) != set(dimensions) - {item[0] for item in assigned}:
+                raise ValueError("classification has inconsistent unclassified dimensions")
+        if self.classification_profile and classified_sources != set(sources_by_representation.values()):
+            raise ValueError("classification profile requires a result for every source")
         for decision in self.identity_decisions:
             missing = _missing(decision.from_entity_ids, entity_ids | mention_ids)
             if missing:
@@ -542,8 +585,60 @@ class SnapshotRef(DigestModel):
         return value
 
 
+class ClassificationVocabularyItem(StrictModel):
+    id: str
+    label: str
+    description: Optional[str] = None
+    parent_id: Optional[str] = Field(default=None, alias="parentId")
+
+
+class ClassificationDimension(StrictModel):
+    id: str
+    label: str
+    cardinality: Literal["single", "multi"]
+    vocabulary: List[ClassificationVocabularyItem]
+
+    @model_validator(mode="after")
+    def validate_vocabulary(self) -> "ClassificationDimension":
+        _unique(self.vocabulary, "classification vocabulary")
+        ids = {item.id for item in self.vocabulary}
+        if any(item.parent_id and item.parent_id not in ids for item in self.vocabulary):
+            raise ValueError("classification vocabulary references unknown parent")
+        return self
+
+
+class ClassificationProfile(StrictModel):
+    id: str
+    version: str
+    label: str
+    description: str
+    dimensions: List[ClassificationDimension]
+
+    @model_validator(mode="after")
+    def validate_dimensions(self) -> "ClassificationProfile":
+        _unique(self.dimensions, "classification dimension")
+        return self
+
+
+class ClassificationAssignment(StrictModel):
+    dimension_id: str
+    item_id: str
+    confidence: float = Field(ge=0, le=1)
+    evidence_ids: List[str] = Field(min_length=1)
+
+
+class SourceClassification(StrictModel):
+    source_id: str
+    profile_id: str
+    profile_version: str
+    assignments: List[ClassificationAssignment]
+    unclassified_dimension_ids: List[str]
+    model_receipt_ids: List[str]
+
+
 class RecipeRef(StrictModel):
     force_ocr_source_ids: List[str] = Field(default_factory=list, alias="forceOcrSourceIds")
+    classification_profile: Optional[ClassificationProfile] = Field(default=None, alias="classificationProfile")
     id: str
     version: str
 
@@ -626,6 +721,8 @@ class ProjectSnapshotBuildRequest(DigestModel):
             raise ValueError("source ids must be unique")
         if set(self.recipe.force_ocr_source_ids) - source_ids:
             raise ValueError("OCR recipe references an unknown source")
+        if self.recipe.classification_profile and self.recipe.id != "model":
+            raise ValueError("classification requires the model recipe")
         if set(self.release.media_types) != {"document-representation", "retrieval-index", "snapshot"}:
             raise ValueError("release media types must cover all artifact kinds")
         if set(self.relays) != {"embedding", "model"}:

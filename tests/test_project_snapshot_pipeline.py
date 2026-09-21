@@ -3,6 +3,7 @@ import json
 from zipfile import ZipFile
 import os
 import threading
+import pytest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -15,6 +16,69 @@ from semantica.project_snapshot_worker import serve
 H1 = "sha256:" + "1" * 64
 H2 = "sha256:" + "2" * 64
 H3 = "sha256:" + "3" * 64
+
+
+def _classification_profile():
+    return {"id": "profile:test", "version": "1", "label": "Document purpose", "description": "Source purpose",
+        "dimensions": [{"id": "purpose", "label": "Purpose", "cardinality": "single", "vocabulary": [{"id": "history", "label": "History"}, {"id": "manual", "label": "Manual"}]},
+            {"id": "topic", "label": "Topic", "cardinality": "multi", "vocabulary": []}]}
+
+
+@pytest.mark.parametrize("corruption", ["unknown-id", "altered-quote", "missing-citation", "unknown-category", "cardinality"])
+def test_semantic_classification_rejects_invalid_model_evidence(tmp_path, monkeypatch, corruption):
+    from semantica.project_snapshot_pipeline import _build_source, _source_passages, _classify_source, SnapshotBuildError
+    from semantica.project_snapshot_schema import ClassificationProfile, SourceBuildInput
+    source = tmp_path / "source.txt"
+    source.write_text("Ada Lovelace designed the Analytical Engine.")
+    built = _build_source(SourceBuildInput(filePath=str(source), sourceId="source-1", materialRevision="material-1", mimeType="text/plain", name="source.txt"), False)
+    built["passages"] = _source_passages(built)
+    citation = {"evidence_id": built["passages"][0].id, "quote": built["passages"][0].quote}
+    assignment = {"dimension_id": "purpose", "item_id": "history", "confidence": 0.9, "citations": [citation]}
+    if corruption == "unknown-id":
+        citation["evidence_id"] = "evidence:invented"
+    elif corruption == "altered-quote":
+        citation["quote"] = "Ada invented a spaceship."
+    elif corruption == "missing-citation":
+        assignment["citations"] = []
+    elif corruption == "unknown-category":
+        assignment["item_id"] = "invented"
+    assignments = [assignment]
+    if corruption == "cardinality":
+        assignments.append({**assignment, "item_id": "manual"})
+    receipt = ModelReceipt(id="receipt:test", operation="source_classification", provider="test", model="test", input_digest=H1, output_digest=H2)
+    monkeypatch.setattr("semantica.project_snapshot_pipeline._product_json", lambda *args: ({"assignments": assignments}, receipt))
+    with pytest.raises(SnapshotBuildError):
+        _classify_source(built, ClassificationProfile.model_validate(_classification_profile()), None)
+
+
+def test_semantic_classification_preserves_source_offsets_and_unclassified_dimensions(tmp_path, monkeypatch):
+    from semantica.project_snapshot_pipeline import _build_source, _source_passages, _classify_source
+    from semantica.project_snapshot_schema import ClassificationProfile, SourceBuildInput
+    source = tmp_path / "source.txt"
+    source.write_text("Ada Lovelace designed the Analytical Engine.")
+    built = _build_source(SourceBuildInput(filePath=str(source), sourceId="source-1", materialRevision="material-1", mimeType="text/plain", name="source.txt"), False)
+    built["passages"] = _source_passages(built)
+    span = built["passages"][0]
+    receipt = ModelReceipt(id="receipt:test", operation="source_classification", provider="test", model="test", input_digest=H1, output_digest=H2)
+    monkeypatch.setattr("semantica.project_snapshot_pipeline._product_json", lambda *args: ({"assignments": [{"dimension_id": "purpose", "item_id": "history", "confidence": 0.9, "citations": [{"evidence_id": span.id, "quote": span.quote}]}]}, receipt))
+    classification, _ = _classify_source(built, ClassificationProfile.model_validate(_classification_profile()), None)
+    assert classification.assignments[0].evidence_ids == [span.id]
+    assert classification.unclassified_dimension_ids == ["topic"]
+    assert built["text"][span.locator.start_char:span.locator.end_char] == span.quote
+
+
+@pytest.mark.parametrize("citation", [[], [{"evidence_id": "evidence:invented", "quote": "unknown"}]])
+def test_explanation_rejects_missing_or_hallucinated_citations(tmp_path, monkeypatch, citation):
+    from semantica.project_snapshot_pipeline import _build_source, _source_passages, _explanation_reports, SnapshotBuildError
+    from semantica.project_snapshot_schema import SourceBuildInput
+    source = tmp_path / "source.txt"
+    source.write_text("Ada Lovelace designed the Analytical Engine.")
+    built = _build_source(SourceBuildInput(filePath=str(source), sourceId="source-1", materialRevision="material-1", mimeType="text/plain", name="source.txt"), False)
+    built["passages"] = _source_passages(built)
+    receipt = ModelReceipt(id="receipt:test", operation="knowledge_explanation", provider="test", model="test", input_digest=H1, output_digest=H2)
+    monkeypatch.setattr("semantica.project_snapshot_pipeline._product_json", lambda *args: ({"sections": [{"title": "Explanation", "text": "Unsupported claim", "citations": citation}]}, receipt))
+    with pytest.raises(SnapshotBuildError):
+        _explanation_reports("project-1", [built], built["entities"], [], [], [], [], [*built["evidence"], *built["passages"]], None)
 
 
 def _request(source: Path, output_dir: Path, *, recipe: str = "deterministic") -> dict:
@@ -173,8 +237,10 @@ def test_model_recipe_uses_bifrost_chat_and_embedding_and_records_receipts(tmp_p
             length = int(self.headers["content-length"])
             payload = json.loads(self.rfile.read(length))
             if self.path == "/v1/chat/completions":
+                explanation = "Explain the supplied knowledge" in payload["messages"][0]["content"]
+                context = json.loads(payload["messages"][1]["content"]) if explanation else None
                 response = {
-                    "choices": [{"message": {"content": json.dumps({
+                    "choices": [{"message": {"content": json.dumps({"sections": [{"title": "Historical role", "text": "Ada Lovelace is connected to the Analytical Engine through the documented design work.", "citations": [{"evidence_id": context["evidence"][0]["id"], "quote": context["evidence"][0]["quote"]}]}]} if explanation else {
                         "entities": [
                             {"name": "Ada Lovelace", "type": "PERSON"},
                             {"name": "Analytical Engine", "type": "CONCEPT"},
@@ -184,6 +250,9 @@ def test_model_recipe_uses_bifrost_chat_and_embedding_and_records_receipts(tmp_p
                     "model": payload["model"],
                     "usage": {"prompt_tokens": 10, "completion_tokens": 8},
                 }
+                if "Classify this source" in payload["messages"][0]["content"]:
+                    context = json.loads(payload["messages"][1]["content"])
+                    response["choices"][0]["message"]["content"] = json.dumps({"assignments": [{"dimension_id": "purpose", "item_id": "history", "confidence": 0.95, "citations": [{"evidence_id": context["evidence"][0]["id"], "quote": context["evidence"][0]["quote"]}]}]})
             elif self.path == "/v1/embeddings":
                 assert payload["model"] == "embedding-1"
                 response = {"data": [{"embedding": [0.25, 0.5, 0.75], "index": 0}], "model": "embedding-1", "usage": {"prompt_tokens": 4, "total_tokens": 4}}
@@ -207,6 +276,7 @@ def test_model_recipe_uses_bifrost_chat_and_embedding_and_records_receipts(tmp_p
     os.environ["OPENAI_API_KEY"] = "relay-test-token"
     try:
         request = _request(source, tmp_path, recipe="model")
+        request["params"]["recipe"]["classificationProfile"] = _classification_profile()
         request["params"]["relays"]["model"]["baseUrl"] = f"http://127.0.0.1:{server.server_port}/v1/chat/completions"
         request["params"]["relays"]["embedding"]["baseUrl"] = f"http://127.0.0.1:{server.server_port}/v1/embeddings"
         stdin = io.StringIO(json.dumps(request) + "\n")
@@ -222,11 +292,16 @@ def test_model_recipe_uses_bifrost_chat_and_embedding_and_records_receipts(tmp_p
         server.server_close()
 
     assert response["ok"] is True
-    assert len(response["result"]["relayReceipts"]["model"]) == 1
+    assert len(response["result"]["relayReceipts"]["model"]) == 7
     assert len(response["result"]["relayReceipts"]["embedding"]) == 1
     snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "snapshot")
     snapshot = ProjectSnapshot.model_validate_json(snapshot_path.read_bytes())
-    assert len(snapshot.model_receipts) == 2
+    assert len(snapshot.model_receipts) == 8
+    assert snapshot.source_classifications[0].assignments[0].item_id == "history"
+    assert snapshot.classification_profile.id == "profile:test"
+    assert "classification:source-1" in snapshot.change_delta.added_ids
+    assert {report.report_type for report in snapshot.reports} == {"overview", "concept", "topic", "community"}
+    assert all(report.sections and report.evidence_ids and len(report.model_receipt_ids) == 1 for report in snapshot.reports)
     assert all(receipt.input_digest.startswith("sha256:") and receipt.output_digest.startswith("sha256:") for receipt in snapshot.model_receipts)
     assert snapshot.relations[0].status == "candidate"
     assert snapshot.relations[0].evidence_ids
@@ -293,8 +368,10 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
     text = "Ada Lovelace designed the Analytical Engine."
     first.write_text(text, encoding="utf-8")
     second.write_text(text + " Ada Lovelace was a mathematician.", encoding="utf-8")
+    operations = []
 
     def relay_response(relay, payload, operation):
+        operations.append(operation)
         if operation == "embedding":
             result = {"data": [{"embedding": [0.25, 0.5, 0.75]}], "model": relay.model_id}
         else:
@@ -304,6 +381,9 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
                 content = {"merges": [{"mention_ids": [item["mention_id"] for item in group],
                     "evidence_ids": [span["id"] for item in group for span in item["evidence"]],
                     "reason": "The same named mathematician and designed machine are corroborated by both source contexts."} for group in groups]}
+            elif operation == "knowledge_explanation":
+                context = json.loads(payload["messages"][1]["content"])
+                content = {"sections": [{"title": "Design", "text": "Ada Lovelace designed the Analytical Engine.", "citations": [{"evidence_id": context["evidence"][0]["id"], "quote": context["evidence"][0]["quote"]}]}]}
             else:
                 content = {"entities": [{"name": "Ada Lovelace", "type": "PERSON"}, {"name": "Analytical Engine", "type": "CONCEPT"}],
                     "relations": [{"subject": "Ada Lovelace", "predicate": "designed", "object": "Analytical Engine", "evidence": text}]}
@@ -328,6 +408,13 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
     identity_receipt = next(receipt for receipt in snapshot.model_receipts if receipt.operation == "identity_resolution")
     assert identity_receipt.id in response["result"]["relayReceipts"]["model"]
     assert all(decision.metadata["model_receipt_id"] == identity_receipt.id for decision in snapshot.identity_decisions)
+    initial_explanations = operations.count("knowledge_explanation")
+    request["params"]["baseSnapshot"] = {"snapshotId": snapshot.id, "snapshotPath": str(snapshot_path), "artifactDigest": next(item["digest"] for item in response["result"]["artifacts"] if item["kind"] == "snapshot"), "schemaDigest": H3}
+    request["params"]["outputDir"] = str(tmp_path / "repeat")
+    repeated = build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(request["params"]))["snapshot"]
+    assert operations.count("knowledge_explanation") == initial_explanations
+    assert repeated.change_delta.affected_report_ids == []
+    assert [report.model_dump() for report in repeated.reports] == [report.model_dump() for report in snapshot.reports]
     canonical_ids = {entity.id for entity in snapshot.entities}
     assert {relation.source_entity_id for relation in snapshot.relations}.issubset(canonical_ids)
     assert {relation.target_entity_id for relation in snapshot.relations}.issubset(canonical_ids)
