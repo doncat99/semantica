@@ -15,6 +15,42 @@ def digest_file(path: Path) -> str:
         return "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+def remove_generated_bytecode(root: Path) -> None:
+    for path in root.rglob("*.pyc"):
+        if "__pycache__" in path.relative_to(root).parts:
+            path.unlink()
+
+
+def verify_bundle_inventory(root: Path, manifest: dict, *, remove_untracked_bytecode: bool = False) -> None:
+    """Verify that the bundle contains exactly the immutable manifest files."""
+    expected = {item["path"]: item for item in manifest["files"]}
+    if len(expected) != len(manifest["files"]):
+        raise ValueError("bundle manifest contains duplicate file paths")
+
+    def inventory() -> dict[str, Path]:
+        files = {}
+        for item in root.rglob("*"):
+            if item.is_symlink():
+                raise ValueError(f"bundle contains a symlink: {item.relative_to(root).as_posix()}")
+            if item.is_file() and item != root / "manifest.json":
+                files[item.relative_to(root).as_posix()] = item
+        return files
+
+    actual = inventory()
+    if remove_untracked_bytecode:
+        remove_generated_bytecode(root)
+        actual = inventory()
+
+    missing = sorted(expected.keys() - actual.keys())
+    extra = sorted(actual.keys() - expected.keys())
+    if missing or extra:
+        raise ValueError(f"bundle inventory differs from manifest: missing={missing[:10]}, extra={extra[:10]}")
+    for relative, item in expected.items():
+        path = actual[relative]
+        if path.stat().st_size != item["size"] or digest_file(path) != item["sha256"]:
+            raise ValueError(f"bundle file differs from manifest: {relative}")
+
+
 def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, office_root: Path, office_receipt: Path, output: Path, uv: str, source_revision: str) -> dict:
     """Inputs are release artifacts, never a Semantica source checkout or venv."""
     if output.exists():
@@ -79,6 +115,7 @@ def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, office_ro
                 shutil.copytree(target, item, symlinks=False)
             else:
                 shutil.copy2(target, item)
+    remove_generated_bytecode(output)
     for item in sorted(output.rglob("*"), key=lambda path: path.relative_to(output).as_posix()):
         if item.is_file():
             manifest["files"].append({"path": item.relative_to(output).as_posix(), "size": item.stat().st_size, "sha256": digest_file(item)})
@@ -89,6 +126,7 @@ def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, office_ro
                   [[item["path"], item["size"], item["sha256"]] for item in manifest["files"]]]
     manifest["artifactDigest"] = "sha256:" + hashlib.sha256(json.dumps(descriptor, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
     (output / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    verify_bundle_inventory(output, manifest)
     return manifest
 
 

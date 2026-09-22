@@ -1,5 +1,4 @@
 """Validate the relocated installed artifact with offline OCR and fresh workers."""
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -12,6 +11,7 @@ from docx import Document
 from PIL import Image, ImageDraw, ImageFont
 from pptx import Presentation
 from openpyxl import Workbook
+from semantica.project_bundle import verify_bundle_inventory
 from semantica.project_office import bundled_office, convert_office
 from semantica.project_source import parse_source
 from semantica.project_document_quality import assess_document_quality
@@ -114,10 +114,7 @@ with tempfile.TemporaryDirectory(prefix="semantica-native-acceptance-") as direc
         source = next(item for item in sources if item["sourceId"] == representation["source_id"])
         assert representation["content_hash"] == representation["material_revision_id"] == source["materialRevision"]
     assert assess_document_quality("Broken \ufffd\ufffd mapping", {})["status"] == "needs_review"
-    for item in manifest["files"]:
-        path = root / item["path"]
-        with path.open("rb") as stream:
-            assert "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest() == item["sha256"], item["path"]
+    verify_bundle_inventory(root, manifest, remove_untracked_bytecode=True)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps({"artifactDigest": manifest["artifactDigest"], "schemaDigest": manifest["schemaDigest"],
         "parsers": parsed, "queryContexts": len(queried["contexts"]), "documentQualityAdmission": True,
