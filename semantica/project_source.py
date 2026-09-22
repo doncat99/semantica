@@ -11,6 +11,7 @@ from typing import Any, Literal
 from urllib.parse import unquote
 from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
+from .project_document_quality import assess_document_quality
 
 class UnsupportedSourceFormatError(ValueError):
     """A source has no admitted adapter in the canonical document chain."""
@@ -25,6 +26,9 @@ class SourceDocument:
     origin: Literal["native", "ocr", "mixed", "adapter", "external"]
     parser: str
     parser_version: str
+
+    def __post_init__(self) -> None:
+        self.document["quality"] = assess_document_quality(self.text, self.document)
 
 
 _TEXT_SUFFIXES = {".txt", ".text", ".md", ".markdown"}

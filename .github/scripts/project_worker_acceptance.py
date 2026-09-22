@@ -14,6 +14,7 @@ from pptx import Presentation
 from openpyxl import Workbook
 from semantica.project_office import bundled_office, convert_office
 from semantica.project_source import parse_source
+from semantica.project_document_quality import assess_document_quality
 
 
 root = Path(sys.argv[1]).resolve()
@@ -66,6 +67,7 @@ with tempfile.TemporaryDirectory(prefix="semantica-native-acceptance-") as direc
         result = parse_source(scratch / name, name=name, mime_type=mime, force_ocr=force)
         assert expected in result.text and "73" in result.text, result.text
         assert result.document["document"] and result.document["doctags"]
+        assert result.document["quality"]["status"] == "passed", result.document["quality"]
         if force:
             assert result.origin == "ocr"
         parsed.append({"name": name, "origin": result.origin, "textLength": len(result.text)})
@@ -105,10 +107,13 @@ with tempfile.TemporaryDirectory(prefix="semantica-native-acceptance-") as direc
         "projectId": "native", "snapshotId": built["snapshot"]["snapshotId"], "snapshot": artifacts["snapshot"], "retrieval": artifacts["retrieval-index"],
         "query": "Ada", "mode": "keyword", "limit": 5}})
     assert queried["contexts"]
+    assert all(item["revision"].startswith("sha256:") for item in built["artifacts"] if item["kind"] == "document-representation")
+    assert assess_document_quality("Broken \ufffd\ufffd mapping", {})["status"] == "needs_review"
     for item in manifest["files"]:
         path = root / item["path"]
         with path.open("rb") as stream:
             assert "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest() == item["sha256"], item["path"]
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps({"artifactDigest": manifest["artifactDigest"], "schemaDigest": manifest["schemaDigest"],
-        "parsers": parsed, "queryContexts": len(queried["contexts"]), "postRunInventoryVerified": True, "deterministicProtocolOnly": True}, indent=2) + "\n")
+        "parsers": parsed, "queryContexts": len(queried["contexts"]), "documentQualityAdmission": True,
+        "representationRevisions": True, "postRunInventoryVerified": True, "deterministicProtocolOnly": True}, indent=2) + "\n")

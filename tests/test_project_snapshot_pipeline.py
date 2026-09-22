@@ -357,7 +357,9 @@ def test_incremental_delta_ignores_audit_time_and_tracks_only_dependent_reports(
     updated = build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(request))["snapshot"]
     unchanged_reports = {report.id for report in initial["snapshot"].reports if "Charles Babbage" in report.title}
     assert unchanged_reports
-    assert updated.change_delta.changed_representation_ids == ["representation:source-1"]
+    changed_representations = {item.id for snapshot in [initial["snapshot"], updated] for item in snapshot.document_representations if item.source_id == "source-1"}
+    assert set(updated.change_delta.changed_representation_ids) == changed_representations
+    assert len(changed_representations) == 2
     assert not unchanged_reports.intersection(updated.change_delta.affected_report_ids)
     removed_reports = {report.id for report in initial["snapshot"].reports if "Ada Lovelace" in report.title}
     assert removed_reports.issubset(set(updated.change_delta.affected_report_ids))

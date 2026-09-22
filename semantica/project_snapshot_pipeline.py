@@ -53,6 +53,10 @@ class SnapshotBuildError(RuntimeError):
     """Raised when a source cannot be represented by the single Semantica chain."""
 
 
+class DocumentQualityError(SnapshotBuildError):
+    """A parsed representation needs an explicit repair before knowledge production."""
+
+
 TEXT_WINDOW_CHARS = 4096
 TEXT_WINDOW_OVERLAP = 256
 MODEL_CONTEXT_BYTES = 48_000
@@ -244,7 +248,7 @@ def _source_passages(built: dict[str, Any]) -> list[EvidenceSpan]:
             end = min(start + 1600, match.end())
             quote = text[start:end]
             if quote.strip():
-                passages.append(EvidenceSpan(id=_span_id(representation.source_id, start, end), representation_id=representation.id,
+                passages.append(EvidenceSpan(id=_span_id(representation.id, start, end), representation_id=representation.id,
                     locator=DocumentLocator(representation_id=representation.id, origin=representation.origin, quote=quote, start_char=start, end_char=end, quality="precise"), quote=quote))
     return passages
 
@@ -550,6 +554,7 @@ def _parse_source(source: Any, force_ocr: bool, document_processing: dict | None
     cache_key = {"sourceId": source.source_id, "contentHash": content_hash, "forceOcr": force_ocr, "documentProcessing": document_processing}
     cached = checkpoint.read("document", cache_key) if checkpoint else None
     if cached is not None:
+        _admit_document_quality(source.source_id, cached[1], force_ocr)
         return tuple(cached)
     try:
         parsed = parse_source(
@@ -562,14 +567,30 @@ def _parse_source(source: Any, force_ocr: bool, document_processing: dict | None
     except UnsupportedSourceFormatError as exc:
         raise SnapshotBuildError(str(exc)) from exc
     document = {**parsed.document, "text": parsed.text, "content_hash": content_hash, "mime_type": source.mime_type}
+    document["representation_revision"] = _representation_revision(source, force_ocr, content_hash, parsed.parser, parsed.parser_version, parsed.origin, document)
     result = (parsed.text, document, parsed.origin, content_hash, parsed.parser, parsed.parser_version)
     if checkpoint:
         checkpoint.write("document", cache_key, result)
+    _admit_document_quality(source.source_id, document, force_ocr)
     return result
 
 
-def _span_id(source_id: str, start: int, end: int) -> str:
-    return f"evidence:{_safe_id(source_id)}:{start}:{end}"
+def _admit_document_quality(source_id: str, document: dict, force_ocr: bool) -> None:
+    quality = document.get("quality", {})
+    if quality.get("status") == "needs_review":
+        codes = sorted({item["code"] for item in quality["issues"]})
+        action = "OCR repair also failed quality admission" if force_ocr else "explicit OCR repair or source correction required"
+        raise DocumentQualityError(f"Document quality failed for {source_id}: {','.join(codes)}; {action}; representation {document.get('representation_revision')} retained in checkpoint")
+
+
+def _representation_revision(source: Any, force_ocr: bool, content_hash: str, parser: str, parser_version: str, origin: str, document: dict) -> str:
+    return stable_digest({"sourceRevision": source.material_revision, "contentHash": content_hash,
+        "parser": parser, "parserVersion": parser_version, "forceOcr": force_ocr, "origin": origin,
+        "document": {key: value for key, value in document.items() if key not in {"metadata", "representation_revision"}}})
+
+
+def _span_id(representation_id: str, start: int, end: int) -> str:
+    return f"evidence:{_safe_id(representation_id)}:{start}:{end}"
 
 
 def _entity_id(source_id: str, name: str, entity_type: str) -> str:
@@ -591,8 +612,9 @@ def _find_span(text: str, quote: str, start: int = 0) -> tuple[int, int]:
 
 def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | None = None, parsed: tuple[str, dict[str, Any], str, str, str, str] | None = None) -> dict[str, Any]:
     text, document, origin, content_hash, parser, parser_version = parsed or _parse_source(source, force_ocr)
-    representation_id = f"representation:{_safe_id(source.source_id)}"
-    representation_artifact_id = f"artifact:representation:{_safe_id(source.source_id)}"
+    representation_revision = _representation_revision(source, force_ocr, content_hash, parser, parser_version, origin, document)
+    representation_id = f"representation:{_safe_id(source.source_id)}:{representation_revision[7:]}"
+    representation_artifact_id = f"artifact:{representation_id}"
     entities: dict[str, KnowledgeEntity] = {}
     evidence: dict[str, EvidenceSpan] = {}
     if model_result is None:
@@ -614,7 +636,7 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
         start, end = (item["_start"], item["_end"]) if "_start" in item else _find_span(text, name)
         if text[start:end].casefold() != name.casefold():
             raise SnapshotBuildError(f"entity is not present in source text: {name}")
-        evidence_id = _span_id(source.source_id, start, end)
+        evidence_id = _span_id(representation_id, start, end)
         evidence[evidence_id] = EvidenceSpan(
             id=evidence_id,
             representation_id=representation_id,
@@ -665,7 +687,7 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
             start, end = (item["_start"], item["_end"]) if "_start" in item else _find_span(text, quote.strip())
             if text[start:end] != quote.strip():
                 raise SnapshotBuildError("relation evidence is not an exact source quote")
-            evidence_id = _span_id(source.source_id, start, end)
+            evidence_id = _span_id(representation_id, start, end)
             evidence[evidence_id] = EvidenceSpan(
                 id=evidence_id,
                 representation_id=representation_id,
@@ -689,7 +711,7 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
         recipe_digest=stable_digest({"parser": document.get("format"), "ocr": force_ocr}),
         origin=origin,
         artifact_ref_id=representation_artifact_id,
-        metadata={"text_length": len(text), "source_name": source.name, "document": document},
+        metadata={"representation_revision": representation_revision, "text_length": len(text), "source_name": source.name, "document": document},
     )
     return {"source": source, "text": text, "representation": representation, "evidence": list(evidence.values()), "entities": list(entities.values()), "assertions": assertions, "relations": relations, "artifact_id": representation_artifact_id, "document": document}
 

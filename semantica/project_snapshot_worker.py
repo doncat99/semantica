@@ -49,7 +49,7 @@ def handle_request(raw: Dict[str, Any]) -> Dict[str, Any]:
             "kind": "document-representation",
             "mediaType": build_request.release.media_types["document-representation"],
             "path": str(item["artifact_path"]),
-            "revision": item["representation"].material_revision_id,
+            "revision": item["representation"].metadata["representation_revision"],
             "sourceId": item["source"].source_id,
         })
     artifacts.append({
