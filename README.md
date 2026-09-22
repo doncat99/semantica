@@ -26,7 +26,7 @@
 
 #### Built for High-Stakes, Regulated Domains
 
-[![GitHub Stars](https://img.shields.io/github/stars/semantica-agi/semantica?style=flat-square&color=FFD700&logo=github&logoColor=white&label=Stars)](https://github.com/semantica-agi/semantica) [![GitHub Forks](https://img.shields.io/github/forks/semantica-agi/semantica?style=flat-square&color=6E40C9&logo=github&logoColor=white&label=Forks)](https://github.com/semantica-agi/semantica/network/members) [![Contributors](https://img.shields.io/github/contributors/semantica-agi/semantica?style=flat-square&color=2EA043&logo=github&logoColor=white)](https://github.com/semantica-agi/semantica/graphs/contributors) [![PyPI](https://img.shields.io/pypi/v/semantica.svg?style=flat-square&color=0066CC&logo=pypi&logoColor=white)](https://pypi.org/project/semantica/) [![Total Downloads](https://static.pepy.tech/badge/semantica?style=flat-square)](https://pepy.tech/project/semantica) [![Python 3.8+](https://img.shields.io/badge/python-3.8+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT) [![CI](https://img.shields.io/github/actions/workflow/status/semantica-agi/semantica/ci.yml?style=flat-square&label=CI)](https://github.com/semantica-agi/semantica/actions) [![Install Matrix](https://img.shields.io/github/actions/workflow/status/semantica-agi/semantica/install-matrix.yml?style=flat-square&label=pip%20install)](https://github.com/semantica-agi/semantica/actions/workflows/install-matrix.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/semantica-agi/semantica/badge?style=flat-square)](https://scorecard.dev/viewer/?uri=github.com/semantica-agi/semantica) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/semantica-agi/semantica)
+[![GitHub Stars](https://img.shields.io/github/stars/semantica-agi/semantica?style=flat-square&color=FFD700&logo=github&logoColor=white&label=Stars)](https://github.com/semantica-agi/semantica) [![GitHub Forks](https://img.shields.io/github/forks/semantica-agi/semantica?style=flat-square&color=6E40C9&logo=github&logoColor=white&label=Forks)](https://github.com/semantica-agi/semantica/network/members) [![Contributors](https://img.shields.io/github/contributors/semantica-agi/semantica?style=flat-square&color=2EA043&logo=github&logoColor=white)](https://github.com/semantica-agi/semantica/graphs/contributors) [![PyPI](https://img.shields.io/pypi/v/semantica.svg?style=flat-square&color=0066CC&logo=pypi&logoColor=white)](https://pypi.org/project/semantica/) [![Total Downloads](https://static.pepy.tech/badge/semantica?style=flat-square)](https://pepy.tech/project/semantica) [![Python 3.10+](https://img.shields.io/badge/python-3.10+-3776AB?style=flat-square&logo=python&logoColor=white)](https://www.python.org/) [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg?style=flat-square)](https://opensource.org/licenses/MIT) [![CI](https://img.shields.io/github/actions/workflow/status/semantica-agi/semantica/ci.yml?style=flat-square&label=CI)](https://github.com/semantica-agi/semantica/actions) [![Install Matrix](https://img.shields.io/github/actions/workflow/status/semantica-agi/semantica/install-matrix.yml?style=flat-square&label=pip%20install)](https://github.com/semantica-agi/semantica/actions/workflows/install-matrix.yml) [![OpenSSF Scorecard](https://api.scorecard.dev/projects/github.com/semantica-agi/semantica/badge?style=flat-square)](https://scorecard.dev/viewer/?uri=github.com/semantica-agi/semantica) [![Ask DeepWiki](https://deepwiki.com/badge.svg)](https://deepwiki.com/semantica-agi/semantica)
 
 [![Website](https://img.shields.io/badge/Website-getsemantica.ai-000000?style=for-the-badge\&logo=googlechrome\&logoColor=white)](https://getsemantica.ai/)
 [![Docs](https://img.shields.io/badge/Docs-docs.getsemantica.ai-0099FF?style=for-the-badge\&logo=readthedocs\&logoColor=white)](https://docs.getsemantica.ai/)
@@ -1555,7 +1555,7 @@ For production deployments, use Docker or Kubernetes rather than a local `pip in
 ```bash
 # From source
 git clone https://github.com/semantica-agi/semantica.git
-cd semantica && pip install -e ".[dev]" && pytest tests/
+cd semantica && pip install -e . --group dev && pytest tests/
 ```
 
 ### CI & Deployment
@@ -1568,7 +1568,7 @@ Wiring `semantica` into your own CI is a two-minute job. On GitHub Actions, use 
     python-version: '3.11'
 ```
 
-Copy-paste starting templates for GitHub Actions, GitLab CI, and CircleCI live in [examples/ci/](examples/ci/). The published package itself is verified installable across Ubuntu/macOS/Windows and Python 3.9-3.12 every week by the [Install Matrix workflow](.github/workflows/install-matrix.yml).
+Copy-paste starting templates for GitHub Actions, GitLab CI, and CircleCI live in [examples/ci/](examples/ci/). The published package itself is verified installable across Ubuntu/macOS/Windows and Python 3.10-3.13 every week by the [Install Matrix workflow](.github/workflows/install-matrix.yml).
 
 Ready-made deployment configs for AWS, GCP, Azure, Fly.io, Railway, Render, Kubernetes, and Helm are in [deploy/](deploy/).
 
@@ -1622,7 +1622,7 @@ On-premises deployment · Private cloud · Custom domain implementations · SLA-
 All contributions are welcome: bug fixes, features, tests, and documentation.
 
 1. Fork the repo and create a branch
-2. `pip install -e ".[dev]"`
+2. `pip install -e . --group dev` (pip 25.1+) or `uv sync`
 3. Write tests alongside your changes (`pytest tests/`)
 4. Open a PR and tag `@KaifAhmad1` for review
 
