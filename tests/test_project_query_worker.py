@@ -6,6 +6,7 @@ from pathlib import Path
 
 from semantica.project_query_worker import serve
 from semantica.project_snapshot_pipeline import build_project_snapshot
+from semantica.project_source import source_content_revision
 from semantica.project_snapshot_schema import ProjectSnapshotBuildRequest
 
 
@@ -35,12 +36,12 @@ def _build(tmp_path: Path, second_source=False):
             "model": {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/chat/completions", "capability": "knowledge.snapshot.generate", "modelId": "model-1", "receipts": "required"},
         },
         "release": {"artifactDigest": H2, "schemaDigest": H3, "mediaTypes": {"document-representation": "application/vnd.semantica.document-representation+json", "retrieval-index": "application/vnd.semantica.retrieval+json", "snapshot": "application/vnd.semantica.project-snapshot+json"}},
-        "sources": [{"filePath": str(source), "materialRevision": "material-1", "mimeType": "text/plain", "name": source.name, "sourceId": "source-1"}],
+        "sources": [{"filePath": str(source), "materialRevision": source_content_revision(source), "mimeType": "text/plain", "name": source.name, "sourceId": "source-1"}],
     })
     if second_source:
         source2 = tmp_path / "source2.txt"
         source2.write_text("Ada designed machines.", encoding="utf-8")
-        request.sources.append(request.sources[0].model_copy(update={"file_path": str(source2), "source_id": "source-2", "name": source2.name}))
+        request.sources.append(request.sources[0].model_copy(update={"file_path": str(source2), "source_id": "source-2", "name": source2.name, "material_revision": source_content_revision(source2)}))
     return build_project_snapshot(request)
 
 

@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 SNAPSHOT_PROTOCOL = "semantica.project-snapshot.v1"
 WORKER_PROTOCOL = "semantica.project-worker.v1"
 SHA256_RE = re.compile(r"^(sha256:)?[0-9a-f]{64}$")
+MATERIAL_REVISION_PATTERN = r"^b3-[0-9a-f]{64}$"
 ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{1,127}$")
 MEDIA_TYPE_RE = re.compile(r"^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$")
 ENV_VAR_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
@@ -140,17 +141,17 @@ class DocumentLocator(StrictModel):
         return self
 
 
-class DocumentRepresentation(KernelModel, DigestModel):
+class DocumentRepresentation(KernelModel):
     id: str
     source_id: str
-    material_revision_id: str
-    input_revision: str
+    material_revision_id: str = Field(pattern=MATERIAL_REVISION_PATTERN)
+    input_revision: str = Field(pattern=MATERIAL_REVISION_PATTERN)
     media_type: str
-    content_hash: str
+    content_hash: str = Field(pattern=MATERIAL_REVISION_PATTERN)
     parser: str
     parser_version: str
     recipe_id: str
-    recipe_digest: str
+    recipe_digest: str = Field(pattern=SHA256_RE.pattern)
     origin: Literal["native", "ocr", "mixed", "adapter", "external"]
     artifact_ref_id: str
     created_at: str = Field(default_factory=utc_now_iso)
@@ -550,7 +551,7 @@ class SourceBuildInput(KernelModel):
     """
 
     file_path: str = Field(alias="filePath")
-    material_revision: str = Field(alias="materialRevision")
+    material_revision: str = Field(alias="materialRevision", pattern=MATERIAL_REVISION_PATTERN)
     mime_type: str = Field(alias="mimeType")
     name: str
     source_id: str = Field(alias="sourceId")

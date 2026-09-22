@@ -4,6 +4,7 @@ from types import SimpleNamespace
 import pytest
 
 from semantica import project_snapshot_pipeline as pipeline
+from semantica.project_source import source_content_revision
 from semantica.project_snapshot_schema import ClassificationProfile, ModelReceipt, SourceBuildInput
 
 
@@ -33,7 +34,7 @@ def test_long_extraction_visits_tail_and_preserves_absolute_repeated_mentions(tm
     assert len(covered) == len(text)
     source = tmp_path / "source.txt"
     source.write_text(text)
-    built = pipeline._build_source(SourceBuildInput(filePath=str(source), sourceId="long", materialRevision="v1", name=source.name, mimeType="text/plain"), False, extracted)
+    built = pipeline._build_source(SourceBuildInput(filePath=str(source), sourceId="long", materialRevision=source_content_revision(source), name=source.name, mimeType="text/plain"), False, extracted)
     assert any(entity.canonical_name == "Tail" for entity in built["entities"])
     ada = next(entity for entity in built["entities"] if entity.canonical_name == "Ada")
     assert len(ada.evidence_ids) > 10
@@ -52,7 +53,7 @@ def test_extraction_rejects_quote_outside_current_window(monkeypatch):
 def test_classification_and_hierarchical_reports_visit_every_passage(tmp_path, monkeypatch):
     source = tmp_path / "long.txt"
     source.write_text("\n".join(f"Passage {index}: " + "fact " * 260 for index in range(90)))
-    built = pipeline._build_source(SourceBuildInput(filePath=str(source), sourceId="long", materialRevision="v1", name=source.name, mimeType="text/plain"), False,
+    built = pipeline._build_source(SourceBuildInput(filePath=str(source), sourceId="long", materialRevision=source_content_revision(source), name=source.name, mimeType="text/plain"), False,
                                    {"entities": [], "relations": []})
     built["passages"] = pipeline._source_passages(built)
     seen = {"source_classification": set(), "knowledge_explanation": set()}

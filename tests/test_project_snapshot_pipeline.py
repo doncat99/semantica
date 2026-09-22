@@ -12,6 +12,7 @@ from semantica.project_snapshot_pipeline import build_project_snapshot
 from semantica.project_snapshot_schema import ProjectSnapshotBuildRequest
 from semantica.project_snapshot_schema import KnowledgeEntity, KnowledgeRelation, ModelReceipt, ProjectSnapshot, stable_digest
 from semantica.project_snapshot_worker import serve
+from semantica.project_source import source_content_revision
 
 H1 = "sha256:" + "1" * 64
 H2 = "sha256:" + "2" * 64
@@ -30,7 +31,7 @@ def test_semantic_classification_rejects_invalid_model_evidence(tmp_path, monkey
     from semantica.project_snapshot_schema import ClassificationProfile, SourceBuildInput
     source = tmp_path / "source.txt"
     source.write_text("Ada Lovelace designed the Analytical Engine.")
-    built = _build_source(SourceBuildInput(filePath=str(source), sourceId="source-1", materialRevision="material-1", mimeType="text/plain", name="source.txt"), False)
+    built = _build_source(SourceBuildInput(filePath=str(source), sourceId="source-1", materialRevision=source_content_revision(source), mimeType="text/plain", name="source.txt"), False)
     built["passages"] = _source_passages(built)
     citation = {"evidence_id": built["passages"][0].id, "quote": built["passages"][0].quote}
     assignment = {"dimension_id": "purpose", "item_id": "history", "confidence": 0.9, "citations": [citation]}
@@ -56,7 +57,7 @@ def test_semantic_classification_preserves_source_offsets_and_unclassified_dimen
     from semantica.project_snapshot_schema import ClassificationProfile, SourceBuildInput
     source = tmp_path / "source.txt"
     source.write_text("Ada Lovelace designed the Analytical Engine.")
-    built = _build_source(SourceBuildInput(filePath=str(source), sourceId="source-1", materialRevision="material-1", mimeType="text/plain", name="source.txt"), False)
+    built = _build_source(SourceBuildInput(filePath=str(source), sourceId="source-1", materialRevision=source_content_revision(source), mimeType="text/plain", name="source.txt"), False)
     built["passages"] = _source_passages(built)
     span = built["passages"][0]
     receipt = ModelReceipt(id="receipt:test", operation="source_classification", provider="test", model="test", input_digest=H1, output_digest=H2)
@@ -73,7 +74,7 @@ def test_explanation_rejects_missing_or_hallucinated_citations(tmp_path, monkeyp
     from semantica.project_snapshot_schema import SourceBuildInput
     source = tmp_path / "source.txt"
     source.write_text("Ada Lovelace designed the Analytical Engine.")
-    built = _build_source(SourceBuildInput(filePath=str(source), sourceId="source-1", materialRevision="material-1", mimeType="text/plain", name="source.txt"), False)
+    built = _build_source(SourceBuildInput(filePath=str(source), sourceId="source-1", materialRevision=source_content_revision(source), mimeType="text/plain", name="source.txt"), False)
     built["passages"] = _source_passages(built)
     receipt = ModelReceipt(id="receipt:test", operation="knowledge_explanation", provider="test", model="test", input_digest=H1, output_digest=H2)
     monkeypatch.setattr("semantica.project_snapshot_pipeline._product_json", lambda *args: ({"sections": [{"title": "Explanation", "text": "Unsupported claim", "citations": citation}]}, receipt))
@@ -97,7 +98,7 @@ def _request(source: Path, output_dir: Path, *, recipe: str = "deterministic") -
                 "model": {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/chat/completions", "capability": "knowledge.snapshot.generate", "modelId": "model-1", "receipts": "required"},
             },
             "release": {"artifactDigest": H2, "schemaDigest": H3, "mediaTypes": {"document-representation": "application/vnd.semantica.document-representation+json", "retrieval-index": "application/vnd.semantica.retrieval+json", "snapshot": "application/vnd.semantica.project-snapshot+json"}},
-            "sources": [{"filePath": str(source), "materialRevision": "material-1", "mimeType": "text/plain", "name": source.name, "sourceId": "source-1"}],
+            "sources": [{"filePath": str(source), "materialRevision": source_content_revision(source), "mimeType": "text/plain", "name": source.name, "sourceId": "source-1"}],
         },
     }
 
@@ -156,10 +157,10 @@ def test_canonical_graph_projection_preserves_snapshot_identity():
 
 
 def test_worker_fails_closed_for_unsupported_source_format(tmp_path):
-    source = tmp_path / "legacy.doc"
+    source = tmp_path / "source.unknown"
     source.write_bytes(b"not-an-epub")
     request = _request(source, tmp_path)
-    request["params"]["sources"][0]["mimeType"] = "application/msword"
+    request["params"]["sources"][0]["mimeType"] = "application/octet-stream"
     stdin = io.StringIO(json.dumps(request) + "\n")
     stdout = io.StringIO()
 
@@ -167,7 +168,7 @@ def test_worker_fails_closed_for_unsupported_source_format(tmp_path):
     response = json.loads(stdout.getvalue())
     assert response["ok"] is False
     assert response["error"]["type"] == "SnapshotBuildError"
-    assert "dedicated Office adapter" in response["error"]["message"] or "does not match" in response["error"]["message"]
+    assert "unsupported" in response["error"]["message"].lower()
 
 
 def test_cross_source_same_name_stays_unresolved(tmp_path):
@@ -178,7 +179,7 @@ def test_cross_source_same_name_stays_unresolved(tmp_path):
     request = _request(first, tmp_path)
     request["params"]["sources"].append({
         "filePath": str(second),
-        "materialRevision": "material-2",
+        "materialRevision": source_content_revision(second),
         "mimeType": "text/plain",
         "name": second.name,
         "sourceId": "source-2",
@@ -342,7 +343,7 @@ def test_incremental_delta_ignores_audit_time_and_tracks_only_dependent_reports(
     first.write_text("Ada Lovelace studied mathematics.", encoding="utf-8")
     second.write_text("Charles Babbage designed machines.", encoding="utf-8")
     request = _request(first, tmp_path / "first-build")["params"]
-    request["sources"].append({"filePath": str(second), "materialRevision": "material-2", "mimeType": "text/plain", "name": second.name, "sourceId": "source-2"})
+    request["sources"].append({"filePath": str(second), "materialRevision": source_content_revision(second), "mimeType": "text/plain", "name": second.name, "sourceId": "source-2"})
     initial = build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(request))
     request["baseSnapshot"] = {"snapshotId": initial["snapshot"].id, "snapshotPath": str(initial["snapshot_path"]), "artifactDigest": initial["snapshot_digest"], "schemaDigest": H3}
     request["inputRevision"] = H2
@@ -353,6 +354,7 @@ def test_incremental_delta_ignores_audit_time_and_tracks_only_dependent_reports(
     assert all(report.evidence_ids for report in identical.reports)
 
     first.write_text("Grace Hopper studied mathematics.", encoding="utf-8")
+    request["sources"][0]["materialRevision"] = source_content_revision(first)
     request["outputDir"] = str(tmp_path / "changed-build")
     updated = build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(request))["snapshot"]
     unchanged_reports = {report.id for report in initial["snapshot"].reports if "Charles Babbage" in report.title}
@@ -396,7 +398,7 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
 
     monkeypatch.setattr("semantica.project_snapshot_pipeline._relay_json", relay_response)
     request = _request(first, tmp_path / "build", recipe="model")
-    request["params"]["sources"].append({"filePath": str(second), "materialRevision": "material-2", "mimeType": "text/plain", "name": second.name, "sourceId": "source-2"})
+    request["params"]["sources"].append({"filePath": str(second), "materialRevision": source_content_revision(second), "mimeType": "text/plain", "name": second.name, "sourceId": "source-2"})
     stdout = io.StringIO()
     assert serve(io.StringIO(json.dumps(request) + "\n"), stdout) == 0
     response = json.loads(stdout.getvalue())

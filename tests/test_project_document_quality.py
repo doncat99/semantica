@@ -34,7 +34,7 @@ def test_ocr_recipe_and_text_revision_have_distinct_evidence_identity(tmp_path: 
     source = tmp_path / "source.txt"
     source.write_text("Ada Lovelace designed the Analytical Engine.")
     request = ProjectSnapshotBuildRequest.model_validate(_request(source, tmp_path / "build")["params"])
-    parsed = (source.read_text(), {"format": "docling", "text": source.read_text()}, "native", "sha256:" + "a" * 64, "docling", "2")
+    parsed = (source.read_text(), {"format": "docling", "text": source.read_text()}, "native", request.sources[0].material_revision, "docling", "2")
     native = _build_source(request.sources[0], False, parsed=parsed)
     repaired = _build_source(request.sources[0], True, parsed=(*parsed[:2], "ocr", *parsed[3:]))
     assert native["representation"].id != repaired["representation"].id

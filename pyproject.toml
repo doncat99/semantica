@@ -141,6 +141,7 @@ parse-pdf = ["pdfplumber>=0.10.0"]
 # remains importable from the core wheel, while this extra installs the single
 # document-processing chain used by snapshot builds.
 project-worker = [
+  "blake3==1.0.8",
   "onnxruntime>=1.23.1",
   "python-docx>=1.2.0",
   "openpyxl>=3.1.5",

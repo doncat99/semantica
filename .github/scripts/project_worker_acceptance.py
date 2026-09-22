@@ -94,7 +94,8 @@ with tempfile.TemporaryDirectory(prefix="semantica-native-acceptance-") as direc
         archive.writestr("META-INF/container.xml", '<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>')
         archive.writestr("OEBPS/content.opf", '<package><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>')
         archive.writestr("OEBPS/chapter.xhtml", "<html><body>Ada Lovelace designed the Analytical Engine.</body></html>")
-    sources = [{"filePath": str(path), "sourceId": f"source-{index}", "name": path.name, "materialRevision": "sha256:" + hashlib.sha256(path.read_bytes()).hexdigest(), "mimeType": mime}
+    from semantica.project_source import source_content_revision
+    sources = [{"filePath": str(path), "sourceId": f"source-{index}", "name": path.name, "materialRevision": source_content_revision(path), "mimeType": mime}
         for index, (path, mime) in enumerate([(source, "text/plain"), (epub, "application/epub+zip")])]
     built = invoke("semantica.project_snapshot_worker", {"protocol": "semantica.project-worker.v1", "id": "native-build", "method": "build_project_snapshot", "params": {
         "projectId": "native", "baseSnapshot": None, "inputRevision": "sha256:" + "1" * 64, "outputDir": str(scratch / "output"),
@@ -108,6 +109,10 @@ with tempfile.TemporaryDirectory(prefix="semantica-native-acceptance-") as direc
         "query": "Ada", "mode": "keyword", "limit": 5}})
     assert queried["contexts"]
     assert all(item["revision"].startswith("sha256:") for item in built["artifacts"] if item["kind"] == "document-representation")
+    snapshot = json.loads(Path(artifacts["snapshot"]["path"]).read_text())
+    for representation in snapshot["document_representations"]:
+        source = next(item for item in sources if item["sourceId"] == representation["source_id"])
+        assert representation["content_hash"] == representation["material_revision_id"] == source["materialRevision"]
     assert assess_document_quality("Broken \ufffd\ufffd mapping", {})["status"] == "needs_review"
     for item in manifest["files"]:
         path = root / item["path"]

@@ -17,6 +17,17 @@ class UnsupportedSourceFormatError(ValueError):
     """A source has no admitted adapter in the canonical document chain."""
 
 
+def source_content_revision(path: Path) -> str:
+    """Hash immutable material bytes using the shared source identity contract."""
+    from blake3 import blake3
+
+    digest = blake3()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return "b3-" + digest.hexdigest()
+
+
 @dataclass(frozen=True)
 class SourceDocument:
     """One adapter result consumed by the semantic snapshot pipeline."""

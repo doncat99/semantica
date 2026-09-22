@@ -44,10 +44,10 @@ def _snapshot_payload():
             {
                 "id": "repr-1",
                 "source_id": "source-1",
-                "material_revision_id": "material-rev-1",
-                "input_revision": H1,
+                "material_revision_id": "b3-" + "7" * 64,
+                "input_revision": "b3-" + "7" * 64,
                 "media_type": "application/pdf",
-                "content_hash": H7,
+                "content_hash": "b3-" + "7" * 64,
                 "parser": "docling",
                 "parser_version": "1",
                 "recipe_id": "recipe:default",
@@ -113,7 +113,7 @@ def _build_request_payload():
         "baseSnapshot": {"snapshotId": "snapshot:base", "snapshotPath": "/tmp/base.json", "artifactDigest": H8, "schemaDigest": H3},
         "inputRevision": H1,
         "outputDir": "/tmp/semantica-output",
-        "sources": [{"filePath": "/tmp/source.pdf", "materialRevision": "material-rev-1", "mimeType": "application/pdf", "name": "source.pdf", "sourceId": "source-1"}],
+        "sources": [{"filePath": "/tmp/source.pdf", "materialRevision": "b3-" + "7" * 64, "mimeType": "application/pdf", "name": "source.pdf", "sourceId": "source-1"}],
         "recipe": {"forceOcrSourceIds": [], "id": "deterministic", "version": "1"},
         "relays": {
             "embedding": {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/embeddings", "capability": "knowledge.snapshot.embed", "modelId": "embedding-1", "receipts": "required"},
@@ -140,7 +140,7 @@ def test_project_snapshot_validates_complete_cross_references():
 def test_project_snapshot_rejects_bad_hash_and_duplicate_ids():
     bad = _snapshot_payload()
     bad["document_representations"][0]["content_hash"] = "not-a-hash"
-    with pytest.raises(ValidationError, match="sha256"):
+    with pytest.raises(ValidationError, match="b3-"):
         ProjectSnapshot.model_validate(bad)
 
     dup = _snapshot_payload()

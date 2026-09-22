@@ -19,7 +19,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from .project_source import UnsupportedSourceFormatError, parse_source
+from .project_source import UnsupportedSourceFormatError, parse_source, source_content_revision
 from .project_checkpoint import SnapshotCheckpoint, active_checkpoint
 from .project_identity import resolve_project_identities
 from .project_snapshot_schema import (
@@ -549,7 +549,9 @@ def _parse_source(source: Any, force_ocr: bool, document_processing: dict | None
     path = Path(source.file_path).resolve()
     if not path.is_file():
         raise SnapshotBuildError(f"source is not a file: {source.source_id}")
-    content_hash = _digest_file(path)
+    content_hash = source_content_revision(path)
+    if source.material_revision != content_hash:
+        raise SnapshotBuildError(f"source material revision does not match immutable bytes: {source.source_id}")
     checkpoint = active_checkpoint.get()
     cache_key = {"sourceId": source.source_id, "contentHash": content_hash, "forceOcr": force_ocr, "documentProcessing": document_processing}
     cached = checkpoint.read("document", cache_key) if checkpoint else None

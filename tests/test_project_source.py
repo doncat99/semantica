@@ -3,7 +3,38 @@ from zipfile import ZipFile
 
 import pytest
 
-from semantica.project_source import UnsupportedSourceFormatError, parse_source
+from semantica.project_source import UnsupportedSourceFormatError, parse_source, source_content_revision
+
+
+def test_material_revision_matches_shared_blake3_known_vector(tmp_path):
+    source = tmp_path / "source.txt"
+    source.write_bytes(b"abc")
+    assert source_content_revision(source) == "b3-6437b3ac38465133ffb63b75273a8db548c558465d79db03fd359c6cd5bd9d85"
+
+
+def test_worker_rejects_changed_bytes_before_parsing(tmp_path, monkeypatch):
+    from semantica.project_snapshot_pipeline import _parse_source, SnapshotBuildError
+    from semantica.project_snapshot_schema import SourceBuildInput
+    source = tmp_path / "source.txt"
+    source.write_bytes(b"abc")
+    revision = source_content_revision(source)
+    request = SourceBuildInput(filePath=str(source), sourceId="s1", materialRevision=revision, name=source.name, mimeType="text/plain")
+    source.write_bytes(b"changed")
+    monkeypatch.setattr("semantica.project_snapshot_pipeline.parse_source", lambda *args, **kwargs: pytest.fail("changed source reached parser"))
+    with pytest.raises(SnapshotBuildError, match="material revision"):
+        _parse_source(request, False)
+
+
+def test_worker_preserves_material_identity_in_representation(tmp_path):
+    from semantica.project_snapshot_pipeline import _build_source
+    from semantica.project_snapshot_schema import SourceBuildInput
+    source = tmp_path / "source.txt"
+    source.write_bytes(b"Ada Lovelace designed the Analytical Engine.")
+    revision = source_content_revision(source)
+    request = SourceBuildInput(filePath=str(source), sourceId="s1", materialRevision=revision, name=source.name, mimeType="text/plain")
+    representation = _build_source(request, False)["representation"]
+    assert representation.content_hash == representation.material_revision_id == revision
+    assert representation.metadata["document"]["content_hash"] == revision
 
 
 def test_text_source_uses_the_canonical_adapter_contract(tmp_path: Path):
