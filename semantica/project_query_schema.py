@@ -75,10 +75,12 @@ class ProjectQueryRequest(StrictModel):
 
 class QueryHit(StrictModel):
     id: str
-    kind: str
+    kind: Literal["entity", "assertion", "relation", "identity_decision", "conflict", "topic", "report", "evidence"]
     title: str
     text: str
     score: float = Field(ge=0)
+    status: Optional[str] = None
+    polarity: Optional[Literal["positive", "negative"]] = None
     evidence_ids: List[str] = Field(default_factory=list, alias="evidenceIds")
     source_ids: List[str] = Field(default_factory=list, alias="sourceIds")
 

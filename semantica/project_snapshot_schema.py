@@ -178,17 +178,33 @@ class KnowledgeEntity(KernelModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
+def _validated_fact_qualifiers(value: Dict[str, Any]) -> Dict[str, Any]:
+    allowed = {"polarity", "condition", "time", "unit", "value"}
+    if set(value) - allowed:
+        raise ValueError("fact qualifiers contain unsupported keys")
+    if value.get("polarity") not in {"positive", "negative"}:
+        raise ValueError("fact qualifiers require positive or negative polarity")
+    if any(not isinstance(item, str) or not item.strip() for key, item in value.items() if key != "polarity"):
+        raise ValueError("fact qualifier values must be non-empty strings")
+    return value
+
+
 class KnowledgeAssertion(KernelModel):
     id: str
     subject_id: str
     predicate: str
     object: Union[str, int, float, bool, Dict[str, Any]]
     object_entity_id: Optional[str] = None
-    qualifiers: Dict[str, Any] = Field(default_factory=dict)
+    qualifiers: Dict[str, Any]
     evidence_ids: List[str] = Field(default_factory=list)
-    support_ids: List[str] = Field(default_factory=list)
+    support_ids: List[str] = Field(default_factory=list, description="Located evidence IDs supporting this canonical qualified assertion")
     status: Literal["candidate", "accepted", "contradicted", "retracted"] = "candidate"
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("qualifiers")
+    @classmethod
+    def validate_qualifiers(cls, value: Dict[str, Any]) -> Dict[str, Any]:
+        return _validated_fact_qualifiers(value)
 
 
 class KnowledgeRelation(KernelModel):
@@ -196,11 +212,16 @@ class KnowledgeRelation(KernelModel):
     source_entity_id: str
     target_entity_id: str
     type: str
-    qualifiers: Dict[str, Any] = Field(default_factory=dict)
+    qualifiers: Dict[str, Any]
     evidence_ids: List[str] = Field(default_factory=list)
-    support_ids: List[str] = Field(default_factory=list)
+    support_ids: List[str] = Field(default_factory=list, description="Located evidence IDs supporting this canonical qualified relation")
     status: Literal["candidate", "accepted", "rejected", "retracted"] = "candidate"
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+    @field_validator("qualifiers")
+    @classmethod
+    def validate_qualifiers(cls, value: Dict[str, Any]) -> Dict[str, Any]:
+        return _validated_fact_qualifiers(value)
 
 
 class IdentityDecision(KernelModel):
@@ -213,6 +234,14 @@ class IdentityDecision(KernelModel):
     decided_by: Literal["semantica", "human", "import"] = "semantica"
     decided_at: str = Field(default_factory=utc_now_iso)
     metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
+class IdentityRegistryEntry(StrictModel):
+    mention_id: str
+    entity_id: str
+    canonical_name: str
+    type: str
+    source_ids: List[str] = Field(default_factory=list)
 
 
 class KnowledgeCommunity(KernelModel):
@@ -354,6 +383,7 @@ class ProjectSnapshot(KernelModel):
     assertions: List[KnowledgeAssertion] = Field(default_factory=list)
     relations: List[KnowledgeRelation] = Field(default_factory=list)
     identity_decisions: List[IdentityDecision] = Field(default_factory=list)
+    identity_registry: List[IdentityRegistryEntry] = Field(default_factory=list)
     communities: List[KnowledgeCommunity] = Field(default_factory=list)
     topics: List[KnowledgeTopic] = Field(default_factory=list)
     reports: List[KnowledgeReport] = Field(default_factory=list)
@@ -390,7 +420,6 @@ class ProjectSnapshot(KernelModel):
         representation_ids = {item.id for item in self.document_representations}
         evidence_ids = {item.id for item in self.evidence_spans}
         entity_ids = {item.id for item in self.entities}
-        mention_ids = {item.id for item in self.entity_mentions}
         assertion_ids = {item.id for item in self.assertions}
         relation_ids = {item.id for item in self.relations}
         community_ids = {item.id for item in self.communities}
@@ -399,6 +428,10 @@ class ProjectSnapshot(KernelModel):
         conflict_ids = {item.id for item in self.conflicts}
         retrieval_ids = {item.id for item in self.retrieval_manifests}
         model_receipt_ids = {item.id for item in self.model_receipts}
+
+        registry_mentions = [item.mention_id for item in self.identity_registry]
+        if len(registry_mentions) != len(set(registry_mentions)):
+            raise ValueError("duplicate identity registry mention_id")
 
         missing = _missing(self.lineage.model_receipt_ids, model_receipt_ids)
         if missing:
@@ -420,6 +453,8 @@ class ProjectSnapshot(KernelModel):
             if missing:
                 raise ValueError(f"entity {entity.id} references unknown evidence ids: {sorted(missing)}")
         for assertion in self.assertions:
+            if set(assertion.support_ids) - set(assertion.evidence_ids):
+                raise ValueError("assertion support must reference its located evidence")
             if assertion.subject_id not in entity_ids:
                 raise ValueError(f"assertion {assertion.id} references unknown subject_id: {assertion.subject_id}")
             if assertion.object_entity_id and assertion.object_entity_id not in entity_ids:
@@ -428,6 +463,8 @@ class ProjectSnapshot(KernelModel):
             if missing:
                 raise ValueError(f"assertion {assertion.id} references unknown evidence ids: {sorted(missing)}")
         for relation in self.relations:
+            if set(relation.support_ids) - set(relation.evidence_ids):
+                raise ValueError("relation support must reference its located evidence")
             if relation.source_entity_id not in entity_ids or relation.target_entity_id not in entity_ids:
                 raise ValueError(f"relation {relation.id} references unknown entity endpoint")
             missing = set(relation.evidence_ids) - evidence_ids
@@ -481,15 +518,12 @@ class ProjectSnapshot(KernelModel):
                 raise ValueError("classification has inconsistent unclassified dimensions")
         if self.classification_profile and classified_sources != set(sources_by_representation.values()):
             raise ValueError("classification profile requires a result for every source")
-        for decision in self.identity_decisions:
-            missing = _missing(decision.from_entity_ids, entity_ids | mention_ids)
-            if missing:
-                raise ValueError(f"identity decision {decision.id} references unknown from_entity_ids: {missing}")
-            if decision.to_entity_id and decision.to_entity_id not in entity_ids:
-                raise ValueError(f"identity decision {decision.id} references unknown to_entity_id")
-            missing = _missing(decision.evidence_ids, evidence_ids)
-            if missing:
-                raise ValueError(f"identity decision {decision.id} references unknown evidence ids: {missing}")
+        registry_by_mention = {item.mention_id: item.entity_id for item in self.identity_registry}
+        for mention in self.entity_mentions:
+            registered = registry_by_mention.get(mention.id)
+            owner = next((item.id for item in self.entities if mention.id in item.metadata.get("mention_ids", [])), None)
+            if registered is not None and registered != owner:
+                raise ValueError(f"identity registry disagrees with live mention owner: {mention.id}")
         for community in self.communities:
             missing = _missing(community.entity_ids, entity_ids)
             if missing:

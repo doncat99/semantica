@@ -133,6 +133,23 @@ def test_worker_builds_complete_snapshot_from_real_text_file(tmp_path):
     assert all(span.locator.representation_id == span.representation_id for span in snapshot.evidence_spans)
 
 
+def test_build_rejects_base_snapshot_from_another_project(tmp_path):
+    source = tmp_path / "source.txt"
+    source.write_text("Ada Lovelace designed the Analytical Engine.", encoding="utf-8")
+    initial_request = ProjectSnapshotBuildRequest.model_validate(_request(source, tmp_path / "initial")["params"])
+    initial = build_project_snapshot(initial_request)
+    request = _request(source, tmp_path / "next")["params"]
+    request["projectId"] = "project-2"
+    request["baseSnapshot"] = {
+        "snapshotId": initial["snapshot"].id,
+        "snapshotPath": str(initial["snapshot_path"]),
+        "artifactDigest": initial["snapshot_digest"],
+        "schemaDigest": H3,
+    }
+    with pytest.raises(Exception, match="project"):
+        build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(request))
+
+
 def test_canonical_graph_projection_preserves_snapshot_identity():
     entities = [
         KnowledgeEntity(id="entity:ada", canonical_name="Ada Lovelace", type="PERSON"),
@@ -144,6 +161,7 @@ def test_canonical_graph_projection_preserves_snapshot_identity():
             source_entity_id="entity:ada",
             target_entity_id="entity:engine",
             type="designed",
+            qualifiers={"polarity": "positive"},
             evidence_ids=["evidence:source-1:0:42"],
         )
     ]
@@ -196,6 +214,10 @@ def test_cross_source_same_name_stays_unresolved(tmp_path):
     assert snapshot.identity_decisions == []
     assert len(snapshot.conflicts) == 1
     assert snapshot.conflicts[0].conflict_type == "identity"
+    retrieval_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "retrieval-index")
+    retrieval = json.loads(retrieval_path.read_text())
+    assert retrieval["identity_decisions"] == []
+    assert retrieval["conflicts"] == [snapshot.conflicts[0].model_dump(mode="json", by_alias=True)]
 
 
 def test_epub_adapter_preserves_adapter_locator_origin(tmp_path):
@@ -243,10 +265,10 @@ def test_model_recipe_uses_bifrost_chat_and_embedding_and_records_receipts(tmp_p
                 response = {
                     "choices": [{"message": {"content": json.dumps({"sections": [{"title": "Historical role", "text": "Ada Lovelace is connected to the Analytical Engine through the documented design work.", "citations": [{"evidence_id": context["evidence"][0]["id"], "quote": context["evidence"][0]["quote"]}]}]} if explanation else {
                         "entities": [
-                            {"name": "Ada Lovelace", "type": "PERSON"},
-                            {"name": "Analytical Engine", "type": "CONCEPT"},
+                            {"id": "ada", "name": "Ada Lovelace", "type": "PERSON", "occurrence": 0},
+                            {"id": "engine", "name": "Analytical Engine", "type": "CONCEPT", "occurrence": 0},
                         ],
-                        "relations": [{"subject": "Ada Lovelace", "predicate": "designed", "object": "Analytical Engine", "evidence": "Ada Lovelace designed the Analytical Engine."}],
+                        "relations": [{"subject": "ada", "predicate": "designed", "object": "engine", "evidence": "Ada Lovelace designed the Analytical Engine.", "qualifiers": {"polarity": "positive"}}],
                     }), "role": "assistant"}}],
                     "model": payload["model"],
                     "usage": {"prompt_tokens": 10, "completion_tokens": 8},
@@ -382,15 +404,15 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
             if operation == "identity_resolution":
                 candidates = json.loads(payload["messages"][1]["content"])
                 groups = [[item for item in candidates if item["name"] == name] for name in {item["name"] for item in candidates}]
-                content = {"merges": [{"mention_ids": [item["mention_id"] for item in group],
+                content = {"splits": [], "merges": [{"mention_ids": [item["mention_id"] for item in group],
                     "evidence_ids": [span["id"] for item in group for span in item["evidence"]],
                     "reason": "The same named mathematician and designed machine are corroborated by both source contexts."} for group in groups]}
             elif operation == "knowledge_explanation":
                 context = json.loads(payload["messages"][1]["content"])
                 content = {"sections": [{"title": "Design", "text": "Ada Lovelace designed the Analytical Engine.", "citations": [{"evidence_id": context["evidence"][0]["id"], "quote": context["evidence"][0]["quote"]}]}]}
             else:
-                content = {"entities": [{"name": "Ada Lovelace", "type": "PERSON"}, {"name": "Analytical Engine", "type": "CONCEPT"}],
-                    "relations": [{"subject": "Ada Lovelace", "predicate": "designed", "object": "Analytical Engine", "evidence": text}]}
+                content = {"entities": [{"id": "ada", "name": "Ada Lovelace", "type": "PERSON", "occurrence": 0}, {"id": "engine", "name": "Analytical Engine", "type": "CONCEPT", "occurrence": 0}],
+                    "relations": [{"subject": "ada", "predicate": "designed", "object": "engine", "evidence": text, "qualifiers": {"polarity": "positive"}}]}
             result = {"choices": [{"message": {"content": json.dumps(content)}}], "model": relay.model_id}
         receipt = ModelReceipt(id="receipt:" + stable_digest([operation, payload]).split(":")[1], operation=operation,
             provider="fixture", model=relay.model_id, input_digest=stable_digest(payload), output_digest=stable_digest(result))
@@ -425,5 +447,9 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
     assert {assertion.subject_id for assertion in snapshot.assertions}.issubset(canonical_ids)
     retrieval_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "retrieval-index")
     retrieval = json.loads(retrieval_path.read_text())
+    assert retrieval["identity_decisions"] == [
+        decision.model_dump(mode="json", by_alias=True) for decision in snapshot.identity_decisions
+    ]
+    assert retrieval["conflicts"] == []
     for entity in snapshot.entities:
         assert set(retrieval["provenance"]["entities"][entity.id]["source_documents"]) == {"source-1", "source-2"}

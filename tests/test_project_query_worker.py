@@ -1,5 +1,6 @@
 import io
 import json
+from copy import deepcopy
 import pytest
 from hashlib import sha256
 from pathlib import Path
@@ -71,6 +72,31 @@ def _request(built, query="Ada"):
     }
 
 
+def _rewrite_artifacts(built, *, snapshot_change=None, retrieval_change=None):
+    snapshot = json.loads(built["snapshot_path"].read_text())
+    retrieval = json.loads(built["retrieval_path"].read_text())
+    if snapshot_change:
+        snapshot_change(snapshot)
+    if retrieval_change:
+        retrieval_change(retrieval)
+    built["retrieval_path"].write_text(json.dumps(retrieval), encoding="utf-8")
+    built["retrieval_digest"] = _digest(built["retrieval_path"])
+    for manifest in snapshot["retrieval_manifests"]:
+        if manifest["id"] == "retrieval:graph":
+            manifest["artifact_hash"] = built["retrieval_digest"]
+    for artifact in snapshot["artifact_manifest"]:
+        if artifact["artifact_type"] == "retrieval":
+            artifact["artifact_hash"] = built["retrieval_digest"]
+    built["snapshot_path"].write_text(json.dumps(snapshot), encoding="utf-8")
+    built["snapshot_digest"] = _digest(built["snapshot_path"])
+
+
+def _serve(request):
+    stdout = io.StringIO()
+    assert serve(io.StringIO(json.dumps(request) + "\n"), stdout) == 0
+    return json.loads(stdout.getvalue())
+
+
 def test_query_worker_returns_snapshot_bound_evidence(tmp_path):
     built = _build(tmp_path)
     stdout = io.StringIO()
@@ -83,6 +109,128 @@ def test_query_worker_returns_snapshot_bound_evidence(tmp_path):
     assert result["contexts"]
     assert all(context["sourceIds"] == ["source-1"] for context in result["contexts"] if context["evidenceIds"])
     assert any(context["kind"] == "evidence" and "Ada Lovelace" in context["text"] for context in result["contexts"])
+
+
+def test_query_worker_returns_grounded_identity_decisions_and_conflicts(tmp_path):
+    built = _build(tmp_path)
+    snapshot = json.loads(built["snapshot_path"].read_text())
+    entity_id = snapshot["entities"][0]["id"]
+    evidence_id = snapshot["evidence_spans"][0]["id"]
+    decision = {
+        "id": "decision:query-test",
+        "decision_type": "accept",
+        "from_entity_ids": [entity_id],
+        "to_entity_id": entity_id,
+        "evidence_ids": [evidence_id],
+        "reason": "corroborated identity evidence",
+        "decided_by": "semantica",
+        "decided_at": "2026-01-01T00:00:00Z",
+        "metadata": {},
+    }
+    conflict = {
+        "id": "conflict:query-test",
+        "conflict_type": "identity",
+        "status": "open",
+        "entity_ids": [entity_id],
+        "assertion_ids": [],
+        "relation_ids": [],
+        "evidence_ids": [evidence_id],
+        "reason": "corroborated identity conflict",
+        "resolution": None,
+    }
+    _rewrite_artifacts(
+        built,
+        snapshot_change=lambda value: (
+            value["identity_decisions"].append(decision),
+            value["conflicts"].append(conflict),
+        ),
+        retrieval_change=lambda value: (
+            value.setdefault("identity_decisions", []).append(decision),
+            value.setdefault("conflicts", []).append(conflict),
+        ),
+    )
+
+    response = _serve(_request(built, "corroborated"))
+
+    assert response["ok"] is True, response
+    hits = {context["kind"]: context for context in response["result"]["contexts"]}
+    assert hits["identity_decision"]["status"] == "accept"
+    assert hits["conflict"]["status"] == "open"
+    assert hits["identity_decision"]["evidenceIds"] == [evidence_id]
+    assert hits["conflict"]["sourceIds"] == ["source-1"]
+
+
+def test_query_worker_preserves_positive_negative_and_contradicted_fact_semantics(tmp_path):
+    built = _build(tmp_path)
+    snapshot = json.loads(built["snapshot_path"].read_text())
+    subject, object_entity = snapshot["entities"][:2]
+    evidence_id = subject["evidence_ids"][0]
+    original = {
+        "subject_id": subject["id"],
+        "predicate": "designed",
+        "object": object_entity["canonical_name"],
+        "object_entity_id": object_entity["id"],
+        "evidence_ids": [evidence_id],
+        "support_ids": [evidence_id],
+        "metadata": {},
+    }
+    facts = []
+    for suffix, polarity, status in (
+        ("positive", "positive", "accepted"),
+        ("negative", "negative", "accepted"),
+        ("contradicted", "positive", "contradicted"),
+    ):
+        fact = deepcopy(original)
+        fact.update({"id": f"assertion:query-{suffix}", "status": status})
+        fact["qualifiers"] = {"polarity": polarity, "condition": "at rest"}
+        fact["evidence_ids"] = [evidence_id]
+        facts.append(fact)
+
+    def add_snapshot(value):
+        value["assertions"].extend(facts)
+
+    def add_retrieval(value):
+        value["assertions"].extend(facts)
+
+    _rewrite_artifacts(built, snapshot_change=add_snapshot, retrieval_change=add_retrieval)
+
+    response = _serve(_request(built, "designed"))
+
+    assert response["ok"] is True, response
+    hits = {context["id"]: context for context in response["result"]["contexts"]}
+    positive = hits["assertion:query-positive"]
+    negative = hits["assertion:query-negative"]
+    contradicted = hits["assertion:query-contradicted"]
+    assert (positive["status"], positive["polarity"]) == ("accepted", "positive")
+    assert (negative["status"], negative["polarity"]) == ("accepted", "negative")
+    assert "does not" in negative["text"]
+    assert "condition=at rest" in negative["text"]
+    assert (contradicted["status"], contradicted["polarity"]) == ("contradicted", "positive")
+    assert contradicted["text"].startswith("Contradicted fact:")
+
+
+@pytest.mark.parametrize("corruption", ["unknown-object", "missing-evidence", "unknown-evidence"])
+def test_query_worker_rejects_ungrounded_retrieval_records(tmp_path, corruption):
+    built = _build(tmp_path)
+
+    def corrupt(retrieval):
+        if corruption == "unknown-object":
+            record = deepcopy(retrieval["entities"][0])
+            record["id"] = "entity:unknown"
+            retrieval["entities"].append(record)
+        elif corruption == "missing-evidence":
+            retrieval["entities"][0]["evidence_ids"] = []
+        else:
+            record = deepcopy(retrieval["evidence"][0])
+            record["id"] = "evidence:unknown"
+            retrieval["evidence"].append(record)
+
+    _rewrite_artifacts(built, retrieval_change=corrupt)
+
+    response = _serve(_request(built))
+
+    assert response["ok"] is False
+    assert response["error"]["type"] == "QueryError"
 
 
 def test_query_worker_returns_empty_contexts_without_fallback(tmp_path):

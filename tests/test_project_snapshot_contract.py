@@ -77,10 +77,10 @@ def _snapshot_payload():
             {"id": "entity-engine", "canonical_name": "Engine", "type": "CONCEPT", "status": "accepted"},
         ],
         "assertions": [
-            {"id": "assertion-1", "subject_id": "entity-ada", "predicate": "designed", "object": "Engine", "object_entity_id": "entity-engine", "evidence_ids": ["ev-1"], "status": "accepted"}
+            {"id": "assertion-1", "subject_id": "entity-ada", "predicate": "designed", "object": "Engine", "object_entity_id": "entity-engine", "qualifiers": {"polarity": "positive"}, "evidence_ids": ["ev-1"], "status": "accepted"}
         ],
         "relations": [
-            {"id": "relation-1", "source_entity_id": "entity-ada", "target_entity_id": "entity-engine", "type": "designed", "evidence_ids": ["ev-1"], "status": "accepted"}
+            {"id": "relation-1", "source_entity_id": "entity-ada", "target_entity_id": "entity-engine", "type": "designed", "qualifiers": {"polarity": "positive"}, "evidence_ids": ["ev-1"], "status": "accepted"}
         ],
         "identity_decisions": [
             {"id": "decision-1", "decision_type": "accept", "to_entity_id": "entity-ada", "reason": "single mention accepted", "evidence_ids": ["ev-1"]}
@@ -147,6 +147,26 @@ def test_project_snapshot_rejects_bad_hash_and_duplicate_ids():
     dup["entities"].append(dict(dup["entities"][0]))
     with pytest.raises(ValidationError, match="duplicate entity id"):
         ProjectSnapshot.model_validate(dup)
+
+
+@pytest.mark.parametrize("section", ["assertions", "relations"])
+@pytest.mark.parametrize("qualifiers", [
+    None,
+    {},
+    {"polarity": "unknown"},
+    {"polarity": "positive", "scope": "global"},
+    {"polarity": "positive", "condition": ""},
+    {"polarity": "positive", "value": 42},
+])
+def test_project_snapshot_rejects_invalid_fact_qualifiers(section, qualifiers):
+    payload = _snapshot_payload()
+    fact = payload[section][0]
+    if qualifiers is None:
+        fact.pop("qualifiers")
+    else:
+        fact["qualifiers"] = qualifiers
+    with pytest.raises(ValidationError, match="qualifier|qualifiers"):
+        ProjectSnapshot.model_validate(payload)
 
 
 def test_project_snapshot_rejects_unavailable_or_empty_locator():

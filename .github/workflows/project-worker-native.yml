@@ -71,7 +71,13 @@ jobs:
           native-inputs/${{ matrix.python }} -I -B .github/scripts/project_worker_models.py .github/requirements/project-worker-models.json native-inputs/models
       - name: Build native bundle
         run: |
-          native-inputs/${{ matrix.python }} -I -B semantica/project_bundle.py --python-root native-inputs/python --wheel native-dist/semantica-0.7.0-py3-none-any.whl --models-root native-inputs/models --office-root native-inputs/office --office-receipt native-inputs/office-release.json --output native-bundle --source-revision "$GITHUB_SHA"
+          shopt -s nullglob
+          wheels=(native-dist/*.whl)
+          if (( ${#wheels[@]} != 1 )); then
+            echo "Expected exactly one Semantica wheel, found ${#wheels[@]}" >&2
+            exit 1
+          fi
+          native-inputs/${{ matrix.python }} -I -B semantica/project_bundle.py --python-root native-inputs/python --wheel "${wheels[0]}" --models-root native-inputs/models --office-root native-inputs/office --office-receipt native-inputs/office-release.json --output native-bundle --source-revision "$GITHUB_SHA"
       - name: Relocate and validate installed worker
         run: |
           mv native-bundle "$RUNNER_TEMP/semantica-relocated"

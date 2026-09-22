@@ -1,4 +1,3 @@
-import json
 from types import SimpleNamespace
 
 import pytest
@@ -20,7 +19,7 @@ def test_long_extraction_visits_tail_and_preserves_absolute_repeated_mentions(tm
     def extract(window, relay):
         calls.append(window)
         names = [name for name in ("Ada", "Engine", "Tail", "FinalEngine") if name in window]
-        return {"entities": [{"name": name, "type": "CONCEPT"} for name in names], "relations": []}, receipt("structured_extraction", len(calls))
+        return {"entities": [{"id": name, "name": name, "type": "CONCEPT", "occurrence": 0} for name in names], "relations": []}, receipt("structured_extraction", len(calls))
 
     monkeypatch.setattr(pipeline, "_structured_extract", extract)
     monkeypatch.setattr(pipeline, "_embed_text", lambda text, relay: ([1.0, 0.0], receipt("embedding", len(calls))))
@@ -36,15 +35,15 @@ def test_long_extraction_visits_tail_and_preserves_absolute_repeated_mentions(tm
     source.write_text(text)
     built = pipeline._build_source(SourceBuildInput(filePath=str(source), sourceId="long", materialRevision=source_content_revision(source), name=source.name, mimeType="text/plain"), False, extracted)
     assert any(entity.canonical_name == "Tail" for entity in built["entities"])
-    ada = next(entity for entity in built["entities"] if entity.canonical_name == "Ada")
-    assert len(ada.evidence_ids) > 10
+    ada = [entity for entity in built["entities"] if entity.canonical_name == "Ada"]
+    assert len(ada) > 10 and all(len(entity.evidence_ids) == 1 for entity in ada)
     for span in built["evidence"]:
         assert text[span.locator.start_char:span.locator.end_char] == span.quote
     assert max(span.locator.start_char for span in built["evidence"]) > len(text) - 30
 
 
 def test_extraction_rejects_quote_outside_current_window(monkeypatch):
-    monkeypatch.setattr(pipeline, "_structured_extract", lambda *args: ({"entities": [{"name": "Tail", "type": "CONCEPT"}], "relations": []}, receipt("structured_extraction", 1)))
+    monkeypatch.setattr(pipeline, "_structured_extract", lambda *args: ({"entities": [{"id": "tail", "name": "Tail", "type": "CONCEPT", "occurrence": 0}], "relations": []}, receipt("structured_extraction", 1)))
     monkeypatch.setattr(pipeline, "_embed_text", lambda *args: ([1.0], receipt("embedding", 1)))
     with pytest.raises(pipeline.SnapshotBuildError, match="source window"):
         pipeline._extract_and_embed("x" * 10_000 + "Tail", None, None)
