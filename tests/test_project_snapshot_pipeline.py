@@ -131,6 +131,7 @@ def test_worker_builds_complete_snapshot_from_real_text_file(tmp_path):
     assert snapshot.model_receipts == []
     assert all(span.quote == span.locator.quote for span in snapshot.evidence_spans)
     assert all(span.locator.representation_id == span.representation_id for span in snapshot.evidence_spans)
+    assert any(span.metadata.get("role") == "source-passage" for span in snapshot.evidence_spans)
 
 
 def test_build_rejects_base_snapshot_from_another_project(tmp_path):
@@ -367,6 +368,8 @@ def test_incremental_delta_ignores_audit_time_and_tracks_only_dependent_reports(
     request = _request(first, tmp_path / "first-build")["params"]
     request["sources"].append({"filePath": str(second), "materialRevision": source_content_revision(second), "mimeType": "text/plain", "name": second.name, "sourceId": "source-2"})
     initial = build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(request))
+    assert all(report.metadata.get("source_ids") for report in initial["snapshot"].reports)
+    assert any(report.metadata["source_ids"] == ["source-1"] for report in initial["snapshot"].reports)
     request["baseSnapshot"] = {"snapshotId": initial["snapshot"].id, "snapshotPath": str(initial["snapshot_path"]), "artifactDigest": initial["snapshot_digest"], "schemaDigest": H3}
     request["inputRevision"] = H2
     request["outputDir"] = str(tmp_path / "identical-build")
@@ -389,6 +392,26 @@ def test_incremental_delta_ignores_audit_time_and_tracks_only_dependent_reports(
     assert removed_reports.issubset(set(updated.change_delta.affected_report_ids))
 
 
+def test_community_and_topic_deltas_affect_only_their_reports(tmp_path):
+    from semantica.project_snapshot_pipeline import _change_delta
+
+    source = tmp_path / "source.txt"
+    source.write_text("Ada Lovelace studied mathematics.", encoding="utf-8")
+    base = build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(_request(source, tmp_path / "build")["params"]))["snapshot"]
+    revised = base.model_copy(deep=True)
+    revised.communities[0].title += " revised"
+    revised.topics[0].title += " revised"
+    delta = _change_delta(base, "next-snapshot", revised.document_representations, revised.entities,
+        revised.assertions, revised.relations, revised.communities, revised.topics, revised.reports,
+        [item.id for item in revised.retrieval_manifests], revised.evidence_spans, revised.source_classifications)
+    assert {revised.communities[0].id, revised.topics[0].id}.issubset(delta.updated_ids)
+    affected = {report.id for report in revised.reports if report.community_id == revised.communities[0].id
+        or report.topic_id == revised.topics[0].id
+        or set(report.metadata.get("depends_on", [])).intersection([revised.communities[0].id, revised.topics[0].id])}
+    assert affected
+    assert set(delta.affected_report_ids) == affected
+
+
 def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, monkeypatch):
     first, second = tmp_path / "first.txt", tmp_path / "second.txt"
     text = "Ada Lovelace designed the Analytical Engine."
@@ -407,6 +430,8 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
                 content = {"splits": [], "merges": [{"mention_ids": [item["mention_id"] for item in group],
                     "evidence_ids": [span["id"] for item in group for span in item["evidence"]],
                     "reason": "The same named mathematician and designed machine are corroborated by both source contexts."} for group in groups]}
+            elif operation == "relationship_discovery":
+                content = {"relations": []}
             elif operation == "knowledge_explanation":
                 context = json.loads(payload["messages"][1]["content"])
                 content = {"sections": [{"title": "Design", "text": "Ada Lovelace designed the Analytical Engine.", "citations": [{"evidence_id": context["evidence"][0]["id"], "quote": context["evidence"][0]["quote"]}]}]}

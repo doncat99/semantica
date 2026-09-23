@@ -224,6 +224,25 @@ class KnowledgeRelation(KernelModel):
         return _validated_fact_qualifiers(value)
 
 
+class SourceRelation(KernelModel):
+    """A canonical relation between two source documents.
+
+    Source relations are produced by Semantica from located knowledge support.
+    Consumers may render them, but must not infer them by joining entity
+    evidence at read time.
+    """
+
+    id: str
+    source_id: str
+    target_id: str
+    type: str
+    evidence_ids: List[str] = Field(default_factory=list)
+    entity_relation_ids: List[str] = Field(default_factory=list)
+    status: Literal["candidate", "accepted", "rejected", "retracted"] = "candidate"
+    unresolved_reason: Optional[str] = None
+    metadata: Dict[str, Any] = Field(default_factory=dict)
+
+
 class IdentityDecision(KernelModel):
     id: str
     decision_type: Literal["accept", "merge", "split", "reject", "retract"]
@@ -387,6 +406,7 @@ class ProjectSnapshot(KernelModel):
     communities: List[KnowledgeCommunity] = Field(default_factory=list)
     topics: List[KnowledgeTopic] = Field(default_factory=list)
     reports: List[KnowledgeReport] = Field(default_factory=list)
+    source_relations: List[SourceRelation] = Field(default_factory=list)
     source_classifications: List["SourceClassification"] = Field(default_factory=list)
     classification_profile: Optional["ClassificationProfile"] = None
     conflicts: List[KnowledgeConflict] = Field(default_factory=list)
@@ -405,6 +425,7 @@ class ProjectSnapshot(KernelModel):
             "entity": self.entities,
             "assertion": self.assertions,
             "relation": self.relations,
+            "source_relation": self.source_relations,
             "identity_decision": self.identity_decisions,
             "community": self.communities,
             "topic": self.topics,
@@ -422,6 +443,7 @@ class ProjectSnapshot(KernelModel):
         entity_ids = {item.id for item in self.entities}
         assertion_ids = {item.id for item in self.assertions}
         relation_ids = {item.id for item in self.relations}
+        source_relation_ids = {item.id for item in self.source_relations}
         community_ids = {item.id for item in self.communities}
         topic_ids = {item.id for item in self.topics}
         report_ids = {item.id for item in self.reports}
@@ -429,6 +451,16 @@ class ProjectSnapshot(KernelModel):
         retrieval_ids = {item.id for item in self.retrieval_manifests}
         model_receipt_ids = {item.id for item in self.model_receipts}
 
+        known_source_ids = {item.source_id for item in self.document_representations}
+        for source_relation in self.source_relations:
+            if source_relation.source_id not in known_source_ids or source_relation.target_id not in known_source_ids:
+                raise ValueError(f"source relation {source_relation.id} references unknown source")
+            if source_relation.source_id == source_relation.target_id:
+                raise ValueError(f"source relation {source_relation.id} must connect distinct sources")
+            if set(source_relation.evidence_ids) - evidence_ids:
+                raise ValueError(f"source relation {source_relation.id} references unknown evidence ids")
+            if set(source_relation.entity_relation_ids) - relation_ids:
+                raise ValueError(f"source relation {source_relation.id} references unknown entity relations")
         registry_mentions = [item.mention_id for item in self.identity_registry]
         if len(registry_mentions) != len(set(registry_mentions)):
             raise ValueError("duplicate identity registry mention_id")

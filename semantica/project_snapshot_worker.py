@@ -23,6 +23,19 @@ from .project_snapshot_schema import (
 )
 
 
+MODEL_RECEIPT_OPERATIONS = {
+    "structured_extraction", "identity_resolution", "relationship_discovery",
+    "knowledge_explanation", "knowledge_synthesis", "source_classification",
+}
+
+
+def _relay_receipts(receipts: list[Any]) -> Dict[str, list[str]]:
+    return {
+        "embedding": [receipt.id for receipt in receipts if receipt.operation == "embedding"],
+        "model": [receipt.id for receipt in receipts if receipt.operation in MODEL_RECEIPT_OPERATIONS],
+    }
+
+
 def _response(request_id: Optional[str], ok: bool, *, result: Optional[Dict[str, Any]] = None, error: Optional[Exception] = None) -> Dict[str, Any]:
     payload: Dict[str, Any] = {"id": request_id, "ok": ok}
     if ok:
@@ -69,10 +82,7 @@ def handle_request(raw: Dict[str, Any]) -> Dict[str, Any]:
     receipts = built["model_receipts"]
     return _response(request.id, True, result={
         "artifacts": artifacts,
-        "relayReceipts": {
-            "embedding": [receipt.id for receipt in receipts if receipt.operation == "embedding"],
-            "model": [receipt.id for receipt in receipts if receipt.operation in {"structured_extraction", "identity_resolution", "knowledge_explanation", "source_classification"}],
-        },
+        "relayReceipts": _relay_receipts(receipts),
         "snapshot": {
             "baseSnapshotId": snapshot.base_snapshot_id,
             "inputRevision": build_request.input_revision,

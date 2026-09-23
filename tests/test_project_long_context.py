@@ -4,7 +4,11 @@ import pytest
 
 from semantica import project_snapshot_pipeline as pipeline
 from semantica.project_source import source_content_revision
-from semantica.project_snapshot_schema import ClassificationProfile, ModelReceipt, SourceBuildInput
+from semantica.project_snapshot_schema import (
+    ClassificationProfile, DocumentLocator, DocumentRepresentation, EvidenceSpan,
+    KnowledgeEntity, ModelReceipt, SourceBuildInput,
+)
+from semantica.project_snapshot_worker import _relay_receipts
 
 
 def receipt(operation, count):
@@ -116,3 +120,115 @@ def test_synthesis_cannot_introduce_evidence_from_another_batch(monkeypatch):
         {"title": "Invented", "text": "Unsupported", "evidence_ids": ["other-evidence"]}]}, receipt("knowledge_synthesis", 1)))
     with pytest.raises(pipeline.SnapshotBuildError, match="unsupported evidence"):
         pipeline._synthesize_sections({"id": "overview"}, [ReportSection(title="Original", text="Supported", evidence_ids=["source-evidence"])], None)
+
+
+def _relationship_fixture(include_third=False):
+    builds, entities, evidence = [], [], []
+    rows = [
+        ("Photosynthesis", "Photosynthesis stores light energy in glucose.", [1.0, 0.0]),
+        ("Cellular respiration", "Cellular respiration releases energy from glucose.", [0.99, 0.01]),
+    ]
+    if include_third:
+        rows.append(("Glucose metabolism", "Glucose metabolism connects storage and release.", [0.98, 0.02]))
+    for index, (name, quote, vector) in enumerate(rows, start=1):
+        representation_id = f"representation-{index}"
+        representation = DocumentRepresentation(
+            id=representation_id, source_id=f"source-{index}", material_revision_id="b3-" + str(index) * 64,
+            input_revision="b3-" + str(index) * 64, media_type="text/plain", content_hash="b3-" + str(index) * 64,
+            parser="test", parser_version="1", recipe_id="model", recipe_digest="sha256:" + "a" * 64,
+            origin="native", artifact_ref_id=f"artifact-{index}",
+        )
+        mention_id = f"mention-{index}"
+        mention = EvidenceSpan(
+            id=mention_id, representation_id=representation_id, quote=name,
+            locator=DocumentLocator(representation_id=representation_id, origin="native", quote=name,
+                                    start_char=0, end_char=len(name), quality="precise"),
+        )
+        passage_id = f"passage-{index}"
+        passage = EvidenceSpan(
+            id=passage_id, representation_id=representation_id, quote=quote,
+            locator=DocumentLocator(representation_id=representation_id, origin="native", quote=quote,
+                                    start_char=0, end_char=len(quote), quality="precise"),
+        )
+        entity = KnowledgeEntity(id=f"entity-{index}", canonical_name=name, type="CONCEPT",
+                                 evidence_ids=[mention_id], metadata={"source_ids": [f"source-{index}"]})
+        builds.append({"source": SimpleNamespace(source_id=f"source-{index}"), "representation": representation,
+                       "embeddings": [{"start_char": 0, "end_char": len(quote), "vector": vector}]})
+        entities.append(entity)
+        evidence.extend([mention, passage])
+    return builds, entities, evidence
+
+
+def test_relationship_discovery_uses_cross_source_candidates_and_exact_evidence(monkeypatch):
+    builds, entities, evidence = _relationship_fixture()
+    seen = []
+
+    def discover(candidates, relay):
+        seen.extend(candidates)
+        candidate = candidates[0]
+        return [{
+            "candidate_id": candidate["candidate_id"],
+            "source_entity_id": "entity-1", "target_entity_id": "entity-2",
+            "predicate": "provides substrate for", "qualifiers": {"polarity": "positive"},
+            "citations": [{"evidence_id": row["id"], "quote": row["quote"]}
+                           for row in candidate["evidence"] if row["id"].startswith("passage-")],
+            "reason": "Both sources explicitly identify glucose as the stored and released energy carrier.",
+        }], receipt("relationship_discovery", 1)
+
+    monkeypatch.setattr(pipeline, "_relationship_batch", discover)
+    assertions, relations, receipts = pipeline._discover_cross_source_relationships(
+        "project", builds, entities, [], [], evidence, None,
+    )
+    assert len(seen) == len(assertions) == len(relations) == len(receipts) == 1
+    assert {row["source_id"] for row in seen[0]["evidence"]} == {"source-1", "source-2"}
+    assert set(relations[0].evidence_ids) == {"passage-1", "passage-2"}
+    assert relations[0].metadata["model_receipt_ids"] == [receipts[0].id]
+
+
+def test_relationship_discovery_skips_single_source_without_model_call(monkeypatch):
+    builds, entities, evidence = _relationship_fixture()
+    monkeypatch.setattr(pipeline, "_relationship_batch", lambda *args: pytest.fail("single source reached relationship model"))
+    assert pipeline._discover_cross_source_relationships(
+        "project", builds[:1], entities[:1], [], [], evidence[:2], None,
+    ) == ([], [], [])
+
+
+def test_relationship_candidates_keep_all_cross_source_pairs():
+    builds, entities, evidence = _relationship_fixture(include_third=True)
+    candidates = pipeline._relationship_candidates(builds, entities, [], [], evidence)
+    assert len(candidates) == 3
+    assert {frozenset((item["source_entity"]["id"], item["target_entity"]["id"])) for item in candidates} == {
+        frozenset(("entity-1", "entity-2")),
+        frozenset(("entity-1", "entity-3")),
+        frozenset(("entity-2", "entity-3")),
+    }
+
+
+def test_relationship_discovery_rejects_evidence_from_one_source(monkeypatch):
+    builds, entities, evidence = _relationship_fixture()
+
+    def discover(candidates, relay):
+        candidate = candidates[0]
+        citation = next(row for row in candidate["evidence"] if row["source_id"] == "source-1")
+        return [{
+            "candidate_id": candidate["candidate_id"],
+            "source_entity_id": "entity-1", "target_entity_id": "entity-2",
+            "predicate": "related", "qualifiers": {"polarity": "positive"},
+            "citations": [{"evidence_id": citation["id"], "quote": citation["quote"]}],
+            "reason": "Unsupported",
+        }], receipt("relationship_discovery", 1)
+
+    monkeypatch.setattr(pipeline, "_relationship_batch", discover)
+    with pytest.raises(pipeline.SnapshotBuildError, match="both endpoints and sources"):
+        pipeline._discover_cross_source_relationships("project", builds, entities, [], [], evidence, None)
+
+
+def test_worker_receipt_manifest_includes_synthesis_and_relationship_discovery():
+    receipts = [receipt(operation, index) for index, operation in enumerate((
+        "embedding", "knowledge_synthesis", "relationship_discovery",
+    ), start=1)]
+    manifest = _relay_receipts(receipts)
+    assert manifest == {
+        "embedding": [receipts[0].id],
+        "model": [receipts[1].id, receipts[2].id],
+    }
