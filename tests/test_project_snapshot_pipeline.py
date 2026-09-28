@@ -3,6 +3,7 @@ import json
 from zipfile import ZipFile
 import os
 import threading
+import urllib.error
 import pytest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -17,6 +18,118 @@ from semantica.project_source import source_content_revision
 H1 = "sha256:" + "1" * 64
 H2 = "sha256:" + "2" * 64
 H3 = "sha256:" + "3" * 64
+
+
+def test_structured_extraction_repairs_unlocated_entity_with_receipts(monkeypatch):
+    from types import SimpleNamespace
+    from semantica.project_snapshot_pipeline import _structured_extract
+
+    calls = []
+    def relay(_binding, payload, operation):
+        calls.append(payload)
+        name = "exposure variables" if len(calls) == 1 else "exposure"
+        content = {"entities": [{"id": "e1", "name": name, "type": "concept", "occurrence": 0}], "relations": []}
+        receipt = ModelReceipt(id=f"receipt:{len(calls)}", operation=operation, provider="test", model="model-1", input_digest=H1, output_digest=H2)
+        return {"model": "model-1", "choices": [{"message": {"content": json.dumps(content)}}]}, receipt
+
+    monkeypatch.setattr("semantica.project_snapshot_pipeline._relay_json", relay)
+    result, receipts = _structured_extract("Identify exposure and outcome variables.", SimpleNamespace(model_id="model-1"))
+    assert result["entities"][0]["name"] == "exposure"
+    assert len(receipts) == len(calls) == 2
+    assert "exposure variables" in calls[1]["messages"][0]["content"]
+
+
+def test_structured_extraction_repairs_unsupported_or_ungrounded_qualifiers(monkeypatch):
+    from types import SimpleNamespace
+    from semantica.project_snapshot_pipeline import _structured_extract
+
+    text = "Reflective roofs do not directly shade pedestrians."
+    calls = []
+    def relay(_binding, payload, operation):
+        calls.append(payload)
+        if len(calls) == 1:
+            content = {"entities": [{"id": "roof", "name": "Reflective roofs", "type": "measure", "occurrence": 0},
+                                    {"id": "people", "name": "pedestrians", "type": "population", "occurrence": 0}],
+                       "relations": [{"subject": "roof", "predicate": "shades", "object": "people", "evidence": text,
+                                      "evidence_occurrence": 0, "qualifiers": {"polarity": "negative", "directness": "directly", "condition": "in summer"}}]}
+        else:
+            content = {"repairs": [{"index": 0, "qualifiers": {"polarity": "negative"}}]}
+        receipt = ModelReceipt(id=f"receipt:{len(calls)}", operation=operation, provider="test", model="model-1", input_digest=H1, output_digest=H2)
+        return {"model": "model-1", "choices": [{"message": {"content": json.dumps(content)}}]}, receipt
+
+    monkeypatch.setattr("semantica.project_snapshot_pipeline._relay_json", relay)
+    result, receipts = _structured_extract(text, SimpleNamespace(model_id="model-1"))
+    assert result["relations"][0]["qualifiers"] == {"polarity": "negative"}
+    assert len(receipts) == len(calls) == 2
+    assert "directness" in calls[1]["messages"][1]["content"]
+    assert len(calls[1]["messages"][1]["content"]) < len(calls[0]["messages"][1]["content"]) + 180
+
+
+def test_relay_http_failure_preserves_status_and_code(monkeypatch):
+    from types import SimpleNamespace
+    from semantica.project_snapshot_pipeline import _relay_json, SnapshotBuildError
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-token")
+    def rejected(_request, timeout):
+        raise urllib.error.HTTPError("http://127.0.0.1/", 403, "Forbidden", {}, io.BytesIO(b'{"error":{"code":"CREDIT_EXHAUSTED","message":"private detail"}}'))
+    monkeypatch.setattr("urllib.request.urlopen", rejected)
+    relay = SimpleNamespace(authorization_env="OPENAI_API_KEY", base_url="http://127.0.0.1/v1/chat/completions", model_id="model-1", binding_id="default")
+    with pytest.raises(SnapshotBuildError, match="structured_extraction relay returned HTTP 403: CREDIT_EXHAUSTED") as failure:
+        _relay_json(relay, {"model": "model-1"}, "structured_extraction")
+    assert "private detail" not in str(failure.value)
+
+
+def test_relay_waits_for_complete_gateway_response(monkeypatch):
+    from types import SimpleNamespace
+    from semantica.project_snapshot_pipeline import _relay_json
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-token")
+    class Response:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def read(self): return b'{"choices":[]}'
+
+    def respond(_request, timeout):
+        assert timeout > 15 * 60
+        return Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", respond)
+    relay = SimpleNamespace(authorization_env="OPENAI_API_KEY", base_url="http://127.0.0.1/v1/chat/completions", model_id="model-1", binding_id="default")
+    response, receipt = _relay_json(relay, {"model": "model-1"}, "structured_extraction")
+    assert response == {"choices": []}
+    assert receipt.operation == "structured_extraction"
+
+
+def test_relationship_discovery_omits_ungrounded_qualifier_without_losing_valid_relations(monkeypatch):
+    from semantica.project_snapshot_pipeline import _discover_cross_source_relationships
+    from semantica.project_snapshot_schema import DocumentLocator, EvidenceSpan
+
+    entities = [KnowledgeEntity(id="entity:left", canonical_name="Left", type="concept"),
+                KnowledgeEntity(id="entity:right", canonical_name="Right", type="concept")]
+    evidence = [EvidenceSpan(id=f"evidence:{index}", representation_id=f"representation:{index}", quote=quote,
+                             locator=DocumentLocator(representation_id=f"representation:{index}", origin="native",
+                                                     quote=quote, start_char=0, end_char=len(quote), quality="precise"))
+                for index, quote in [(1, "Left recorded 31."), (2, "Right observed 31.")]]
+    candidate = {"candidate_id": "candidate:1", "source_entity": {"id": entities[0].id},
+                 "target_entity": {"id": entities[1].id},
+                 "evidence": [{"id": span.id, "quote": span.quote, "source_id": f"source:{index}",
+                               "endpoint_ids": [entities[index - 1].id]} for index, span in enumerate(evidence, 1)]}
+    citations = [{"evidence_id": span.id, "quote": span.quote} for span in evidence]
+    valid = {"candidate_id": candidate["candidate_id"], "source_entity_id": entities[0].id,
+             "target_entity_id": entities[1].id, "predicate": "associated with",
+             "qualifiers": {"polarity": "positive"}, "citations": citations, "reason": "Both are observed."}
+    receipt = ModelReceipt(id="receipt:relationship", operation="relationship_discovery", provider="test",
+                           model="model-1", input_digest=H1, output_digest=H2)
+    monkeypatch.setattr("semantica.project_snapshot_pipeline._relationship_candidates", lambda *_: [candidate])
+    monkeypatch.setattr("semantica.project_snapshot_pipeline._relationship_batch",
+                        lambda *_: ([{**valid, "qualifiers": {"polarity": "positive", "unit": "percent"}}, valid], receipt))
+
+    assertions, relations, receipts = _discover_cross_source_relationships(
+        "project-1", [], entities, [], [], evidence, None)
+    assert len(assertions) == len(relations) == 1
+    assert relations[0].evidence_ids == [span.id for span in evidence]
+    assert receipts == [receipt]
 
 
 def _classification_profile():

@@ -15,7 +15,8 @@ SNAPSHOT_PROTOCOL = "semantica.project-snapshot.v1"
 WORKER_PROTOCOL = "semantica.project-worker.v1"
 SHA256_RE = re.compile(r"^(sha256:)?[0-9a-f]{64}$")
 MATERIAL_REVISION_PATTERN = r"^b3-[0-9a-f]{64}$"
-ID_RE = re.compile(r"^[A-Za-z][A-Za-z0-9_.:-]{1,127}$")
+ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{1,127}$")
+MODEL_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:/-]{1,255}$")
 MEDIA_TYPE_RE = re.compile(r"^[A-Za-z0-9!#$&^_.+-]+/[A-Za-z0-9!#$&^_.+-]+$")
 ENV_VAR_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
 
@@ -67,7 +68,8 @@ class StrictModel(BaseModel):
         for name in self.__class__.model_fields:
             value = getattr(self, name)
             if isinstance(value, str) and (name == "id" or name.endswith("_id")):
-                if not ID_RE.match(value):
+                pattern = MODEL_ID_RE if name == "model_id" else ID_RE
+                if not pattern.fullmatch(value):
                     raise ValueError(f"invalid {name}: {value}")
             elif isinstance(value, list) and name.endswith("_ids"):
                 for item in value:

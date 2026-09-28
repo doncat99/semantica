@@ -201,6 +201,19 @@ def test_build_request_accepts_sources_not_semantic_objects():
         ProjectSnapshotBuildRequest.model_validate(bad)
 
 
+def test_build_request_preserves_host_source_and_provider_model_ids():
+    payload = _build_request_payload()
+    payload["sources"][0]["sourceId"] = "6996f3a7-b132-4474-aa13-d14d746218cd"
+    payload["relays"]["embedding"]["modelId"] = "nvidia/llama-nemotron-embed-vl-1b-v2:free"
+    request = ProjectSnapshotBuildRequest.model_validate(payload)
+    assert request.sources[0].source_id == payload["sources"][0]["sourceId"]
+    assert request.relays["embedding"].model_id == payload["relays"]["embedding"]["modelId"]
+
+    payload["relays"]["embedding"]["modelId"] = "../unsafe"
+    with pytest.raises(ValidationError, match="model_id"):
+        ProjectSnapshotBuildRequest.model_validate(payload)
+
+
 def test_build_request_rejects_unsafe_release_and_source_boundaries():
     bad = _build_request_payload()
     bad["sources"][0]["filePath"] = "relative/source.pdf"
