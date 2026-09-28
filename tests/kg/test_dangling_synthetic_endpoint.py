@@ -458,3 +458,17 @@ def test_rejected_count_resets_between_build_calls():
         extract=False,
     )
     assert g2["metadata"]["rejected_relationships"] == 0
+
+
+def test_reject_policy_fail_closed_raises_on_dropped_relationship():
+    builder = GraphBuilder(
+        resolve_conflicts=False,
+        unknown_relation_endpoint="reject",
+        fail_closed=True,
+    )
+
+    with pytest.raises(Exception, match="relationships were dropped|relationship\(s\) were rejected|unknown endpoints"):
+        builder.build(
+            [_rel(_known(), "related_to", _synthetic("Synthetic Entity"))],
+            extract=False,
+        )

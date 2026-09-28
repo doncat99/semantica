@@ -1,0 +1,30 @@
+{
+  "officeVersion": "26.2.6",
+  "wordPerfectFixture": {
+    "url": "https://raw.githubusercontent.com/LibreOffice/core/7b431c168818c66fbbe628f9cec3f9c511e810e5/writerperfect/qa/unit/data/writer/libwpd/pass/WP6.wpd",
+    "sha256": "d5fde49f38d0dd73c65c0d19cb132defcc037dc09c8c405a2dfbaba457d65150"
+  },
+  "platforms": {
+    "darwin-arm64": {
+      "pythonUrl": "https://github.com/astral-sh/python-build-standalone/releases/download/20250612/cpython-3.12.11%2B20250612-aarch64-apple-darwin-install_only.tar.gz",
+      "pythonSha256": "c6d4843e8af496f034176908ae3384556680284653a4bff45eff07e43fe4ae34",
+      "officeUrl": "https://download.documentfoundation.org/libreoffice/stable/26.2.6/mac/aarch64/LibreOffice_26.2.6_MacOS_aarch64.dmg",
+      "officeSha256": "94bb3248df074c225490a8a6d1d9dc87c7d6783dbb7a8e9f0d0c3d94348552af",
+      "officeExecutable": "Contents/MacOS/soffice"
+    },
+    "linux-x64": {
+      "pythonUrl": "https://github.com/astral-sh/python-build-standalone/releases/download/20250612/cpython-3.12.11%2B20250612-x86_64-unknown-linux-gnu-install_only.tar.gz",
+      "pythonSha256": "8e8bb0dbc815fb0b3912e0d8fc0a4f4aaac002bfc1f6cb0fcd278f2888f11bcf",
+      "officeUrl": "https://download.documentfoundation.org/libreoffice/stable/26.2.6/deb/x86_64/LibreOffice_26.2.6_Linux_x86-64_deb.tar.gz",
+      "officeSha256": "fd0e8f8f2408dd2e5b90286e60f3f97cf566ba441cd48cfc5bcc68067303e0bc",
+      "officeExecutable": "program/soffice"
+    },
+    "win-x64": {
+      "pythonUrl": "https://github.com/astral-sh/python-build-standalone/releases/download/20250612/cpython-3.12.11%2B20250612-x86_64-pc-windows-msvc-install_only.tar.gz",
+      "pythonSha256": "7b93afa91931dbc37b307a81b8680b30193736b5ef29a44ef6452f702c306e7a",
+      "officeUrl": "https://download.documentfoundation.org/libreoffice/stable/26.2.6/win/x86_64/LibreOffice_26.2.6_Win_x86-64.msi",
+      "officeSha256": "f9877032fd908beb9c0ddf06df4af5c2e85f419c42e14876c4cce5aae5fb2660",
+      "officeExecutable": "program/soffice.com"
+    }
+  }
+}

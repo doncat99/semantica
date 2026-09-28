@@ -798,6 +798,33 @@ class Semantica:
         """
         return self._create_pipeline(pipeline_dict)
 
+
+    def _extract_graph_sources(self, result: Any) -> List[Dict[str, Any]]:
+        """Return graph source dicts from direct or pipeline-wrapped results."""
+        if result is None:
+            return []
+        if hasattr(result, "output"):
+            return self._extract_graph_sources(result.output)
+        if isinstance(result, list):
+            sources: List[Dict[str, Any]] = []
+            for item in result:
+                sources.extend(self._extract_graph_sources(item))
+            return sources
+        if not isinstance(result, dict):
+            return []
+
+        source_data = {}
+        if "entities" in result:
+            source_data["entities"] = result["entities"]
+        if "relationships" in result:
+            source_data["relationships"] = result["relationships"]
+        if source_data:
+            return [source_data]
+
+        if "output" in result:
+            return self._extract_graph_sources(result["output"])
+        return []
+
     def _build_knowledge_graph(self, results: List[Dict[str, Any]]) -> Dict[str, Any]:
         """
         Build knowledge graph from processing results.
@@ -812,17 +839,13 @@ class Semantica:
             Dictionary containing knowledge graph structure
         """
         try:
-            # Extract entities and relationships from results
+            # Extract entities and relationships from pipeline outputs.
+            # run_pipeline wraps step output as {success, output, metrics, metadata};
+            # callers can also pass an ExecutionResult-like object.  Walk through
+            # that wrapper instead of requiring graph data at the top level.
             graph_sources = []
             for result in results:
-                if isinstance(result, dict):
-                    source_data = {}
-                    if "entities" in result:
-                        source_data["entities"] = result["entities"]
-                    if "relationships" in result:
-                        source_data["relationships"] = result["relationships"]
-                    if source_data:
-                        graph_sources.append(source_data)
+                graph_sources.extend(self._extract_graph_sources(result))
 
             if not graph_sources:
                 self.logger.warning("No entities or relationships found in results")

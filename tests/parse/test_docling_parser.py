@@ -1,9 +1,66 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from pathlib import Path
 from semantica.parse.docling_parser import DoclingParser, DoclingMetadata
 
 class TestDoclingParser(unittest.TestCase):
+    def test_page_projection_uses_all_docling_provenance_entries(self):
+        first = SimpleNamespace(text="First page", prov=[SimpleNamespace(page_no=1)])
+        second = SimpleNamespace(text="Second page", prov=[SimpleNamespace(page_no=2)])
+        shared = SimpleNamespace(text="Spanning item", prov=[SimpleNamespace(page_no=1), SimpleNamespace(page_no=2)])
+        document = SimpleNamespace(
+            pages={number: SimpleNamespace(size=SimpleNamespace(width=100, height=200)) for number in [1, 2]},
+            iterate_items=lambda: iter([(first, 0), (second, 0), (shared, 0)]),
+        )
+        pages = self.parser._extract_pages(SimpleNamespace(document=document), {})
+        self.assertEqual(pages[0]["text"], "First page\nSpanning item")
+        self.assertEqual(pages[1]["text"], "Second page\nSpanning item")
+
+    def test_force_ocr_configures_full_page_and_reports_actual_cell_origin(self):
+        document = MagicMock()
+        document.tables = []
+        document.pages = []
+        document.export_to_text.return_value = "Recovered text"
+        self.mock_converter.convert.return_value = SimpleNamespace(
+            document=document, status="success", pages=[SimpleNamespace(cells=[SimpleNamespace(text="Recovered text", from_ocr=True)])]
+        )
+        with patch.object(Path, 'exists', return_value=True):
+            result = DoclingParser(enable_ocr=True, force_full_page_ocr=True).parse("fixture.pdf", include_document=True)
+        options = next(iter(self.mock_converter_cls.call_args.kwargs["format_options"].values())).pipeline_options
+        self.assertTrue(options.do_ocr)
+        self.assertTrue(options.ocr_options.force_full_page_ocr)
+        self.assertEqual(result["origin"], "ocr")
+        self.assertEqual(result["plain_text"], "Recovered text")
+
+    def test_mixed_origin_comes_from_cells_not_requested_ocr_setting(self):
+        document = MagicMock()
+        document.tables = []
+        document.pages = []
+        self.mock_converter.convert.return_value = SimpleNamespace(
+            document=document, status="success", pages=[SimpleNamespace(cells=[
+                SimpleNamespace(text="Native", from_ocr=False), SimpleNamespace(text="Scanned", from_ocr=True)
+            ])]
+        )
+        with patch.object(Path, 'exists', return_value=True):
+            result = DoclingParser(enable_ocr=True).parse("fixture.pdf", include_document=True)
+        self.assertEqual(result["origin"], "mixed")
+
+    def test_complete_document_uses_one_conversion_and_survives_reload(self):
+        from docling_core.types.doc import DoclingDocument, DocItemLabel
+        document = DoclingDocument(name="one-conversion")
+        document.add_text(label=DocItemLabel.TEXT, text="北京大学位于北京。")
+        converter = MagicMock()
+        converter.convert.return_value = SimpleNamespace(document=document, status="success")
+        parser = DoclingParser(converter=converter)
+        with patch.object(Path, 'exists', return_value=True):
+            result = parser.parse("fixture.pdf", include_document=True, export_format="doctags")
+        converter.convert.assert_called_once_with("fixture.pdf")
+        restored = DoclingDocument.model_validate(result["document"])
+        self.assertEqual(result["doctags"], restored.export_to_doctags())
+        self.assertEqual(result["full_text"], result["doctags"])
+        self.assertEqual(restored.texts[0].text, "北京大学位于北京。")
+
     def setUp(self):
         # Patch DOCLING_AVAILABLE to True for testing logic
         self.available_patcher = patch('semantica.parse.docling_parser.DOCLING_AVAILABLE', True)

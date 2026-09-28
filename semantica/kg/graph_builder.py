@@ -26,6 +26,8 @@ from datetime import datetime
 from typing import Any, Dict, List, Optional, Set, Tuple, Union
 import time
 
+from ..utils.exceptions import ProcessingError
+
 
 class GraphBuilder:
     """
@@ -99,6 +101,7 @@ class GraphBuilder:
         if isinstance(_nested, dict):
             for _key, _value in _nested.items():
                 kwargs.setdefault(_key, _value)
+        self.fail_closed = bool(kwargs.pop("fail_closed", False))
         self.config = kwargs
         # unknown_relation_endpoint lives in the per-module build config
         # (semantica/kg/config.py); fall back to it so the option has a single
@@ -126,6 +129,7 @@ class GraphBuilder:
         }
         # Counts relationships dropped by the reject policy per build() call.
         self._rejected_relationships: int = 0
+        self._fail_closed_errors: List[str] = []
 
         # Initialize logging
         from ..utils.logging import get_logger
@@ -450,6 +454,8 @@ class GraphBuilder:
         if not options.get("extract", True):
             return
 
+        fail_closed = bool(options.get("fail_closed", self.fail_closed))
+
         from ..semantic_extract.ner_extractor import NERExtractor
         from ..semantic_extract.relation_extractor import RelationExtractor
         from ..semantic_extract.triplet_extractor import TripletExtractor
@@ -474,6 +480,9 @@ class GraphBuilder:
                 self._process_item(ent, all_entities, all_relationships, **options)
         except Exception as e:
             self.logger.error(f"Entity extraction failed: {e}")
+            if fail_closed:
+                raise ProcessingError(f"Entity extraction failed: {e}") from e
+            self._fail_closed_errors.append(f"entity_extraction: {e}")
             entities = []
         
         # 2. Extract Relations (if requested)
@@ -497,6 +506,9 @@ class GraphBuilder:
                     self._process_item(rel, all_entities, all_relationships, **options)
             except Exception as e:
                 self.logger.error(f"Relation extraction failed: {e}")
+                if fail_closed:
+                    raise ProcessingError(f"Relation extraction failed: {e}") from e
+                self._fail_closed_errors.append(f"relation_extraction: {e}")
 
         # 3. Extract Triplets (if requested)
         if options.get("extract_triplets", True):
@@ -514,6 +526,9 @@ class GraphBuilder:
                     self._process_item(trip, all_entities, all_relationships, **options)
             except Exception as e:
                 self.logger.error(f"Triplet extraction failed: {e}")
+                if fail_closed:
+                    raise ProcessingError(f"Triplet extraction failed: {e}") from e
+                self._fail_closed_errors.append(f"triplet_extraction: {e}")
 
     def build(
         self,
@@ -639,8 +654,9 @@ class GraphBuilder:
             "extracted_relations": 0,
             "extracted_triplets": 0
         }
-        # Reset per-run rejection counter.
+        # Reset per-run failure counters.
         self._rejected_relationships = 0
+        self._fail_closed_errors = []
         
         tracking_id = self.progress_tracker.start_tracking(
             module="kg",
@@ -913,12 +929,45 @@ class GraphBuilder:
                     filtered.append(_entity)
                 resolved_entities = filtered
 
+            fail_closed = bool(options.get("fail_closed", self.fail_closed))
             if input_relationships_count > 0 and len(all_relationships) == 0:
                 warning_msg = (
                     f"All relationships were dropped during graph building: "
                     f"{input_relationships_count} input relationships, 0 in final graph"
                 )
                 self.logger.warning(warning_msg)
+                if fail_closed:
+                    raise ProcessingError(warning_msg)
+            elif fail_closed and self._rejected_relationships:
+                raise ProcessingError(
+                    f"{self._rejected_relationships} relationship(s) were rejected during graph building"
+                )
+
+            if fail_closed:
+                known_entity_ids: Set[Any] = set()
+                for entity in resolved_entities:
+                    if not isinstance(entity, dict):
+                        continue
+                    for key in ("id", "entity_id"):
+                        value = entity.get(key)
+                        if value is None:
+                            continue
+                        try:
+                            known_entity_ids.add(value)
+                        except TypeError:
+                            continue
+                dangling = []
+                for relationship in all_relationships:
+                    if not isinstance(relationship, dict):
+                        continue
+                    source = relationship.get("source")
+                    target = relationship.get("target")
+                    if source not in known_entity_ids or target not in known_entity_ids:
+                        dangling.append(relationship)
+                if dangling:
+                    raise ProcessingError(
+                        f"{len(dangling)} relationship(s) reference unknown endpoints"
+                    )
 
             # Build graph structure
             self.logger.debug("Building graph structure...")
@@ -933,6 +982,8 @@ class GraphBuilder:
                     "timestamp": self._get_timestamp(),
                     "entity_resolution_applied": resolver_to_use is not None,
                     "rejected_relationships": self._rejected_relationships,
+                    "fail_closed": fail_closed,
+                    "extraction_errors": list(self._fail_closed_errors),
                 },
             }
             structure_time = time.time() - structure_start

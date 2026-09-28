@@ -1,0 +1,103 @@
+name: Project Worker Native Release
+
+on:
+  push:
+    tags: ['ontoscience-native-*']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  wheel:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
+        with:
+          version: '0.9.10'
+      - env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="ontoscience-project-worker-${GITHUB_SHA:0:12}"
+          if ! gh release view "$tag" >/dev/null 2>&1; then
+            uv build --wheel --out-dir native-dist
+            gh release create "$tag" --target "$GITHUB_SHA" --title "OntoScience project worker ${GITHUB_SHA:0:12}" --notes 'Immutable worker and native runtime bundles. Platform acceptance and inventories are attached.' native-dist/*.whl
+          fi
+  native:
+    needs: wheel
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-14
+            target: darwin-arm64
+            python: python/bin/python3
+          - runner: ubuntu-24.04
+            target: linux-x64
+            python: python/bin/python3
+          - runner: windows-2022
+            target: win-x64
+            python: python/python.exe
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 90
+    permissions:
+      contents: write
+    defaults:
+      run:
+        shell: bash
+    env:
+      UV_CONSTRAINT: ${{ github.workspace }}/.github/requirements/project-worker-${{ matrix.target }}.lock
+      UV_TORCH_BACKEND: cpu
+      DOCLING_DEVICE: cpu
+      ORT_DISABLE_TELEMETRY: '1'
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
+        with:
+          version: '0.9.10'
+      - name: Fetch immutable native inputs
+        run: uv run --no-project --python 3.12 .github/scripts/project_worker_native.py '${{ matrix.target }}' native-inputs
+      - name: Fetch wheel and locked model inputs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="ontoscience-project-worker-${GITHUB_SHA:0:12}"
+          mkdir -p native-dist
+          gh release download "$tag" --pattern '*.whl' --dir native-dist
+          native-inputs/${{ matrix.python }} -I -B .github/scripts/project_worker_models.py .github/requirements/project-worker-models.json native-inputs/models
+      - name: Build native bundle
+        run: |
+          shopt -s nullglob
+          wheels=(native-dist/*.whl)
+          if (( ${#wheels[@]} != 1 )); then
+            echo "Expected exactly one Semantica wheel, found ${#wheels[@]}" >&2
+            exit 1
+          fi
+          native-inputs/${{ matrix.python }} -I -B semantica/project_bundle.py --python-root native-inputs/python --wheel "${wheels[0]}" --models-root native-inputs/models --office-root native-inputs/office --office-receipt native-inputs/office-release.json --output native-bundle --source-revision "$GITHUB_SHA"
+      - name: Relocate and validate installed worker
+        run: |
+          mv native-bundle "$RUNNER_TEMP/semantica-relocated"
+          "$RUNNER_TEMP/semantica-relocated/${{ matrix.python }}" -I -B .github/scripts/project_worker_acceptance.py "$RUNNER_TEMP/semantica-relocated" native-dist/${{ matrix.target }}-acceptance.json
+      - name: Archive and publish immutable native release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          COPYFILE_DISABLE: '1'
+        run: |
+          tag="ontoscience-project-worker-${GITHUB_SHA:0:12}"
+          archive="semantica-${{ matrix.target }}-${GITHUB_SHA:0:12}.tar.gz"
+          tar -czf "native-dist/$archive" -C "$RUNNER_TEMP/semantica-relocated" .
+          cp "$RUNNER_TEMP/semantica-relocated/manifest.json" native-dist/${{ matrix.target }}-manifest.json
+          for artifact in native-dist/*; do
+            name="$(basename "$artifact")"
+            if gh release view "$tag" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then
+              mkdir -p existing-release
+              gh release download "$tag" --pattern "$name" --dir existing-release
+              cmp "$artifact" "existing-release/$name"
+            else
+              gh release upload "$tag" "$artifact"
+            fi
+          done
