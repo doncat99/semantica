@@ -101,7 +101,7 @@ with tempfile.TemporaryDirectory(prefix="semantica-native-acceptance-") as direc
         "projectId": "native", "baseSnapshot": None, "inputRevision": "sha256:" + "1" * 64, "outputDir": str(scratch / "output"),
         "recipe": {"id": "deterministic", "version": "1", "forceOcrSourceIds": []}, "sources": sources,
         "release": {key: manifest[key] for key in ("artifactDigest", "schemaDigest", "mediaTypes")},
-        "relays": {key: {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/" + endpoint, "modelId": "offline-probe", "capability": capability, "receipts": "required"}
+        "relays": {key: {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/" + endpoint, "modelId": "nvidia/llama-nemotron-embed-vl-1b-v2:free", "capability": capability, "receipts": "required"}
             for key, endpoint, capability in [("model", "chat/completions", "knowledge.snapshot.generate"), ("embedding", "embeddings", "knowledge.snapshot.embed")]}}})
     artifacts = {item["kind"]: {key: item[key] for key in ("path", "digest", "kind", "mediaType")} for item in built["artifacts"]}
     queried = invoke("semantica.project_query_worker", {"protocol": "semantica.project-query.v1", "id": "native-query", "method": "query", "params": {
