@@ -28,7 +28,7 @@ os.environ.update(DOCLING_ARTIFACTS_PATH=str(root / "models"), HF_HUB_OFFLINE="1
 def invoke(module, request):
     process = subprocess.run([sys.executable, "-I", "-B", "-m", module], input=json.dumps(request) + "\n",
                              text=True, capture_output=True, timeout=180, check=True)
-    response = json.loads(process.stdout)
+    response = json.loads(process.stdout.splitlines()[-1])
     assert response["ok"], response
     return response["result"]
 
