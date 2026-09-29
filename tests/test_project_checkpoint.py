@@ -17,7 +17,8 @@ def test_worker_process_restart_reuses_durable_parse_and_model_calls(tmp_path):
     source = tmp_path / "source.txt"
     source.write_text("A source explains durable knowledge production.", encoding="utf-8")
     request = _request(source, tmp_path / "output", recipe="model")
-    parsed_log = tmp_path / "parsed.log"
+    parsed_artifact = Path(request["params"]["parsedSources"][0]["artifactPath"])
+    parsed_bytes = parsed_artifact.read_bytes()
     second_call = threading.Event()
     release_call = threading.Event()
     calls = []
@@ -60,23 +61,9 @@ def test_worker_process_restart_reuses_durable_parse_and_model_calls(tmp_path):
             relay["baseUrl"] = f"http://127.0.0.1:{instance.server_port}/v1/{endpoint}"
         return instance
 
-    # Instrument the real parser only; the worker, HTTP calls and disk recovery are real.
-    script = """
-import os
-from pathlib import Path
-import semantica.project_snapshot_pipeline as pipeline
-from semantica.project_snapshot_worker import serve
-original = pipeline.parse_source
-def parse(*args, **kwargs):
-    with Path(os.environ['PARSED_LOG']).open('a') as stream:
-        stream.write('parsed\\n')
-    return original(*args, **kwargs)
-pipeline.parse_source = parse
-raise SystemExit(serve())
-"""
     def worker():
-        return subprocess.Popen([sys.executable, "-c", script], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE, text=True, env={**os.environ, "OPENAI_API_KEY": "fixture", "PARSED_LOG": str(parsed_log)})
+        return subprocess.Popen([sys.executable, "-m", "semantica.project_snapshot_worker"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE, text=True, env={**os.environ, "OPENAI_API_KEY": "fixture"})
 
     first_server = server()
     child = worker()
@@ -104,9 +91,9 @@ raise SystemExit(serve())
         resumed = worker()
         stdout, stderr = resumed.communicate(json.dumps(request) + "\n", timeout=30)
         assert resumed.returncode == 0, stderr
-        result = json.loads(stdout)
+        result = json.loads(stdout.strip().splitlines()[-1])
         assert result["ok"], result
-        assert parsed_log.read_text().splitlines() == ["parsed"]
+        assert parsed_artifact.read_bytes() == parsed_bytes
         extraction_calls = [item for item in calls if "messages" in item and item["messages"][1]["content"] == source.read_text()]
         assert len(extraction_calls) == 1
         snapshot_artifact = next(item for item in result["result"]["artifacts"] if item["kind"] == "snapshot")
@@ -117,18 +104,18 @@ raise SystemExit(serve())
         repeated = worker()
         stdout, stderr = repeated.communicate(json.dumps(request) + "\n", timeout=30)
         assert repeated.returncode == 0, stderr
-        assert json.loads(stdout) == result
+        assert json.loads(stdout.strip().splitlines()[-1]) == result
         assert len(calls) == count
-        assert parsed_log.read_text().splitlines() == ["parsed"]
+        assert parsed_artifact.read_bytes() == parsed_bytes
         source.write_text("The material changed without changing its declared revision.")
         changed = worker()
         stdout, stderr = changed.communicate(json.dumps(request) + "\n", timeout=30)
         assert changed.returncode == 0, stderr
-        failure = json.loads(stdout)
+        failure = json.loads(stdout.strip().splitlines()[-1])
         assert not failure["ok"]
         assert "inputs changed" in failure["error"]["message"]
         assert len(calls) == count
-        assert parsed_log.read_text().splitlines() == ["parsed"]
+        assert parsed_artifact.read_bytes() == parsed_bytes
     finally:
         resumed_server.shutdown()
         resumed_server.server_close()

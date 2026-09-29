@@ -75,6 +75,36 @@ def test_force_ocr_cannot_claim_non_docling_provenance(tmp_path: Path):
         parse_source(source, name=source.name, mime_type="text/plain", force_ocr=True)
 
 
+@pytest.mark.parametrize("force_ocr", [False, True])
+def test_docling_enables_ocr_only_for_explicit_repair(tmp_path: Path, monkeypatch, force_ocr: bool):
+    from semantica.parse import docling_parser
+
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"%PDF fixture")
+    options = {}
+
+    class FakeDoclingParser:
+        def __init__(self, **kwargs):
+            options.update(kwargs)
+
+        def parse(self, *_args, **_kwargs):
+            return {
+                "conversion_status": "success",
+                "doctags": "<text>Native text</text>",
+                "document": {"pages": {}},
+                "metadata": {},
+                "origin": "ocr" if force_ocr else "native",
+                "pages": [],
+                "plain_text": "Native text",
+            }
+
+    monkeypatch.setattr(docling_parser, "DoclingParser", FakeDoclingParser)
+    parse_source(source, name=source.name, mime_type="application/pdf", force_ocr=force_ocr)
+
+    assert options["enable_ocr"] is force_ocr
+    assert options["force_full_page_ocr"] is force_ocr
+
+
 def test_epub_adapter_reads_spine_without_a_second_parser(tmp_path: Path):
     source = tmp_path / "book.epub"
     with ZipFile(source, "w") as archive:

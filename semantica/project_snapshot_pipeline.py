@@ -41,6 +41,8 @@ from .project_snapshot_schema import (
     ModelReceipt,
     ProjectSnapshot,
     ProjectSnapshotBuildRequest,
+    ParseSourceRequest,
+    ParsedSourceRef,
     ReportSection,
     SourceClassification,
     SourceRelation,
@@ -95,16 +97,24 @@ def _text_windows(text: str):
             break
 
 
-def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any):
+def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, progress=None, progress_base: int = 0, progress_total: int = 1):
     result: dict[str, list] = {"entities": [], "relations": []}
     receipts, embeddings = [], []
     seen_entities, seen_relations = set(), set()
-    for start, end, window in _text_windows(text):
+    windows = list(_text_windows(text))
+    for index, (start, end, window) in enumerate(windows, start=1):
         extracted, extraction_receipts = _structured_extract(window, model_relay)
         receipts.extend(extraction_receipts if isinstance(extraction_receipts, list) else [extraction_receipts])
         vector, receipt = _embed_text(window, embedding_relay)
         receipts.append(receipt)
         embeddings.append({"start_char": start, "end_char": end, "vector": vector})
+        if progress:
+            progress({
+                "stage": "embedding",
+                "percent": min(99, 20 + round(((progress_base + index) / max(1, progress_total)) * 70)),
+                "detail": f"Embedding {progress_base + index} / {progress_total} chunks",
+                "metadata": {"completedChunks": progress_base + index, "totalChunks": progress_total},
+            })
         local_ids = {item.get("id") for item in extracted["entities"] if isinstance(item, dict)}
         if None in local_ids or len(local_ids) != len(extracted["entities"]):
             raise SnapshotBuildError("extraction requires unique occurrence ids")
@@ -887,6 +897,60 @@ def _representation_revision(source: Any, force_ocr: bool, content_hash: str, pa
         "document": {key: value for key, value in document.items() if key not in {"metadata", "representation_revision"}}})
 
 
+def parse_source_artifact(request: ParseSourceRequest) -> dict[str, str]:
+    """Materialize one source revision before any semantic/model work."""
+    profile = request.document_processing.model_dump(mode="json", by_alias=True)
+    text, document, origin, content_hash, parser, parser_version = _parse_source(request.source, request.force_ocr, profile)
+    payload = {
+        "protocol": "semantica.parsed-source.v1",
+        "sourceId": request.source.source_id,
+        "materialRevision": content_hash,
+        "name": request.source.name,
+        "mimeType": request.source.mime_type,
+        "forceOcr": request.force_ocr,
+        "documentProcessing": profile,
+        "parser": parser,
+        "parserVersion": parser_version,
+        "origin": origin,
+        "document": document,
+    }
+    output_dir = Path(request.output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"parsed-{_safe_id(request.source.source_id)}.json"
+    digest = _write_json(path, payload)
+    return {"artifactPath": str(path), "artifactDigest": digest, "sourceId": request.source.source_id,
+            "materialRevision": content_hash, "representationRevision": document["representation_revision"],
+            "representationId": f"representation:{_safe_id(request.source.source_id)}:{document['representation_revision'][7:]}"}
+
+
+def _load_parsed_source(source: Any, ref: ParsedSourceRef, force_ocr: bool, profile: dict) -> tuple[str, dict, str, str, str, str]:
+    path = Path(ref.artifact_path).resolve()
+    if not path.is_file() or _digest_file(path) != ref.artifact_digest:
+        raise SnapshotBuildError(f"parsed source artifact digest is invalid: {source.source_id}")
+    if source_content_revision(Path(source.file_path).resolve()) != source.material_revision:
+        raise SnapshotBuildError(f"source material revision does not match immutable bytes: {source.source_id}")
+    payload = json.loads(path.read_bytes())
+    if not isinstance(payload, dict) or any((
+        payload.get("protocol") != "semantica.parsed-source.v1",
+        payload.get("sourceId") != source.source_id or ref.source_id != source.source_id,
+        payload.get("materialRevision") != source.material_revision,
+        payload.get("name") != source.name,
+        payload.get("mimeType") != source.mime_type,
+        payload.get("forceOcr") is not force_ocr,
+        payload.get("documentProcessing") != profile,
+    )):
+        raise SnapshotBuildError(f"parsed source identity or processing profile changed: {source.source_id}")
+    document = payload.get("document")
+    origin, parser, version = payload.get("origin"), payload.get("parser"), payload.get("parserVersion")
+    if not isinstance(document, dict) or not isinstance(document.get("text"), str) or not all(isinstance(value, str) for value in (origin, parser, version)):
+        raise SnapshotBuildError(f"parsed source document is invalid: {source.source_id}")
+    if (document.get("content_hash") != source.material_revision or document.get("mime_type") != source.mime_type
+        or document.get("representation_revision") != _representation_revision(source, force_ocr, source.material_revision, parser, version, origin, document)):
+        raise SnapshotBuildError(f"parsed source representation revision changed: {source.source_id}")
+    _admit_document_quality(source.source_id, document, force_ocr)
+    return document["text"], document, origin, source.material_revision, parser, version
+
+
 def _span_id(representation_id: str, start: int, end: int) -> str:
     return f"evidence:{_safe_id(representation_id)}:{start}:{end}"
 
@@ -1508,16 +1572,16 @@ def _change_delta(
     )
 
 
-def build_project_snapshot(request: ProjectSnapshotBuildRequest) -> dict[str, Any]:
+def build_project_snapshot(request: ProjectSnapshotBuildRequest, progress=None) -> dict[str, Any]:
     """Build, validate, and materialize one immutable snapshot and its artifacts."""
     token = active_checkpoint.set(SnapshotCheckpoint(request))
     try:
-        return _build_project_snapshot(request)
+        return _build_project_snapshot(request, progress=progress)
     finally:
         active_checkpoint.reset(token)
 
 
-def _build_project_snapshot(request: ProjectSnapshotBuildRequest) -> dict[str, Any]:
+def _build_project_snapshot(request: ProjectSnapshotBuildRequest, progress=None) -> dict[str, Any]:
     if request.recipe.id not in {"deterministic", "model"}:
         raise SnapshotBuildError(
             f"unsupported project snapshot recipe: {request.recipe.id}; "
@@ -1545,11 +1609,37 @@ def _build_project_snapshot(request: ProjectSnapshotBuildRequest) -> dict[str, A
     source_builds = []
     model_receipts: list[ModelReceipt] = []
     source_classifications: list[SourceClassification] = []
-    for source in request.sources:
+    parsed_sources = []
+    parsed_refs = {ref.source_id: ref for ref in request.parsed_sources}
+    for source_index, source in enumerate(request.sources, start=1):
+        source_path = Path(source.file_path).resolve()
+        total_pages = None
+        if source_path.suffix.lower() == ".pdf":
+            try:
+                import pdfplumber
+                with pdfplumber.open(source_path) as pdf:
+                    total_pages = len(pdf.pages)
+            except Exception:
+                pass
+        if progress:
+            progress({
+                "stage": "document_parsing",
+                "percent": max(2, round((source_index - 1) / max(1, len(request.sources)) * 20)),
+                "detail": f"Parsing document {source_index} / {len(request.sources)}",
+                **({"metadata": {"totalPages": total_pages}} if total_pages else {}),
+            })
         force_ocr = source.source_id in request.recipe.force_ocr_source_ids
-        parsed = _parse_source(source, force_ocr, request.document_processing.model_dump(mode="json", by_alias=True))
+        parsed = _load_parsed_source(source, parsed_refs[source.source_id], force_ocr, request.document_processing.model_dump(mode="json", by_alias=True))
+        parsed_sources.append((source, force_ocr, parsed))
+    total_chunks = sum(len(list(_text_windows(parsed[0]))) for _, _, parsed in parsed_sources) if request.recipe.id == "model" else 0
+    completed_chunks = 0
+    for source, force_ocr, parsed in parsed_sources:
         if request.recipe.id == "model":
-            model_result, embeddings, source_receipts = _extract_and_embed(parsed[0], request.relays["model"], request.relays["embedding"])
+            model_result, embeddings, source_receipts = _extract_and_embed(
+                parsed[0], request.relays["model"], request.relays["embedding"],
+                progress=progress, progress_base=completed_chunks, progress_total=total_chunks,
+            )
+            completed_chunks += len(embeddings)
             built_source = _build_source(source, force_ocr, model_result, parsed)
             built_source["embeddings"] = embeddings
             model_receipts.extend(source_receipts)

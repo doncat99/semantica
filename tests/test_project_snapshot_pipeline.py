@@ -9,8 +9,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from semantica.project_snapshot_pipeline import _canonical_graph_projection
-from semantica.project_snapshot_pipeline import build_project_snapshot
-from semantica.project_snapshot_schema import ProjectSnapshotBuildRequest
+from semantica.project_snapshot_pipeline import build_project_snapshot, parse_source_artifact
+from semantica.project_snapshot_schema import ProjectSnapshotBuildRequest, ParseSourceRequest
 from semantica.project_snapshot_schema import KnowledgeEntity, KnowledgeRelation, ModelReceipt, ProjectSnapshot, stable_digest
 from semantica.project_snapshot_worker import serve
 from semantica.project_source import source_content_revision
@@ -18,6 +18,11 @@ from semantica.project_source import source_content_revision
 H1 = "sha256:" + "1" * 64
 H2 = "sha256:" + "2" * 64
 H3 = "sha256:" + "3" * 64
+
+
+def _worker_output(stdout):
+    events = [json.loads(line) for line in stdout.getvalue().splitlines()]
+    return events, events[-1]
 
 
 def test_structured_extraction_repairs_unlocated_entity_with_receipts(monkeypatch):
@@ -195,8 +200,17 @@ def test_explanation_rejects_missing_or_hallucinated_citations(tmp_path, monkeyp
         _explanation_reports("project-1", [built], built["entities"], [], [], [], [], [*built["evidence"], *built["passages"]], None)
 
 
-def _request(source: Path, output_dir: Path, *, recipe: str = "deterministic") -> dict:
-    return {
+def _parsed_ref(params, source):
+    result = parse_source_artifact(ParseSourceRequest.model_validate({
+        "source": source, "outputDir": str(Path(params["outputDir"]) / "parsed"),
+        "forceOcr": source["sourceId"] in params["recipe"]["forceOcrSourceIds"],
+        "documentProcessing": params.get("documentProcessing", {"mode": "local"}),
+    }))
+    return {key: result[key] for key in ("artifactPath", "artifactDigest", "sourceId")}
+
+
+def _request(source: Path, output_dir: Path, *, recipe: str = "deterministic", prepare: bool = True) -> dict:
+    request = {
         "protocol": "semantica.project-worker.v1",
         "id": "build-1",
         "method": "build_project_snapshot",
@@ -211,9 +225,11 @@ def _request(source: Path, output_dir: Path, *, recipe: str = "deterministic") -
                 "model": {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/chat/completions", "capability": "knowledge.snapshot.generate", "modelId": "model-1", "receipts": "required"},
             },
             "release": {"artifactDigest": H2, "schemaDigest": H3, "mediaTypes": {"document-representation": "application/vnd.semantica.document-representation+json", "retrieval-index": "application/vnd.semantica.retrieval+json", "snapshot": "application/vnd.semantica.project-snapshot+json"}},
-            "sources": [{"filePath": str(source), "materialRevision": source_content_revision(source), "mimeType": "text/plain", "name": source.name, "sourceId": "source-1"}],
+            "sources": [{"filePath": str(source), "materialRevision": source_content_revision(source), "mimeType": "application/epub+zip" if source.suffix == ".epub" else "text/plain", "name": source.name, "sourceId": "source-1"}],
         },
     }
+    request["params"]["parsedSources"] = [_parsed_ref(request["params"], request["params"]["sources"][0])] if prepare else []
+    return request
 
 
 def test_worker_builds_complete_snapshot_from_real_text_file(tmp_path):
@@ -223,7 +239,9 @@ def test_worker_builds_complete_snapshot_from_real_text_file(tmp_path):
     stdout = io.StringIO()
 
     assert serve(stdin, stdout) == 0
-    response = json.loads(stdout.getvalue())
+    events, response = _worker_output(stdout)
+    assert events[0]["type"] == "progress"
+    assert events[0]["stage"] == "document_parsing"
     assert response["ok"] is True
     assert [item["kind"] for item in response["result"]["artifacts"]] == ["document-representation", "retrieval-index", "snapshot"]
     assert response["result"]["relayReceipts"] == {"embedding": [], "model": []}
@@ -291,13 +309,15 @@ def test_canonical_graph_projection_preserves_snapshot_identity():
 def test_worker_fails_closed_for_unsupported_source_format(tmp_path):
     source = tmp_path / "source.unknown"
     source.write_bytes(b"not-an-epub")
-    request = _request(source, tmp_path)
+    request = _request(source, tmp_path, prepare=False)
     request["params"]["sources"][0]["mimeType"] = "application/octet-stream"
+    request["method"] = "parse_source"
+    request["params"] = {"source": request["params"]["sources"][0], "outputDir": str(tmp_path), "forceOcr": False, "documentProcessing": {"mode": "local"}}
     stdin = io.StringIO(json.dumps(request) + "\n")
     stdout = io.StringIO()
 
     assert serve(stdin, stdout) == 0
-    response = json.loads(stdout.getvalue())
+    _, response = _worker_output(stdout)
     assert response["ok"] is False
     assert response["error"]["type"] == "SnapshotBuildError"
     assert "unsupported" in response["error"]["message"].lower()
@@ -316,9 +336,10 @@ def test_cross_source_same_name_stays_unresolved(tmp_path):
         "name": second.name,
         "sourceId": "source-2",
     })
+    request["params"]["parsedSources"].append(_parsed_ref(request["params"], request["params"]["sources"][-1]))
     stdout = io.StringIO()
     assert serve(io.StringIO(json.dumps(request) + "\n"), stdout) == 0
-    response = json.loads(stdout.getvalue())
+    _, response = _worker_output(stdout)
     assert response["ok"] is True
     snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "snapshot")
     snapshot = ProjectSnapshot.model_validate_json(snapshot_path.read_bytes())
@@ -350,10 +371,9 @@ def test_epub_adapter_preserves_adapter_locator_origin(tmp_path):
             "<html><body><h1>Ada Lovelace</h1><p>Designed the Analytical Engine.</p></body></html>",
         )
     request = _request(source, tmp_path)
-    request["params"]["sources"][0]["mimeType"] = "application/epub+zip"
     stdout = io.StringIO()
     assert serve(io.StringIO(json.dumps(request) + "\n"), stdout) == 0
-    response = json.loads(stdout.getvalue())
+    _, response = _worker_output(stdout)
     assert response["ok"] is True
     snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "snapshot")
     snapshot = ProjectSnapshot.model_validate_json(snapshot_path.read_bytes())
@@ -419,7 +439,7 @@ def test_model_recipe_uses_bifrost_chat_and_embedding_and_records_receipts(tmp_p
         stdin = io.StringIO(json.dumps(request) + "\n")
         stdout = io.StringIO()
         assert serve(stdin, stdout) == 0
-        response = json.loads(stdout.getvalue())
+        _, response = _worker_output(stdout)
     finally:
         if previous_token is None:
             os.environ.pop("OPENAI_API_KEY", None)
@@ -464,7 +484,7 @@ def test_model_recipe_fails_closed_without_relay_token(tmp_path):
         stdin = io.StringIO(json.dumps(_request(source, tmp_path, recipe="model")) + "\n")
         stdout = io.StringIO()
         assert serve(stdin, stdout) == 0
-        response = json.loads(stdout.getvalue())
+        _, response = _worker_output(stdout)
     finally:
         if previous_token is not None:
             os.environ["OPENAI_API_KEY"] = previous_token
@@ -480,6 +500,7 @@ def test_incremental_delta_ignores_audit_time_and_tracks_only_dependent_reports(
     second.write_text("Charles Babbage designed machines.", encoding="utf-8")
     request = _request(first, tmp_path / "first-build")["params"]
     request["sources"].append({"filePath": str(second), "materialRevision": source_content_revision(second), "mimeType": "text/plain", "name": second.name, "sourceId": "source-2"})
+    request["parsedSources"].append(_parsed_ref(request, request["sources"][-1]))
     initial = build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(request))
     assert all(report.metadata.get("source_ids") for report in initial["snapshot"].reports)
     assert any(report.metadata["source_ids"] == ["source-1"] for report in initial["snapshot"].reports)
@@ -494,6 +515,7 @@ def test_incremental_delta_ignores_audit_time_and_tracks_only_dependent_reports(
     first.write_text("Grace Hopper studied mathematics.", encoding="utf-8")
     request["sources"][0]["materialRevision"] = source_content_revision(first)
     request["outputDir"] = str(tmp_path / "changed-build")
+    request["parsedSources"][0] = _parsed_ref(request, request["sources"][0])
     updated = build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(request))["snapshot"]
     unchanged_reports = {report.id for report in initial["snapshot"].reports if "Charles Babbage" in report.title}
     assert unchanged_reports
@@ -559,9 +581,12 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
     monkeypatch.setattr("semantica.project_snapshot_pipeline._relay_json", relay_response)
     request = _request(first, tmp_path / "build", recipe="model")
     request["params"]["sources"].append({"filePath": str(second), "materialRevision": source_content_revision(second), "mimeType": "text/plain", "name": second.name, "sourceId": "source-2"})
+    request["params"]["parsedSources"].append(_parsed_ref(request["params"], request["params"]["sources"][-1]))
     stdout = io.StringIO()
     assert serve(io.StringIO(json.dumps(request) + "\n"), stdout) == 0
-    response = json.loads(stdout.getvalue())
+    events, response = _worker_output(stdout)
+    embedding_progress = [event for event in events if event.get("stage") == "embedding"]
+    assert embedding_progress[-1]["metadata"] == {"completedChunks": 2, "totalChunks": 2}
     assert response["ok"] is True, response
     snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "snapshot")
     snapshot = ProjectSnapshot.model_validate_json(snapshot_path.read_bytes())

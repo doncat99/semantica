@@ -88,9 +88,14 @@ with tempfile.TemporaryDirectory(prefix="semantica-native-acceptance-") as direc
     from semantica.project_source import source_content_revision
     sources = [{"filePath": str(path), "sourceId": f"source-{index}", "name": path.name, "materialRevision": source_content_revision(path), "mimeType": mime}
         for index, (path, mime) in enumerate([(source, "text/plain"), (epub, "application/epub+zip")])]
+    parsed_sources = []
+    for item in sources:
+        result = invoke("semantica.project_snapshot_worker", {"protocol": "semantica.project-worker.v1", "id": "native-parse", "method": "parse_source", "params": {
+            "source": item, "outputDir": str(scratch / "parsed"), "forceOcr": False, "documentProcessing": {"mode": "local"}}})
+        parsed_sources.append({key: result[key] for key in ("sourceId", "artifactPath", "artifactDigest")})
     built = invoke("semantica.project_snapshot_worker", {"protocol": "semantica.project-worker.v1", "id": "native-build", "method": "build_project_snapshot", "params": {
         "projectId": "native", "baseSnapshot": None, "inputRevision": "sha256:" + "1" * 64, "outputDir": str(scratch / "output"),
-        "recipe": {"id": "deterministic", "version": "1", "forceOcrSourceIds": []}, "sources": sources,
+        "recipe": {"id": "deterministic", "version": "1", "forceOcrSourceIds": []}, "sources": sources, "parsedSources": parsed_sources, "documentProcessing": {"mode": "local"},
         "release": {key: manifest[key] for key in ("artifactDigest", "schemaDigest", "mediaTypes")},
         "relays": {key: {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/" + endpoint, "modelId": "nvidia/llama-nemotron-embed-vl-1b-v2:free", "capability": capability, "receipts": "required"}
             for key, endpoint, capability in [("model", "chat/completions", "knowledge.snapshot.generate"), ("embedding", "embeddings", "knowledge.snapshot.embed")]}}})

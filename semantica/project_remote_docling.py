@@ -41,7 +41,7 @@ def parse_remote_docling(path: Path, *, name: str, force_ocr: bool, profile: dic
     def request(route: str, body: dict | None = None) -> dict:
         encoded = json.dumps(body).encode("utf-8") if body is not None else None
         try:
-            headers = {"Content-Type": "application/json", **({"X-Api-Key": token} if token else {})}
+            headers = {"Content-Type": "application/json", **({"X-OntoScience-Auth-Token": token} if token else {})}
             with opener.open(Request(endpoint + route, data=encoded, headers=headers), timeout=75) as response:
                 result = json.load(response)
         except HTTPError as exc:

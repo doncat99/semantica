@@ -8,14 +8,15 @@ from __future__ import annotations
 
 import json
 import sys
-from typing import Any, Dict, Optional, TextIO
+from typing import Any, Callable, Dict, Optional, TextIO
 
 from pydantic import ValidationError as PydanticValidationError
 
-from .project_snapshot_pipeline import SnapshotBuildError, build_project_snapshot
+from .project_snapshot_pipeline import SnapshotBuildError, build_project_snapshot, parse_source_artifact
 from .project_snapshot_schema import (
     ProjectSnapshot,
     ProjectSnapshotBuildRequest,
+    ParseSourceRequest,
     WorkerRequest,
     WorkerResponse,
     build_request_json_schema,
@@ -45,15 +46,17 @@ def _response(request_id: Optional[str], ok: bool, *, result: Optional[Dict[str,
     return WorkerResponse.model_validate(payload).model_dump(exclude_none=True)
 
 
-def handle_request(raw: Dict[str, Any]) -> Dict[str, Any]:
+def handle_request(raw: Dict[str, Any], progress: Optional[Callable[[Dict[str, Any]], None]] = None) -> Dict[str, Any]:
     request = WorkerRequest.model_validate(raw)
     if request.method == "schema":
         return _response(request.id, True, result={"snapshot": project_snapshot_json_schema(), "build_request": build_request_json_schema()})
     if request.method == "validate_snapshot":
         snapshot = ProjectSnapshot.model_validate(request.params)
         return _response(request.id, True, result={"valid": True, "snapshot_id": snapshot.id})
+    if request.method == "parse_source":
+        return _response(request.id, True, result=parse_source_artifact(ParseSourceRequest.model_validate(request.params)))
     build_request = ProjectSnapshotBuildRequest.model_validate(request.params)
-    built = build_project_snapshot(build_request)
+    built = build_project_snapshot(build_request, progress=progress)
     snapshot: ProjectSnapshot = built["snapshot"]
     artifacts = []
     for item in built["representation_artifacts"]:
@@ -103,7 +106,15 @@ def serve(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> int:
             raw = json.loads(line)
             if isinstance(raw, dict):
                 request_id = raw.get("id")
-            response = handle_request(raw)
+            def emit_progress(event: Dict[str, Any]) -> None:
+                stdout.write(json.dumps({
+                    "protocol": "semantica.project-worker.v1",
+                    "id": request_id,
+                    "type": "progress",
+                    **event,
+                }, ensure_ascii=False, sort_keys=True) + "\n")
+                stdout.flush()
+            response = handle_request(raw, progress=emit_progress)
         except (json.JSONDecodeError, PydanticValidationError, ValueError, TypeError, SnapshotBuildError, OSError) as exc:
             response = _response(request_id, False, error=exc)
         stdout.write(json.dumps(response, ensure_ascii=False, sort_keys=True) + "\n")

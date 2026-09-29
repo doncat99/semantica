@@ -789,6 +789,19 @@ class DocumentProcessingProfile(StrictModel):
         return self
 
 
+class ParsedSourceRef(DigestModel):
+    artifact_digest: str = Field(alias="artifactDigest")
+    artifact_path: str = Field(alias="artifactPath")
+    source_id: str = Field(alias="sourceId")
+
+    @field_validator("artifact_path", mode="after")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        if not isabs(value):
+            raise ValueError("parsed source artifactPath must be absolute")
+        return value
+
+
 class ProjectSnapshotBuildRequest(DigestModel):
     project_id: str = Field(alias="projectId")
     base_snapshot: Optional[SnapshotRef] = Field(default=None, alias="baseSnapshot")
@@ -798,6 +811,7 @@ class ProjectSnapshotBuildRequest(DigestModel):
     relays: Dict[str, RelayRef]
     release: ReleaseRef
     sources: List[SourceBuildInput]
+    parsed_sources: List[ParsedSourceRef] = Field(alias="parsedSources")
     document_processing: DocumentProcessingProfile = Field(default_factory=DocumentProcessingProfile, alias="documentProcessing")
 
     @model_validator(mode="after")
@@ -817,6 +831,8 @@ class ProjectSnapshotBuildRequest(DigestModel):
             raise ValueError("release media types must cover all artifact kinds")
         if set(self.relays) != {"embedding", "model"}:
             raise ValueError("relays must contain embedding and model")
+        if {item.source_id for item in self.parsed_sources} != source_ids or len(self.parsed_sources) != len(source_ids):
+            raise ValueError("parsed sources must match the source manifest exactly")
         if self.relays["embedding"].capability != "knowledge.snapshot.embed":
             raise ValueError("embedding relay capability is invalid")
         if self.relays["model"].capability != "knowledge.snapshot.generate":
@@ -824,10 +840,24 @@ class ProjectSnapshotBuildRequest(DigestModel):
         return self
 
 
+class ParseSourceRequest(StrictModel):
+    source: SourceBuildInput
+    output_dir: str = Field(alias="outputDir")
+    force_ocr: bool = Field(alias="forceOcr")
+    document_processing: DocumentProcessingProfile = Field(alias="documentProcessing")
+
+    @field_validator("output_dir", mode="after")
+    @classmethod
+    def validate_output_dir(cls, value: str) -> str:
+        if not isabs(value):
+            raise ValueError("parse outputDir must be absolute")
+        return value
+
+
 class WorkerRequest(StrictModel):
     protocol: Literal[WORKER_PROTOCOL] = WORKER_PROTOCOL
     id: str
-    method: Literal["build_project_snapshot", "validate_snapshot", "schema"]
+    method: Literal["parse_source", "build_project_snapshot", "validate_snapshot", "schema"]
     params: Dict[str, Any] = Field(default_factory=dict)
 
 

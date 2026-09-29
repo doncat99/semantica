@@ -211,7 +211,7 @@ def parse_source(path: Path, *, name: str, mime_type: str, force_ocr: bool, docu
         # legacy parse package's eager imports; load Docling only for this adapter.
         from .parse.docling_parser import DoclingParser
 
-        result = DoclingParser(enable_ocr=True, force_full_page_ocr=force_ocr, export_format="doctags").parse(
+        result = DoclingParser(enable_ocr=force_ocr, force_full_page_ocr=force_ocr, export_format="doctags").parse(
             path,
             export_format="doctags",
             include_document=True,

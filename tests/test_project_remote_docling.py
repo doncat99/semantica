@@ -14,6 +14,13 @@ from semantica.project_snapshot_schema import ProjectSnapshotBuildRequest
 from tests.test_project_snapshot_pipeline import _request
 
 
+def _remote_request(source, output):
+    params = _request(source, output, prepare=False)["params"]
+    params["sources"][0]["mimeType"] = "application/pdf"
+    params["parsedSources"] = [{"sourceId": "source-1", "artifactPath": str(output / "parsed.json"), "artifactDigest": "sha256:" + "0" * 64}]
+    return params
+
+
 @pytest.fixture
 def gateway(tmp_path):
     calls = []
@@ -36,7 +43,7 @@ def gateway(tmp_path):
                 pass
 
         def do_POST(self):
-            calls.append(("POST", self.path, self.headers.get("X-Api-Key"), json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+            calls.append(("POST", self.path, self.headers.get("X-OntoScience-Auth-Token"), json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
             if result.get("http_status"):
                 self.send_response(result["http_status"])
                 self.send_header("Location", "/credential-redirect")
@@ -46,7 +53,7 @@ def gateway(tmp_path):
             self.respond({"task_id": "task-1", "task_status": "pending"})
 
         def do_GET(self):
-            calls.append(("GET", self.path, self.headers.get("X-Api-Key")))
+            calls.append(("GET", self.path, self.headers.get("X-OntoScience-Auth-Token")))
             if "/status/" in self.path:
                 polling.set()
                 release.wait(20)
@@ -69,10 +76,10 @@ def test_remote_task_survives_actual_process_kill_without_resubmission(tmp_path,
     profile, calls, polling, release, _ = gateway
     source = tmp_path / "source.pdf"
     source.write_bytes(b"synthetic protocol fixture")
-    request = _request(source, tmp_path / "output")
-    request["params"]["documentProcessing"] = profile
+    request = _remote_request(source, tmp_path / "output")
+    request["documentProcessing"] = profile
     request_file = tmp_path / "request.json"
-    request_file.write_text(json.dumps(request["params"]))
+    request_file.write_text(json.dumps(request))
     script = """
 import json,sys
 from pathlib import Path
@@ -118,7 +125,7 @@ def test_missing_auth_and_uncertain_submit_fail_closed(tmp_path, gateway, monkey
     profile, calls, _, release, _ = gateway
     source = tmp_path / "source.pdf"
     source.write_bytes(b"fixture")
-    request = ProjectSnapshotBuildRequest.model_validate(_request(source, tmp_path / "output")["params"])
+    request = ProjectSnapshotBuildRequest.model_validate(_remote_request(source, tmp_path / "output"))
     checkpoint = SnapshotCheckpoint(request)
     token = active_checkpoint.set(checkpoint)
     try:
@@ -142,7 +149,7 @@ def test_partial_result_is_not_adopted(tmp_path, gateway, monkeypatch):
     monkeypatch.setenv("TEST_DOCLING_KEY", "secret-fixture")
     source = tmp_path / "source.pdf"
     source.write_bytes(b"fixture")
-    request = ProjectSnapshotBuildRequest.model_validate(_request(source, tmp_path / "output")["params"])
+    request = ProjectSnapshotBuildRequest.model_validate(_remote_request(source, tmp_path / "output"))
     token = active_checkpoint.set(SnapshotCheckpoint(request))
     try:
         with pytest.raises(RemoteDoclingError, match="not a successful"):
@@ -158,7 +165,7 @@ def test_auth_error_redaction_and_redirect_refusal(tmp_path, gateway, monkeypatc
     monkeypatch.setenv("TEST_DOCLING_KEY", "secret-fixture")
     source = tmp_path / "source.pdf"
     source.write_bytes(b"fixture")
-    request = ProjectSnapshotBuildRequest.model_validate(_request(source, tmp_path / "output")["params"])
+    request = ProjectSnapshotBuildRequest.model_validate(_remote_request(source, tmp_path / "output"))
     token = active_checkpoint.set(SnapshotCheckpoint(request))
     try:
         with pytest.raises(RemoteDoclingError, match=f"HTTP {status}") as error:
