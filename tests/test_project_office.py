@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from semantica.project_office import flat_odf_document
-from semantica.project_source import parse_source
+from semantica.project_source import UnsupportedSourceFormatError, parse_source
 
 
 def test_binary_office_routes_once_to_dedicated_owner(tmp_path, monkeypatch):
@@ -15,6 +15,12 @@ def test_binary_office_routes_once_to_dedicated_owner(tmp_path, monkeypatch):
     result = parse_source(tmp_path / "source.doc", name="source.doc", mime_type="application/msword", force_ocr=False)
     assert result.text == "Ada" and result.parser == "semantica.libreoffice"
     assert len(calls) == 1
+
+
+def test_binary_office_requires_explicit_optional_capability(tmp_path, monkeypatch):
+    monkeypatch.delenv("SEMANTICA_OFFICE_ROOT", raising=False)
+    with pytest.raises(UnsupportedSourceFormatError, match="office-runtime-unavailable"):
+        parse_source(tmp_path / "source.doc", name="source.doc", mime_type="application/msword", force_ocr=False)
 
 
 @pytest.mark.parametrize("body,expected,locator", [

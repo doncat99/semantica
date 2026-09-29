@@ -12,8 +12,7 @@ from PIL import Image, ImageDraw, ImageFont
 from pptx import Presentation
 from openpyxl import Workbook
 from semantica.project_bundle import verify_bundle_inventory
-from semantica.project_office import bundled_office, convert_office
-from semantica.project_source import parse_source
+from semantica.project_source import parse_source, UnsupportedSourceFormatError
 from semantica.project_document_quality import assess_document_quality
 
 
@@ -71,22 +70,14 @@ with tempfile.TemporaryDirectory(prefix="semantica-native-acceptance-") as direc
         if force:
             assert result.origin == "ocr"
         parsed.append({"name": name, "origin": result.origin, "textLength": len(result.text)})
-    executable, version = bundled_office()
-    for source, target, mime, expected in [
-        ("native.docx", "doc:MS Word 97", "application/msword", "\u5317\u4eac\u5927\u5b66"),
-        ("slides.pptx", "ppt:MS PowerPoint 97", "application/vnd.ms-powerpoint", "Knowledge Evidence"),
-        ("sheet.xlsx", "xls:MS Excel 97", "application/vnd.ms-excel", "Knowledge Evidence"),
-    ]:
-        path = convert_office(scratch / source, scratch, scratch / (source + "-profile"), executable, target)
-        result = parse_source(path, name=path.name, mime_type=mime, force_ocr=False)
-        assert expected in result.text and "73" in result.text, result.text
-        assert result.parser == "semantica.libreoffice" and result.parser_version == version
-        assert result.document["sections"] and result.document["flat_odf"]
-        parsed.append({"name": path.name, "origin": result.origin, "textLength": len(result.text), "sections": len(result.document["sections"])})
-    wpd = Path("native-inputs/wp6.wpd").resolve()
-    result = parse_source(wpd, name=wpd.name, mime_type="application/vnd.wordperfect", force_ocr=False)
-    assert result.text == "Foo\n\nfoo" and len(result.document["sections"]) == 2
-    parsed.append({"name": wpd.name, "origin": result.origin, "textLength": len(result.text), "sections": len(result.document["sections"])})
+    for name, mime in [("legacy.doc", "application/msword"), ("legacy.wpd", "application/vnd.wordperfect")]:
+        (scratch / name).write_bytes(b"legacy")
+        try:
+            parse_source(scratch / name, name=name, mime_type=mime, force_ocr=False)
+        except UnsupportedSourceFormatError as error:
+            assert "office-runtime-unavailable" in str(error), error
+        else:
+            raise AssertionError("legacy input unexpectedly succeeded without Office capability")
     source = scratch / "source.txt"
     source.write_text("Ada Lovelace designed the Analytical Engine.")
     epub = scratch / "book.epub"

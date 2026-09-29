@@ -14,12 +14,20 @@ OFFICE_SUFFIXES = {".doc", ".ppt", ".xls", ".wpd", ".wp", ".wp4", ".wp5", ".wp6"
 _NS = {"office": "urn:oasis:names:tc:opendocument:xmlns:office:1.0", "text": "urn:oasis:names:tc:opendocument:xmlns:text:1.0", "table": "urn:oasis:names:tc:opendocument:xmlns:table:1.0", "draw": "urn:oasis:names:tc:opendocument:xmlns:drawing:1.0"}
 
 
+class OfficeRuntimeUnavailableError(ValueError):
+    """The optional LibreOffice capability is not installed."""
+
+
 def bundled_office() -> tuple[Path, str]:
-    root = Path(sys.executable).resolve().parents[1 if os.name == "nt" else 2]
-    receipt = json.loads((root / "office-release.json").read_text(encoding="utf-8"))
+    configured = os.environ.get("SEMANTICA_OFFICE_ROOT", "").strip()
+    root = Path(configured).expanduser().resolve() if configured else None
+    if root is None:
+        raise OfficeRuntimeUnavailableError("office-runtime-unavailable: install the LibreOffice capability and set SEMANTICA_OFFICE_ROOT")
+    receipt_path = root / "office-release.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     executable = (root / "office" / receipt["executable"]).resolve(strict=True)
     if not executable.is_relative_to(root / "office") or not executable.is_file():
-        raise ValueError("the bundled Office executable is outside its immutable runtime")
+        raise ValueError("the Office capability executable is outside its immutable runtime")
     return executable, receipt["version"]
 
 

@@ -51,7 +51,39 @@ def verify_bundle_inventory(root: Path, manifest: dict, *, remove_untracked_byte
             raise ValueError(f"bundle file differs from manifest: {relative}")
 
 
-def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, office_root: Path, office_receipt: Path, output: Path, uv: str, source_revision: str) -> dict:
+def build_office_bundle(*, office_root: Path, office_receipt: Path, output: Path, target: str) -> dict:
+    if output.exists():
+        raise ValueError("Office bundle output must not already exist")
+    release = json.loads(office_receipt.read_text(encoding="utf-8"))
+    executable = release.get("executable")
+    if not isinstance(executable, str) or not (office_root / executable).is_file():
+        raise ValueError("Office receipt does not identify an immutable executable")
+    shutil.copytree(office_root, output / "office", symlinks=False)
+    shutil.copy2(office_receipt, output / "office-release.json")
+    files = []
+    for item in sorted(output.rglob("*"), key=lambda path: path.relative_to(output).as_posix()):
+        if item.is_symlink():
+            target_path = item.resolve(strict=True)
+            item.unlink()
+            shutil.copytree(target_path, item, symlinks=False) if target_path.is_dir() else shutil.copy2(target_path, item)
+        if item.is_file():
+            files.append({"path": item.relative_to(output).as_posix(), "size": item.stat().st_size, "sha256": digest_file(item)})
+    manifest = {
+        "protocol": "ontoscience.semantica-office-bundle.v1",
+        "target": target,
+        "version": release["version"],
+        "executable": executable,
+        "files": files,
+    }
+    descriptor = [manifest["protocol"], target, manifest["version"], executable,
+                  [[item["path"], item["size"], item["sha256"]] for item in files]]
+    manifest["artifactDigest"] = "sha256:" + hashlib.sha256(json.dumps(descriptor, ensure_ascii=False, separators=(",", ":")).encode()).hexdigest()
+    (output / "manifest.json").write_text(json.dumps(manifest, ensure_ascii=False, indent=2) + "\n", encoding="utf-8")
+    verify_bundle_inventory(output, manifest)
+    return manifest
+
+
+def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, output: Path, uv: str, source_revision: str, office_root: Path | None = None, office_receipt: Path | None = None) -> dict:
     """Inputs are release artifacts, never a Semantica source checkout or venv."""
     if output.exists():
         raise ValueError("bundle output must not already exist")
@@ -64,16 +96,20 @@ def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, office_ro
     python_name = "python.exe" if os.name == "nt" else "bin/python3"
     if not (python_root / python_name).is_file():
         raise ValueError("CPython distribution has no interpreter")
-    office_release = json.loads(office_receipt.read_text(encoding="utf-8"))
-    if not (office_root / office_release["executable"]).is_file():
-        raise ValueError("the dedicated Office adapter requires its immutable executable")
+    if (office_root is None) != (office_receipt is None):
+        raise ValueError("office_root and office_receipt must be provided together")
+    if office_root is not None and office_receipt is not None:
+        office_release = json.loads(office_receipt.read_text(encoding="utf-8"))
+        if not (office_root / office_release["executable"]).is_file():
+            raise ValueError("the dedicated Office adapter requires its immutable executable")
     model_names = ("RapidOcr", "docling-project--docling-layout-heron", "docling-project--docling-models")
     for name in model_names:
         if not (models_root / name).is_dir():
             raise ValueError(f"required offline Docling model is absent: {name}")
     shutil.copytree(python_root, output / "python", symlinks=False)
-    shutil.copytree(office_root, output / "office", symlinks=False)
-    shutil.copy2(office_receipt, output / "office-release.json")
+    if office_root is not None and office_receipt is not None:
+        shutil.copytree(office_root, output / "office", symlinks=False)
+        shutil.copy2(office_receipt, output / "office-release.json")
     python = output / "python" / python_name
     # This interpreter is our private copy, not the managed source distribution.
     subprocess.run([uv, "pip", "install", "--python", str(python), "--system", "--break-system-packages", f"{wheel.resolve()}[project-worker]"], check=True)
@@ -135,14 +171,27 @@ def main() -> None:
     parser.add_argument("--python-root", required=True, type=Path)
     parser.add_argument("--wheel", required=True, type=Path)
     parser.add_argument("--models-root", required=True, type=Path)
-    parser.add_argument("--office-root", required=True, type=Path)
-    parser.add_argument("--office-receipt", required=True, type=Path)
+    parser.add_argument("--office-root", type=Path)
+    parser.add_argument("--office-receipt", type=Path)
+    parser.add_argument("--office-output", type=Path)
+    parser.add_argument("--target")
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--uv", default="uv")
     parser.add_argument("--source-revision", required=True)
     args = parser.parse_args()
-    manifest = build_bundle(**vars(args))
-    print(json.dumps({"artifactDigest": manifest["artifactDigest"], "files": len(manifest["files"])}))
+    values = vars(args)
+    office_output = values.pop("office_output")
+    target = values.pop("target")
+    office_root = values.pop("office_root")
+    office_receipt = values.pop("office_receipt")
+    manifest = build_bundle(**values)
+    result = {"artifactDigest": manifest["artifactDigest"], "files": len(manifest["files"])}
+    if office_output is not None:
+        if office_root is None or office_receipt is None or not target:
+            raise ValueError("Office output requires office inputs and target")
+        office_manifest = build_office_bundle(office_root=office_root, office_receipt=office_receipt, output=office_output, target=target)
+        result["officeArtifactDigest"] = office_manifest["artifactDigest"]
+    print(json.dumps(result))
 
 
 if __name__ == "__main__":
