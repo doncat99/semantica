@@ -34,12 +34,15 @@ jobs:
         include:
           - runner: macos-14
             target: darwin-arm64
+            runtime_target: darwin-arm64
             python: python/bin/python3
           - runner: ubuntu-24.04
             target: linux-x64
+            runtime_target: linux-x64
             python: python/bin/python3
           - runner: windows-2022
             target: win-x64
+            runtime_target: win32-x64
             python: python/python.exe
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
@@ -77,7 +80,7 @@ jobs:
             echo "Expected exactly one Semantica wheel, found ${#wheels[@]}" >&2
             exit 1
           fi
-          native-inputs/${{ matrix.python }} -I -B semantica/project_bundle.py --python-root native-inputs/python --wheel "${wheels[0]}" --models-root native-inputs/models --office-root native-inputs/office --office-receipt native-inputs/office-release.json --office-output native-office-bundle --target '${{ matrix.target }}' --output native-bundle --source-revision "$GITHUB_SHA"
+          native-inputs/${{ matrix.python }} -I -B semantica/project_bundle.py --python-root native-inputs/python --wheel "${wheels[0]}" --models-root native-inputs/models --office-root native-inputs/office --office-receipt native-inputs/office-release.json --office-output native-office-bundle --target '${{ matrix.runtime_target }}' --output native-bundle --source-revision "$GITHUB_SHA"
       - name: Relocate and validate installed worker
         run: |
           mv native-bundle "$RUNNER_TEMP/semantica-relocated"
