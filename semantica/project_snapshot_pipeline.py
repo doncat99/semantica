@@ -1042,6 +1042,8 @@ def _find_occurrence(text: str, quote: str, occurrence: Any = None) -> tuple[int
         matches = list(re.finditer(r"\s+".join(re.escape(part) for part in parts), text))
     if not matches:
         raise SnapshotBuildError("extracted quote is not present in its source window")
+    if len(matches) == 1:
+        return matches[0].span()
     if occurrence is None and len(matches) != 1:
         raise SnapshotBuildError("ambiguous quote requires an explicit occurrence")
     index = 0 if occurrence is None else occurrence

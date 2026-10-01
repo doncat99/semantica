@@ -44,6 +44,15 @@ def test_structured_extraction_repairs_unlocated_entity_with_receipts(monkeypatc
     assert "exposure variables" in calls[1]["messages"][0]["content"]
 
 
+def test_unique_quote_ignores_model_position_but_duplicate_requires_occurrence():
+    from semantica.project_snapshot_pipeline import _find_occurrence, SnapshotBuildError
+
+    text = "Green Bonds and Private Equity. Green Bonds"
+    assert _find_occurrence(text, "Private Equity", 590) == (16, 30)
+    with pytest.raises(SnapshotBuildError, match="outside its source window"):
+        _find_occurrence(text, "Green Bonds", 590)
+
+
 def test_structured_extraction_repairs_unsupported_or_ungrounded_qualifiers(monkeypatch):
     from types import SimpleNamespace
     from semantica.project_snapshot_pipeline import _structured_extract
