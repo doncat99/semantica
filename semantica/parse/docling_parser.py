@@ -53,6 +53,8 @@ PdfFormatOption = None
 try:
     from docling.document_converter import DocumentConverter, PdfFormatOption
     from docling.datamodel.base_models import InputFormat
+    from docling.datamodel.backend_options import PdfBackendOptions
+    from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
     from docling.datamodel.pipeline_options import PdfPipelineOptions, RapidOcrOptions
     DOCLING_AVAILABLE = True
     DOCLING_IMPORT_ERROR = None
@@ -167,8 +169,14 @@ class DoclingParser:
                 pipeline_options.generate_parsed_pages = True
                 if self.config.get("artifacts_path"):
                     pipeline_options.artifacts_path = Path(self.config["artifacts_path"])
+                # A word can span font subsets (e.g. a ligature and its suffix).
+                pdf_format = PdfFormatOption(pipeline_options=pipeline_options,
+                                             backend_options=PdfBackendOptions(enforce_same_font=False))
+                if self.force_full_page_ocr:
+                    # Native segmented word cells bypass OCR in table matching.
+                    pdf_format.backend = PyPdfiumDocumentBackend
                 self._converter = DocumentConverter(format_options={
-                    InputFormat.PDF: PdfFormatOption(pipeline_options=pipeline_options),
+                    InputFormat.PDF: pdf_format,
                     InputFormat.IMAGE: PdfFormatOption(pipeline_options=pipeline_options),
                 })
 

@@ -15,6 +15,8 @@ import tempfile
 import urllib.error
 import urllib.request
 from collections import defaultdict
+from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from contextvars import copy_context
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -97,24 +99,46 @@ def _text_windows(text: str):
             break
 
 
-def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, progress=None, progress_base: int = 0, progress_total: int = 1):
+def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, progress=None, progress_base: int = 0, progress_total: int = 1, parallelism: int = 1):
     result: dict[str, list] = {"entities": [], "relations": []}
     receipts, embeddings = [], []
     seen_entities, seen_relations = set(), set()
     windows = list(_text_windows(text))
-    for index, (start, end, window) in enumerate(windows, start=1):
-        extracted, extraction_receipts = _structured_extract(window, model_relay)
+    def extract(item):
+        return _structured_extract(item[2], model_relay)
+
+    context = copy_context()
+    with ThreadPoolExecutor(max_workers=parallelism) as pool:
+        pending = iter(enumerate(windows))
+        futures = {}
+        for index, item in [next(pending, None) for _ in range(min(parallelism, len(windows)))]:
+            futures[pool.submit(context.copy().run, extract, item)] = index
+        extracted_windows = [None] * len(windows)
+        completed = progress_base
+        while futures:
+            done, _ = wait(futures, return_when=FIRST_COMPLETED)
+            for future in done:
+                index = futures.pop(future)
+                try:
+                    extracted_windows[index] = future.result()
+                except Exception:
+                    for waiting in futures:
+                        waiting.cancel()
+                    raise
+                completed += 1
+                if progress:
+                    progress({
+                        "stage": "extracting",
+                        "percent": min(60, 20 + round((completed / max(1, progress_total)) * 40)),
+                        "detail": f"Extracting knowledge {completed} / {progress_total} chunks",
+                        "metadata": {"completedChunks": completed, "totalChunks": progress_total},
+                    })
+                next_item = next(pending, None)
+                if next_item is not None:
+                    next_index, item = next_item
+                    futures[pool.submit(context.copy().run, extract, item)] = next_index
+    for index, ((start, end, window), (extracted, extraction_receipts)) in enumerate(zip(windows, extracted_windows), start=1):
         receipts.extend(extraction_receipts if isinstance(extraction_receipts, list) else [extraction_receipts])
-        vector, receipt = _embed_text(window, embedding_relay)
-        receipts.append(receipt)
-        embeddings.append({"start_char": start, "end_char": end, "vector": vector})
-        if progress:
-            progress({
-                "stage": "embedding",
-                "percent": min(99, 20 + round(((progress_base + index) / max(1, progress_total)) * 70)),
-                "detail": f"Embedding {progress_base + index} / {progress_total} chunks",
-                "metadata": {"completedChunks": progress_base + index, "totalChunks": progress_total},
-            })
         local_ids = {item.get("id") for item in extracted["entities"] if isinstance(item, dict)}
         if None in local_ids or len(local_ids) != len(extracted["entities"]):
             raise SnapshotBuildError("extraction requires unique occurrence ids")
@@ -122,13 +146,12 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, progre
             for item in extracted[kind]:
                 if not isinstance(item, dict):
                     raise SnapshotBuildError("extraction output must contain objects")
-                quote = item.get("name" if kind == "entities" else "evidence")
+                quote_key = "name" if kind == "entities" else "evidence"
+                quote = item.get(quote_key)
                 if not isinstance(quote, str) or not quote.strip():
                     raise SnapshotBuildError("extraction output has no located quote")
                 local_start, local_end = _find_occurrence(window, quote.strip(), item.get("occurrence") if kind == "entities" else item.get("evidence_occurrence"))
-                if kind == "relations" and window[local_start:local_end] != quote.strip():
-                    raise SnapshotBuildError("relation evidence is not an exact source quote")
-                item = {**item, "_start": start + local_start, "_end": start + local_end}
+                item = {**item, quote_key: window[local_start:local_end], "_start": start + local_start, "_end": start + local_end}
                 if kind == "entities":
                     item["id"] = f"{start}:{item['id']}"
                 else:
@@ -141,6 +164,41 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, progre
                 if key not in seen:
                     seen.add(key)
                     result[kind].append(item)
+    batches = [windows[offset:offset + 8] for offset in range(0, len(windows), 8)]
+    embedded_batches = [None] * len(batches)
+    completed = 0
+    with ThreadPoolExecutor(max_workers=parallelism) as pool:
+        pending = iter(enumerate(batches))
+        futures = {}
+        for index, batch in [next(pending, None) for _ in range(min(parallelism, len(batches)))]:
+            futures[pool.submit(context.copy().run, _embed_texts, [window for _, _, window in batch], embedding_relay)] = index
+        while futures:
+            done, _ = wait(futures, return_when=FIRST_COMPLETED)
+            for future in done:
+                index = futures.pop(future)
+                try:
+                    embedded_batches[index] = future.result()
+                except Exception:
+                    for waiting in futures:
+                        waiting.cancel()
+                    raise
+                completed += len(batches[index])
+                if progress:
+                    count = progress_base + completed
+                    progress({
+                        "stage": "embedding",
+                        "percent": min(90, 60 + round((count / max(1, progress_total)) * 30)),
+                        "detail": f"Embedding {count} / {progress_total} chunks",
+                        "metadata": {"completedChunks": count, "totalChunks": progress_total},
+                    })
+                next_item = next(pending, None)
+                if next_item is not None:
+                    next_index, batch = next_item
+                    futures[pool.submit(context.copy().run, _embed_texts, [window for _, _, window in batch], embedding_relay)] = next_index
+    for batch, (vectors, receipt) in zip(batches, embedded_batches):
+        receipts.append(receipt)
+        embeddings.extend({"start_char": start, "end_char": end, "vector": vector}
+                          for (start, end, _), vector in zip(batch, vectors))
     if not embeddings:
         raise SnapshotBuildError("source has no text for semantic production")
     dimension = len(embeddings[0]["vector"])
@@ -299,19 +357,31 @@ def _invalid_fact_qualifiers(qualifiers: Any, quote: Any) -> list[str]:
     return invalid
 
 
-def _embed_text(text: str, relay: Any) -> tuple[list[float], ModelReceipt]:
-    response, receipt = _relay_json(relay, {"input": [text], "model": relay.model_id}, "embedding")
+def _embed_texts(texts: list[str], relay: Any) -> tuple[list[list[float]], ModelReceipt]:
+    response, receipt = _relay_json(relay, {"input": texts, "model": relay.model_id}, "embedding")
     if response.get("model") != relay.model_id:
         raise SnapshotBuildError("embedding response model does not match the admitted relay model")
     if isinstance(response.get("usage"), dict):
         receipt.metadata["usage"] = response["usage"]
     data = response.get("data")
-    if not isinstance(data, list) or len(data) != 1 or not isinstance(data[0], dict):
+    if not isinstance(data, list) or len(data) != len(texts):
         raise SnapshotBuildError("embedding response has invalid data")
-    vector = data[0].get("embedding")
-    if not isinstance(vector, list) or not vector or not all(not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value) for value in vector):
-        raise SnapshotBuildError("embedding response has invalid vector")
-    return [float(value) for value in vector], receipt
+    vectors = []
+    for index, item in enumerate(data):
+        if not isinstance(item, dict) or item.get("index") != index:
+            raise SnapshotBuildError("embedding response index does not match input order")
+        vector = item.get("embedding")
+        if not isinstance(vector, list) or not vector or not all(not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value) for value in vector):
+            raise SnapshotBuildError("embedding response has invalid vector")
+        vectors.append([float(value) for value in vector])
+    if len({len(vector) for vector in vectors}) != 1:
+        raise SnapshotBuildError("embedding response has inconsistent dimensions")
+    return vectors, receipt
+
+
+def _embed_text(text: str, relay: Any) -> tuple[list[float], ModelReceipt]:
+    vectors, receipt = _embed_texts([text], relay)
+    return vectors[0], receipt
 
 
 def _product_json(relay: Any, operation: str, instruction: str, context: dict[str, Any]) -> tuple[dict[str, Any], ModelReceipt]:
@@ -968,6 +1038,8 @@ def _normalized_text(value: str) -> str:
 
 def _find_occurrence(text: str, quote: str, occurrence: Any = None) -> tuple[int, int]:
     matches = list(re.finditer(re.escape(quote), text))
+    if not matches and len(parts := quote.split()) > 1:
+        matches = list(re.finditer(r"\s+".join(re.escape(part) for part in parts), text))
     if not matches:
         raise SnapshotBuildError("extracted quote is not present in its source window")
     if occurrence is None and len(matches) != 1:
@@ -1638,6 +1710,7 @@ def _build_project_snapshot(request: ProjectSnapshotBuildRequest, progress=None)
             model_result, embeddings, source_receipts = _extract_and_embed(
                 parsed[0], request.relays["model"], request.relays["embedding"],
                 progress=progress, progress_base=completed_chunks, progress_total=total_chunks,
+                parallelism=request.parallelism,
             )
             completed_chunks += len(embeddings)
             built_source = _build_source(source, force_ocr, model_result, parsed)

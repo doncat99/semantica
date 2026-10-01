@@ -1,5 +1,7 @@
 import io
 import json
+import subprocess
+import sys
 
 import pytest
 from pydantic import ValidationError
@@ -20,6 +22,25 @@ H5 = "sha256:" + "5" * 64
 H6 = "sha256:" + "6" * 64
 H7 = "sha256:" + "7" * 64
 H8 = "sha256:" + "8" * 64
+
+
+def test_worker_keeps_parser_diagnostics_out_of_protocol_stdout():
+    script = """\
+import os
+from semantica import project_snapshot_worker as worker
+def handle(raw, progress=None):
+    os.write(1, b'Docling table warning\\n')
+    return {'protocol': 'semantica.project-worker.v1', 'id': raw['id'], 'ok': True, 'result': {}}
+worker.handle_request = handle
+worker.main()
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", script], input='{"id":"parse-1"}\n', capture_output=True, text=True, check=True,
+    )
+    assert json.loads(result.stdout) == {
+        "protocol": "semantica.project-worker.v1", "id": "parse-1", "ok": True, "result": {},
+    }
+    assert "Docling table warning" in result.stderr
 
 
 def _snapshot_payload():
@@ -113,6 +134,7 @@ def _build_request_payload():
         "baseSnapshot": {"snapshotId": "snapshot:base", "snapshotPath": "/tmp/base.json", "artifactDigest": H8, "schemaDigest": H3},
         "inputRevision": H1,
         "outputDir": "/tmp/semantica-output",
+        "parsedSources": [{"artifactDigest": H2, "artifactPath": "/tmp/parsed.json", "sourceId": "source-1"}],
         "sources": [{"filePath": "/tmp/source.pdf", "materialRevision": "b3-" + "7" * 64, "mimeType": "application/pdf", "name": "source.pdf", "sourceId": "source-1"}],
         "recipe": {"forceOcrSourceIds": [], "id": "deterministic", "version": "1"},
         "relays": {
@@ -204,6 +226,7 @@ def test_build_request_accepts_sources_not_semantic_objects():
 def test_build_request_preserves_host_source_and_provider_model_ids():
     payload = _build_request_payload()
     payload["sources"][0]["sourceId"] = "6996f3a7-b132-4474-aa13-d14d746218cd"
+    payload["parsedSources"][0]["sourceId"] = payload["sources"][0]["sourceId"]
     payload["relays"]["embedding"]["modelId"] = "nvidia/llama-nemotron-embed-vl-1b-v2:free"
     request = ProjectSnapshotBuildRequest.model_validate(payload)
     assert request.sources[0].source_id == payload["sources"][0]["sourceId"]

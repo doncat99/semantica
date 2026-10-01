@@ -1,4 +1,6 @@
 from types import SimpleNamespace
+from threading import Lock
+from time import sleep
 
 import pytest
 
@@ -26,10 +28,10 @@ def test_long_extraction_visits_tail_and_preserves_absolute_repeated_mentions(tm
         return {"entities": [{"id": name, "name": name, "type": "CONCEPT", "occurrence": 0} for name in names], "relations": []}, receipt("structured_extraction", len(calls))
 
     monkeypatch.setattr(pipeline, "_structured_extract", extract)
-    monkeypatch.setattr(pipeline, "_embed_text", lambda text, relay: ([1.0, 0.0], receipt("embedding", len(calls))))
+    monkeypatch.setattr(pipeline, "_embed_texts", lambda texts, relay: ([[1.0, 0.0] for _ in texts], receipt("embedding", len(calls))))
     extracted, embeddings, receipts = pipeline._extract_and_embed(text, None, None)
     assert len(calls) > 10 and all(len(item) <= pipeline.TEXT_WINDOW_CHARS for item in calls)
-    assert len(receipts) == len(calls) * 2
+    assert len(receipts) == len(calls) + (len(calls) + 7) // 8
     assert embeddings[-1]["end_char"] == len(text)
     covered = set()
     for chunk in embeddings:
@@ -48,9 +50,94 @@ def test_long_extraction_visits_tail_and_preserves_absolute_repeated_mentions(tm
 
 def test_extraction_rejects_quote_outside_current_window(monkeypatch):
     monkeypatch.setattr(pipeline, "_structured_extract", lambda *args: ({"entities": [{"id": "tail", "name": "Tail", "type": "CONCEPT", "occurrence": 0}], "relations": []}, receipt("structured_extraction", 1)))
-    monkeypatch.setattr(pipeline, "_embed_text", lambda *args: ([1.0], receipt("embedding", 1)))
+    monkeypatch.setattr(pipeline, "_embed_texts", lambda texts, relay: ([[1.0] for _ in texts], receipt("embedding", 1)))
     with pytest.raises(pipeline.SnapshotBuildError, match="source window"):
         pipeline._extract_and_embed("x" * 10_000 + "Tail", None, None)
+
+
+def test_extraction_reports_active_stage_and_anchors_whitespace_to_source(monkeypatch):
+    text = "CFA Institute thanks the authors:\nAlice   Bob"
+    events = []
+
+    monkeypatch.setattr(pipeline, "_structured_extract", lambda *args: ({
+        "entities": [
+            {"id": "cfa", "name": "CFA Institute", "type": "ORG", "occurrence": 0},
+            {"id": "authors", "name": "authors", "type": "GROUP", "occurrence": 0},
+        ],
+        "relations": [{
+            "subject": "cfa", "predicate": "thanks", "object": "authors",
+            "evidence": "CFA Institute thanks the authors: Alice Bob",
+            "evidence_occurrence": 0, "qualifiers": {"polarity": "positive"},
+        }],
+    }, receipt("structured_extraction", 1)))
+    monkeypatch.setattr(pipeline, "_embed_texts", lambda texts, relay: ([[1.0] for _ in texts], receipt("embedding", 1)))
+
+    extracted, _, _ = pipeline._extract_and_embed(text, None, None, progress=events.append)
+
+    assert [event["stage"] for event in events] == ["extracting", "embedding"]
+    assert events[0]["metadata"] == {"completedChunks": 1, "totalChunks": 1}
+    evidence = extracted["relations"][0]["evidence"]
+    assert evidence == text
+
+
+def test_parallel_extraction_is_bounded_and_preserves_window_order(monkeypatch):
+    windows = [(index * 10, index * 10 + 4, f"Fact{index}") for index in range(4)]
+    monkeypatch.setattr(pipeline, "_text_windows", lambda text: iter(windows))
+    lock = Lock()
+    active = peak = 0
+
+    def extract(window, relay):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        sleep(0.02 if window == "Fact0" else 0.005)
+        with lock:
+            active -= 1
+        return {"entities": [{"id": window, "name": window, "type": "CONCEPT", "occurrence": 0}], "relations": []}, receipt("structured_extraction", int(window[-1]))
+
+    monkeypatch.setattr(pipeline, "_structured_extract", extract)
+    monkeypatch.setattr(pipeline, "_embed_texts", lambda texts, relay: ([[1.0, 0.0] for _ in texts], receipt("embedding", 1)))
+    result, embeddings, receipts = pipeline._extract_and_embed("unused", None, None, parallelism=2)
+    assert peak == 2
+    assert [entity["name"] for entity in result["entities"]] == [item[2] for item in windows]
+    assert [item["start_char"] for item in embeddings] == [item[0] for item in windows]
+    assert [item.id for item in receipts[:4]] == [f"receipt:structured_extraction:{index}" for index in range(4)]
+
+
+def test_parallel_embedding_batches_are_bounded_and_ordered(monkeypatch):
+    windows = [(index * 10, index * 10 + 4, f"Fact{index}") for index in range(24)]
+    monkeypatch.setattr(pipeline, "_text_windows", lambda text: iter(windows))
+    monkeypatch.setattr(pipeline, "_structured_extract", lambda window, relay: ({"entities": [], "relations": []}, receipt("structured_extraction", int(window[4:]))))
+    lock = Lock()
+    active = peak = 0
+
+    def embed(texts, relay):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        sleep(0.02 if texts[0] == "Fact0" else 0.005)
+        with lock:
+            active -= 1
+        return [[float(int(text[4:]))] for text in texts], receipt("embedding", int(texts[0][4:]))
+
+    monkeypatch.setattr(pipeline, "_embed_texts", embed)
+    _, embeddings, receipts = pipeline._extract_and_embed("unused", None, None, parallelism=2)
+    assert peak == 2
+    assert [chunk["vector"] for chunk in embeddings] == [[float(index)] for index in range(24)]
+    assert [item.id for item in receipts[-3:]] == [f"receipt:embedding:{index}" for index in (0, 8, 16)]
+
+
+@pytest.mark.parametrize("data", [
+    [{"index": 1, "embedding": [1.0]}, {"index": 0, "embedding": [2.0]}],
+    [{"index": 0, "embedding": [1.0]}],
+    [{"index": 0, "embedding": [1.0]}, {"index": 1, "embedding": [1.0, 2.0]}],
+])
+def test_batch_embedding_rejects_invalid_response(monkeypatch, data):
+    monkeypatch.setattr(pipeline, "_relay_json", lambda *args: ({"model": "test", "data": data}, receipt("embedding", 1)))
+    with pytest.raises(pipeline.SnapshotBuildError, match="embedding response"):
+        pipeline._embed_texts(["one", "two"], SimpleNamespace(model_id="test"))
 
 
 def test_classification_and_hierarchical_reports_visit_every_passage(tmp_path, monkeypatch):

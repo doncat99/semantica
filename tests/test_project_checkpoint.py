@@ -34,7 +34,10 @@ def test_worker_process_restart_reuses_durable_parse_and_model_calls(tmp_path):
                 second_call.set()
                 release_call.wait(30)
             if "input" in payload:
-                response = {"model": payload["model"], "data": [{"embedding": [1.0, 0.5]}]}
+                response = {"model": payload["model"], "data": [
+                    {"index": index, "embedding": [1.0, 0.5]}
+                    for index, _ in enumerate(payload["input"])
+                ]}
             else:
                 user = payload["messages"][1]["content"]
                 if user == source.read_text():

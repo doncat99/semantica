@@ -557,7 +557,10 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
     def relay_response(relay, payload, operation):
         operations.append(operation)
         if operation == "embedding":
-            result = {"data": [{"embedding": [0.25, 0.5, 0.75]}], "model": relay.model_id}
+            result = {"data": [
+                {"index": index, "embedding": [0.25, 0.5, 0.75]}
+                for index, _ in enumerate(payload["input"])
+            ], "model": relay.model_id}
         else:
             if operation == "identity_resolution":
                 candidates = json.loads(payload["messages"][1]["content"])

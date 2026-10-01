@@ -7,6 +7,7 @@ cancellation is process-level termination rather than an in-band command.
 from __future__ import annotations
 
 import json
+import os
 import sys
 from typing import Any, Callable, Dict, Optional, TextIO
 
@@ -123,7 +124,10 @@ def serve(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> int:
 
 
 def main() -> None:
-    raise SystemExit(serve())
+    protocol_fd = os.dup(sys.stdout.fileno())
+    os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
+    with os.fdopen(protocol_fd, "w", encoding="utf-8") as protocol_stdout:
+        raise SystemExit(serve(stdout=protocol_stdout))
 
 
 if __name__ == "__main__":

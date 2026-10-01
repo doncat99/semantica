@@ -5,6 +5,19 @@ from pathlib import Path
 from semantica.parse.docling_parser import DoclingParser, DoclingMetadata
 
 class TestDoclingParser(unittest.TestCase):
+    def test_native_pdf_keeps_words_across_font_fragments_without_ocr(self):
+        from docling.datamodel.backend_options import PdfBackendOptions
+        if "enforce_same_font" not in PdfBackendOptions.model_fields:
+            self.skipTest("Docling before the locked native release does not expose font segmentation")
+        with patch.object(Path, 'exists', return_value=True):
+            self.parser.parse("fixture.pdf")
+        from docling.datamodel.base_models import InputFormat
+        option = self.mock_converter_cls.call_args.kwargs["format_options"][InputFormat.PDF]
+        self.assertFalse(option.backend_options.enforce_same_font)
+        self.assertFalse(option.pipeline_options.do_ocr)
+        from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
+        self.assertIsNot(option.backend, PyPdfiumDocumentBackend)
+
     def test_page_projection_uses_all_docling_provenance_entries(self):
         first = SimpleNamespace(text="First page", prov=[SimpleNamespace(page_no=1)])
         second = SimpleNamespace(text="Second page", prov=[SimpleNamespace(page_no=2)])
@@ -27,7 +40,11 @@ class TestDoclingParser(unittest.TestCase):
         )
         with patch.object(Path, 'exists', return_value=True):
             result = DoclingParser(enable_ocr=True, force_full_page_ocr=True).parse("fixture.pdf", include_document=True)
-        options = next(iter(self.mock_converter_cls.call_args.kwargs["format_options"].values())).pipeline_options
+        from docling.datamodel.base_models import InputFormat
+        from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
+        pdf = self.mock_converter_cls.call_args.kwargs["format_options"][InputFormat.PDF]
+        self.assertIs(pdf.backend, PyPdfiumDocumentBackend)
+        options = pdf.pipeline_options
         self.assertTrue(options.do_ocr)
         self.assertTrue(options.ocr_options.force_full_page_ocr)
         self.assertEqual(result["origin"], "ocr")

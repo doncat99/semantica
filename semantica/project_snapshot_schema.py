@@ -806,6 +806,7 @@ class ProjectSnapshotBuildRequest(DigestModel):
     project_id: str = Field(alias="projectId")
     base_snapshot: Optional[SnapshotRef] = Field(default=None, alias="baseSnapshot")
     input_revision: str = Field(alias="inputRevision")
+    parallelism: int = Field(default=1, ge=1, le=8)
     output_dir: str = Field(alias="outputDir")
     recipe: RecipeRef
     relays: Dict[str, RelayRef]
