@@ -421,20 +421,196 @@ def _product_json(relay: Any, operation: str, instruction: str, context: dict[st
     return result, receipt
 
 
+def _bbox(value: Any) -> list[float] | None:
+    if not isinstance(value, dict) or not all(isinstance(value.get(key), (int, float)) for key in ("l", "t", "r", "b")):
+        return None
+    return [float(value[key]) for key in ("l", "t", "r", "b")]
+
+
+def _docling_locations(document: dict[str, Any], text: str) -> list[dict[str, Any]]:
+    """Project the retained Docling reading order into the representation text."""
+    raw = document.get("document") if document.get("format") == "docling" else None
+    if not isinstance(raw, dict):
+        return []
+    indexed = {
+        item["self_ref"]: item
+        for collection in ("groups", "texts", "tables", "pictures", "key_value_items", "form_items")
+        for item in raw.get(collection, [])
+        if isinstance(item, dict) and isinstance(item.get("self_ref"), str)
+    }
+    locations: list[dict[str, Any]] = []
+    section_path: list[str] = []
+    cursor = 0
+    quote_cursors: dict[str, int] = {}
+    page_cursors: dict[int, int] = {}
+    seen: set[str] = set()
+
+    page_anchors: list[tuple[int, int]] = []
+    anchor_cursor = 0
+    for page in document.get("pages", []):
+        if not isinstance(page, dict) or not isinstance(page.get("page_number"), int):
+            continue
+        lines = [line.strip() for line in str(page.get("text", "")).splitlines()
+                 if line.strip() and not line.lstrip().startswith("<!--")]
+        anchor = None
+        for line in lines:
+            position = text.find(line, anchor_cursor)
+            if position >= 0:
+                anchor = position
+                break
+            match = re.search(r"\s+".join(re.escape(part) for part in line.split()), text[anchor_cursor:])
+            if match:
+                anchor = anchor_cursor + match.start()
+                break
+        if anchor is not None:
+            page_anchors.append((page["page_number"], anchor))
+            anchor_cursor = anchor + 1
+    page_ranges = {
+        page: (start, page_anchors[index + 1][1] if index + 1 < len(page_anchors) else len(text))
+        for index, (page, start) in enumerate(page_anchors)
+    }
+
+    def add(quote: Any, item: dict[str, Any], *, table_id: str | None = None,
+            cell: str | None = None, cell_bbox: Any = None, locate_text: bool = True) -> None:
+        nonlocal cursor
+        if not isinstance(quote, str) or not quote.strip():
+            return
+        quote = quote.strip()
+        prov = next((value for value in item.get("prov", []) if isinstance(value, dict)), {})
+        page = prov.get("page_no") if isinstance(prov.get("page_no"), int) and prov["page_no"] > 0 else None
+        page_range = page_ranges.get(page) if page is not None else None
+        if page_range:
+            search_start = max(page_cursors.get(page, page_range[0]), quote_cursors.get(f"{page}:{quote}", page_range[0]))
+            start = text.find(quote, search_start, page_range[1]) if locate_text else -1
+            if start < 0 and locate_text:
+                match = re.search(r"\s+".join(re.escape(part) for part in quote.split()), text[search_start:page_range[1]])
+                start = search_start + match.start() if match else -1
+                end = search_start + match.end() if match else None
+            else:
+                end = start + len(quote)
+            if start >= 0 and end is not None:
+                page_cursors[page] = end
+                quote_cursors[f"{page}:{quote}"] = end
+        else:
+            search_start = max(cursor, quote_cursors.get(quote, cursor))
+            start = text.find(quote, search_start) if locate_text else -1
+            if start >= 0 and start - search_start > 32_000 and len(quote) < 48:
+                start = -1
+            if start < 0 and locate_text:
+                match = re.search(r"\s+".join(re.escape(part) for part in quote.split()), text[search_start:])
+                candidate = search_start + match.start() if match else -1
+                if candidate >= 0 and (candidate - search_start <= 32_000 or len(quote) >= 48):
+                    start = candidate
+                    end = search_start + match.end() if match else None
+                else:
+                    start, end = -1, None
+            else:
+                end = start + len(quote)
+            if start >= 0 and end is not None:
+                quote_cursors[quote] = end
+                if len(quote) >= 48:
+                    cursor = end
+        locations.append({
+            "start": start if start >= 0 else None,
+            "end": end if start >= 0 else None,
+            "quote": quote,
+            "page": page,
+            "bbox": _bbox(cell_bbox) or _bbox(prov.get("bbox")),
+            "section_path": list(section_path),
+            "source_ref": item.get("self_ref"),
+            "source_kind": item.get("label"),
+            "table_id": table_id,
+            "cell": cell,
+        })
+
+    def visit(ref: str) -> None:
+        if ref in seen:
+            return
+        seen.add(ref)
+        item = indexed.get(ref)
+        if not item or item.get("content_layer") == "furniture":
+            return
+        children = item.get("children")
+        if isinstance(children, list) and children:
+            for child in children:
+                child_ref = child.get("$ref") if isinstance(child, dict) else child
+                if isinstance(child_ref, str):
+                    visit(child_ref)
+            return
+        label = item.get("label")
+        if label == "section_header" and isinstance(item.get("text"), str):
+            level = item.get("level") if isinstance(item.get("level"), int) and item["level"] > 0 else 1
+            section_path[:] = section_path[:level - 1] + [item["text"].strip()]
+        if ref.startswith("#/tables/") or label == "table":
+            cells = item.get("data", {}).get("table_cells", []) if isinstance(item.get("data"), dict) else []
+            for value in sorted((cell for cell in cells if isinstance(cell, dict)),
+                                key=lambda cell: (cell.get("start_row_offset_idx", 0), cell.get("start_col_offset_idx", 0))):
+                row, col = value.get("start_row_offset_idx"), value.get("start_col_offset_idx")
+                if isinstance(row, int) and isinstance(col, int):
+                    add(value.get("text"), item, table_id=f"table:{stable_digest(ref).split(':')[1][:24]}",
+                        cell=f"r{row}:c{col}", cell_bbox=value.get("bbox"), locate_text=False)
+            return
+        add(item.get("text"), item)
+
+    body = raw.get("body")
+    for child in body.get("children", []) if isinstance(body, dict) else []:
+        ref = child.get("$ref") if isinstance(child, dict) else child
+        if isinstance(ref, str):
+            visit(ref)
+    return locations
+
+
+def _located_document_fields(locations: list[dict[str, Any]], start: int, end: int) -> tuple[dict[str, Any], dict[str, Any]]:
+    matches = [item for item in locations if item["start"] is not None and item["start"] <= start and end <= item["end"]]
+    if not matches:
+        return {}, {}
+    item = min(matches, key=lambda value: value["end"] - value["start"])
+    locator = {key: item[key] for key in ("page", "bbox", "table_id", "cell") if item.get(key) is not None}
+    if item["section_path"]:
+        locator["section_path"] = item["section_path"]
+    metadata = {key: item[key] for key in ("source_ref", "source_kind") if item.get(key) is not None}
+    return locator, metadata
+
+
 def _source_passages(built: dict[str, Any]) -> list[EvidenceSpan]:
     """Locate bounded passages in the already parsed representation, without reparsing."""
     text = built["text"]
     representation = built["representation"]
+    locations = built.get("source_locations", [])
     passages = []
     for match in re.finditer(r"[^\n]+", text):
         for start in range(match.start(), match.end(), 1600):
             end = min(start + 1600, match.end())
             quote = text[start:end]
             if quote.strip():
+                fields, metadata = _located_document_fields(locations, start, end)
                 passages.append(EvidenceSpan(id=_span_id(representation.id, start, end), representation_id=representation.id,
-                    locator=DocumentLocator(representation_id=representation.id, origin=representation.origin, quote=quote, start_char=start, end_char=end, quality="precise"),
-                    metadata={"role": "source-passage"}, quote=quote))
+                    locator=DocumentLocator(representation_id=representation.id, origin=representation.origin, quote=quote,
+                                            start_char=start, end_char=end, quality="precise", **fields),
+                    metadata={"role": "source-passage", **metadata}, quote=quote))
     return passages
+
+
+def _docling_cell_evidence(built: dict[str, Any]) -> list[EvidenceSpan]:
+    representation = built["representation"]
+    evidence = []
+    for item in built.get("source_locations", []):
+        if not item.get("cell"):
+            continue
+        locator = {key: item[key] for key in ("page", "bbox", "table_id", "cell") if item.get(key) is not None}
+        if item["section_path"]:
+            locator["section_path"] = item["section_path"]
+        if item["start"] is not None:
+            locator.update(start_char=item["start"], end_char=item["end"])
+        evidence.append(EvidenceSpan(
+            id=f"evidence:{_safe_id(representation.id)}:cell:{stable_digest([item['table_id'], item['cell']]).split(':')[1][:24]}",
+            representation_id=representation.id,
+            locator=DocumentLocator(representation_id=representation.id, origin=representation.origin,
+                                    quote=item["quote"], quality="precise", **locator),
+            metadata={"role": "source-passage", "source_ref": item["source_ref"], "source_kind": item["source_kind"]},
+            quote=item["quote"],
+        ))
+    return evidence
 
 
 def _checked_citations(value: Any, allowed: dict[str, EvidenceSpan]) -> list[str]:
@@ -1087,6 +1263,7 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
     representation_revision = _representation_revision(source, force_ocr, content_hash, parser, parser_version, origin, document)
     representation_id = f"representation:{_safe_id(source.source_id)}:{representation_revision[7:]}"
     representation_artifact_id = f"artifact:{representation_id}"
+    source_locations = _docling_locations(document, text)
     entities: dict[str, KnowledgeEntity] = {}
     entities_by_ref: dict[str, KnowledgeEntity] = {}
     evidence: dict[str, EvidenceSpan] = {}
@@ -1110,6 +1287,7 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
         if text[start:end].casefold() != name.casefold():
             raise SnapshotBuildError(f"entity is not present in source text: {name}")
         evidence_id = _span_id(representation_id, start, end)
+        fields, source_metadata = _located_document_fields(source_locations, start, end)
         evidence[evidence_id] = EvidenceSpan(
             id=evidence_id,
             representation_id=representation_id,
@@ -1120,9 +1298,11 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
                 start_char=start,
                 end_char=end,
                 quality="precise",
+                **fields,
             ),
             quote=text[start:end],
             confidence=item.get("confidence"),
+            metadata=source_metadata,
         )
         entity_id = _entity_id(source.source_id, name, entity_type, text, start, end)
         current = entities.get(entity_id)
@@ -1165,11 +1345,14 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
             if text[start:end] != quote.strip():
                 raise SnapshotBuildError("relation evidence is not an exact source quote")
             evidence_id = _span_id(representation_id, start, end)
+            fields, source_metadata = _located_document_fields(source_locations, start, end)
             evidence[evidence_id] = EvidenceSpan(
                 id=evidence_id,
                 representation_id=representation_id,
-                locator=DocumentLocator(representation_id=representation_id, origin=origin, quote=quote.strip(), start_char=start, end_char=end, quality="precise"),
+                locator=DocumentLocator(representation_id=representation_id, origin=origin, quote=quote.strip(),
+                                        start_char=start, end_char=end, quality="precise", **fields),
                 quote=quote.strip(),
+                metadata=source_metadata,
             )
             qualifiers = item.get("qualifiers")
             if _invalid_fact_qualifiers(qualifiers, quote):
@@ -1194,7 +1377,7 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
         artifact_ref_id=representation_artifact_id,
         metadata={"representation_revision": representation_revision, "text_length": len(text), "source_name": source.name, "document": document},
     )
-    return {"source": source, "text": text, "representation": representation, "evidence": list(evidence.values()), "entities": list(entities.values()), "assertions": assertions, "relations": relations, "artifact_id": representation_artifact_id, "document": document}
+    return {"source": source, "text": text, "representation": representation, "evidence": list(evidence.values()), "entities": list(entities.values()), "assertions": assertions, "relations": relations, "artifact_id": representation_artifact_id, "document": document, "source_locations": source_locations}
 
 
 def _shared_facts(project_id: str, assertions: list[KnowledgeAssertion], relations: list[KnowledgeRelation]):
@@ -1742,7 +1925,9 @@ def _build_project_snapshot(request: ProjectSnapshotBuildRequest, progress=None)
         built_source["passages"] = _source_passages(built_source)
         if not built_source["passages"]:
             raise SnapshotBuildError(f"source has no located text for semantic production: {source.source_id}")
-        built_source["evidence"] = list({span.id: span for span in [*built_source["evidence"], *built_source["passages"]]}.values())
+        built_source["evidence"] = list({span.id: span for span in [
+            *built_source["evidence"], *built_source["passages"], *_docling_cell_evidence(built_source),
+        ]}.values())
         if request.recipe.id == "model" and request.recipe.classification_profile:
             classification, receipts = _classify_source(built_source, request.recipe.classification_profile, request.relays["model"])
             source_classifications.append(classification)

@@ -219,6 +219,56 @@ def test_semantic_classification_preserves_source_offsets_and_unclassified_dimen
     assert built["text"][span.locator.start_char:span.locator.end_char] == span.quote
 
 
+def test_docling_evidence_preserves_reading_order_and_physical_locators(tmp_path):
+    from semantica.project_snapshot_pipeline import _build_source, _docling_cell_evidence, _source_passages
+    from semantica.project_snapshot_schema import SourceBuildInput
+
+    source_path = tmp_path / "source.pdf"
+    source_path.write_bytes(b"source")
+    source = SourceBuildInput(filePath=str(source_path), sourceId="source-1",
+                              materialRevision=source_content_revision(source_path),
+                              mimeType="application/pdf", name="source.pdf")
+    text = "Chapter\nRepeated\nRepeated\nx = y\nROE\n12%"
+    def bbox(top):
+        return {"l": 10, "t": top, "r": 100, "b": top + 10, "coord_origin": "TOPLEFT"}
+    raw = {
+        "texts": [
+            {"self_ref": "#/texts/0", "label": "section_header", "level": 1, "text": "Chapter", "prov": [{"page_no": 1, "bbox": bbox(10)}]},
+            {"self_ref": "#/texts/1", "label": "text", "text": "Repeated", "prov": [{"page_no": 1, "bbox": bbox(30)}]},
+            {"self_ref": "#/texts/2", "label": "text", "text": "Repeated", "prov": [{"page_no": 2, "bbox": bbox(10)}]},
+            {"self_ref": "#/texts/3", "label": "formula", "text": "x = y", "prov": [{"page_no": 2, "bbox": bbox(30)}]},
+        ],
+        "tables": [{"self_ref": "#/tables/0", "label": "table", "prov": [{"page_no": 3, "bbox": bbox(10)}],
+                    "data": {"table_cells": [
+                        {"start_row_offset_idx": 0, "start_col_offset_idx": 0, "row_span": 1, "col_span": 1, "text": "ROE", "bbox": bbox(20)},
+                        {"start_row_offset_idx": 0, "start_col_offset_idx": 1, "row_span": 1, "col_span": 1, "text": "12%", "bbox": bbox(20)},
+                    ]}}],
+        "groups": [], "pictures": [], "key_value_items": [], "form_items": [],
+        "body": {"children": [{"$ref": ref} for ref in
+                              ("#/texts/0", "#/texts/1", "#/texts/2", "#/texts/3", "#/tables/0")]},
+    }
+    document = {"format": "docling", "document": raw, "text": text}
+    model_result = {"entities": [{"id": "e1", "name": "Repeated", "type": "concept", "occurrence": 1}], "relations": []}
+    built = _build_source(source, False, model_result=model_result,
+                          parsed=(text, document, "native", source.material_revision, "docling", "2"))
+    passages = _source_passages(built)
+
+    repeated = [span for span in passages if span.quote == "Repeated"]
+    assert [span.locator.page for span in repeated] == [1, 2]
+    assert repeated[1].locator.section_path == ["Chapter"]
+    entity_span = next(span for span in built["evidence"] if span.quote == "Repeated")
+    assert entity_span.locator.page == 2
+    formula = next(span for span in passages if span.quote == "x = y")
+    assert formula.metadata["source_kind"] == "formula"
+    cell = next(span for span in _docling_cell_evidence(built) if span.quote == "12%")
+    assert cell.locator.table_id.startswith("table:")
+    assert cell.metadata["source_ref"] == "#/tables/0"
+    assert cell.locator.cell == "r0:c1"
+    assert cell.locator.page == 3
+    assert cell.locator.bbox == [10.0, 20.0, 100.0, 30.0]
+    assert cell.locator.start_char is None and cell.locator.end_char is None
+
+
 @pytest.mark.parametrize("citation", [[], [{"evidence_id": "evidence:invented", "quote": "unknown"}]])
 def test_explanation_rejects_missing_or_hallucinated_citations(tmp_path, monkeypatch, citation):
     from semantica.project_snapshot_pipeline import _build_source, _source_passages, _explanation_reports, SnapshotBuildError
