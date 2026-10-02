@@ -7,13 +7,25 @@ import shutil
 import subprocess
 import tarfile
 import tempfile
+import time
 import urllib.request
 
 
-def download(url, destination, digest):
+def download(url, destination, digest, attempts=4):
     if not destination.exists():
-        with urllib.request.urlopen(url, timeout=300) as response, destination.open("wb") as target:
-            shutil.copyfileobj(response, target)
+        partial = destination.with_name(f"{destination.name}.partial")
+        for attempt in range(attempts):
+            try:
+                partial.unlink(missing_ok=True)
+                with urllib.request.urlopen(url, timeout=300) as response, partial.open("wb") as target:
+                    shutil.copyfileobj(response, target)
+                partial.replace(destination)
+                break
+            except OSError:
+                partial.unlink(missing_ok=True)
+                if attempt + 1 == attempts:
+                    raise
+                time.sleep(10 * 2**attempt)
     with destination.open("rb") as stream:
         actual = hashlib.file_digest(stream, "sha256").hexdigest()
     if actual != digest:
