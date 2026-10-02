@@ -11,11 +11,58 @@ from semantica.project_snapshot_schema import (
     KnowledgeEntity, ModelReceipt, SourceBuildInput,
 )
 from semantica.project_snapshot_worker import _relay_receipts
+from semantica.semantic_extract.types import Entity, Relation
 
 
 def receipt(operation, count):
     return ModelReceipt(id=f"receipt:{operation}:{count}", operation=operation, provider="test", model="test",
                         input_digest="sha256:" + "1" * 64, output_digest="sha256:" + "2" * 64)
+
+
+def _stub_canonical_extraction(monkeypatch, extract):
+    class Provider:
+        def __init__(self):
+            self.receipts = []
+            self.result = None
+
+    class NER:
+        def __init__(self, provider_instance, **_kwargs):
+            self.provider = provider_instance
+
+        def extract(self, text):
+            self.provider.result, model_receipt = extract(text, None)
+            self.provider.receipts.append(model_receipt)
+            entities = []
+            for index, item in enumerate(self.provider.result["entities"]):
+                start, end = pipeline._find_occurrence(text, item["name"], item.get("occurrence"))
+                entities.append(Entity(
+                    item["name"], item["type"], start, end, item.get("confidence", 0.9),
+                    {"mention_id": item["id"], "span_occurrence": item.get("occurrence", 0)},
+                ))
+            return entities
+
+    class Relations:
+        def __init__(self, provider_instance, **_kwargs):
+            self.provider = provider_instance
+
+        def extract(self, text, entities):
+            by_id = {entity.metadata["mention_id"]: entity for entity in entities}
+            relations = []
+            for item in self.provider.result["relations"]:
+                start, end = pipeline._find_occurrence(text, item["evidence"], item.get("evidence_occurrence"))
+                relations.append(Relation(
+                    by_id[item["subject"]], item["predicate"], by_id[item["object"]],
+                    item.get("confidence", 0.9), text[start:end], {
+                        "subject_id": item["subject"], "object_id": item["object"],
+                        "evidence_occurrence": item.get("evidence_occurrence", 0),
+                        "qualifiers": item["qualifiers"],
+                    },
+                ))
+            return relations
+
+    monkeypatch.setattr(pipeline, "_project_model_provider", lambda _relay: Provider())
+    monkeypatch.setattr(pipeline, "NERExtractor", NER)
+    monkeypatch.setattr(pipeline, "RelationExtractor", Relations)
 
 
 def test_long_extraction_visits_tail_and_preserves_absolute_repeated_mentions(tmp_path, monkeypatch):
@@ -27,9 +74,9 @@ def test_long_extraction_visits_tail_and_preserves_absolute_repeated_mentions(tm
         names = [name for name in ("Ada", "Engine", "Tail", "FinalEngine") if name in window]
         return {"entities": [{"id": name, "name": name, "type": "CONCEPT", "occurrence": 0} for name in names], "relations": []}, receipt("structured_extraction", len(calls))
 
-    monkeypatch.setattr(pipeline, "_structured_extract", extract)
+    _stub_canonical_extraction(monkeypatch, extract)
     monkeypatch.setattr(pipeline, "_embed_texts", lambda texts, relay: ([[1.0, 0.0] for _ in texts], receipt("embedding", len(calls))))
-    extracted, embeddings, receipts = pipeline._extract_and_embed(text, None, None)
+    extracted, embeddings, receipts = pipeline._extract_and_embed(text, SimpleNamespace(model_id="test"), None)
     assert len(calls) > 10 and all(len(item) <= pipeline.TEXT_WINDOW_CHARS for item in calls)
     assert len(receipts) == len(calls) + (len(calls) + 7) // 8
     assert embeddings[-1]["end_char"] == len(text)
@@ -49,30 +96,30 @@ def test_long_extraction_visits_tail_and_preserves_absolute_repeated_mentions(tm
 
 
 def test_extraction_rejects_quote_outside_current_window(monkeypatch):
-    monkeypatch.setattr(pipeline, "_structured_extract", lambda *args: ({"entities": [{"id": "tail", "name": "Tail", "type": "CONCEPT", "occurrence": 0}], "relations": []}, receipt("structured_extraction", 1)))
+    _stub_canonical_extraction(monkeypatch, lambda *args: ({"entities": [{"id": "tail", "name": "Tail", "type": "CONCEPT", "occurrence": 0}], "relations": []}, receipt("structured_extraction", 1)))
     monkeypatch.setattr(pipeline, "_embed_texts", lambda texts, relay: ([[1.0] for _ in texts], receipt("embedding", 1)))
     with pytest.raises(pipeline.SnapshotBuildError, match="source window"):
-        pipeline._extract_and_embed("x" * 10_000 + "Tail", None, None)
+        pipeline._extract_and_embed("x" * 10_000 + "Tail", SimpleNamespace(model_id="test"), None)
 
 
-def test_extraction_reports_active_stage_and_anchors_whitespace_to_source(monkeypatch):
+def test_extraction_reports_active_stage_and_preserves_exact_evidence(monkeypatch):
     text = "CFA Institute thanks the authors:\nAlice   Bob"
     events = []
 
-    monkeypatch.setattr(pipeline, "_structured_extract", lambda *args: ({
+    _stub_canonical_extraction(monkeypatch, lambda *args: ({
         "entities": [
             {"id": "cfa", "name": "CFA Institute", "type": "ORG", "occurrence": 0},
             {"id": "authors", "name": "authors", "type": "GROUP", "occurrence": 0},
         ],
         "relations": [{
             "subject": "cfa", "predicate": "thanks", "object": "authors",
-            "evidence": "CFA Institute thanks the authors: Alice Bob",
+                "evidence": text,
             "evidence_occurrence": 0, "qualifiers": {"polarity": "positive"},
         }],
     }, receipt("structured_extraction", 1)))
     monkeypatch.setattr(pipeline, "_embed_texts", lambda texts, relay: ([[1.0] for _ in texts], receipt("embedding", 1)))
 
-    extracted, _, _ = pipeline._extract_and_embed(text, None, None, progress=events.append)
+    extracted, _, _ = pipeline._extract_and_embed(text, SimpleNamespace(model_id="test"), None, progress=events.append)
 
     assert [event["stage"] for event in events] == ["extracting", "extracting", "embedding", "embedding"]
     assert events[0]["metadata"] == {"completedChunks": 0, "totalChunks": 1}
@@ -94,9 +141,9 @@ def test_stage_progress_precedes_relay_calls(monkeypatch):
         assert events[-1]["metadata"] == {"completedChunks": 0, "totalChunks": 1}
         return [[1.0] for _ in texts], receipt("embedding", 1)
 
-    monkeypatch.setattr(pipeline, "_structured_extract", extract)
+    _stub_canonical_extraction(monkeypatch, extract)
     monkeypatch.setattr(pipeline, "_embed_texts", embed)
-    pipeline._extract_and_embed("source", None, None, progress=events.append)
+    pipeline._extract_and_embed("source", SimpleNamespace(model_id="test"), None, progress=events.append)
 
 
 def test_parallel_extraction_is_bounded_and_preserves_window_order(monkeypatch):
@@ -115,9 +162,9 @@ def test_parallel_extraction_is_bounded_and_preserves_window_order(monkeypatch):
             active -= 1
         return {"entities": [{"id": window, "name": window, "type": "CONCEPT", "occurrence": 0}], "relations": []}, receipt("structured_extraction", int(window[-1]))
 
-    monkeypatch.setattr(pipeline, "_structured_extract", extract)
+    _stub_canonical_extraction(monkeypatch, extract)
     monkeypatch.setattr(pipeline, "_embed_texts", lambda texts, relay: ([[1.0, 0.0] for _ in texts], receipt("embedding", 1)))
-    result, embeddings, receipts = pipeline._extract_and_embed("unused", None, None, parallelism=2)
+    result, embeddings, receipts = pipeline._extract_and_embed("unused", SimpleNamespace(model_id="test"), None, parallelism=2)
     assert peak == 2
     assert [entity["name"] for entity in result["entities"]] == [item[2] for item in windows]
     assert [item["start_char"] for item in embeddings] == [item[0] for item in windows]
@@ -127,7 +174,7 @@ def test_parallel_extraction_is_bounded_and_preserves_window_order(monkeypatch):
 def test_parallel_embedding_batches_are_bounded_and_ordered(monkeypatch):
     windows = [(index * 10, index * 10 + 4, f"Fact{index}") for index in range(24)]
     monkeypatch.setattr(pipeline, "_text_windows", lambda text: iter(windows))
-    monkeypatch.setattr(pipeline, "_structured_extract", lambda window, relay: ({"entities": [], "relations": []}, receipt("structured_extraction", int(window[4:]))))
+    _stub_canonical_extraction(monkeypatch, lambda window, relay: ({"entities": [], "relations": []}, receipt("structured_extraction", int(window[4:]))))
     lock = Lock()
     active = peak = 0
 
@@ -142,7 +189,7 @@ def test_parallel_embedding_batches_are_bounded_and_ordered(monkeypatch):
         return [[float(int(text[4:]))] for text in texts], receipt("embedding", int(texts[0][4:]))
 
     monkeypatch.setattr(pipeline, "_embed_texts", embed)
-    _, embeddings, receipts = pipeline._extract_and_embed("unused", None, None, parallelism=2)
+    _, embeddings, receipts = pipeline._extract_and_embed("unused", SimpleNamespace(model_id="test"), None, parallelism=2)
     assert peak == 2
     assert [chunk["vector"] for chunk in embeddings] == [[float(index)] for index in range(24)]
     assert [item.id for item in receipts[-3:]] == [f"receipt:embedding:{index}" for index in (0, 8, 16)]

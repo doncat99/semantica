@@ -25,25 +25,6 @@ def _worker_output(stdout):
     return events, events[-1]
 
 
-def test_structured_extraction_repairs_unlocated_entity_with_receipts(monkeypatch):
-    from types import SimpleNamespace
-    from semantica.project_snapshot_pipeline import _structured_extract
-
-    calls = []
-    def relay(_binding, payload, operation):
-        calls.append(payload)
-        name = "exposure variables" if len(calls) == 1 else "exposure"
-        content = {"entities": [{"id": "e1", "name": name, "type": "concept", "occurrence": 0}], "relations": []}
-        receipt = ModelReceipt(id=f"receipt:{len(calls)}", operation=operation, provider="test", model="model-1", input_digest=H1, output_digest=H2)
-        return {"model": "model-1", "choices": [{"message": {"content": json.dumps(content)}}]}, receipt
-
-    monkeypatch.setattr("semantica.project_snapshot_pipeline._relay_json", relay)
-    result, receipts = _structured_extract("Identify exposure and outcome variables.", SimpleNamespace(model_id="model-1"))
-    assert result["entities"][0]["name"] == "exposure"
-    assert len(receipts) == len(calls) == 2
-    assert "exposure variables" in calls[1]["messages"][0]["content"]
-
-
 def test_unique_quote_ignores_model_position_but_duplicate_requires_occurrence():
     from semantica.project_snapshot_pipeline import _find_occurrence, SnapshotBuildError
 
@@ -51,56 +32,6 @@ def test_unique_quote_ignores_model_position_but_duplicate_requires_occurrence()
     assert _find_occurrence(text, "Private Equity", 590) == (16, 30)
     with pytest.raises(SnapshotBuildError, match="outside its source window"):
         _find_occurrence(text, "Green Bonds", 590)
-
-
-def test_structured_extraction_repairs_unsupported_or_ungrounded_qualifiers(monkeypatch):
-    from types import SimpleNamespace
-    from semantica.project_snapshot_pipeline import _structured_extract
-
-    text = "Reflective roofs do not directly shade pedestrians."
-    calls = []
-    def relay(_binding, payload, operation):
-        calls.append(payload)
-        if len(calls) == 1:
-            content = {"entities": [{"id": "roof", "name": "Reflective roofs", "type": "measure", "occurrence": 0},
-                                    {"id": "people", "name": "pedestrians", "type": "population", "occurrence": 0}],
-                       "relations": [{"subject": "roof", "predicate": "shades", "object": "people", "evidence": text,
-                                      "evidence_occurrence": 0, "qualifiers": {"polarity": "negative", "directness": "directly", "condition": "in summer"}}]}
-        else:
-            content = {"repairs": [{"index": 0, "qualifiers": {"polarity": "negative"}}]}
-        receipt = ModelReceipt(id=f"receipt:{len(calls)}", operation=operation, provider="test", model="model-1", input_digest=H1, output_digest=H2)
-        return {"model": "model-1", "choices": [{"message": {"content": json.dumps(content)}}]}, receipt
-
-    monkeypatch.setattr("semantica.project_snapshot_pipeline._relay_json", relay)
-    result, receipts = _structured_extract(text, SimpleNamespace(model_id="model-1"))
-    assert result["relations"][0]["qualifiers"] == {"polarity": "negative"}
-    assert len(receipts) == len(calls) == 2
-    assert "directness" in calls[1]["messages"][1]["content"]
-    assert len(calls[1]["messages"][1]["content"]) < len(calls[0]["messages"][1]["content"]) + 180
-
-
-def test_structured_extraction_rejects_unrepaired_relation_without_losing_valid_facts(monkeypatch):
-    from types import SimpleNamespace
-    from semantica.project_snapshot_pipeline import _structured_extract
-
-    text = "Social Factors | 219. Reflective roofs do not shade pedestrians."
-    outputs = [
-        {"entities": [{"id": "roof", "name": "Reflective roofs", "type": "measure", "occurrence": 0},
-                      {"id": "people", "name": "pedestrians", "type": "population", "occurrence": 0}],
-         "relations": [{"subject": "roof", "predicate": "listed_on", "object": "people", "evidence": "Social Factors | 219", "qualifiers": {"page": "219"}},
-                       {"subject": "roof", "predicate": "shades", "object": "people", "evidence": "Reflective roofs do not shade pedestrians.", "qualifiers": {"polarity": "negative"}}]},
-        {"repairs": [{"index": 0, "qualifiers": {"value": "219"}}]},
-    ]
-    def relay(_binding, _payload, operation):
-        content = outputs.pop(0)
-        receipt = ModelReceipt(id=f"receipt:{len(outputs)}", operation=operation, provider="test", model="model-1", input_digest=H1, output_digest=H2)
-        return {"model": "model-1", "choices": [{"message": {"content": json.dumps(content)}}]}, receipt
-
-    monkeypatch.setattr("semantica.project_snapshot_pipeline._relay_json", relay)
-    result, receipts = _structured_extract(text, SimpleNamespace(model_id="model-1"))
-    assert result["entities"] and len(result["relations"]) == 1
-    assert result["relations"][0]["predicate"] == "shades"
-    assert receipts[-1].metadata["rejected_relations"] == 1
 
 
 def test_relay_http_failure_preserves_status_and_code(monkeypatch):
@@ -477,16 +408,29 @@ def test_model_recipe_uses_bifrost_chat_and_embedding_and_records_receipts(tmp_p
             length = int(self.headers["content-length"])
             payload = json.loads(self.rfile.read(length))
             if self.path == "/v1/chat/completions":
-                explanation = "Explain the supplied knowledge" in payload["messages"][0]["content"]
+                prompt = payload["messages"][0]["content"]
+                explanation = "Explain the supplied knowledge" in prompt
                 context = json.loads(payload["messages"][1]["content"]) if explanation else None
-                response = {
-                    "choices": [{"message": {"content": json.dumps({"sections": [{"title": "Historical role", "text": "Ada Lovelace is connected to the Analytical Engine through the documented design work.", "citations": [{"evidence_id": context["evidence"][0]["id"], "quote": context["evidence"][0]["quote"]}]}]} if explanation else {
+                if len(payload["messages"]) == 1:
+                    content = ({
+                        "relations": [{
+                            "subject": "Ada Lovelace", "subject_id": "mention:0",
+                            "predicate": "designed", "object": "Analytical Engine",
+                            "object_id": "mention:1",
+                            "evidence": "Ada Lovelace designed the Analytical Engine.",
+                            "evidence_occurrence": 0,
+                            "qualifiers": {"polarity": "positive"},
+                        }],
+                    } if "Extract source-grounded relations" in prompt else {
                         "entities": [
-                            {"id": "ada", "name": "Ada Lovelace", "type": "PERSON", "occurrence": 0},
-                            {"id": "engine", "name": "Analytical Engine", "type": "CONCEPT", "occurrence": 0},
+                            {"text": "Ada Lovelace", "label": "PERSON", "occurrence": 0},
+                            {"text": "Analytical Engine", "label": "CONCEPT", "occurrence": 0},
                         ],
-                        "relations": [{"subject": "ada", "predicate": "designed", "object": "engine", "evidence": "Ada Lovelace designed the Analytical Engine.", "qualifiers": {"polarity": "positive"}}],
-                    }), "role": "assistant"}}],
+                    })
+                else:
+                    content = {"sections": [{"title": "Historical role", "text": "Ada Lovelace is connected to the Analytical Engine through the documented design work.", "citations": [{"evidence_id": context["evidence"][0]["id"], "quote": context["evidence"][0]["quote"]}]}]} if explanation else {}
+                response = {
+                    "choices": [{"message": {"content": json.dumps(content), "role": "assistant"}}],
                     "model": payload["model"],
                     "usage": {"prompt_tokens": 10, "completion_tokens": 8},
                 }
@@ -532,11 +476,13 @@ def test_model_recipe_uses_bifrost_chat_and_embedding_and_records_receipts(tmp_p
         server.server_close()
 
     assert response["ok"] is True
-    assert len(response["result"]["relayReceipts"]["model"]) == 7
+    assert len(response["result"]["relayReceipts"]["model"]) == 8
     assert len(response["result"]["relayReceipts"]["embedding"]) == 1
     snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "snapshot")
     snapshot = ProjectSnapshot.model_validate_json(snapshot_path.read_bytes())
-    assert len(snapshot.model_receipts) == 8
+    assert len(snapshot.model_receipts) == 9
+    extraction_receipts = [receipt for receipt in snapshot.model_receipts if receipt.operation == "structured_extraction"]
+    assert {receipt.metadata["extraction_stage"] for receipt in extraction_receipts} == {"entities", "relations"}
     assert snapshot.source_classifications[0].assignments[0].item_id == "history"
     assert snapshot.classification_profile.id == "profile:test"
     assert "classification:source-1" in snapshot.change_delta.added_ids
@@ -645,7 +591,21 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
                 for index, _ in enumerate(payload["input"])
             ], "model": relay.model_id}
         else:
-            if operation == "identity_resolution":
+            if operation == "structured_extraction":
+                prompt = payload["messages"][0]["content"]
+                content = ({"relations": [{
+                    "subject": "Ada Lovelace", "subject_id": "mention:0",
+                    "predicate": "designed", "object": "Analytical Engine",
+                    "object_id": "mention:1", "evidence": text,
+                    "evidence_occurrence": 0,
+                    "qualifiers": {"polarity": "positive"},
+                }]} if "Extract source-grounded relations" in prompt else {
+                    "entities": [
+                        {"text": "Ada Lovelace", "label": "PERSON", "occurrence": 0},
+                        {"text": "Analytical Engine", "label": "CONCEPT", "occurrence": 0},
+                    ],
+                })
+            elif operation == "identity_resolution":
                 candidates = json.loads(payload["messages"][1]["content"])
                 groups = [[item for item in candidates if item["name"] == name] for name in {item["name"] for item in candidates}]
                 content = {"splits": [], "merges": [{"mention_ids": [item["mention_id"] for item in group],
@@ -657,8 +617,7 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
                 context = json.loads(payload["messages"][1]["content"])
                 content = {"sections": [{"title": "Design", "text": "Ada Lovelace designed the Analytical Engine.", "citations": [{"evidence_id": context["evidence"][0]["id"], "quote": context["evidence"][0]["quote"]}]}]}
             else:
-                content = {"entities": [{"id": "ada", "name": "Ada Lovelace", "type": "PERSON", "occurrence": 0}, {"id": "engine", "name": "Analytical Engine", "type": "CONCEPT", "occurrence": 0}],
-                    "relations": [{"subject": "ada", "predicate": "designed", "object": "engine", "evidence": text, "qualifiers": {"polarity": "positive"}}]}
+                content = {}
             result = {"choices": [{"message": {"content": json.dumps(content)}}], "model": relay.model_id}
         receipt = ModelReceipt(id="receipt:" + stable_digest([operation, payload]).split(":")[1], operation=operation,
             provider="fixture", model=relay.model_id, input_digest=stable_digest(payload), output_digest=stable_digest(result))

@@ -768,10 +768,19 @@ class NERExtractor:
                                 message=f"Extracted {len(filtered)} entities using {method_name}",
                             )
                             return filtered
+                        if all_options.get("grounding") == "strict":
+                            self.progress_tracker.stop_tracking(
+                                tracking_id,
+                                status="completed",
+                                message="Strict grounded extraction returned no entities",
+                            )
+                            return []
                     else:
                         all_entities.append((method_name, filtered))
 
                 except Exception as e:
+                    if all_options.get("grounding") == "strict":
+                        raise
                     self.logger.warning(
                         "Method %s failed: %s", method_name, e, exc_info=True
                     )

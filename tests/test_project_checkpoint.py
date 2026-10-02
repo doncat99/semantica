@@ -39,10 +39,11 @@ def test_worker_process_restart_reuses_durable_parse_and_model_calls(tmp_path):
                     for index, _ in enumerate(payload["input"])
                 ]}
             else:
-                user = payload["messages"][1]["content"]
-                if user == source.read_text():
-                    content = {"entities": [], "relations": []}
+                prompt = payload["messages"][0]["content"]
+                if len(payload["messages"]) == 1:
+                    content = {"relations": []} if "Extract source-grounded relations" in prompt else {"entities": []}
                 else:
+                    user = payload["messages"][1]["content"]
                     context = json.loads(user)
                     content = {"sections": [{"title": "Knowledge production", "text": context["evidence"][0]["quote"],
                         "citations": [{"evidence_id": item["id"], "quote": item["quote"]} for item in context["evidence"]]}]}
@@ -97,7 +98,7 @@ def test_worker_process_restart_reuses_durable_parse_and_model_calls(tmp_path):
         result = json.loads(stdout.strip().splitlines()[-1])
         assert result["ok"], result
         assert parsed_artifact.read_bytes() == parsed_bytes
-        extraction_calls = [item for item in calls if "messages" in item and item["messages"][1]["content"] == source.read_text()]
+        extraction_calls = [item for item in calls if "messages" in item and len(item["messages"]) == 1]
         assert len(extraction_calls) == 1
         snapshot_artifact = next(item for item in result["result"]["artifacts"] if item["kind"] == "snapshot")
         snapshot = json.loads(Path(snapshot_artifact["path"]).read_bytes())

@@ -469,8 +469,17 @@ class RelationExtractor:
                                 message=f"Extracted {len(result)} relations using {method_name}",
                             )
                             return result
+                    if all_options.get("grounding") == "strict" and len(methods) == 1:
+                        self.progress_tracker.stop_tracking(
+                            tracking_id,
+                            status="completed",
+                            message="Strict grounded extraction returned no relations",
+                        )
+                        return []
 
                 except Exception as e:
+                    if all_options.get("grounding") == "strict":
+                        raise
                     self.logger.warning("Method %s failed: %s", method_name, e, exc_info=verbose_mode)
                     continue
 

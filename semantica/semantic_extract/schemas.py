@@ -10,6 +10,7 @@ class EntityOut(BaseModel):
     start: int = Field(0, description="Start character index", alias="start_char")
     end: int = Field(0, description="End character index", alias="end_char")
     confidence: float = Field(0.9, description="Confidence score between 0 and 1")
+    occurrence: Optional[int] = Field(None, ge=0, description="Zero-based exact text occurrence")
     metadata: dict = Field(default_factory=dict, description="Additional metadata including provenance")
 
     @field_validator("text", mode="before")
@@ -54,6 +55,11 @@ class RelationOut(BaseModel):
     object: str = Field(..., description="Target entity text")
     predicate: str = Field(..., description="Relation type or predicate")
     confidence: float = Field(0.9, description="Confidence score between 0 and 1")
+    subject_id: Optional[str] = Field(None, description="Exact source entity mention identifier")
+    object_id: Optional[str] = Field(None, description="Exact target entity mention identifier")
+    evidence: Optional[str] = Field(None, description="Exact supporting source quote")
+    evidence_occurrence: Optional[int] = Field(None, ge=0, description="Zero-based evidence quote occurrence")
+    qualifiers: dict = Field(default_factory=dict, description="Grounded relation qualifiers")
     metadata: dict = Field(default_factory=dict, description="Additional metadata including provenance")
 
     @model_validator(mode="before")
