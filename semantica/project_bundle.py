@@ -15,6 +15,37 @@ def digest_file(path: Path) -> str:
         return "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest()
 
 
+_PARSER_MODULES = {
+    "__init__.py",
+    "project_checkpoint.py",
+    "project_document_quality.py",
+    "project_office.py",
+    "project_remote_docling.py",
+    "project_snapshot_schema.py",
+    "project_snapshot_worker.py",
+    "project_source.py",
+}
+
+
+def document_parser_digest(files: list[dict]) -> str:
+    """Hash the parser runtime without coupling it to knowledge extraction code."""
+    selected = []
+    for item in files:
+        path = item["path"]
+        marker = "/site-packages/semantica/"
+        if path == "release.json" or ("/site-packages/semantica-" in path and ".dist-info/" in path):
+            continue
+        if marker in path:
+            relative = path.split(marker, 1)[1]
+            if relative not in _PARSER_MODULES and not relative.startswith("parse/"):
+                continue
+        selected.append([path, item["size"], item["sha256"]])
+    if not selected:
+        raise ValueError("bundle has no document parser inputs")
+    payload = json.dumps(sorted(selected), ensure_ascii=False, separators=(",", ":")).encode()
+    return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
 def remove_generated_bytecode(root: Path) -> None:
     for path in root.rglob("*.pyc"):
         if "__pycache__" in path.relative_to(root).parts:
@@ -155,7 +186,8 @@ def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, output: P
     for item in sorted(output.rglob("*"), key=lambda path: path.relative_to(output).as_posix()):
         if item.is_file():
             manifest["files"].append({"path": item.relative_to(output).as_posix(), "size": item.stat().st_size, "sha256": digest_file(item)})
-    descriptor = [manifest["protocol"], schema_digest, manifest["pythonPath"],
+    manifest["documentParserDigest"] = document_parser_digest(manifest["files"])
+    descriptor = [manifest["protocol"], schema_digest, manifest["documentParserDigest"], manifest["pythonPath"],
                   [manifest["worker"]["path"], manifest["worker"]["args"]],
                   [manifest["queryWorker"]["path"], manifest["queryWorker"]["args"]],
                   sorted([key, value] for key, value in manifest["mediaTypes"].items()),

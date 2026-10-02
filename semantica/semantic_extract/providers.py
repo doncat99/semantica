@@ -712,7 +712,7 @@ class BaseProvider:
 
         raise ProcessingError(
             f"Failed to generate typed output after {max_retries} attempts: {last_error}"
-        )
+        ) from last_error
 
 
 class OpenAIProvider(BaseProvider):

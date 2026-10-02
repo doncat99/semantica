@@ -77,6 +77,20 @@ MODEL_CONTEXT_BYTES = 48_000
 EXTRACTION_MAX_OUTPUT_TOKENS = 4096
 
 
+def _typed_extraction_error(error: ProcessingError) -> SnapshotBuildError:
+    cause: BaseException | None = error
+    while cause is not None:
+        if isinstance(cause, SnapshotBuildError):
+            return SnapshotBuildError(
+                str(error),
+                status=cause.status,
+                code=cause.code,
+                retryable=cause.retryable,
+            )
+        cause = cause.__cause__
+    return SnapshotBuildError(str(error))
+
+
 def _context_size(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
 
@@ -183,7 +197,7 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
                 except ProcessingError as exc:
                     for waiting in futures:
                         waiting.cancel()
-                    raise SnapshotBuildError(str(exc)) from exc
+                    raise _typed_extraction_error(exc) from exc
                 except Exception:
                     for waiting in futures:
                         waiting.cancel()

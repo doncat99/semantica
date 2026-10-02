@@ -2,7 +2,12 @@ from pathlib import Path
 
 import pytest
 
-from semantica.project_bundle import digest_file, remove_generated_bytecode, verify_bundle_inventory
+from semantica.project_bundle import (
+    document_parser_digest,
+    digest_file,
+    remove_generated_bytecode,
+    verify_bundle_inventory,
+)
 
 
 def manifest_for(path: Path) -> dict:
@@ -41,3 +46,18 @@ def test_post_acceptance_inventory_rejects_changed_manifest_file(tmp_path: Path)
 
     with pytest.raises(ValueError, match="runtime.bin"):
         verify_bundle_inventory(tmp_path, manifest, remove_untracked_bytecode=True)
+
+
+def test_document_parser_digest_ignores_extraction_code_but_tracks_parser_inputs():
+    files = [
+        {"path": "models/layout/model.bin", "size": 1, "sha256": "sha256:" + "1" * 64},
+        {"path": "python/lib/site-packages/docling/core.py", "size": 2, "sha256": "sha256:" + "2" * 64},
+        {"path": "python/lib/site-packages/semantica/project_source.py", "size": 3, "sha256": "sha256:" + "3" * 64},
+        {"path": "python/lib/site-packages/semantica/project_snapshot_pipeline.py", "size": 4, "sha256": "sha256:" + "4" * 64},
+    ]
+    original = document_parser_digest(files)
+    extraction_only = [*files[:3], {**files[3], "sha256": "sha256:" + "5" * 64}]
+    parser_change = [files[0], files[1], {**files[2], "sha256": "sha256:" + "6" * 64}, files[3]]
+
+    assert document_parser_digest(extraction_only) == original
+    assert document_parser_digest(parser_change) != original
