@@ -32,14 +32,16 @@ def download(url, destination, digest, attempts=4):
         raise ValueError(f"native input digest mismatch: {url}")
 
 
-def prepare(target, output):
+def prepare(target, output, *, include_office=False):
     lock = json.loads(Path(".github/requirements/project-worker-native.json").read_text())
     platform = lock["platforms"][target]
     output.mkdir(parents=True, exist_ok=True)
-    download(lock["wordPerfectFixture"]["url"], output / "wp6.wpd", lock["wordPerfectFixture"]["sha256"])
     download(platform["pythonUrl"], output / "python.tar.gz", platform["pythonSha256"])
     with tarfile.open(output / "python.tar.gz") as archive:
         archive.extractall(output, filter="data")
+    if not include_office:
+        return
+    download(lock["wordPerfectFixture"]["url"], output / "wp6.wpd", lock["wordPerfectFixture"]["sha256"])
     installer = output / ("office.dmg" if target.startswith("darwin") else "office.msi" if target.startswith("win") else "office.tar.gz")
     download(platform["officeUrl"], installer, platform["officeSha256"])
     with tempfile.TemporaryDirectory(prefix="semantica-office-install-") as temporary:
@@ -71,5 +73,6 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("target", choices=["darwin-arm64", "linux-x64", "win-x64"])
     parser.add_argument("output", type=Path)
+    parser.add_argument("--office", action="store_true", help="also prepare the independently released Office capability")
     args = parser.parse_args()
-    prepare(args.target, args.output)
+    prepare(args.target, args.output, include_office=args.office)

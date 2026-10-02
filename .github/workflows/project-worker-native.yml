@@ -80,12 +80,11 @@ jobs:
             echo "Expected exactly one Semantica wheel, found ${#wheels[@]}" >&2
             exit 1
           fi
-          native-inputs/${{ matrix.python }} -I -B semantica/project_bundle.py --python-root native-inputs/python --wheel "${wheels[0]}" --models-root native-inputs/models --office-root native-inputs/office --office-receipt native-inputs/office-release.json --office-output native-office-bundle --target '${{ matrix.runtime_target }}' --output native-bundle --source-revision "$GITHUB_SHA"
+          native-inputs/${{ matrix.python }} -I -B semantica/project_bundle.py --python-root native-inputs/python --wheel "${wheels[0]}" --models-root native-inputs/models --target '${{ matrix.runtime_target }}' --output native-bundle --source-revision "$GITHUB_SHA"
       - name: Relocate and validate installed worker
         run: |
           mv native-bundle "$RUNNER_TEMP/semantica-relocated"
           "$RUNNER_TEMP/semantica-relocated/${{ matrix.python }}" -I -B .github/scripts/project_worker_acceptance.py "$RUNNER_TEMP/semantica-relocated" native-dist/${{ matrix.target }}-acceptance.json
-          SEMANTICA_OFFICE_ROOT="$PWD/native-office-bundle" "$RUNNER_TEMP/semantica-relocated/${{ matrix.python }}" -I -B -c 'from pathlib import Path; from semantica.project_source import parse_source; result=parse_source(Path("native-inputs/wp6.wpd"), name="wp6.wpd", mime_type="application/vnd.wordperfect", force_ocr=False); assert result.text == "Foo\n\nfoo"'
       - name: Archive and publish immutable native release
         env:
           GH_TOKEN: ${{ github.token }}
@@ -93,11 +92,8 @@ jobs:
         run: |
           tag="ontoscience-project-worker-${GITHUB_SHA:0:12}"
           archive="semantica-${{ matrix.target }}-${GITHUB_SHA:0:12}.tar.gz"
-          office_archive="semantica-office-${{ matrix.target }}-${GITHUB_SHA:0:12}.tar.gz"
           tar -czf "native-dist/$archive" -C "$RUNNER_TEMP/semantica-relocated" .
-          tar -czf "native-dist/$office_archive" -C native-office-bundle .
           cp "$RUNNER_TEMP/semantica-relocated/manifest.json" native-dist/${{ matrix.target }}-manifest.json
-          cp native-office-bundle/manifest.json native-dist/${{ matrix.target }}-office-manifest.json
           for artifact in native-dist/*; do
             name="$(basename "$artifact")"
             if gh release view "$tag" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then

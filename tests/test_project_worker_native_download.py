@@ -32,3 +32,25 @@ def test_download_retries_without_leaving_partial_file(tmp_path, monkeypatch):
     assert attempts == 3
     assert destination.read_bytes() == content
     assert not destination.with_name("input.tar.gz.partial").exists()
+
+
+def test_core_prepare_does_not_fetch_office_inputs(tmp_path, monkeypatch):
+    downloads = []
+
+    class Archive:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def extractall(self, *_args, **_kwargs):
+            return None
+
+    monkeypatch.setattr(MODULE, "download", lambda url, *_args: downloads.append(url))
+    monkeypatch.setattr(MODULE.tarfile, "open", lambda *_args: Archive())
+
+    MODULE.prepare("linux-x64", tmp_path)
+
+    assert len(downloads) == 1
+    assert "python-build-standalone" in downloads[0]
