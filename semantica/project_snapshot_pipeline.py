@@ -333,11 +333,16 @@ def _structured_extract(text: str, relay: Any) -> tuple[dict[str, Any], list[Mod
             if (not isinstance(repaired, list) or len(repaired) != len(invalid_qualifiers)
                     or {item.get("index") for item in repaired if isinstance(item, dict)} != set(invalid_qualifiers)):
                 raise SnapshotBuildError("structured extraction qualifier repair changed relation identities")
+            rejected = set()
             for item in repaired:
                 quote = result["relations"][item["index"]]["evidence"]
                 if _invalid_fact_qualifiers(item.get("qualifiers"), quote):
-                    raise SnapshotBuildError("structured extraction qualifier repair is not source-grounded")
+                    rejected.add(item["index"])
+                    continue
                 result["relations"][item["index"]]["qualifiers"] = item["qualifiers"]
+            if rejected:
+                repaired_receipt.metadata["rejected_relations"] = len(rejected)
+                result["relations"] = [relation for index, relation in enumerate(result["relations"]) if index not in rejected]
             return result, receipts
         payload = {**payload, "messages": [
             {"role": "system", "content": payload["messages"][0]["content"] + " Every name and evidence quote must be an exact contiguous substring of the source, with its exact occurrence index. Relation qualifiers allow only polarity, condition, time, unit, value; each non-polarity value must be an exact substring of that relation's evidence quote. Correct these invalid fields: " + "; ".join(invalid[:5])},

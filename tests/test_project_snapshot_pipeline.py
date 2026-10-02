@@ -79,6 +79,30 @@ def test_structured_extraction_repairs_unsupported_or_ungrounded_qualifiers(monk
     assert len(calls[1]["messages"][1]["content"]) < len(calls[0]["messages"][1]["content"]) + 180
 
 
+def test_structured_extraction_rejects_unrepaired_relation_without_losing_valid_facts(monkeypatch):
+    from types import SimpleNamespace
+    from semantica.project_snapshot_pipeline import _structured_extract
+
+    text = "Social Factors | 219. Reflective roofs do not shade pedestrians."
+    outputs = [
+        {"entities": [{"id": "roof", "name": "Reflective roofs", "type": "measure", "occurrence": 0},
+                      {"id": "people", "name": "pedestrians", "type": "population", "occurrence": 0}],
+         "relations": [{"subject": "roof", "predicate": "listed_on", "object": "people", "evidence": "Social Factors | 219", "qualifiers": {"page": "219"}},
+                       {"subject": "roof", "predicate": "shades", "object": "people", "evidence": "Reflective roofs do not shade pedestrians.", "qualifiers": {"polarity": "negative"}}]},
+        {"repairs": [{"index": 0, "qualifiers": {"value": "219"}}]},
+    ]
+    def relay(_binding, _payload, operation):
+        content = outputs.pop(0)
+        receipt = ModelReceipt(id=f"receipt:{len(outputs)}", operation=operation, provider="test", model="model-1", input_digest=H1, output_digest=H2)
+        return {"model": "model-1", "choices": [{"message": {"content": json.dumps(content)}}]}, receipt
+
+    monkeypatch.setattr("semantica.project_snapshot_pipeline._relay_json", relay)
+    result, receipts = _structured_extract(text, SimpleNamespace(model_id="model-1"))
+    assert result["entities"] and len(result["relations"]) == 1
+    assert result["relations"][0]["predicate"] == "shades"
+    assert receipts[-1].metadata["rejected_relations"] == 1
+
+
 def test_relay_http_failure_preserves_status_and_code(monkeypatch):
     from types import SimpleNamespace
     from semantica.project_snapshot_pipeline import _relay_json, SnapshotBuildError
