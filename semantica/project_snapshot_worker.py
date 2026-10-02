@@ -44,7 +44,13 @@ def _response(request_id: Optional[str], ok: bool, *, result: Optional[Dict[str,
     if ok:
         payload["result"] = result or {}
     else:
-        payload["error"] = {"type": error.__class__.__name__ if error else "Error", "message": str(error) if error else "unknown error"}
+        payload["error"] = {
+            "type": error.__class__.__name__ if error else "Error",
+            "message": str(error) if error else "unknown error",
+            **({"status": error.status} if isinstance(error, SnapshotBuildError) and error.status is not None else {}),
+            **({"code": error.code} if isinstance(error, SnapshotBuildError) and error.code else {}),
+            **({"retryable": True} if isinstance(error, SnapshotBuildError) and error.retryable else {}),
+        }
     return WorkerResponse.model_validate(payload).model_dump(exclude_none=True)
 
 

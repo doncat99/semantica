@@ -13,6 +13,7 @@ import os
 import re
 import tempfile
 import urllib.error
+import urllib.parse
 import urllib.request
 from collections import defaultdict
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
@@ -58,6 +59,12 @@ from .utils.exceptions import ProcessingError
 
 class SnapshotBuildError(RuntimeError):
     """Raised when a source cannot be represented by the single Semantica chain."""
+
+    def __init__(self, message: str, *, status: int | None = None, code: str | None = None, retryable: bool = False):
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        self.retryable = retryable
 
 
 class DocumentQualityError(SnapshotBuildError):
@@ -296,11 +303,23 @@ def _relay_json(relay: Any, payload: dict[str, Any], operation: str) -> tuple[di
     except urllib.error.HTTPError as exc:
         try:
             failure = json.loads(exc.read(4096))
-            code = failure.get("error", {}).get("code")
+            relay_error = failure.get("error", {})
+            code = relay_error.get("code")
+            detail = relay_error.get("message")
+            retryable = relay_error.get("retryable")
         except (ValueError, AttributeError, TypeError):
-            code = None
+            code, detail, retryable = None, None, None
         safe_code = code if isinstance(code, str) and 0 < len(code) <= 80 and all(char.isalnum() or char in "_-" for char in code) else None
-        raise SnapshotBuildError(f"{operation} relay returned HTTP {exc.code}" + (f": {safe_code}" if safe_code else "")) from exc
+        safe_detail = detail.strip()[:1000] if isinstance(detail, str) and detail.strip() else None
+        if safe_detail:
+            safe_detail = safe_detail.replace(token, "[REDACTED]").replace(urllib.parse.quote(token, safe=""), "[REDACTED]")
+        message = f"{operation} relay returned HTTP {exc.code}" + (f": {safe_code}" if safe_code else "") + (f": {safe_detail}" if safe_detail else "")
+        raise SnapshotBuildError(
+            message,
+            status=exc.code,
+            code=safe_code,
+            retryable=retryable if isinstance(retryable, bool) else exc.code == 429 or 500 <= exc.code <= 599,
+        ) from exc
     except (urllib.error.URLError, TimeoutError) as exc:
         raise SnapshotBuildError(f"{operation} relay request failed") from exc
     try:

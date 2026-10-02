@@ -34,18 +34,22 @@ def test_unique_quote_ignores_model_position_but_duplicate_requires_occurrence()
         _find_occurrence(text, "Green Bonds", 590)
 
 
-def test_relay_http_failure_preserves_status_and_code(monkeypatch):
+def test_relay_http_failure_preserves_safe_structured_error(monkeypatch):
     from types import SimpleNamespace
     from semantica.project_snapshot_pipeline import _relay_json, SnapshotBuildError
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-token")
     def rejected(_request, timeout):
-        raise urllib.error.HTTPError("http://127.0.0.1/", 403, "Forbidden", {}, io.BytesIO(b'{"error":{"code":"CREDIT_EXHAUSTED","message":"private detail"}}'))
+        raise urllib.error.HTTPError("http://127.0.0.1/", 500, "Internal Server Error", {}, io.BytesIO(
+            b'{"error":{"code":"INTERNAL_ERROR","message":"provider failed for test-token","retryable":true,"status":500}}'))
     monkeypatch.setattr("urllib.request.urlopen", rejected)
     relay = SimpleNamespace(authorization_env="OPENAI_API_KEY", base_url="http://127.0.0.1/v1/chat/completions", model_id="model-1", binding_id="default")
-    with pytest.raises(SnapshotBuildError, match="structured_extraction relay returned HTTP 403: CREDIT_EXHAUSTED") as failure:
+    with pytest.raises(SnapshotBuildError, match="structured_extraction relay returned HTTP 500: INTERNAL_ERROR") as failure:
         _relay_json(relay, {"model": "model-1"}, "structured_extraction")
-    assert "private detail" not in str(failure.value)
+    assert failure.value.status == 500
+    assert failure.value.code == "INTERNAL_ERROR"
+    assert failure.value.retryable is True
+    assert "test-token" not in str(failure.value)
 
 
 def test_relay_waits_for_complete_gateway_response(monkeypatch):

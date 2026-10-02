@@ -877,6 +877,9 @@ class WorkerRequest(StrictModel):
 class WorkerError(StrictModel):
     type: str
     message: str
+    status: Optional[int] = None
+    code: Optional[str] = None
+    retryable: bool = False
 
 
 class WorkerResponse(StrictModel):
