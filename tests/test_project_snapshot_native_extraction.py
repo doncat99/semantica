@@ -64,6 +64,8 @@ def test_project_snapshot_extraction_uses_canonical_semantica_extractors(monkeyp
     )
 
     assert [name for name, *_ in calls] == ["ner-init", "ner", "relation-init", "relation"]
+    assert calls[0][1]["max_tokens"] == project_snapshot_pipeline.EXTRACTION_MAX_OUTPUT_TOKENS
+    assert calls[2][1]["max_tokens"] == project_snapshot_pipeline.EXTRACTION_MAX_OUTPUT_TOKENS
     assert result["entities"][0]["name"] == "Reflective roofs"
     assert result["relations"][0]["evidence"] == "Reflective roofs do not shade pedestrians."
     assert embeddings == [{"start_char": 0, "end_char": 42, "vector": [0.1, 0.2]}]
@@ -74,3 +76,27 @@ def test_project_snapshot_has_no_parallel_structured_extractor():
     source = inspect.getsource(project_snapshot_pipeline)
     assert "def _structured_extract" not in source
     assert "return _structured_extract" not in source
+
+
+def test_project_model_provider_forwards_extraction_output_budget(monkeypatch):
+    request = {}
+
+    def relay_json(_relay, payload, operation):
+        request.update(payload)
+        return {
+            "choices": [{"message": {"content": '{"entities": []}'}}],
+            "model": "model-1",
+        }, ModelReceipt(
+            id="receipt:extraction",
+            operation=operation,
+            provider="test",
+            model="model-1",
+            input_digest="sha256:" + "1" * 64,
+            output_digest="sha256:" + "2" * 64,
+        )
+
+    monkeypatch.setattr(project_snapshot_pipeline, "_relay_json", relay_json)
+    provider = project_snapshot_pipeline._project_model_provider(SimpleNamespace(model_id="model-1"))
+
+    assert provider.generate("prompt", max_tokens=2048) == '{"entities": []}'
+    assert request["max_tokens"] == 2048

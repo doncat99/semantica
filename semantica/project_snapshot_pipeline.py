@@ -67,6 +67,7 @@ class DocumentQualityError(SnapshotBuildError):
 TEXT_WINDOW_CHARS = 4096
 TEXT_WINDOW_OVERLAP = 256
 MODEL_CONTEXT_BYTES = 48_000
+EXTRACTION_MAX_OUTPUT_TOKENS = 4096
 
 
 def _context_size(value: Any) -> int:
@@ -116,6 +117,7 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, progre
             provider_instance=provider,
             grounding="strict",
             grounding_retries=1,
+            max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
         ).extract(window)
         relations = RelationExtractor(
             method="llm",
@@ -125,6 +127,7 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, progre
             grounding="strict",
             grounding_retries=1,
             confidence_threshold=0,
+            max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
         ).extract(window, entities)
         extracted = {
             "entities": [{
@@ -326,12 +329,13 @@ class _ProjectModelProvider(BaseProvider):
         self.relay = relay
         self.receipts: list[ModelReceipt] = []
 
-    def generate(self, prompt: str, **_kwargs) -> str:
+    def generate(self, prompt: str, **kwargs) -> str:
         extraction_stage = "relations" if "Extract source-grounded relations" in prompt else "entities"
         response, receipt = _relay_json(self.relay, {
             "model": self.relay.model_id,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0,
+            "max_tokens": kwargs.get("max_tokens", EXTRACTION_MAX_OUTPUT_TOKENS),
             "response_format": {"type": "json_object"},
         }, "structured_extraction")
         if response.get("model") != self.relay.model_id:
