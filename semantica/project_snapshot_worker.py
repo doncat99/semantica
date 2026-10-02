@@ -23,6 +23,7 @@ from .project_snapshot_schema import (
     build_request_json_schema,
     project_snapshot_json_schema,
 )
+from .semantic_extract.schema import ExtractionSpecification
 
 
 MODEL_RECEIPT_OPERATIONS = {
@@ -54,6 +55,9 @@ def handle_request(raw: Dict[str, Any], progress: Optional[Callable[[Dict[str, A
     if request.method == "validate_snapshot":
         snapshot = ProjectSnapshot.model_validate(request.params)
         return _response(request.id, True, result={"valid": True, "snapshot_id": snapshot.id})
+    if request.method == "validate_extraction_spec":
+        specification = ExtractionSpecification.model_validate(request.params)
+        return _response(request.id, True, result={"valid": True, "digest": specification.digest})
     if request.method == "parse_source":
         return _response(request.id, True, result=parse_source_artifact(ParseSourceRequest.model_validate(request.params)))
     build_request = ProjectSnapshotBuildRequest.model_validate(request.params)

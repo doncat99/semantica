@@ -214,16 +214,24 @@ def resolve_project_identities(*, project_id: str, mentions: list[KnowledgeEntit
         if previous_name is None:
             previous_name = next((entry.canonical_name for entry in registry.values() if entry.entity_id == entity_id), None)
         canonical_name = previous_name if previous_name in names else names[0]
+        attribute_values = {
+            name: {stable_digest(value): value for member in members for name, value in member.attributes.items()}
+            for name in {name for member in members for name in member.attributes}
+        }
+        attributes = {name: next(iter(values.values())) for name, values in attribute_values.items() if len(values) == 1}
+        attribute_conflicts = {name: list(values.values()) for name, values in attribute_values.items() if len(values) > 1}
         canonical.append(KnowledgeEntity(
             id=entity_id,
             canonical_name=canonical_name,
             type=members[0].type,
+            attributes=attributes,
             aliases=[name for name in names if name != canonical_name],
             evidence_ids=sorted({item for member in members for item in member.evidence_ids}),
             status="accepted" if len(ids) > 1 else members[0].status,
             metadata={
                 "mention_ids": ids,
                 "source_ids": sorted({item for member in members for item in member.metadata.get("source_ids", [])}),
+                **({"attribute_conflicts": attribute_conflicts} if attribute_conflicts else {}),
             },
         ))
         for mention_id in ids:

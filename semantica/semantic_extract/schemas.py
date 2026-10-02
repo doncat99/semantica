@@ -11,6 +11,7 @@ class EntityOut(BaseModel):
     end: int = Field(0, description="End character index", alias="end_char")
     confidence: float = Field(0.9, description="Confidence score between 0 and 1")
     occurrence: Optional[int] = Field(None, ge=0, description="Zero-based exact text occurrence")
+    attributes: dict = Field(default_factory=dict, description="Typed attributes defined by the extraction specification")
     metadata: dict = Field(default_factory=dict, description="Additional metadata including provenance")
 
     @field_validator("text", mode="before")

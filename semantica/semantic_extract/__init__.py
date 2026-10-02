@@ -107,6 +107,7 @@ _LAZY_EXPORTS: Dict[str, Tuple[str, str]] = {
     "ValidationResult": (".extraction_validator", "ValidationResult"),
     # Schema-guided validation
     "ExtractionSchema": (".schema", "ExtractionSchema"),
+    "ExtractionSpecification": (".schema", "ExtractionSpecification"),
     "Predicate": (".schema", "Predicate"),
     "SchemaValidator": (".schema_validator", "SchemaValidator"),
     # Providers
@@ -203,6 +204,7 @@ __all__ = [
     "ValidationResult",
     # Schema-guided validation
     "ExtractionSchema",
+    "ExtractionSpecification",
     "Predicate",
     "SchemaValidator",
     # Providers

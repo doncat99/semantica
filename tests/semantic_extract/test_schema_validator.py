@@ -10,6 +10,7 @@ from semantica.semantic_extract import (
     SchemaValidator,
     ValidationResult,
 )
+from semantica.semantic_extract.schema import ExtractionSpecification
 
 ONTOLOGY = {
     "classes": [{"name": "Person"}, {"name": "Organization"}, {"label": "City"}],
@@ -47,6 +48,45 @@ def _org() -> Entity:
 
 def _city() -> Entity:
     return Entity(text="Paris", label="City", start_char=0, end_char=5)
+
+
+def test_extraction_specification_is_typed_domain_neutral_and_stable():
+    payload = {
+        "id": "research-domain",
+        "version": "1",
+        "entity_types": [
+            {"name": "Material", "description": "A physical material", "attributes": {
+                "density": {"type": "number", "description": "Measured density", "required": True},
+            }},
+            {"name": "Process", "description": "A manufacturing process"},
+        ],
+        "relation_types": [{"name": "uses", "description": "A process uses a material", "domain": ["Process"], "range": ["Material"]}],
+        "examples": [{"text": "Casting uses steel.", "entities": [
+            {"text": "Casting", "label": "Process"}, {"text": "steel", "label": "Material", "attributes": {"density": 7.85}},
+        ], "relations": [{"subject": "Casting", "predicate": "uses", "object": "steel"}]}],
+    }
+    specification = ExtractionSpecification.model_validate(payload)
+    schema = ExtractionSchema.from_specification(specification)
+
+    assert specification.digest == ExtractionSpecification.model_validate(payload).digest
+    assert schema.validate_attributes("Material", {"density": 7.85}) == {"density": 7.85}
+    assert schema.allows_relation("Process", "uses", "Material")
+
+
+def test_extraction_specification_rejects_unknown_and_mistyped_attributes():
+    specification = ExtractionSpecification.model_validate({
+        "id": "biology", "version": "1",
+        "entity_types": [{"name": "Species", "description": "A species", "attributes": {
+            "endangered": {"type": "boolean", "description": "Conservation status", "required": True},
+        }}],
+    })
+    schema = ExtractionSchema.from_specification(specification)
+
+    import pytest
+    with pytest.raises(ValueError, match="missing required"):
+        schema.validate_attributes("Species", {})
+    with pytest.raises(ValueError, match="invalid type"):
+        schema.validate_attributes("Species", {"endangered": "yes"})
 
 
 def _product() -> Entity:

@@ -237,6 +237,25 @@ def test_build_request_preserves_host_source_and_provider_model_ids():
         ProjectSnapshotBuildRequest.model_validate(payload)
 
 
+def test_build_request_and_snapshot_preserve_extraction_specification():
+    payload = _build_request_payload()
+    payload["recipe"]["id"] = "model"
+    payload["recipe"]["extractionSpec"] = {
+        "id": "finance", "version": "1",
+        "entity_types": [{"name": "Issuer", "description": "A security issuer", "attributes": {
+            "ticker": {"type": "string", "description": "Exchange ticker"},
+        }}],
+    }
+    request = ProjectSnapshotBuildRequest.model_validate(payload)
+    snapshot_payload = _snapshot_payload()
+    snapshot_payload["extraction_spec"] = payload["recipe"]["extractionSpec"]
+    snapshot_payload["lineage"]["extraction_spec_digest"] = request.recipe.extraction_spec.digest
+    snapshot = ProjectSnapshot.model_validate(snapshot_payload)
+
+    assert request.recipe.extraction_spec.digest == snapshot.lineage.extraction_spec_digest
+    assert snapshot.extraction_spec.entity_types[0].name == "Issuer"
+
+
 def test_build_request_rejects_unsafe_release_and_source_boundaries():
     bad = _build_request_payload()
     bad["sources"][0]["filePath"] = "relative/source.pdf"
@@ -287,6 +306,20 @@ def test_jsonl_worker_validate_snapshot_method():
     response = json.loads(stdout.getvalue())
     assert response["ok"] is True
     assert response["result"] == {"valid": True, "snapshot_id": "snapshot:one"}
+
+
+def test_jsonl_worker_validates_extraction_spec_with_semantica_owned_schema():
+    request = {"protocol": "semantica.project-worker.v1", "id": "spec-1", "method": "validate_extraction_spec", "params": {
+        "id": "general", "version": "1",
+        "entity_types": [{"name": "Concept", "description": "A source-grounded concept"}],
+    }}
+    stdin = io.StringIO(json.dumps(request) + "\n")
+    stdout = io.StringIO()
+    assert serve(stdin, stdout) == 0
+    response = json.loads(stdout.getvalue())
+    assert response["ok"] is True
+    assert response["result"]["valid"] is True
+    assert response["result"]["digest"].startswith("sha256:")
 
 
 def test_jsonl_worker_schema_method_returns_snapshot_and_build_request_schema():

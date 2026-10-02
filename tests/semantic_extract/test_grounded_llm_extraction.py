@@ -10,6 +10,7 @@ from semantica.semantic_extract.schemas import (
     RelationOut,
     RelationsResponse,
 )
+from semantica.semantic_extract.schema import ExtractionSpecification
 from semantica.utils.exceptions import ProcessingError
 
 
@@ -26,6 +27,56 @@ class TypedProvider:
         self.prompts.append(prompt)
         self.schemas.append(schema)
         return self.responses.pop(0)
+
+
+def test_native_grounded_extractors_apply_typed_spec_and_examples():
+    text = "Casting uses steel with density 7.85."
+    specification = ExtractionSpecification.model_validate({
+        "id": "manufacturing", "version": "1",
+        "entity_types": [
+            {"name": "Process", "description": "A manufacturing process"},
+            {"name": "Material", "description": "A material", "attributes": {
+                "density": {"type": "number", "description": "Density stated in source", "required": True},
+            }},
+        ],
+        "relation_types": [{"name": "uses", "description": "Process uses material", "domain": ["Process"], "range": ["Material"]}],
+        "examples": [{"text": "Forging uses iron.", "entities": [{"text": "Forging", "label": "Process"}, {"text": "iron", "label": "Material", "attributes": {"density": 7.87}}], "relations": [{"subject": "Forging", "predicate": "uses", "object": "iron"}]}],
+    })
+    provider = TypedProvider(
+        EntitiesResponse(entities=[
+            EntityOut(text="Casting", label="Process", occurrence=0),
+            EntityOut(text="steel", label="Material", occurrence=0, attributes={"density": 7.85}),
+        ]),
+        RelationsResponse(relations=[RelationOut(subject="Casting", subject_id="mention:0", predicate="uses", object="steel", object_id="mention:1", evidence=text, evidence_occurrence=0, qualifiers={"polarity": "positive"})]),
+    )
+
+    entities = extract_entities_llm(text, provider="bifrost", provider_instance=provider, grounding="strict", extraction_spec=specification)
+    relations = extract_relations_llm(text, entities, provider="bifrost", provider_instance=provider, grounding="strict", extraction_spec=specification)
+
+    assert entities[1].attributes == {"density": 7.85}
+    assert [relation.predicate for relation in relations] == ["uses"]
+    assert "manufacturing process" in provider.prompts[0]
+    assert "Forging uses iron" in provider.prompts[0]
+    assert "Process uses material" in provider.prompts[1]
+
+
+def test_native_grounded_extraction_retries_schema_violations():
+    text = "Blue whale is endangered."
+    specification = ExtractionSpecification.model_validate({
+        "id": "conservation", "version": "1",
+        "entity_types": [{"name": "Species", "description": "A biological species", "attributes": {
+            "endangered": {"type": "boolean", "description": "Whether source states endangered", "required": True},
+        }}],
+    })
+    provider = TypedProvider(
+        EntitiesResponse(entities=[EntityOut(text="Blue whale", label="Species", occurrence=0, attributes={"endangered": "yes"})]),
+        EntitiesResponse(entities=[EntityOut(text="Blue whale", label="Species", occurrence=0, attributes={"endangered": True})]),
+    )
+
+    entities = extract_entities_llm(text, provider="bifrost", provider_instance=provider, grounding="strict", grounding_retries=1, extraction_spec=specification)
+
+    assert entities[0].attributes == {"endangered": True}
+    assert "invalid type" in provider.prompts[1]
 
 
 def test_grounded_native_extractors_preserve_mentions_evidence_and_qualifiers():

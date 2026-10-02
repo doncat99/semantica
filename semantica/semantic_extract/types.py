@@ -36,6 +36,7 @@ class Entity:
     end_char: int
     confidence: Optional[float] = None
     metadata: Dict[str, Any] = field(default_factory=dict)
+    attributes: Dict[str, Any] = field(default_factory=dict)
 
 
 def meets_confidence_threshold(

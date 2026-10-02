@@ -102,7 +102,7 @@ def _text_windows(text: str):
             break
 
 
-def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, progress=None, progress_base: int = 0, progress_total: int = 1, parallelism: int = 1):
+def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extraction_spec=None, progress=None, progress_base: int = 0, progress_total: int = 1, parallelism: int = 1):
     result: dict[str, list] = {"entities": [], "relations": []}
     receipts, embeddings = [], []
     seen_entities, seen_relations = set(), set()
@@ -117,6 +117,7 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, progre
             provider_instance=provider,
             grounding="strict",
             grounding_retries=1,
+            extraction_spec=extraction_spec,
             max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
         ).extract(window)
         relations = RelationExtractor(
@@ -126,6 +127,7 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, progre
             provider_instance=provider,
             grounding="strict",
             grounding_retries=1,
+            extraction_spec=extraction_spec,
             confidence_threshold=0,
             max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
         ).extract(window, entities)
@@ -136,6 +138,7 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, progre
                 "type": entity.label,
                 "occurrence": entity.metadata["span_occurrence"],
                 "confidence": entity.confidence,
+                "attributes": entity.attributes,
             } for entity in entities],
             "relations": [{
                 "subject": relation.metadata["subject_id"],
@@ -1304,6 +1307,7 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
                 id=entity_id,
                 canonical_name=name,
                 type=entity_type,
+                attributes=dict(item.get("attributes", {})),
                 aliases=[],
                 evidence_ids=[evidence_id],
                 status="candidate",
@@ -1906,6 +1910,7 @@ def _build_project_snapshot(request: ProjectSnapshotBuildRequest, progress=None)
         if request.recipe.id == "model":
             model_result, embeddings, source_receipts = _extract_and_embed(
                 parsed[0], request.relays["model"], request.relays["embedding"],
+                extraction_spec=request.recipe.extraction_spec,
                 progress=progress, progress_base=completed_chunks, progress_total=total_chunks,
                 parallelism=request.parallelism,
             )
@@ -2013,7 +2018,7 @@ def _build_project_snapshot(request: ProjectSnapshotBuildRequest, progress=None)
     # only its upstream artifacts.
     retrieval_artifact = ArtifactManifest(id=retrieval_artifact_id, artifact_type="retrieval", artifact_ref=str(retrieval_path), artifact_hash=retrieval_digest, depends_on=[item.id for item in representation_artifacts])
     receipt_ids = [receipt.id for receipt in model_receipts]
-    lineage = KernelLineage(schema_digest=request.release.schema_digest, recipe_id=request.recipe.id, recipe_digest=stable_digest(request.recipe.model_dump(mode="json", by_alias=True)), rule_version="semantica-project-snapshot-v1", rule_digest=stable_digest({"pipeline": request.recipe.id}), ontology_version="semantica-default", ontology_digest=stable_digest({"ontology": "default"}), model_receipt_ids=receipt_ids)
+    lineage = KernelLineage(schema_digest=request.release.schema_digest, recipe_id=request.recipe.id, recipe_digest=stable_digest(request.recipe.model_dump(mode="json", by_alias=True)), rule_version="semantica-project-snapshot-v1", rule_digest=stable_digest({"pipeline": request.recipe.id}), ontology_version="semantica-default", ontology_digest=stable_digest({"ontology": "default"}), extraction_spec_digest=request.recipe.extraction_spec.digest if request.recipe.extraction_spec else None, model_receipt_ids=receipt_ids)
     retrieval_manifests = [
         RetrievalArtifactManifest(
             id="retrieval:graph",
@@ -2056,7 +2061,7 @@ def _build_project_snapshot(request: ProjectSnapshotBuildRequest, progress=None)
         evidence,
         source_classifications,
     )
-    snapshot = ProjectSnapshot(snapshot_id=snapshot_id, project_id=request.project_id, base_snapshot_id=request.base_snapshot.snapshot_id if request.base_snapshot else None, lineage=lineage, artifact_manifest=representation_artifacts + [retrieval_artifact], document_representations=representations, evidence_spans=evidence, entity_mentions=mentions, entities=entities, assertions=assertions, relations=relations, identity_decisions=identity_decisions, identity_registry=identity_registry, communities=communities, topics=topics, reports=reports, source_relations=source_relations, source_classifications=source_classifications, classification_profile=request.recipe.classification_profile, conflicts=conflicts, retrieval_manifests=retrieval_manifests, change_delta=change_delta, model_receipts=model_receipts, metadata={"pipeline": "semantica", "recipe": request.recipe.id, "source_count": len(source_builds), "stages": ["document", "evidence", "identity", "knowledge", "organization", "retrieval", "change"]})
+    snapshot = ProjectSnapshot(snapshot_id=snapshot_id, project_id=request.project_id, base_snapshot_id=request.base_snapshot.snapshot_id if request.base_snapshot else None, lineage=lineage, artifact_manifest=representation_artifacts + [retrieval_artifact], document_representations=representations, evidence_spans=evidence, entity_mentions=mentions, entities=entities, assertions=assertions, relations=relations, identity_decisions=identity_decisions, identity_registry=identity_registry, communities=communities, topics=topics, reports=reports, source_relations=source_relations, source_classifications=source_classifications, classification_profile=request.recipe.classification_profile, extraction_spec=request.recipe.extraction_spec, conflicts=conflicts, retrieval_manifests=retrieval_manifests, change_delta=change_delta, model_receipts=model_receipts, metadata={"pipeline": "semantica", "recipe": request.recipe.id, "source_count": len(source_builds), "stages": ["document", "evidence", "identity", "knowledge", "organization", "retrieval", "change"]})
     snapshot_path = output_dir / "snapshot.json"
     snapshot_digest = _write_json(snapshot_path, snapshot.model_dump(mode="json", by_alias=True))
     return {"snapshot": snapshot, "snapshot_path": snapshot_path, "snapshot_digest": snapshot_digest, "representation_artifacts": source_builds, "retrieval_path": retrieval_path, "retrieval_digest": retrieval_digest, "model_receipts": model_receipts}

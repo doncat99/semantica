@@ -25,9 +25,107 @@ Information Extraction: An Introduction and a Survey" (2010).
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from dataclasses import dataclass, field
-from typing import Any, Dict, FrozenSet, Iterable, Mapping, Optional, Set
+from typing import Any, Dict, FrozenSet, Iterable, List, Literal, Mapping, Optional, Set
+
+from pydantic import BaseModel, ConfigDict, Field, model_validator
+
+
+class ExtractionAttribute(BaseModel):
+    """A typed attribute that may be extracted for one entity type."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    type: Literal["string", "number", "integer", "boolean", "string_list", "number_list"]
+    description: str = Field(min_length=1)
+    required: bool = False
+
+
+class ExtractionEntityType(BaseModel):
+    """An open domain entity type and its source-grounded attributes."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    attributes: Dict[str, ExtractionAttribute] = Field(default_factory=dict)
+
+
+class ExtractionRelationType(BaseModel):
+    """An allowed relation with optional endpoint constraints."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    domain: List[str] = Field(default_factory=list)
+    range: List[str] = Field(default_factory=list)
+
+
+class ExtractionExampleEntity(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1)
+    label: str = Field(min_length=1)
+    attributes: Dict[str, Any] = Field(default_factory=dict)
+
+
+class ExtractionExampleRelation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    subject: str = Field(min_length=1)
+    predicate: str = Field(min_length=1)
+    object: str = Field(min_length=1)
+
+
+class ExtractionExample(BaseModel):
+    """A caller-provided example; it guides extraction without changing ownership."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    text: str = Field(min_length=1)
+    entities: List[ExtractionExampleEntity] = Field(default_factory=list)
+    relations: List[ExtractionExampleRelation] = Field(default_factory=list)
+
+
+class ExtractionSpecification(BaseModel):
+    """Immutable, domain-neutral configuration for Semantica's native extractors."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str = Field(min_length=1)
+    version: str = Field(min_length=1)
+    entity_types: List[ExtractionEntityType] = Field(min_length=1)
+    relation_types: List[ExtractionRelationType] = Field(default_factory=list)
+    examples: List[ExtractionExample] = Field(default_factory=list)
+    grounding: Literal["strict"] = "strict"
+
+    @model_validator(mode="after")
+    def validate_references(self) -> "ExtractionSpecification":
+        names = [item.name for item in self.entity_types]
+        if len(set(names)) != len(names):
+            raise ValueError("extraction entity type names must be unique")
+        relations = [item.name for item in self.relation_types]
+        if len(set(relations)) != len(relations):
+            raise ValueError("extraction relation type names must be unique")
+        known = set(names)
+        for relation in self.relation_types:
+            if set(relation.domain + relation.range) - known:
+                raise ValueError("extraction relation constraints reference unknown entity types")
+        for example in self.examples:
+            if any(entity.label not in known for entity in example.entities):
+                raise ValueError("extraction example references an unknown entity type")
+            if any(relation.predicate not in set(relations) for relation in example.relations):
+                raise ValueError("extraction example references an unknown relation type")
+        return self
+
+    @property
+    def digest(self) -> str:
+        payload = json.dumps(self.model_dump(mode="json"), ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        return "sha256:" + hashlib.sha256(payload.encode("utf-8")).hexdigest()
 
 
 def _as_name_set(value: Any) -> Set[str]:
@@ -101,8 +199,20 @@ class ExtractionSchema:
 
     concepts: FrozenSet[str] = field(default_factory=frozenset)
     predicates: Dict[str, Predicate] = field(default_factory=dict)
+    specification: Optional[ExtractionSpecification] = None
 
     # ---- constructors -------------------------------------------------
+
+    @classmethod
+    def from_specification(cls, specification: ExtractionSpecification) -> "ExtractionSchema":
+        return cls(
+            concepts=frozenset(item.name for item in specification.entity_types),
+            predicates={
+                item.name: Predicate(item.name, frozenset(item.domain), frozenset(item.range))
+                for item in specification.relation_types
+            },
+            specification=specification,
+        )
 
     @classmethod
     def from_ontology(cls, ontology: Any) -> "ExtractionSchema":
@@ -232,3 +342,29 @@ class ExtractionSchema:
         if pred.range and object_label not in pred.range:
             return False
         return True
+
+    def validate_attributes(self, label: str, attributes: Mapping[str, Any]) -> Dict[str, Any]:
+        """Validate one entity's typed attributes against the configured specification."""
+        if self.specification is None:
+            return dict(attributes)
+        entity_type = next((item for item in self.specification.entity_types if item.name == label), None)
+        if entity_type is None:
+            raise ValueError(f"unknown entity type: {label}")
+        unknown = set(attributes) - set(entity_type.attributes)
+        if unknown:
+            raise ValueError(f"unknown attributes for {label}: {sorted(unknown)}")
+        missing = {name for name, definition in entity_type.attributes.items() if definition.required} - set(attributes)
+        if missing:
+            raise ValueError(f"missing required attributes for {label}: {sorted(missing)}")
+        expected = {
+            "string": lambda value: isinstance(value, str) and bool(value.strip()),
+            "number": lambda value: isinstance(value, (int, float)) and not isinstance(value, bool),
+            "integer": lambda value: isinstance(value, int) and not isinstance(value, bool),
+            "boolean": lambda value: isinstance(value, bool),
+            "string_list": lambda value: isinstance(value, list) and all(isinstance(item, str) and item.strip() for item in value),
+            "number_list": lambda value: isinstance(value, list) and all(isinstance(item, (int, float)) and not isinstance(item, bool) for item in value),
+        }
+        for name, value in attributes.items():
+            if not expected[entity_type.attributes[name].type](value):
+                raise ValueError(f"attribute {label}.{name} has invalid type")
+        return dict(attributes)

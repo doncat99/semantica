@@ -11,6 +11,8 @@ from urllib.parse import urlsplit
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from .semantic_extract.schema import ExtractionSpecification
+
 SNAPSHOT_PROTOCOL = "semantica.project-snapshot.v1"
 WORKER_PROTOCOL = "semantica.project-worker.v1"
 SHA256_RE = re.compile(r"^(sha256:)?[0-9a-f]{64}$")
@@ -174,6 +176,7 @@ class KnowledgeEntity(KernelModel):
     id: str
     canonical_name: str
     type: str
+    attributes: Dict[str, Any] = Field(default_factory=dict)
     aliases: List[str] = Field(default_factory=list)
     evidence_ids: List[str] = Field(default_factory=list)
     status: Literal["candidate", "accepted", "rejected", "retracted"] = "candidate"
@@ -366,6 +369,7 @@ class KernelLineage(DigestModel):
     rule_digest: str
     ontology_version: str
     ontology_digest: str
+    extraction_spec_digest: Optional[str] = None
     model_receipt_ids: List[str] = Field(default_factory=list)
 
 
@@ -411,6 +415,7 @@ class ProjectSnapshot(KernelModel):
     source_relations: List[SourceRelation] = Field(default_factory=list)
     source_classifications: List["SourceClassification"] = Field(default_factory=list)
     classification_profile: Optional["ClassificationProfile"] = None
+    extraction_spec: Optional[ExtractionSpecification] = None
     conflicts: List[KnowledgeConflict] = Field(default_factory=list)
     retrieval_manifests: List[RetrievalArtifactManifest] = Field(default_factory=list)
     change_delta: ChangeDelta = Field(default_factory=ChangeDelta)
@@ -419,6 +424,10 @@ class ProjectSnapshot(KernelModel):
 
     @model_validator(mode="after")
     def validate_references(self) -> "ProjectSnapshot":
+        if bool(self.extraction_spec) != bool(self.lineage.extraction_spec_digest):
+            raise ValueError("snapshot extraction specification and lineage digest must appear together")
+        if self.extraction_spec and self.extraction_spec.digest != self.lineage.extraction_spec_digest:
+            raise ValueError("snapshot extraction specification does not match lineage digest")
         lists = {
             "artifact": self.artifact_manifest,
             "representation": self.document_representations,
@@ -713,6 +722,7 @@ class SourceClassification(StrictModel):
 class RecipeRef(StrictModel):
     force_ocr_source_ids: List[str] = Field(default_factory=list, alias="forceOcrSourceIds")
     classification_profile: Optional[ClassificationProfile] = Field(default=None, alias="classificationProfile")
+    extraction_spec: Optional[ExtractionSpecification] = Field(default=None, alias="extractionSpec")
     id: str
     version: str
 
@@ -828,6 +838,8 @@ class ProjectSnapshotBuildRequest(DigestModel):
             raise ValueError("OCR recipe references an unknown source")
         if self.recipe.classification_profile and self.recipe.id != "model":
             raise ValueError("classification requires the model recipe")
+        if self.recipe.extraction_spec and self.recipe.id != "model":
+            raise ValueError("typed extraction requires the model recipe")
         if set(self.release.media_types) != {"document-representation", "retrieval-index", "snapshot"}:
             raise ValueError("release media types must cover all artifact kinds")
         if set(self.relays) != {"embedding", "model"}:
@@ -858,7 +870,7 @@ class ParseSourceRequest(StrictModel):
 class WorkerRequest(StrictModel):
     protocol: Literal[WORKER_PROTOCOL] = WORKER_PROTOCOL
     id: str
-    method: Literal["parse_source", "build_project_snapshot", "validate_snapshot", "schema"]
+    method: Literal["parse_source", "build_project_snapshot", "validate_snapshot", "validate_extraction_spec", "schema"]
     params: Dict[str, Any] = Field(default_factory=dict)
 
 
