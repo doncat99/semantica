@@ -107,6 +107,13 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, progre
     def extract(item):
         return _structured_extract(item[2], model_relay)
 
+    if progress:
+        progress({
+            "stage": "extracting",
+            "percent": min(60, 20 + round((progress_base / max(1, progress_total)) * 40)),
+            "detail": f"Extracting knowledge {progress_base} / {progress_total} chunks",
+            "metadata": {"completedChunks": progress_base, "totalChunks": progress_total},
+        })
     context = copy_context()
     with ThreadPoolExecutor(max_workers=parallelism) as pool:
         pending = iter(enumerate(windows))
@@ -165,6 +172,13 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, progre
                     seen.add(key)
                     result[kind].append(item)
     batches = [windows[offset:offset + 8] for offset in range(0, len(windows), 8)]
+    if progress:
+        progress({
+            "stage": "embedding",
+            "percent": min(90, 60 + round((progress_base / max(1, progress_total)) * 30)),
+            "detail": f"Embedding {progress_base} / {progress_total} chunks",
+            "metadata": {"completedChunks": progress_base, "totalChunks": progress_total},
+        })
     embedded_batches = [None] * len(batches)
     completed = 0
     with ThreadPoolExecutor(max_workers=parallelism) as pool:

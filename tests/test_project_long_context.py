@@ -74,10 +74,29 @@ def test_extraction_reports_active_stage_and_anchors_whitespace_to_source(monkey
 
     extracted, _, _ = pipeline._extract_and_embed(text, None, None, progress=events.append)
 
-    assert [event["stage"] for event in events] == ["extracting", "embedding"]
-    assert events[0]["metadata"] == {"completedChunks": 1, "totalChunks": 1}
+    assert [event["stage"] for event in events] == ["extracting", "extracting", "embedding", "embedding"]
+    assert events[0]["metadata"] == {"completedChunks": 0, "totalChunks": 1}
+    assert events[1]["metadata"] == {"completedChunks": 1, "totalChunks": 1}
     evidence = extracted["relations"][0]["evidence"]
     assert evidence == text
+
+
+def test_stage_progress_precedes_relay_calls(monkeypatch):
+    events = []
+
+    def extract(*args):
+        assert events[-1]["stage"] == "extracting"
+        assert events[-1]["metadata"] == {"completedChunks": 0, "totalChunks": 1}
+        return {"entities": [], "relations": []}, receipt("structured_extraction", 1)
+
+    def embed(texts, relay):
+        assert events[-1]["stage"] == "embedding"
+        assert events[-1]["metadata"] == {"completedChunks": 0, "totalChunks": 1}
+        return [[1.0] for _ in texts], receipt("embedding", 1)
+
+    monkeypatch.setattr(pipeline, "_structured_extract", extract)
+    monkeypatch.setattr(pipeline, "_embed_texts", embed)
+    pipeline._extract_and_embed("source", None, None, progress=events.append)
 
 
 def test_parallel_extraction_is_bounded_and_preserves_window_order(monkeypatch):
