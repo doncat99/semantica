@@ -135,6 +135,8 @@ from .types import (
 try:
     from .schemas import (
         EntitiesResponse,
+        GroundedEntitiesResponse,
+        GroundedRelationsResponse,
         RelationsResponse,
         RelationsWithTemporalResponse,
         TripletsResponse,
@@ -1420,7 +1422,8 @@ Grounding requirements:
 
         entities = []
         for attempt in range(grounding_retries + 1):
-            result_obj = llm.generate_typed(prompt, schema=EntitiesResponse, **kwargs)
+            active_schema = GroundedEntitiesResponse if grounding == "strict" else EntitiesResponse
+            result_obj = llm.generate_typed(prompt, schema=active_schema, **kwargs)
             try:
                 entities = []
                 for index, e_out in enumerate(result_obj.entities):
@@ -2306,7 +2309,9 @@ Source text:
         call_kwargs["max_retries"] = max_retries
 
         # Select schema based on whether temporal extraction is requested
-        active_schema = RelationsWithTemporalResponse if extract_temporal_bounds else RelationsResponse
+        active_schema = GroundedRelationsResponse if grounding == "strict" else (
+            RelationsWithTemporalResponse if extract_temporal_bounds else RelationsResponse
+        )
         result_obj = None
         relations = []
         for attempt in range(grounding_retries + 1):

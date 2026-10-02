@@ -124,9 +124,35 @@ class EntitiesResponse(BaseModel):
     """Wrapper for list of entities."""
     entities: List[EntityOut] = Field(default_factory=list)
 
+
+class GroundedEntityOut(EntityOut):
+    """Entity output whose exact source occurrence is mandatory."""
+    occurrence: int = Field(..., ge=0, description="Zero-based exact text occurrence")
+
+
+class GroundedEntitiesResponse(BaseModel):
+    """Strict source-grounded entity extraction response."""
+    entities: List[GroundedEntityOut] = Field(default_factory=list)
+
+
 class RelationsResponse(BaseModel):
     """Wrapper for list of relations."""
     relations: List[RelationOut] = Field(default_factory=list)
+
+
+class GroundedRelationOut(RelationOut):
+    """Relation output whose source evidence fields are mandatory."""
+    subject_id: str = Field(..., description="Exact source entity mention identifier")
+    object_id: str = Field(..., description="Exact target entity mention identifier")
+    evidence: str = Field(..., description="Exact supporting source quote")
+    evidence_occurrence: int = Field(..., ge=0, description="Zero-based evidence quote occurrence")
+    qualifiers: dict = Field(..., description="Grounded relation qualifiers")
+
+
+class GroundedRelationsResponse(BaseModel):
+    """Strict source-grounded relation extraction response."""
+    relations: List[GroundedRelationOut] = Field(default_factory=list)
+
 
 class TripletsResponse(BaseModel):
     """Wrapper for list of triplets."""

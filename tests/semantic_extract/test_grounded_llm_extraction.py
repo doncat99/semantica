@@ -17,12 +17,14 @@ class TypedProvider:
     def __init__(self, *responses):
         self.responses = list(responses)
         self.prompts = []
+        self.schemas = []
 
     def is_available(self):
         return True
 
     def generate_typed(self, prompt, schema, **_kwargs):
         self.prompts.append(prompt)
+        self.schemas.append(schema)
         return self.responses.pop(0)
 
 
@@ -70,6 +72,8 @@ def test_grounded_native_extractors_preserve_mentions_evidence_and_qualifiers():
     assert "exact contiguous substring" in provider.prompts[1]
     assert "table-of-contents" in provider.prompts[0]
     assert "navigation labels" in provider.prompts[0]
+    assert provider.schemas[0].__name__ == "GroundedEntitiesResponse"
+    assert provider.schemas[1].__name__ == "GroundedRelationsResponse"
 
 
 def test_grounded_native_relation_extraction_rejects_ungrounded_qualifier():
