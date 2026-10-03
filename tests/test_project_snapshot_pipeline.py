@@ -149,6 +149,7 @@ def test_product_output_repairs_semantic_citation_and_vocabulary(monkeypatch):
     assert "invented" in prompts[1]
     assert "Altered quote" in prompts[1]
     assert '"evidence_id":"evidence:source","quote":"Source quote"' in prompts[1]
+    assert ']\nPrevious JSON response:' in prompts[1]
 
 
 def test_product_output_repair_has_budget_for_schema_and_previous_json(monkeypatch):

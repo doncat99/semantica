@@ -724,6 +724,7 @@ class BaseProvider:
                     citation_hint = (
                         "\nExact citation objects required at the reported citation locations:\n"
                         + json.dumps(citation_repairs, ensure_ascii=False, separators=(",", ":"))
+                        + "\n"
                         if citation_repairs else ""
                     )
                     current_prompt = (
