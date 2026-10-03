@@ -76,6 +76,7 @@ class DocumentQualityError(SnapshotBuildError):
 TEXT_WINDOW_CHARS = 4096
 TEXT_WINDOW_OVERLAP = 256
 MODEL_CONTEXT_BYTES = 48_000
+MODEL_REQUEST_BYTES = 80_000
 EXTRACTION_MAX_OUTPUT_TOKENS = 4096
 
 
@@ -377,7 +378,7 @@ def _relay_json(relay: Any, payload: dict[str, Any], operation: str) -> tuple[di
     if not token:
         raise SnapshotBuildError(f"missing relay authorization environment: {relay.authorization_env}")
     request_bytes = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-    if len(request_bytes) > MODEL_CONTEXT_BYTES + 4096:
+    if len(request_bytes) > MODEL_REQUEST_BYTES:
         raise SnapshotBuildError(f"{operation} exceeds the production request budget")
     request = urllib.request.Request(
         relay.base_url,

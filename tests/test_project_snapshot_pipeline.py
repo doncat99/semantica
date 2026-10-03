@@ -112,6 +112,40 @@ def test_product_output_repairs_citation_shape_through_native_typed_provider(mon
     assert "evidence_id" in prompts[1] and "quote" in prompts[1]
 
 
+def test_product_output_repair_has_budget_for_schema_and_previous_json(monkeypatch):
+    from types import SimpleNamespace
+    from semantica import project_snapshot_pipeline as pipeline
+
+    quote = "Grounded evidence. " * 2_400
+    outputs = [
+        {"assignments": [{"dimension_id": "purpose", "item_id": "history", "confidence": 0.9,
+                          "citations": [5], "invalid": "x" * 20_000}]},
+        {"assignments": [{"dimension_id": "purpose", "item_id": "history", "confidence": 0.9,
+                          "citations": [{"evidence_id": "evidence:source", "quote": quote}]}]},
+    ]
+
+    class Response:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *_args): return None
+        def read(self):
+            return json.dumps({"model": "model-1", "choices": [{"message": {"content": json.dumps(outputs.pop(0))}}]}).encode()
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-token")
+    monkeypatch.setattr("urllib.request.urlopen", lambda _request, timeout: Response())
+    result, receipts = pipeline._product_json(
+        SimpleNamespace(model_id="model-1", binding_id="default", authorization_env="OPENAI_API_KEY",
+                        base_url="http://127.0.0.1/v1/chat/completions"),
+        "source_classification",
+        "Classify the source.",
+        {"evidence": [{"id": "evidence:source", "quote": quote}]},
+        pipeline._ClassificationOutput,
+    )
+
+    assert result["assignments"][0]["citations"] == [{"evidence_id": "evidence:source", "quote": quote}]
+    assert len(receipts) == 2
+
+
 def test_relationship_discovery_omits_ungrounded_qualifier_without_losing_valid_relations(monkeypatch):
     from semantica.project_snapshot_pipeline import _discover_cross_source_relationships
     from semantica.project_snapshot_schema import DocumentLocator, EvidenceSpan
