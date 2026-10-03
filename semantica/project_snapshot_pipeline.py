@@ -27,6 +27,7 @@ from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, Valid
 from .project_source import UnsupportedSourceFormatError, parse_source, source_content_revision
 from .project_checkpoint import SnapshotCheckpoint, active_checkpoint
 from .project_identity import resolve_project_identities
+from .deduplication.similarity_calculator import SimilarityCalculator
 from .project_snapshot_schema import (
     ArtifactManifest,
     ChangeDelta,
@@ -1006,6 +1007,7 @@ def _identity_judgments(source_builds: list[dict[str, Any]], relay: Any, base_sn
         spans = {span.id: span for span in source["evidence"]}
         for entity in source["entities"]:
             candidates.append({"mention_id": entity.id, "name": entity.canonical_name, "type": entity.type,
+                "attributes": getattr(entity, "attributes", {}),
                 "source_id": source["source"].source_id,
                 "previous_entity_id": previous.get(entity.id),
                 "separate_from": sorted({other for partition in split_partitions for group in partition if entity.id in group
@@ -1013,41 +1015,55 @@ def _identity_judgments(source_builds: list[dict[str, Any]], relay: Any, base_sn
                 "evidence": [{"id": span_id, "quote": spans[span_id].quote,
                     "context": source["text"][max(0, (spans[span_id].locator.start_char or 0) - 250):(spans[span_id].locator.end_char or 0) + 250]}
                     for span_id in entity.evidence_ids]})
+    representatives = {}
+    for candidate in candidates:
+        key = (candidate["source_id"], candidate["type"].casefold(), " ".join(candidate["name"].casefold().split()),
+               stable_digest(candidate.get("attributes", {})))
+        representatives.setdefault(key, candidate)
+    candidates = list(representatives.values())
     if len({candidate["type"].casefold() for candidate in candidates}) == len(candidates):
         return [], []
     if _context_size(candidates) <= MODEL_CONTEXT_BYTES:
         return _identity_batch(candidates, relay)
-    # All compatible occurrence pairs are considered. Name similarity is not
-    # an admission filter, so aliases are not silently lost at a batch boundary.
+    if len(candidates) <= 32:
+        candidate_pairs = [(left, right) for index, left in enumerate(candidates)
+                           for right in candidates[index + 1:]
+                           if left["type"].casefold() == right["type"].casefold()]
+    else:
+        rows = [{"id": item["mention_id"], "name": item["name"], "type": item["type"]} for item in candidates]
+        similar = SimilarityCalculator().batch_calculate_similarity(
+            rows, threshold=0.85, candidate_strategy="hybrid_v2", blocking_keys=["type", "token"],
+            enable_phonetic_blocking=True, max_candidates_per_entity=4,
+        )
+        by_id = {item["mention_id"]: item for item in candidates}
+        candidate_pairs = [(by_id[left["id"]], by_id[right["id"]]) for left, right, _score in similar
+                           if left["type"].casefold() == right["type"].casefold()]
     admitted, receipts = [], []
-    for index, left in enumerate(candidates):
-        for right in candidates[index + 1:]:
-            if left["type"].casefold() != right["type"].casefold():
-                continue
-            packets = []
-            for candidate in (left, right):
-                base = {key: value for key, value in candidate.items() if key != "evidence"}
-                packets.append(_context_batches(base, [("evidence", span) for span in candidate["evidence"]],
-                    max_bytes=(MODEL_CONTEXT_BYTES - 256) // 2))
-            for left_packet in packets[0]:
-                for right_packet in packets[1]:
-                    pair = [left_packet, right_packet]
-                    if _context_size(pair) > MODEL_CONTEXT_BYTES:
-                        raise SnapshotBuildError("identity evidence pair exceeds the production budget")
-                    judgments, batch_receipts = _identity_batch(pair, relay)
-                    receipts.extend(batch_receipts)
-                    for judgment in judgments:
-                        ids = judgment.get("mention_ids", [])
-                        refs = judgment.get("evidence_ids", [])
-                        allowed = {span["id"] for item in pair for span in item["evidence"]}
-                        if (not isinstance(ids, list) or len(ids) != 2 or any(not isinstance(item, str) for item in ids)
-                                or set(ids) != {left["mention_id"], right["mention_id"]}
-                                or not isinstance(refs, list) or any(not isinstance(ref, str) for ref in refs)
-                                or not set(refs).issubset(allowed)
-                                or any(not set(refs).intersection(span["id"] for span in item["evidence"]) for item in pair)
-                                or not isinstance(judgment.get("reason"), str) or not judgment["reason"].strip()):
-                            raise SnapshotBuildError("identity pair judgment has unsupported members or evidence")
-                        admitted.append({**judgment, "_receipt_ids": [receipt.id for receipt in batch_receipts]})
+    for left, right in candidate_pairs:
+        packets = []
+        for candidate in (left, right):
+            base = {key: value for key, value in candidate.items() if key != "evidence"}
+            packets.append(_context_batches(base, [("evidence", span) for span in candidate["evidence"]],
+                max_bytes=(MODEL_CONTEXT_BYTES - 256) // 2))
+        for left_packet in packets[0]:
+            for right_packet in packets[1]:
+                pair = [left_packet, right_packet]
+                if _context_size(pair) > MODEL_CONTEXT_BYTES:
+                    raise SnapshotBuildError("identity evidence pair exceeds the production budget")
+                judgments, batch_receipts = _identity_batch(pair, relay)
+                receipts.extend(batch_receipts)
+                for judgment in judgments:
+                    ids = judgment.get("mention_ids", [])
+                    refs = judgment.get("evidence_ids", [])
+                    allowed = {span["id"] for item in pair for span in item["evidence"]}
+                    if (not isinstance(ids, list) or len(ids) != 2 or any(not isinstance(item, str) for item in ids)
+                            or set(ids) != {left["mention_id"], right["mention_id"]}
+                            or not isinstance(refs, list) or any(not isinstance(ref, str) for ref in refs)
+                            or not set(refs).issubset(allowed)
+                            or any(not set(refs).intersection(span["id"] for span in item["evidence"]) for item in pair)
+                            or not isinstance(judgment.get("reason"), str) or not judgment["reason"].strip()):
+                        raise SnapshotBuildError("identity pair judgment has unsupported members or evidence")
+                    admitted.append({**judgment, "_receipt_ids": [receipt.id for receipt in batch_receipts]})
     return admitted, receipts
 
 

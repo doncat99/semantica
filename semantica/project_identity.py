@@ -119,6 +119,14 @@ def resolve_project_identities(*, project_id: str, mentions: list[KnowledgeEntit
         if left_root != right_root:
             parent[max(left_root, right_root)] = min(left_root, right_root)
 
+    exact_groups: dict[tuple[str, str, str, tuple[str, ...]], list[str]] = defaultdict(list)
+    for mention in mentions:
+        exact_groups[(mention.type.casefold(), _normalized(mention.canonical_name), stable_digest(mention.attributes),
+                      tuple(sorted(set(mention.metadata.get("source_ids", [])))))].append(mention.id)
+    for ids in exact_groups.values():
+        for mention_id in ids[1:]:
+            union(ids[0], mention_id)
+
     inherited_groups: dict[str, list[str]] = defaultdict(list)
     for mention_id, entity_id in inherited.items():
         inherited_groups[entity_id].append(mention_id)

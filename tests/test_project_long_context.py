@@ -277,6 +277,24 @@ def test_identity_batches_compare_cross_source_aliases_without_name_filter(monke
     assert len(pairs) == 6 and 6 < len(receipts) < 100
 
 
+def test_large_identity_input_uses_native_candidate_blocking(monkeypatch):
+    builds = []
+    for index in range(200):
+        source_id = f"source-{index}"
+        span = SimpleNamespace(id=f"evidence-{index}", quote=f"DistinctName{index}",
+                               locator=SimpleNamespace(start_char=0, end_char=16))
+        entity = SimpleNamespace(id=f"mention-{index}", canonical_name=f"DistinctName{index}",
+                                 type="ORG", attributes={}, evidence_ids=[span.id])
+        builds.append({"source": SimpleNamespace(source_id=source_id), "text": span.quote,
+                       "entities": [entity], "evidence": [span]})
+    calls = []
+    monkeypatch.setattr(pipeline, "_identity_batch", lambda pair, _relay: (calls.append(pair) or ([], [])))
+
+    pipeline._identity_judgments(builds, None)
+
+    assert len(calls) < 800
+
+
 def test_indivisible_context_is_rejected_without_truncation():
     with pytest.raises(pipeline.SnapshotBuildError, match="indivisible"):
         pipeline._context_batches({}, [("evidence", {"quote": "x" * 60_000})])

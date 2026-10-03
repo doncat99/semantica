@@ -58,6 +58,18 @@ def test_missing_merge_judgment_preserves_previous_identity():
     assert retained[0].id == original[0].id
 
 
+def test_exact_occurrences_in_one_source_share_identity_without_model_judgment():
+    first = mention("mention:first")
+    second = mention("mention:second")
+
+    entities, mapping, decisions = resolve([first, second], [])
+
+    assert len(entities) == 1
+    assert mapping[first.id] == mapping[second.id]
+    assert entities[0].evidence_ids == [*first.evidence_ids, *second.evidence_ids]
+    assert decisions == []
+
+
 def test_explicit_split_survives_rebuild_and_rejects_unacknowledged_remerge():
     first, second = mention("mention:first"), mention("mention:second", source="source:two")
     merge = {"mention_ids": [first.id, second.id], "evidence_ids": [*first.evidence_ids, *second.evidence_ids], "reason": "corroborated alias"}
