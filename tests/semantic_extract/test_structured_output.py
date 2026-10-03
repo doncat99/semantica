@@ -173,5 +173,31 @@ def test_extract_triplets_typed(mock_create_provider, mock_provider):
     assert triplets[0].predicate == "founded"
     assert triplets[0].metadata["extraction_method"] == "llm_typed"
 
+
+def test_base_provider_repairs_typed_output_with_schema_and_previous_response(monkeypatch):
+    class LocatedItem(BaseModel):
+        text: str
+        occurrence: int
+
+    class LocatedItems(BaseModel):
+        items: List[LocatedItem]
+
+    provider = BaseProvider()
+    provider.generate_structured = MagicMock(side_effect=[
+        {"items": [{"text": "Alpha"}]},
+        {"items": [{"text": "Alpha", "occurrence": 0}]},
+    ])
+    monkeypatch.setattr("semantica.semantic_extract.providers.instructor", None)
+    monkeypatch.setattr("semantica.semantic_extract.providers.time.sleep", lambda _seconds: None)
+
+    result = provider.generate_typed("Locate each item.", LocatedItems, max_retries=2)
+
+    assert result.items[0].occurrence == 0
+    retry_prompt = provider.generate_structured.call_args_list[1].args[0]
+    assert '"occurrence"' in retry_prompt
+    assert '"required":["text","occurrence"]' in retry_prompt.replace(" ", "")
+    assert '"text":"Alpha"' in retry_prompt.replace(" ", "")
+    assert "Field required" in retry_prompt
+
 if __name__ == "__main__":
     pytest.main([__file__])

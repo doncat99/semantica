@@ -1397,20 +1397,22 @@ Examples:
         raise ImportError("Pydantic schemas not available. Install pydantic/instructor to use LLM extraction.")
 
     try:
+        grounded_fields = ", and 'occurrence'" if grounding == "strict" else ""
+        grounded_example = ', "occurrence": 0' if grounding == "strict" else ""
         prompt = f"""Extract named entities from the provided text.
 Return the result as a JSON object with an "entities" key containing the list of entities.
-Each entity should have 'text', 'label', 'attributes', and 'confidence' fields.
+Each entity should have 'text', 'label', 'attributes', 'confidence'{grounded_fields} fields.
 
 IMPORTANT: 
 - Return a FLAT LIST of entities. 
 - DO NOT group entities by type.
-- The output structure must exactly match: {{ "entities": [ {{ "text": "...", "label": "...", "attributes": {{}}, "confidence": ... }}, ... ] }}
+- The output structure must exactly match: {{ "entities": [ {{ "text": "...", "label": "...", "attributes": {{}}, "confidence": ...{grounded_example} }}, ... ] }}
 
 Example output (JSON format only):
 {{
   "entities": [
-    {{"text": "Entity Name", "label": "CATEGORY", "attributes": {{}}, "confidence": 0.95}},
-    {{"text": "Another Entity", "label": "OTHER_CATEGORY", "attributes": {{}}, "confidence": 0.90}}
+    {{"text": "Entity Name", "label": "CATEGORY", "attributes": {{}}, "confidence": 0.95{grounded_example}}},
+    {{"text": "Another Entity", "label": "OTHER_CATEGORY", "attributes": {{}}, "confidence": 0.90{grounded_example}}}
   ]
 }}
 

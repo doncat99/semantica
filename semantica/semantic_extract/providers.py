@@ -688,8 +688,6 @@ class BaseProvider:
             except ValidationError as e:
                 last_error = e
                 error_summary = str(e)
-                # Simplify error summary for the LLM
-                # (You could parse e.errors() for a better message)
 
                 if attempt < max_retries - 1:
                     wait_time = (attempt + 1) * 1
@@ -697,8 +695,20 @@ class BaseProvider:
                         f"Schema validation failed (attempt {attempt + 1}): {e}. Retrying with error feedback..."
                     )
 
-                    # Update prompt with error info
-                    current_prompt = f"{prompt}\n\nPrevious response was invalid JSON or didn't match schema:\n{error_summary}\n\nPlease fix the errors and return valid JSON matching the schema."
+                    schema_json = json.dumps(
+                        schema.model_json_schema(), ensure_ascii=False, separators=(",", ":")
+                    )
+                    previous_json = json.dumps(
+                        json_result, ensure_ascii=False, separators=(",", ":")
+                    )
+                    current_prompt = (
+                        f"{prompt}\n\nThe previous JSON response failed validation. "
+                        "Preserve every valid value and repair only the invalid or missing fields.\n"
+                        f"Required JSON Schema:\n{schema_json}\n"
+                        f"Validation errors:\n{error_summary}\n"
+                        f"Previous JSON response:\n{previous_json}\n"
+                        "Return only the complete repaired JSON object."
+                    )
                     time.sleep(wait_time)
                 else:
                     self.logger.error(f"Typed generation failed validation: {e}")
