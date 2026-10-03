@@ -240,6 +240,40 @@ def test_grounded_quote_accepts_source_line_breaks_between_words():
     assert text[entities[0].start_char:entities[0].end_char] == "Emission Trading\nSystems"
 
 
+def test_grounded_relation_validates_qualifiers_against_canonical_source_slice():
+    text = "Policy applies where outcomes are financially  material."
+    entities = extract_entities_llm(
+        text,
+        provider="bifrost",
+        provider_instance=TypedProvider(EntitiesResponse(entities=[
+            EntityOut(text="Policy", label="concept", occurrence=0),
+            EntityOut(text="outcomes", label="concept", occurrence=0),
+        ])),
+        grounding="strict",
+    )
+    provider = TypedProvider(RelationsResponse(relations=[RelationOut(
+        subject="Policy",
+        subject_id="mention:0",
+        predicate="applies_to",
+        object="outcomes",
+        object_id="mention:1",
+        evidence="Policy applies where outcomes are financially material.",
+        evidence_occurrence=0,
+        qualifiers={"polarity": "positive", "condition": "financially material"},
+    )]))
+
+    relations = extract_relations_llm(
+        text,
+        entities,
+        provider="bifrost",
+        provider_instance=provider,
+        grounding="strict",
+        grounding_retries=0,
+    )
+
+    assert relations == []
+
+
 def test_repeated_grounded_quote_retry_includes_range_and_previous_json():
     text = "Alpha references Alpha."
     provider = TypedProvider(

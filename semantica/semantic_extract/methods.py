@@ -2620,7 +2620,7 @@ def _parse_grounded_relation_result(
                 raise ProcessingError("grounded relation requires a predicate")
             evidence = item.get("evidence")
             start, end, occurrence = _exact_occurrence(text, evidence, item.get("evidence_occurrence"))
-            evidence = evidence.strip()
+            evidence = text[start:end]
             qualifiers = _grounded_qualifiers(item.get("qualifiers"), evidence)
             relations.append(Relation(
                 subject=subject,
