@@ -131,35 +131,41 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
     def extract(item):
         window = item[2]
         provider = _project_model_provider(model_relay)
-        try:
-            entities = NERExtractor(
-                method="llm",
-                provider="bifrost",
-                llm_model=model_relay.model_id,
-                provider_instance=provider,
-                grounding="strict",
-                grounding_retries=1,
-                extraction_spec=extraction_spec,
-                max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
-            ).extract(window)
-        except ProcessingError:
-            provider.reject_last()
-            raise
-        try:
-            relations = RelationExtractor(
-                method="llm",
-                provider="bifrost",
-                llm_model=model_relay.model_id,
-                provider_instance=provider,
-                grounding="strict",
-                grounding_retries=1,
-                extraction_spec=extraction_spec,
-                confidence_threshold=0,
-                max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
-            ).extract(window, entities)
-        except ProcessingError:
-            provider.reject_last()
-            raise
+        for retry in range(2):
+            try:
+                entities = NERExtractor(
+                    method="llm",
+                    provider="bifrost",
+                    llm_model=model_relay.model_id,
+                    provider_instance=provider,
+                    grounding="strict",
+                    grounding_retries=1,
+                    extraction_spec=extraction_spec,
+                    max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
+                ).extract(window)
+                break
+            except ProcessingError:
+                provider.reject_last()
+                if retry:
+                    raise
+        for retry in range(2):
+            try:
+                relations = RelationExtractor(
+                    method="llm",
+                    provider="bifrost",
+                    llm_model=model_relay.model_id,
+                    provider_instance=provider,
+                    grounding="strict",
+                    grounding_retries=1,
+                    extraction_spec=extraction_spec,
+                    confidence_threshold=0,
+                    max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
+                ).extract(window, entities)
+                break
+            except ProcessingError:
+                provider.reject_last()
+                if retry:
+                    raise
         extracted = {
             "entities": [{
                 "id": entity.metadata["mention_id"],
