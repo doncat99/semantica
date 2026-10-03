@@ -20,6 +20,12 @@ H2 = "sha256:" + "2" * 64
 H3 = "sha256:" + "3" * 64
 
 
+def _typed_prompt_context(payload):
+    prompt = payload["messages"][0]["content"]
+    marker = "Input JSON:\n"
+    return json.JSONDecoder().raw_decode(prompt[prompt.index(marker) + len(marker):])[0]
+
+
 def _worker_output(stdout):
     events = [json.loads(line) for line in stdout.getvalue().splitlines()]
     return events, events[-1]
@@ -72,6 +78,38 @@ def test_relay_waits_for_complete_gateway_response(monkeypatch):
     response, receipt = _relay_json(relay, {"model": "model-1"}, "structured_extraction")
     assert response == {"choices": []}
     assert receipt.operation == "structured_extraction"
+
+
+def test_product_output_repairs_citation_shape_through_native_typed_provider(monkeypatch):
+    from types import SimpleNamespace
+    from semantica import project_snapshot_pipeline as pipeline
+
+    outputs = [
+        {"assignments": [{"dimension_id": "purpose", "item_id": "history", "confidence": 0.9, "citations": [5]}]},
+        {"assignments": [{"dimension_id": "purpose", "item_id": "history", "confidence": 0.9,
+                          "citations": [{"evidence_id": "evidence:source", "quote": "Source quote"}]}]},
+    ]
+    prompts = []
+
+    def relay_response(relay, payload, operation):
+        prompts.append(payload["messages"][0]["content"])
+        result = {"model": relay.model_id, "choices": [{"message": {"content": json.dumps(outputs.pop(0))}}]}
+        return result, ModelReceipt(id=f"receipt:{len(prompts)}", operation=operation, provider="test",
+                                    model=relay.model_id, input_digest=H1, output_digest=H2)
+
+    monkeypatch.setattr(pipeline, "_relay_json", relay_response)
+    result, receipts = pipeline._product_json(
+        SimpleNamespace(model_id="model-1", binding_id="default"),
+        "source_classification",
+        "Classify the source.",
+        {"evidence": [{"id": "evidence:source", "quote": "Source quote"}]},
+        pipeline._ClassificationOutput,
+    )
+
+    assert result["assignments"][0]["citations"] == [{"evidence_id": "evidence:source", "quote": "Source quote"}]
+    assert [receipt.id for receipt in receipts] == ["receipt:1", "receipt:2"]
+    assert "Required JSON Schema" in prompts[1]
+    assert "evidence_id" in prompts[1] and "quote" in prompts[1]
 
 
 def test_relationship_discovery_omits_ungrounded_qualifier_without_losing_valid_relations(monkeypatch):
@@ -133,7 +171,7 @@ def test_semantic_classification_rejects_invalid_model_evidence(tmp_path, monkey
     if corruption == "cardinality":
         assignments.append({**assignment, "item_id": "manual"})
     receipt = ModelReceipt(id="receipt:test", operation="source_classification", provider="test", model="test", input_digest=H1, output_digest=H2)
-    monkeypatch.setattr("semantica.project_snapshot_pipeline._product_json", lambda *args: ({"assignments": assignments}, receipt))
+    monkeypatch.setattr("semantica.project_snapshot_pipeline._product_json", lambda *args: ({"assignments": assignments}, [receipt]))
     with pytest.raises(SnapshotBuildError):
         _classify_source(built, ClassificationProfile.model_validate(_classification_profile()), None)
 
@@ -147,7 +185,7 @@ def test_semantic_classification_preserves_source_offsets_and_unclassified_dimen
     built["passages"] = _source_passages(built)
     span = built["passages"][0]
     receipt = ModelReceipt(id="receipt:test", operation="source_classification", provider="test", model="test", input_digest=H1, output_digest=H2)
-    monkeypatch.setattr("semantica.project_snapshot_pipeline._product_json", lambda *args: ({"assignments": [{"dimension_id": "purpose", "item_id": "history", "confidence": 0.9, "citations": [{"evidence_id": span.id, "quote": span.quote}]}]}, receipt))
+    monkeypatch.setattr("semantica.project_snapshot_pipeline._product_json", lambda *args: ({"assignments": [{"dimension_id": "purpose", "item_id": "history", "confidence": 0.9, "citations": [{"evidence_id": span.id, "quote": span.quote}]}]}, [receipt]))
     classification, _ = _classify_source(built, ClassificationProfile.model_validate(_classification_profile()), None)
     assert classification.assignments[0].evidence_ids == [span.id]
     assert classification.unclassified_dimension_ids == ["topic"]
@@ -215,7 +253,7 @@ def test_explanation_rejects_missing_or_hallucinated_citations(tmp_path, monkeyp
     built = _build_source(SourceBuildInput(filePath=str(source), sourceId="source-1", materialRevision=source_content_revision(source), mimeType="text/plain", name="source.txt"), False)
     built["passages"] = _source_passages(built)
     receipt = ModelReceipt(id="receipt:test", operation="knowledge_explanation", provider="test", model="test", input_digest=H1, output_digest=H2)
-    monkeypatch.setattr("semantica.project_snapshot_pipeline._product_json", lambda *args: ({"sections": [{"title": "Explanation", "text": "Unsupported claim", "citations": citation}]}, receipt))
+    monkeypatch.setattr("semantica.project_snapshot_pipeline._product_json", lambda *args: ({"sections": [{"title": "Explanation", "text": "Unsupported claim", "citations": citation}]}, [receipt]))
     with pytest.raises(SnapshotBuildError):
         _explanation_reports("project-1", [built], built["entities"], [], [], [], [], [*built["evidence"], *built["passages"]], None)
 
@@ -416,8 +454,10 @@ def test_model_recipe_uses_bifrost_chat_and_embedding_and_records_receipts(tmp_p
             if self.path == "/v1/chat/completions":
                 prompt = payload["messages"][0]["content"]
                 explanation = "Explain the supplied knowledge" in prompt
-                context = json.loads(payload["messages"][1]["content"]) if explanation else None
-                if len(payload["messages"]) == 1:
+                context = _typed_prompt_context(payload) if explanation else None
+                if explanation:
+                    content = {"sections": [{"title": "Historical role", "text": "Ada Lovelace is connected to the Analytical Engine through the documented design work.", "citations": [{"evidence_id": context["evidence"][0]["id"], "quote": context["evidence"][0]["quote"]}]}]}
+                else:
                     content = ({
                         "relations": [{
                             "subject": "Ada Lovelace", "subject_id": "mention:0",
@@ -433,15 +473,13 @@ def test_model_recipe_uses_bifrost_chat_and_embedding_and_records_receipts(tmp_p
                             {"text": "Analytical Engine", "label": "CONCEPT", "occurrence": 0},
                         ],
                     })
-                else:
-                    content = {"sections": [{"title": "Historical role", "text": "Ada Lovelace is connected to the Analytical Engine through the documented design work.", "citations": [{"evidence_id": context["evidence"][0]["id"], "quote": context["evidence"][0]["quote"]}]}]} if explanation else {}
                 response = {
                     "choices": [{"message": {"content": json.dumps(content), "role": "assistant"}}],
                     "model": payload["model"],
                     "usage": {"prompt_tokens": 10, "completion_tokens": 8},
                 }
                 if "Classify this source" in payload["messages"][0]["content"]:
-                    context = json.loads(payload["messages"][1]["content"])
+                    context = _typed_prompt_context(payload)
                     response["choices"][0]["message"]["content"] = json.dumps({"assignments": [{"dimension_id": "purpose", "item_id": "history", "confidence": 0.95, "citations": [{"evidence_id": context["evidence"][0]["id"], "quote": context["evidence"][0]["quote"]}]}]})
             elif self.path == "/v1/embeddings":
                 assert payload["model"] == "embedding-1"
@@ -620,7 +658,7 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
             elif operation == "relationship_discovery":
                 content = {"relations": []}
             elif operation == "knowledge_explanation":
-                context = json.loads(payload["messages"][1]["content"])
+                context = _typed_prompt_context(payload)
                 content = {"sections": [{"title": "Design", "text": "Ada Lovelace designed the Analytical Engine.", "citations": [{"evidence_id": context["evidence"][0]["id"], "quote": context["evidence"][0]["quote"]}]}]}
             else:
                 content = {}

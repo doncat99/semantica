@@ -230,19 +230,19 @@ def test_classification_and_hierarchical_reports_visit_every_passage(tmp_path, m
     seen = {"source_classification": set(), "knowledge_explanation": set()}
     calls = []
 
-    def model(relay, operation, instruction, context):
+    def model(relay, operation, instruction, context, schema):
         assert pipeline._context_size(context) <= pipeline.MODEL_CONTEXT_BYTES
         calls.append(operation)
         if operation == "knowledge_synthesis":
             refs = sorted({ref for section in context["sections"] for ref in section["evidence_ids"]})
-            return {"sections": [{"title": "Synthesis", "text": "Connected explanation", "evidence_ids": refs[:1]}]}, receipt(operation, len(calls))
+            return {"sections": [{"title": "Synthesis", "text": "Connected explanation", "evidence_ids": refs[:1]}]}, [receipt(operation, len(calls))]
         seen[operation].update(item["id"] for item in context["evidence"])
         citations = [{"evidence_id": item["id"], "quote": item["quote"]} for item in context["evidence"]]
         if operation == "source_classification":
             result = {"assignments": [{"dimension_id": "subject", "item_id": "science", "confidence": 0.9, "citations": citations}]}
         else:
             result = {"sections": [{"title": "Details", "text": "Supported explanation", "citations": citations}]}
-        return result, receipt(operation, len(calls))
+        return result, [receipt(operation, len(calls))]
 
     monkeypatch.setattr(pipeline, "_product_json", model)
     profile = ClassificationProfile(id="profile", version="1", label="Subject", description="Classification", dimensions=[{"id": "subject", "label": "Subject", "cardinality": "single", "vocabulary": [{"id": "science", "label": "Science"}]}])
@@ -285,7 +285,7 @@ def test_indivisible_context_is_rejected_without_truncation():
 def test_synthesis_cannot_introduce_evidence_from_another_batch(monkeypatch):
     from semantica.project_snapshot_schema import ReportSection
     monkeypatch.setattr(pipeline, "_product_json", lambda *args: ({"sections": [
-        {"title": "Invented", "text": "Unsupported", "evidence_ids": ["other-evidence"]}]}, receipt("knowledge_synthesis", 1)))
+        {"title": "Invented", "text": "Unsupported", "evidence_ids": ["other-evidence"]}]}, [receipt("knowledge_synthesis", 1)]))
     with pytest.raises(pipeline.SnapshotBuildError, match="unsupported evidence"):
         pipeline._synthesize_sections({"id": "overview"}, [ReportSection(title="Original", text="Supported", evidence_ids=["source-evidence"])], None)
 

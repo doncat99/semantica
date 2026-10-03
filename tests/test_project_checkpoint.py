@@ -11,6 +11,7 @@ import pytest
 from semantica.project_checkpoint import SnapshotCheckpoint, SnapshotCheckpointError
 from semantica.project_snapshot_schema import ProjectSnapshotBuildRequest
 from tests.test_project_snapshot_pipeline import _request
+from tests.test_project_snapshot_pipeline import _typed_prompt_context
 
 
 def test_worker_process_restart_reuses_durable_parse_and_model_calls(tmp_path):
@@ -40,13 +41,16 @@ def test_worker_process_restart_reuses_durable_parse_and_model_calls(tmp_path):
                 ]}
             else:
                 prompt = payload["messages"][0]["content"]
-                if len(payload["messages"]) == 1:
-                    content = {"relations": []} if "Extract source-grounded relations" in prompt else {"entities": []}
-                else:
-                    user = payload["messages"][1]["content"]
-                    context = json.loads(user)
+                if "Explain the supplied knowledge" in prompt:
+                    context = _typed_prompt_context(payload)
                     content = {"sections": [{"title": "Knowledge production", "text": context["evidence"][0]["quote"],
                         "citations": [{"evidence_id": item["id"], "quote": item["quote"]} for item in context["evidence"]]}]}
+                elif "Synthesize the supplied grounded explanations" in prompt:
+                    context = _typed_prompt_context(payload)
+                    content = {"sections": [{"title": "Knowledge production", "text": "Connected explanation",
+                        "evidence_ids": [context["sections"][0]["evidence_ids"][0]]}]}
+                else:
+                    content = {"relations": []} if "Extract source-grounded relations" in prompt else {"entities": []}
                 response = {"model": payload["model"], "choices": [{"message": {"content": json.dumps(content)}}]}
             encoded = json.dumps(response).encode()
             self.send_response(200)
@@ -98,7 +102,9 @@ def test_worker_process_restart_reuses_durable_parse_and_model_calls(tmp_path):
         result = json.loads(stdout.strip().splitlines()[-1])
         assert result["ok"], result
         assert parsed_artifact.read_bytes() == parsed_bytes
-        extraction_calls = [item for item in calls if "messages" in item and len(item["messages"]) == 1]
+        extraction_calls = [item for item in calls if "messages" in item and
+            ("Extract named entities" in item["messages"][0]["content"] or
+             "Extract source-grounded relations" in item["messages"][0]["content"])]
         assert len(extraction_calls) == 1
         snapshot_artifact = next(item for item in result["result"]["artifacts"] if item["kind"] == "snapshot")
         snapshot = json.loads(Path(snapshot_artifact["path"]).read_bytes())
