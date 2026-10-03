@@ -140,3 +140,21 @@ def test_checkpoint_rejects_corrupt_payload_and_changed_recipe(tmp_path):
     request["params"]["recipe"]["forceOcrSourceIds"] = ["source-1"]
     with pytest.raises(SnapshotCheckpointError, match="inputs changed"):
         SnapshotCheckpoint(ProjectSnapshotBuildRequest.model_validate(request["params"]))
+
+
+def test_new_run_reuses_only_matching_verified_relay_entries(tmp_path):
+    source = tmp_path / "source.txt"
+    source.write_text("A source")
+    first = _request(source, tmp_path / "first")
+    first_checkpoint = SnapshotCheckpoint(ProjectSnapshotBuildRequest.model_validate(first["params"]))
+    first_checkpoint.write("relay", {"operation": "embedding", "input": ["Alpha"]}, {"response": "saved"})
+    first_checkpoint.write("document", {"source": "source-1"}, {"document": "old"})
+
+    second = _request(source, tmp_path / "second")
+    second["params"]["resumeCheckpointDirs"] = [str(first_checkpoint.root)]
+    second_checkpoint = SnapshotCheckpoint(ProjectSnapshotBuildRequest.model_validate(second["params"]))
+
+    assert second_checkpoint.read("relay", {"operation": "embedding", "input": ["Alpha"]}) == {"response": "saved"}
+    assert second_checkpoint.read("relay", {"operation": "embedding", "input": ["Beta"]}) is None
+    assert second_checkpoint.read("document", {"source": "source-1"}) is None
+    assert len(list(second_checkpoint.root.glob("relay-*.json"))) == 1

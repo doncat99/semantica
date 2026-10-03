@@ -156,11 +156,17 @@ def _exact_occurrence(text: str, quote: str, occurrence: Optional[int]) -> tuple
         raise ProcessingError("grounded extraction requires a non-empty source quote")
     quote = quote.strip()
     matches = list(re.finditer(re.escape(quote), text))
+    if len(matches) == 1:
+        match = matches[0]
+        return match.start(), match.end(), 0
     if occurrence is None and len(matches) != 1:
         raise ProcessingError(f"ambiguous grounded quote requires occurrence: {quote!r}")
     index = 0 if occurrence is None else occurrence
     if isinstance(index, bool) or not isinstance(index, int) or not 0 <= index < len(matches):
-        raise ProcessingError(f"grounded quote occurrence is outside source text: {quote!r}")
+        raise ProcessingError(
+            f"grounded quote occurrence {index!r} is outside source text for {quote!r}; "
+            f"found {len(matches)} exact occurrence(s)"
+        )
     match = matches[index]
     return match.start(), match.end(), index
 
@@ -1470,7 +1476,12 @@ Grounding requirements:
             except ProcessingError as exc:
                 if attempt >= grounding_retries:
                     raise
-                prompt += f"\nCorrect the invalid grounded output: {exc}"
+                previous = result_obj.model_dump(mode="json", by_alias=True)
+                prompt += (
+                    f"\n\nCorrect the invalid grounded output: {exc}\n"
+                    f"Previous grounded JSON:\n{json.dumps(previous, ensure_ascii=False)}\n"
+                    "Preserve valid values, repair the invalid grounding fields, and return the complete JSON object."
+                )
         
         logger.info(f"Successfully extracted {len(entities)} entities using {provider}/{model} (typed)")
         if provider_instance is None:

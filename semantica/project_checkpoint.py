@@ -46,6 +46,7 @@ class SnapshotCheckpoint:
     def __init__(self, request: Any):
         self.root = Path(request.output_dir).resolve() / "checkpoint"
         self.root.mkdir(parents=True, exist_ok=True)
+        self.resume_roots = [Path(item).resolve() for item in request.resume_checkpoint_dirs]
         sources = []
         for source in request.sources:
             with Path(source.file_path).open("rb") as stream:
@@ -82,13 +83,17 @@ class SnapshotCheckpoint:
 
     def read(self, kind: str, key: Any) -> Any | None:
         path = self._path(kind, key)
-        if not path.exists():
-            return None
+        if not path.exists() and kind == "relay":
+            path = next((root / path.name for root in self.resume_roots if (root / path.name).is_file()), path)
+        if not path.exists(): return None
         try:
             entry = json.loads(path.read_bytes())
             payload = entry["payload"]
-            if entry["fence"] != self.fence or entry["digest"] != _digest(_bytes(payload)):
+            local = path.parent == self.root
+            if (local and entry["fence"] != self.fence) or entry["digest"] != _digest(_bytes(payload)):
                 raise ValueError("digest mismatch")
+            if not local:
+                self.write(kind, key, payload)
             return payload
         except (ValueError, KeyError, TypeError, OSError) as exc:
             raise SnapshotCheckpointError(f"snapshot checkpoint entry failed verification: {path.name}") from exc

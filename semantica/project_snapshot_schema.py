@@ -818,6 +818,7 @@ class ProjectSnapshotBuildRequest(DigestModel):
     input_revision: str = Field(alias="inputRevision")
     parallelism: int = Field(default=1, ge=1, le=8)
     output_dir: str = Field(alias="outputDir")
+    resume_checkpoint_dirs: List[str] = Field(default_factory=list, alias="resumeCheckpointDirs")
     recipe: RecipeRef
     relays: Dict[str, RelayRef]
     release: ReleaseRef
@@ -831,6 +832,8 @@ class ProjectSnapshotBuildRequest(DigestModel):
             raise ValueError("at least one source is required")
         if not isabs(self.output_dir):
             raise ValueError("outputDir must be absolute")
+        if any(not isabs(item) for item in self.resume_checkpoint_dirs):
+            raise ValueError("resumeCheckpointDirs must contain absolute paths")
         source_ids = {source.source_id for source in self.sources}
         if len(source_ids) != len(self.sources):
             raise ValueError("source ids must be unique")

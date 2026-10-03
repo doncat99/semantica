@@ -205,6 +205,44 @@ def test_grounded_native_extractors_retry_invalid_grounding():
     assert "does not reference an entity mention" in relation_provider.prompts[1]
 
 
+def test_unique_grounded_quote_uses_its_deterministic_occurrence():
+    text = "Alpha references Beta."
+    provider = TypedProvider(EntitiesResponse(entities=[
+        EntityOut(text="Beta", label="concept", occurrence=7),
+    ]))
+
+    entities = extract_entities_llm(
+        text,
+        provider="bifrost",
+        provider_instance=provider,
+        grounding="strict",
+        grounding_retries=0,
+    )
+
+    assert entities[0].start_char == text.index("Beta")
+    assert entities[0].metadata["span_occurrence"] == 0
+
+
+def test_repeated_grounded_quote_retry_includes_range_and_previous_json():
+    text = "Alpha references Alpha."
+    provider = TypedProvider(
+        EntitiesResponse(entities=[EntityOut(text="Alpha", label="concept", occurrence=7)]),
+        EntitiesResponse(entities=[EntityOut(text="Alpha", label="concept", occurrence=1)]),
+    )
+
+    entities = extract_entities_llm(
+        text,
+        provider="bifrost",
+        provider_instance=provider,
+        grounding="strict",
+        grounding_retries=1,
+    )
+
+    assert entities[0].start_char == text.rindex("Alpha")
+    assert "found 2 exact occurrence(s)" in provider.prompts[1]
+    assert '"occurrence": 7' in provider.prompts[1]
+
+
 def test_grounded_relation_keeps_valid_facts_when_peer_is_invalid():
     text = "Reflective roofs do not shade pedestrians."
     entities = extract_entities_llm(
