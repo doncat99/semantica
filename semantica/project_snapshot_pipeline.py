@@ -78,8 +78,6 @@ TEXT_WINDOW_CHARS = 4096
 TEXT_WINDOW_OVERLAP = 256
 MODEL_CONTEXT_BYTES = 48_000
 MODEL_REQUEST_BYTES = 80_000
-EXTRACTION_MAX_OUTPUT_TOKENS = 4096
-PRODUCT_MAX_OUTPUT_TOKENS = 8192
 
 
 class _ProductOutput(BaseModel):
@@ -263,7 +261,6 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
                     grounding="strict",
                     grounding_retries=1,
                     extraction_spec=extraction_spec,
-                    max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
                 ).extract(window)
                 break
             except ProcessingError:
@@ -281,7 +278,6 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
                     grounding_retries=1,
                     extraction_spec=extraction_spec,
                     confidence_threshold=0,
-                    max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
                 ).extract(window, entities)
                 break
             except ProcessingError:
@@ -529,7 +525,7 @@ class _ProjectModelProvider(BaseProvider):
             "model": self.relay.model_id,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0,
-            "max_tokens": kwargs.get("max_tokens", EXTRACTION_MAX_OUTPUT_TOKENS),
+            "max_tokens": self.relay.max_output_tokens,
             "response_format": {"type": "json_object"},
         }
         response, receipt = _relay_json(self.relay, payload, self.operation)
@@ -609,7 +605,6 @@ def _product_json(relay: Any, operation: str, instruction: str, context: dict[st
             f"{instruction}\n\nInput JSON:\n{json.dumps(context, ensure_ascii=False)}",
             schema=schema,
             max_retries=3,
-            max_tokens=PRODUCT_MAX_OUTPUT_TOKENS,
             validation_context=context,
         )
     except ProcessingError as exc:

@@ -139,7 +139,7 @@ def _build_request_payload():
         "recipe": {"forceOcrSourceIds": [], "id": "deterministic", "version": "1"},
         "relays": {
             "embedding": {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/embeddings", "capability": "knowledge.snapshot.embed", "modelId": "embedding-1", "receipts": "required"},
-            "model": {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/chat/completions", "capability": "knowledge.snapshot.generate", "modelId": "model-1", "receipts": "required"},
+            "model": {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/chat/completions", "capability": "knowledge.snapshot.generate", "contextWindowTokens": 500000, "maxOutputTokens": 393216, "modelId": "model-1", "receipts": "required"},
         },
         "release": {"artifactDigest": H2, "schemaDigest": H3, "mediaTypes": {"document-representation": "application/vnd.semantica.document-representation+json", "retrieval-index": "application/vnd.semantica.retrieval+json", "snapshot": "application/vnd.semantica.project-snapshot+json"}},
     }
@@ -235,6 +235,24 @@ def test_build_request_preserves_host_source_and_provider_model_ids():
     payload["relays"]["embedding"]["modelId"] = "../unsafe"
     with pytest.raises(ValidationError, match="model_id"):
         ProjectSnapshotBuildRequest.model_validate(payload)
+
+
+def test_build_request_requires_admitted_model_output_limits():
+    payload = _build_request_payload()
+    request = ProjectSnapshotBuildRequest.model_validate(payload)
+    assert request.relays["model"].context_window_tokens == 500000
+    assert request.relays["model"].max_output_tokens == 393216
+
+    for field in ("contextWindowTokens", "maxOutputTokens"):
+        bad = _build_request_payload()
+        del bad["relays"]["model"][field]
+        with pytest.raises(ValidationError, match="model relay requires"):
+            ProjectSnapshotBuildRequest.model_validate(bad)
+
+    bad = _build_request_payload()
+    bad["relays"]["model"]["maxOutputTokens"] = 500001
+    with pytest.raises(ValidationError, match="cannot exceed"):
+        ProjectSnapshotBuildRequest.model_validate(bad)
 
 
 def test_build_request_and_snapshot_preserve_extraction_specification():

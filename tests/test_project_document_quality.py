@@ -4,8 +4,9 @@ import pytest
 
 from semantica.project_document_quality import assess_document_quality
 from semantica.project_source import SourceDocument
-from semantica.project_snapshot_pipeline import DocumentQualityError, _build_source, build_project_snapshot
-from semantica.project_snapshot_schema import ProjectSnapshotBuildRequest
+from semantica.project_checkpoint import active_checkpoint
+from semantica.project_snapshot_pipeline import DocumentQualityError, _build_source, parse_source_artifact
+from semantica.project_snapshot_schema import ParseSourceRequest, ProjectSnapshotBuildRequest
 from tests.test_project_snapshot_pipeline import _request
 
 
@@ -44,13 +45,26 @@ def test_ocr_recipe_and_text_revision_have_distinct_evidence_identity(tmp_path: 
 
 
 def test_failed_quality_is_durable_and_never_enters_knowledge_extraction(tmp_path, monkeypatch):
-    import json
     import semantica.project_snapshot_pipeline as pipeline
     source = tmp_path / "source.pdf"
     source.write_bytes(b"fixture")
-    request = _request(source, tmp_path / "build")
+    request = _request(source, tmp_path / "build", prepare=False)
     request["params"]["sources"][0]["mimeType"] = "application/pdf"
+    parse_request = ParseSourceRequest.model_validate({
+        "source": request["params"]["sources"][0],
+        "outputDir": str(tmp_path / "parsed"),
+        "forceOcr": False,
+        "documentProcessing": {"mode": "local"},
+    })
     calls = []
+    cache = {}
+
+    class Checkpoint:
+        def read(self, stage, key):
+            return cache.get((stage, repr(key)))
+
+        def write(self, stage, key, value):
+            cache[(stage, repr(key))] = value
 
     def parse(*args, **kwargs):
         calls.append(kwargs["force_ocr"])
@@ -58,9 +72,12 @@ def test_failed_quality_is_durable_and_never_enters_knowledge_extraction(tmp_pat
 
     monkeypatch.setattr(pipeline, "parse_source", parse)
     monkeypatch.setattr(pipeline, "_build_source", lambda *args, **kwargs: pytest.fail("failed quality reached extraction"))
-    for _ in range(2):
-        with pytest.raises(DocumentQualityError, match="explicit OCR repair"):
-            build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(request["params"]))
+    token = active_checkpoint.set(Checkpoint())
+    try:
+        for _ in range(2):
+            with pytest.raises(DocumentQualityError, match="explicit OCR repair"):
+                parse_source_artifact(parse_request)
+    finally:
+        active_checkpoint.reset(token)
     assert calls == [False]
-    cached = next((tmp_path / "build" / "checkpoint").glob("document-*.json"))
-    assert json.loads(cached.read_text())["payload"][1]["quality"]["status"] == "needs_review"
+    assert next(iter(cache.values()))[1]["quality"]["status"] == "needs_review"

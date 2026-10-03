@@ -99,7 +99,7 @@ def test_product_output_repairs_citation_shape_through_native_typed_provider(mon
 
     monkeypatch.setattr(pipeline, "_relay_json", relay_response)
     result, receipts = pipeline._product_json(
-        SimpleNamespace(model_id="model-1", binding_id="default"),
+        SimpleNamespace(model_id="model-1", binding_id="default", max_output_tokens=393216),
         "source_classification",
         "Classify the source.",
         {"evidence": [{"id": "evidence:source", "quote": "Source quote"}]},
@@ -112,7 +112,7 @@ def test_product_output_repairs_citation_shape_through_native_typed_provider(mon
     assert "evidence_id" in prompts[1] and "quote" in prompts[1]
 
 
-def test_product_output_reserves_more_tokens_than_chunk_extraction(monkeypatch):
+def test_product_output_uses_host_admitted_output_limit(monkeypatch):
     from types import SimpleNamespace
     from semantica import project_snapshot_pipeline as pipeline
 
@@ -130,15 +130,14 @@ def test_product_output_reserves_more_tokens_than_chunk_extraction(monkeypatch):
 
     monkeypatch.setattr(pipeline, "_relay_json", relay_response)
     pipeline._product_json(
-        SimpleNamespace(model_id="model-1", binding_id="default"),
+        SimpleNamespace(model_id="model-1", binding_id="default", max_output_tokens=393216),
         "knowledge_explanation",
         "Explain the source.",
         {"evidence": [{"id": "evidence:source", "quote": "Source quote"}]},
         pipeline._ExplanationOutput,
     )
 
-    assert payloads[0]["max_tokens"] == pipeline.PRODUCT_MAX_OUTPUT_TOKENS
-    assert pipeline.PRODUCT_MAX_OUTPUT_TOKENS > pipeline.EXTRACTION_MAX_OUTPUT_TOKENS
+    assert payloads[0]["max_tokens"] == 393216
 
 
 def test_product_output_repairs_semantic_citation_and_vocabulary(monkeypatch):
@@ -166,7 +165,7 @@ def test_product_output_repairs_semantic_citation_and_vocabulary(monkeypatch):
         "evidence": [{"id": "evidence:source", "quote": "Source quote"}],
     }
     result, receipts = pipeline._product_json(
-        SimpleNamespace(model_id="model-1", binding_id="default"),
+        SimpleNamespace(model_id="model-1", binding_id="default", max_output_tokens=393216),
         "source_classification",
         "Classify the source.",
         context,
@@ -204,7 +203,7 @@ def test_product_output_repair_has_budget_for_schema_and_previous_json(monkeypat
     monkeypatch.setattr("urllib.request.urlopen", lambda _request, timeout: Response())
     result, receipts = pipeline._product_json(
         SimpleNamespace(model_id="model-1", binding_id="default", authorization_env="OPENAI_API_KEY",
-                        base_url="http://127.0.0.1/v1/chat/completions"),
+                        base_url="http://127.0.0.1/v1/chat/completions", max_output_tokens=393216),
         "source_classification",
         "Classify the source.",
         {"evidence": [{"id": "evidence:source", "quote": quote}]},
@@ -239,7 +238,9 @@ def test_identity_resolution_repairs_invalid_json_through_native_typed_provider(
                                     model=relay.model_id, input_digest=H1, output_digest=H2)
 
     monkeypatch.setattr(pipeline, "_relay_json", relay_response)
-    judgments, receipts = pipeline._identity_batch(candidates, SimpleNamespace(model_id="model-1", binding_id="default"))
+    judgments, receipts = pipeline._identity_batch(
+        candidates, SimpleNamespace(model_id="model-1", binding_id="default", max_output_tokens=393216)
+    )
 
     assert judgments == [{"mention_ids": ["mention:1", "mention:2"],
                           "evidence_ids": ["evidence:1", "evidence:2"],
@@ -416,7 +417,7 @@ def _request(source: Path, output_dir: Path, *, recipe: str = "deterministic", p
             "recipe": {"forceOcrSourceIds": [], "id": recipe, "version": "1"},
             "relays": {
                 "embedding": {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/embeddings", "capability": "knowledge.snapshot.embed", "modelId": "embedding-1", "receipts": "required"},
-                "model": {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/chat/completions", "capability": "knowledge.snapshot.generate", "modelId": "model-1", "receipts": "required"},
+                "model": {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/chat/completions", "capability": "knowledge.snapshot.generate", "contextWindowTokens": 500000, "maxOutputTokens": 393216, "modelId": "model-1", "receipts": "required"},
             },
             "release": {"artifactDigest": H2, "schemaDigest": H3, "mediaTypes": {"document-representation": "application/vnd.semantica.document-representation+json", "retrieval-index": "application/vnd.semantica.retrieval+json", "snapshot": "application/vnd.semantica.project-snapshot+json"}},
             "sources": [{"filePath": str(source), "materialRevision": source_content_revision(source), "mimeType": "application/epub+zip" if source.suffix == ".epub" else "text/plain", "name": source.name, "sourceId": "source-1"}],

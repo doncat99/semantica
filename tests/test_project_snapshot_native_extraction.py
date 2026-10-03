@@ -69,8 +69,8 @@ def test_project_snapshot_extraction_uses_canonical_semantica_extractors(monkeyp
     )
 
     assert [name for name, *_ in calls] == ["ner-init", "ner", "relation-init", "relation"]
-    assert calls[0][1]["max_tokens"] == project_snapshot_pipeline.EXTRACTION_MAX_OUTPUT_TOKENS
-    assert calls[2][1]["max_tokens"] == project_snapshot_pipeline.EXTRACTION_MAX_OUTPUT_TOKENS
+    assert "max_tokens" not in calls[0][1]
+    assert "max_tokens" not in calls[2][1]
     assert result["entities"][0]["name"] == "Reflective roofs"
     assert result["relations"][0]["evidence"] == "Reflective roofs do not shade pedestrians."
     assert embeddings == [{"start_char": 0, "end_char": 42, "vector": [0.1, 0.2]}]
@@ -83,7 +83,7 @@ def test_project_snapshot_has_no_parallel_structured_extractor():
     assert "return _structured_extract" not in source
 
 
-def test_project_model_provider_forwards_extraction_output_budget(monkeypatch):
+def test_project_model_provider_uses_host_admitted_output_limit(monkeypatch):
     request = {}
 
     def relay_json(_relay, payload, operation):
@@ -101,10 +101,12 @@ def test_project_model_provider_forwards_extraction_output_budget(monkeypatch):
         )
 
     monkeypatch.setattr(project_snapshot_pipeline, "_relay_json", relay_json)
-    provider = project_snapshot_pipeline._project_model_provider(SimpleNamespace(model_id="model-1"))
+    provider = project_snapshot_pipeline._project_model_provider(
+        SimpleNamespace(model_id="model-1", max_output_tokens=393216)
+    )
 
     assert provider.generate("prompt", max_tokens=2048) == '{"entities": []}'
-    assert request["max_tokens"] == 2048
+    assert request["max_tokens"] == 393216
 
 
 def test_native_extraction_preserves_retryable_relay_failure(monkeypatch):
@@ -152,7 +154,9 @@ def test_typed_provider_keeps_relay_failure_as_its_cause(monkeypatch):
         "_relay_json",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(relay_failure),
     )
-    provider = project_snapshot_pipeline._project_model_provider(SimpleNamespace(model_id="model-1"))
+    provider = project_snapshot_pipeline._project_model_provider(
+        SimpleNamespace(model_id="model-1", max_output_tokens=393216)
+    )
 
     with pytest.raises(ProcessingError) as failure:
         provider.generate_typed("extract entities", Output, max_retries=1)

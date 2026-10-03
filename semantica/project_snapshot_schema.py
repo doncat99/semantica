@@ -733,6 +733,8 @@ class RelayRef(StrictModel):
     capability: Literal["knowledge.snapshot.embed", "knowledge.snapshot.generate"]
     model_id: str = Field(alias="modelId")
     binding_id: Optional[str] = Field(default=None, alias="bindingId")
+    context_window_tokens: Optional[int] = Field(default=None, alias="contextWindowTokens", gt=0)
+    max_output_tokens: Optional[int] = Field(default=None, alias="maxOutputTokens", gt=0)
     receipts: Literal["required"]
 
     @field_validator("authorization_env", mode="after")
@@ -760,6 +762,11 @@ class RelayRef(StrictModel):
         }[self.capability]
         if parsed.path.rstrip("/") != expected_path:
             raise ValueError(f"relay baseUrl path must be {expected_path} for {self.capability}")
+        if self.capability == "knowledge.snapshot.generate":
+            if self.context_window_tokens is None or self.max_output_tokens is None:
+                raise ValueError("model relay requires contextWindowTokens and maxOutputTokens")
+            if self.max_output_tokens > self.context_window_tokens:
+                raise ValueError("model relay maxOutputTokens cannot exceed contextWindowTokens")
         return self
 
 
