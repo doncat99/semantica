@@ -223,6 +223,23 @@ def test_unique_grounded_quote_uses_its_deterministic_occurrence():
     assert entities[0].metadata["span_occurrence"] == 0
 
 
+def test_grounded_quote_accepts_source_line_breaks_between_words():
+    text = "Policy tools include Emission Trading\nSystems."
+    provider = TypedProvider(EntitiesResponse(entities=[
+        EntityOut(text="Emission Trading Systems", label="concept", occurrence=0),
+    ]))
+
+    entities = extract_entities_llm(
+        text,
+        provider="bifrost",
+        provider_instance=provider,
+        grounding="strict",
+        grounding_retries=0,
+    )
+
+    assert text[entities[0].start_char:entities[0].end_char] == "Emission Trading\nSystems"
+
+
 def test_repeated_grounded_quote_retry_includes_range_and_previous_json():
     text = "Alpha references Alpha."
     provider = TypedProvider(

@@ -156,6 +156,8 @@ def _exact_occurrence(text: str, quote: str, occurrence: Optional[int]) -> tuple
         raise ProcessingError("grounded extraction requires a non-empty source quote")
     quote = quote.strip()
     matches = list(re.finditer(re.escape(quote), text))
+    if not matches and len(parts := quote.split()) > 1:
+        matches = list(re.finditer(r"\s+".join(re.escape(part) for part in parts), text))
     if len(matches) == 1:
         match = matches[0]
         return match.start(), match.end(), 0
