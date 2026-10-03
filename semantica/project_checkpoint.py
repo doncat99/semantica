@@ -81,25 +81,55 @@ class SnapshotCheckpoint:
     def _path(self, kind: str, key: Any) -> Path:
         return self.root / f"{kind}-{sha256(_bytes(key)).hexdigest()}.json"
 
+    def _rejection_path(self, root: Path, kind: str, key: Any, payload_digest: str) -> Path:
+        key_digest = sha256(_bytes(key)).hexdigest()
+        return root / f"rejected-{kind}-{key_digest}-{payload_digest.removeprefix('sha256:')}.json"
+
+    def _is_rejected(self, kind: str, key: Any, payload_digest: str) -> bool:
+        expected = {"kind": kind, "keyDigest": _digest(_bytes(key)), "payloadDigest": payload_digest}
+        for root in [self.root, *self.resume_roots]:
+            marker = self._rejection_path(root, kind, key, payload_digest)
+            if not marker.is_file():
+                continue
+            try:
+                if json.loads(marker.read_bytes()) != expected:
+                    raise ValueError("rejection marker mismatch")
+            except (ValueError, OSError) as exc:
+                raise SnapshotCheckpointError(f"snapshot checkpoint rejection failed verification: {marker.name}") from exc
+            return True
+        return False
+
     def read(self, kind: str, key: Any) -> Any | None:
-        path = self._path(kind, key)
-        if not path.exists() and kind == "relay":
-            path = next((root / path.name for root in self.resume_roots if (root / path.name).is_file()), path)
-        if not path.exists(): return None
-        try:
-            entry = json.loads(path.read_bytes())
-            payload = entry["payload"]
-            local = path.parent == self.root
-            if (local and entry["fence"] != self.fence) or entry["digest"] != _digest(_bytes(payload)):
-                raise ValueError("digest mismatch")
-            if not local:
-                self.write(kind, key, payload)
-            return payload
-        except (ValueError, KeyError, TypeError, OSError) as exc:
-            raise SnapshotCheckpointError(f"snapshot checkpoint entry failed verification: {path.name}") from exc
+        local_path = self._path(kind, key)
+        paths = [local_path]
+        if kind == "relay":
+            paths.extend(root / local_path.name for root in self.resume_roots)
+        for path in paths:
+            if not path.is_file():
+                continue
+            try:
+                entry = json.loads(path.read_bytes())
+                payload = entry["payload"]
+                local = path.parent == self.root
+                if (local and entry["fence"] != self.fence) or entry["digest"] != _digest(_bytes(payload)):
+                    raise ValueError("digest mismatch")
+                if self._is_rejected(kind, key, entry["digest"]):
+                    continue
+                if not local:
+                    self.write(kind, key, payload)
+                return payload
+            except (ValueError, KeyError, TypeError, OSError) as exc:
+                raise SnapshotCheckpointError(f"snapshot checkpoint entry failed verification: {path.name}") from exc
+        return None
 
     def write(self, kind: str, key: Any, payload: Any) -> None:
         _atomic_json(self._path(kind, key), {"fence": self.fence, "digest": _digest(_bytes(payload)), "payload": payload})
+
+    def reject(self, kind: str, key: Any, payload: Any) -> None:
+        payload_digest = _digest(_bytes(payload))
+        _atomic_json(self._rejection_path(self.root, kind, key, payload_digest), {
+            "kind": kind, "keyDigest": _digest(_bytes(key)), "payloadDigest": payload_digest,
+        })
 
 
 active_checkpoint: ContextVar[SnapshotCheckpoint | None] = ContextVar("snapshot_checkpoint", default=None)

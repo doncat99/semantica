@@ -131,27 +131,35 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
     def extract(item):
         window = item[2]
         provider = _project_model_provider(model_relay)
-        entities = NERExtractor(
-            method="llm",
-            provider="bifrost",
-            llm_model=model_relay.model_id,
-            provider_instance=provider,
-            grounding="strict",
-            grounding_retries=1,
-            extraction_spec=extraction_spec,
-            max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
-        ).extract(window)
-        relations = RelationExtractor(
-            method="llm",
-            provider="bifrost",
-            llm_model=model_relay.model_id,
-            provider_instance=provider,
-            grounding="strict",
-            grounding_retries=1,
-            extraction_spec=extraction_spec,
-            confidence_threshold=0,
-            max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
-        ).extract(window, entities)
+        try:
+            entities = NERExtractor(
+                method="llm",
+                provider="bifrost",
+                llm_model=model_relay.model_id,
+                provider_instance=provider,
+                grounding="strict",
+                grounding_retries=1,
+                extraction_spec=extraction_spec,
+                max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
+            ).extract(window)
+        except ProcessingError:
+            provider.reject_last()
+            raise
+        try:
+            relations = RelationExtractor(
+                method="llm",
+                provider="bifrost",
+                llm_model=model_relay.model_id,
+                provider_instance=provider,
+                grounding="strict",
+                grounding_retries=1,
+                extraction_spec=extraction_spec,
+                confidence_threshold=0,
+                max_tokens=EXTRACTION_MAX_OUTPUT_TOKENS,
+            ).extract(window, entities)
+        except ProcessingError:
+            provider.reject_last()
+            raise
         extracted = {
             "entities": [{
                 "id": entity.metadata["mention_id"],
@@ -364,16 +372,23 @@ class _ProjectModelProvider(BaseProvider):
         super().__init__(model=relay.model_id)
         self.relay = relay
         self.receipts: list[ModelReceipt] = []
+        self.last_checkpoint_entry = None
 
     def generate(self, prompt: str, **kwargs) -> str:
         extraction_stage = "relations" if "Extract source-grounded relations" in prompt else "entities"
-        response, receipt = _relay_json(self.relay, {
+        payload = {
             "model": self.relay.model_id,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0,
             "max_tokens": kwargs.get("max_tokens", EXTRACTION_MAX_OUTPUT_TOKENS),
             "response_format": {"type": "json_object"},
-        }, "structured_extraction")
+        }
+        response, receipt = _relay_json(self.relay, payload, "structured_extraction")
+        cache_key = {"operation": "structured_extraction", "bindingId": getattr(self.relay, "binding_id", None),
+                     "modelId": self.relay.model_id, "payload": payload}
+        self.last_checkpoint_entry = (cache_key, {
+            "response": response, "receipt": receipt.model_dump(mode="json", by_alias=True),
+        })
         if response.get("model") != self.relay.model_id:
             raise SnapshotBuildError("structured extraction response model does not match the admitted relay model")
         if isinstance(response.get("usage"), dict):
@@ -388,6 +403,11 @@ class _ProjectModelProvider(BaseProvider):
             raise SnapshotBuildError("structured extraction response has no JSON content")
         self.receipts.append(receipt)
         return content
+
+    def reject_last(self) -> None:
+        checkpoint = active_checkpoint.get()
+        if checkpoint and self.last_checkpoint_entry:
+            checkpoint.reject("relay", *self.last_checkpoint_entry)
 
 
 def _project_model_provider(relay: Any) -> _ProjectModelProvider:

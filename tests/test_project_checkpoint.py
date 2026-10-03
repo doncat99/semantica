@@ -158,3 +158,20 @@ def test_new_run_reuses_only_matching_verified_relay_entries(tmp_path):
     assert second_checkpoint.read("relay", {"operation": "embedding", "input": ["Beta"]}) is None
     assert second_checkpoint.read("document", {"source": "source-1"}) is None
     assert len(list(second_checkpoint.root.glob("relay-*.json"))) == 1
+
+
+def test_new_run_skips_semantically_rejected_relay_payload(tmp_path):
+    source = tmp_path / "source.txt"
+    source.write_text("A source")
+    first = _request(source, tmp_path / "first")
+    first_checkpoint = SnapshotCheckpoint(ProjectSnapshotBuildRequest.model_validate(first["params"]))
+    key = {"operation": "structured_extraction", "input": "Alpha"}
+    rejected = {"response": "invalid", "receipt": {"id": "receipt:invalid"}}
+    first_checkpoint.write("relay", key, rejected)
+    first_checkpoint.reject("relay", key, rejected)
+
+    second = _request(source, tmp_path / "second")
+    second["params"]["resumeCheckpointDirs"] = [str(first_checkpoint.root)]
+    second_checkpoint = SnapshotCheckpoint(ProjectSnapshotBuildRequest.model_validate(second["params"]))
+
+    assert second_checkpoint.read("relay", key) is None
