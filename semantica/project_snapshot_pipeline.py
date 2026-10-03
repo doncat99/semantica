@@ -1543,20 +1543,21 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
             if subject_entity.id == object_entity.id:
                 raise SnapshotBuildError("self relations are not accepted")
             start, end = (item["_start"], item["_end"]) if "_start" in item else _find_occurrence(text, quote.strip(), item.get("evidence_occurrence"))
-            if text[start:end] != quote.strip():
+            canonical_quote = text[start:end]
+            if canonical_quote != quote.strip():
                 raise SnapshotBuildError("relation evidence is not an exact source quote")
             evidence_id = _span_id(representation_id, start, end)
             fields, source_metadata = _located_document_fields(source_locations, start, end)
             evidence[evidence_id] = EvidenceSpan(
                 id=evidence_id,
                 representation_id=representation_id,
-                locator=DocumentLocator(representation_id=representation_id, origin=origin, quote=quote.strip(),
+                locator=DocumentLocator(representation_id=representation_id, origin=origin, quote=canonical_quote,
                                         start_char=start, end_char=end, quality="precise", **fields),
-                quote=quote.strip(),
+                quote=canonical_quote,
                 metadata=source_metadata,
             )
             qualifiers = item.get("qualifiers")
-            if _invalid_fact_qualifiers(qualifiers, quote):
+            if _invalid_fact_qualifiers(qualifiers, canonical_quote):
                 raise SnapshotBuildError("fact qualifiers require polarity and exact source-grounded values")
             predicate = " ".join(predicate.split()).casefold()
             key = stable_digest([source.source_id, subject_entity.id, predicate, object_entity.id, qualifiers]).split(":")[1][:32]
