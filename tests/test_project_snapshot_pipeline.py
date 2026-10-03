@@ -160,7 +160,7 @@ def test_docling_evidence_preserves_reading_order_and_physical_locators(tmp_path
 
     source_path = tmp_path / "source.pdf"
     source_path.write_bytes(b"source")
-    source = SourceBuildInput(filePath=str(source_path), sourceId="source-1",
+    source = SourceBuildInput(filePath=str(source_path), sourceId="4830a9a9-25ed-45ac-87d0-afcc80587480",
                               materialRevision=source_content_revision(source_path),
                               mimeType="application/pdf", name="source.pdf")
     text = "Chapter\nRepeated\nRepeated\nx = y\nROE\n12%"
@@ -187,6 +187,7 @@ def test_docling_evidence_preserves_reading_order_and_physical_locators(tmp_path
     built = _build_source(source, False, model_result=model_result,
                           parsed=(text, document, "native", source.material_revision, "docling", "2"))
     passages = _source_passages(built)
+    assert all(len(span.id) <= 128 for span in passages)
 
     repeated = [span for span in passages if span.quote == "Repeated"]
     assert [span.locator.page for span in repeated] == [1, 2]
@@ -196,6 +197,7 @@ def test_docling_evidence_preserves_reading_order_and_physical_locators(tmp_path
     formula = next(span for span in passages if span.quote == "x = y")
     assert formula.metadata["source_kind"] == "formula"
     cell = next(span for span in _docling_cell_evidence(built) if span.quote == "12%")
+    assert len(cell.id) <= 128
     assert cell.locator.table_id.startswith("table:")
     assert cell.metadata["source_ref"] == "#/tables/0"
     assert cell.locator.cell == "r0:c1"

@@ -658,7 +658,7 @@ def _docling_cell_evidence(built: dict[str, Any]) -> list[EvidenceSpan]:
         if item["start"] is not None:
             locator.update(start_char=item["start"], end_char=item["end"])
         evidence.append(EvidenceSpan(
-            id=f"evidence:{_safe_id(representation.id)}:cell:{stable_digest([item['table_id'], item['cell']]).split(':')[1][:24]}",
+            id=_evidence_id(["cell", representation.id, item["table_id"], item["cell"]]),
             representation_id=representation.id,
             locator=DocumentLocator(representation_id=representation.id, origin=representation.origin,
                                     quote=item["quote"], quality="precise", **locator),
@@ -1271,8 +1271,13 @@ def _load_parsed_source(source: Any, ref: ParsedSourceRef, force_ocr: bool, prof
     return document["text"], document, origin, source.material_revision, parser, version
 
 
+def _evidence_id(identity: Any) -> str:
+    return "evidence:" + stable_digest(identity).split(":", 1)[1][:32]
+
+
 def _span_id(representation_id: str, start: int, end: int) -> str:
-    return f"evidence:{_safe_id(representation_id)}:{start}:{end}"
+    readable = f"evidence:{_safe_id(representation_id)}:{start}:{end}"
+    return readable if len(readable) <= 128 else _evidence_id(["span", representation_id, start, end])
 
 
 def _entity_id(source_id: str, name: str, entity_type: str, text: str, start: int, end: int) -> str:
