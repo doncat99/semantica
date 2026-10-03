@@ -156,6 +156,47 @@ class _SynthesisOutput(_ProductOutput):
     sections: list[_SynthesisOutputItem] = Field(min_length=1)
 
 
+class _IdentityDecisionOutputItem(_ProductOutput):
+    mention_ids: list[str] = Field(min_length=2)
+    evidence_ids: list[str] = Field(min_length=2)
+    reason: str = Field(min_length=1)
+
+
+class _IdentitySplitOutputItem(_IdentityDecisionOutputItem):
+    groups: list[list[str]] = Field(min_length=2)
+
+
+class _IdentityOutput(_ProductOutput):
+    merges: list[_IdentityDecisionOutputItem]
+    splits: list[_IdentitySplitOutputItem]
+
+    @model_validator(mode="after")
+    def uses_supplied_mentions_and_evidence(self, info: ValidationInfo):
+        context = info.context if isinstance(info.context, dict) else {}
+        candidates = context.get("candidates", [])
+        by_id = {item.get("mention_id"): item for item in candidates if isinstance(item, dict)}
+        used: set[str] = set()
+        for decision_type, decisions in (("merge", self.merges), ("split", self.splits)):
+            for decision in decisions:
+                ids, refs = decision.mention_ids, set(decision.evidence_ids)
+                if len(ids) != len(set(ids)) or any(item not in by_id for item in ids) or used.intersection(ids):
+                    raise ValueError("identity decision must use distinct supplied mention_ids without overlap")
+                if len({by_id[item].get("type", "").casefold() for item in ids}) != 1:
+                    raise ValueError("identity decision cannot combine incompatible mention types")
+                evidence = {item: {span.get("id") for span in by_id[item].get("evidence", []) if isinstance(span, dict)} for item in ids}
+                if not refs.issubset(set().union(*evidence.values())) or any(not refs.intersection(evidence[item]) for item in ids):
+                    raise ValueError("identity decision must cite supplied evidence from every mention")
+                if decision_type == "merge" and any(other in by_id[item].get("separate_from", []) for item in ids for other in ids if other != item):
+                    raise ValueError("identity merge violates a supplied separation constraint")
+                if decision_type == "split":
+                    groups = decision.groups
+                    flattened = [item for group in groups for item in group]
+                    if any(not group for group in groups) or len(flattened) != len(set(flattened)) or set(flattened) != set(ids):
+                        raise ValueError("identity split must partition every mention exactly once")
+                used.update(ids)
+        return self
+
+
 def _typed_extraction_error(error: ProcessingError) -> SnapshotBuildError:
     cause: BaseException | None = error
     while cause is not None:
@@ -975,8 +1016,7 @@ def _identity_judgments(source_builds: list[dict[str, Any]], relay: Any, base_sn
     if len({candidate["type"].casefold() for candidate in candidates}) == len(candidates):
         return [], []
     if _context_size(candidates) <= MODEL_CONTEXT_BYTES:
-        judgments, receipt = _identity_batch(candidates, relay)
-        return judgments, [receipt]
+        return _identity_batch(candidates, relay)
     # All compatible occurrence pairs are considered. Name similarity is not
     # an admission filter, so aliases are not silently lost at a batch boundary.
     admitted, receipts = [], []
@@ -994,8 +1034,8 @@ def _identity_judgments(source_builds: list[dict[str, Any]], relay: Any, base_sn
                     pair = [left_packet, right_packet]
                     if _context_size(pair) > MODEL_CONTEXT_BYTES:
                         raise SnapshotBuildError("identity evidence pair exceeds the production budget")
-                    judgments, receipt = _identity_batch(pair, relay)
-                    receipts.append(receipt)
+                    judgments, batch_receipts = _identity_batch(pair, relay)
+                    receipts.extend(batch_receipts)
                     for judgment in judgments:
                         ids = judgment.get("mention_ids", [])
                         refs = judgment.get("evidence_ids", [])
@@ -1007,31 +1047,19 @@ def _identity_judgments(source_builds: list[dict[str, Any]], relay: Any, base_sn
                                 or any(not set(refs).intersection(span["id"] for span in item["evidence"]) for item in pair)
                                 or not isinstance(judgment.get("reason"), str) or not judgment["reason"].strip()):
                             raise SnapshotBuildError("identity pair judgment has unsupported members or evidence")
-                        admitted.append({**judgment, "_receipt_ids": [receipt.id]})
+                        admitted.append({**judgment, "_receipt_ids": [receipt.id for receipt in batch_receipts]})
     return admitted, receipts
 
 
 def _identity_batch(candidates: list[dict[str, Any]], relay: Any):
-    payload = {"model": relay.model_id, "temperature": 0, "response_format": {"type": "json_object"}, "messages": [
-        {"role": "system", "content": "Resolve project entity identity using only the quoted source contexts. Each candidate is a located occurrence, including occurrences within the same document. Equal names alone are insufficient; require corroborating identity facts, a shared unique identifier, or an explicit alias. Keep homonyms and uncertain cases separate. Do not merge incompatible types or pairs constrained by separate_from. An existing previous_entity_id persists unless affirmative evidence proves it wrong: omission does not split it. Return strict JSON {merges:[{mention_ids:[id,id],evidence_ids:[id,id],reason:string}],splits:[{mention_ids:[id,id],groups:[[id],[id]],evidence_ids:[id,id],reason:string}]}. A split must explicitly partition all referenced mentions and explain evidence of distinct identities. Every decision must cite evidence from every member. Return empty arrays when no change is justified."},
-        {"role": "user", "content": json.dumps(candidates, ensure_ascii=False)},
-    ]}
-    response, receipt = _relay_json(relay, payload, "identity_resolution")
-    if response.get("model") != relay.model_id:
-        raise SnapshotBuildError("identity resolution response model does not match the admitted relay model")
-    try:
-        choices = response["choices"]
-        if len(choices) != 1:
-            raise ValueError("expected one choice")
-        result = json.loads(choices[0]["message"]["content"])
-        if not isinstance(result, dict) or set(result) != {"merges", "splits"} or not all(isinstance(result[key], list) for key in result):
-            raise ValueError("expected merges and splits arrays")
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        raise SnapshotBuildError("identity resolution returned invalid JSON judgments") from exc
-    if isinstance(response.get("usage"), dict):
-        receipt.metadata["usage"] = response["usage"]
+    instruction = ("Resolve project entity identity using only the quoted source contexts. Each candidate is a located occurrence, including occurrences within the same document. "
+        "Equal names alone are insufficient; require corroborating identity facts, a shared unique identifier, or an explicit alias. Keep homonyms and uncertain cases separate. "
+        "Do not merge incompatible types or pairs constrained by separate_from. An existing previous_entity_id persists unless affirmative evidence proves it wrong: omission does not split it. "
+        "A split must explicitly partition all referenced mentions and explain evidence of distinct identities. Every decision must cite evidence from every member. Return empty arrays when no change is justified.")
+    result, receipts = _product_json(relay, "identity_resolution", instruction,
+                                     {"candidates": candidates}, _IdentityOutput)
     return [*({**item, "decision_type": "merge"} for item in result["merges"]),
-            *({**item, "decision_type": "split"} for item in result["splits"])], receipt
+            *({**item, "decision_type": "split"} for item in result["splits"])], receipts
 
 
 def _cosine_similarity(left: list[float], right: list[float]) -> float:

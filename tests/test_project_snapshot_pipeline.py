@@ -184,6 +184,39 @@ def test_product_output_repair_has_budget_for_schema_and_previous_json(monkeypat
     assert len(receipts) == 2
 
 
+def test_identity_resolution_repairs_invalid_json_through_native_typed_provider(monkeypatch):
+    from types import SimpleNamespace
+    from semantica import project_snapshot_pipeline as pipeline
+
+    candidates = [
+        {"mention_id": "mention:1", "name": "Alpha", "type": "ORG", "source_id": "source:1",
+         "previous_entity_id": None, "separate_from": [],
+         "evidence": [{"id": "evidence:1", "quote": "Alpha one", "context": "Alpha one"}]},
+        {"mention_id": "mention:2", "name": "Alpha", "type": "ORG", "source_id": "source:2",
+         "previous_entity_id": None, "separate_from": [],
+         "evidence": [{"id": "evidence:2", "quote": "Alpha two", "context": "Alpha two"}]},
+    ]
+    outputs = [[], {"merges": [{"mention_ids": ["mention:1", "mention:2"],
+                                 "evidence_ids": ["evidence:1", "evidence:2"], "reason": "Same organization"}],
+                    "splits": []}]
+    prompts = []
+
+    def relay_response(relay, payload, operation):
+        prompts.append(payload["messages"][0]["content"])
+        result = {"model": relay.model_id, "choices": [{"message": {"content": json.dumps(outputs.pop(0))}}]}
+        return result, ModelReceipt(id=f"receipt:{len(prompts)}", operation=operation, provider="test",
+                                    model=relay.model_id, input_digest=H1, output_digest=H2)
+
+    monkeypatch.setattr(pipeline, "_relay_json", relay_response)
+    judgments, receipts = pipeline._identity_batch(candidates, SimpleNamespace(model_id="model-1", binding_id="default"))
+
+    assert judgments == [{"mention_ids": ["mention:1", "mention:2"],
+                          "evidence_ids": ["evidence:1", "evidence:2"],
+                          "reason": "Same organization", "decision_type": "merge"}]
+    assert [receipt.id for receipt in receipts] == ["receipt:1", "receipt:2"]
+    assert "Required JSON Schema" in prompts[1]
+
+
 def test_relationship_discovery_omits_ungrounded_qualifier_without_losing_valid_relations(monkeypatch):
     from semantica.project_snapshot_pipeline import _discover_cross_source_relationships
     from semantica.project_snapshot_schema import DocumentLocator, EvidenceSpan
@@ -722,7 +755,7 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
                     ],
                 })
             elif operation == "identity_resolution":
-                candidates = json.loads(payload["messages"][1]["content"])
+                candidates = _typed_prompt_context(payload)["candidates"]
                 groups = [[item for item in candidates if item["name"] == name] for name in {item["name"] for item in candidates}]
                 content = {"splits": [], "merges": [{"mention_ids": [item["mention_id"] for item in group],
                     "evidence_ids": [span["id"] for item in group for span in item["evidence"]],

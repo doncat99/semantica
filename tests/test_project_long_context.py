@@ -269,7 +269,7 @@ def test_identity_batches_compare_cross_source_aliases_without_name_filter(monke
         assert pipeline._context_size(candidates) <= pipeline.MODEL_CONTEXT_BYTES
         assert len(candidates) == 2
         pairs.add(tuple(item["mention_id"] for item in candidates))
-        return [], receipt("identity_resolution", len(pairs))
+        return [], [receipt("identity_resolution", len(pairs))]
 
     monkeypatch.setattr(pipeline, "_identity_batch", model)
     judgments, receipts = pipeline._identity_judgments(builds, None)
