@@ -702,11 +702,36 @@ class BaseProvider:
                     previous_json = json.dumps(
                         json_result, ensure_ascii=False, separators=(",", ":")
                     )
+                    citation_repairs = []
+                    evidence = {
+                        item.get("id"): item.get("quote")
+                        for item in (validation_context or {}).get("evidence", [])
+                        if isinstance(item, dict)
+                    }
+                    for error in e.errors():
+                        current = json_result
+                        for part in error.get("loc", ()):
+                            if isinstance(current, dict) and part in current:
+                                current = current[part]
+                            elif isinstance(current, list) and isinstance(part, int) and part < len(current):
+                                current = current[part]
+                            else:
+                                current = None
+                                break
+                        evidence_id = current.get("evidence_id") if isinstance(current, dict) else None
+                        if isinstance(evidence_id, str) and evidence_id in evidence:
+                            citation_repairs.append({"evidence_id": evidence_id, "quote": evidence[evidence_id]})
+                    citation_hint = (
+                        "\nExact citation objects required at the reported citation locations:\n"
+                        + json.dumps(citation_repairs, ensure_ascii=False, separators=(",", ":"))
+                        if citation_repairs else ""
+                    )
                     current_prompt = (
                         f"{prompt}\n\nThe previous JSON response failed validation. "
                         "Preserve every valid value and repair only the invalid or missing fields.\n"
                         f"Required JSON Schema:\n{schema_json}\n"
                         f"Validation errors:\n{error_summary}\n"
+                        f"{citation_hint}"
                         f"Previous JSON response:\n{previous_json}\n"
                         "Return only the complete repaired JSON object."
                     )
