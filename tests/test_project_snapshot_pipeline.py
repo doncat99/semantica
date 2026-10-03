@@ -637,7 +637,11 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
     assert serve(io.StringIO(json.dumps(request) + "\n"), stdout) == 0
     events, response = _worker_output(stdout)
     embedding_progress = [event for event in events if event.get("stage") == "embedding"]
-    assert embedding_progress[-1]["metadata"] == {"completedChunks": 2, "totalChunks": 2}
+    assert embedding_progress[-1]["metadata"] == {
+        "completedChunks": 2,
+        "restoredChunks": 0,
+        "totalChunks": 2,
+    }
     assert response["ok"] is True, response
     snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "snapshot")
     snapshot = ProjectSnapshot.model_validate_json(snapshot_path.read_bytes())

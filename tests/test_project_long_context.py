@@ -123,9 +123,24 @@ def test_extraction_reports_active_stage_and_preserves_exact_evidence(monkeypatc
 
     assert [event["stage"] for event in events] == ["extracting", "extracting", "embedding", "embedding"]
     assert events[0]["metadata"] == {"completedChunks": 0, "totalChunks": 1}
-    assert events[1]["metadata"] == {"completedChunks": 1, "totalChunks": 1}
+    assert events[1]["metadata"] == {"completedChunks": 1, "restoredChunks": 0, "totalChunks": 1}
     evidence = extracted["relations"][0]["evidence"]
     assert evidence == text
+
+
+def test_extraction_reports_restored_checkpoint_chunks(monkeypatch):
+    events = []
+    restored = receipt("structured_extraction", 1)
+    object.__setattr__(restored, "_checkpoint_restored", True)
+    _stub_canonical_extraction(monkeypatch, lambda *args: ({"entities": [], "relations": []}, restored))
+    embedding = receipt("embedding", 1)
+    object.__setattr__(embedding, "_checkpoint_restored", True)
+    monkeypatch.setattr(pipeline, "_embed_texts", lambda texts, relay: ([[1.0] for _ in texts], embedding))
+
+    pipeline._extract_and_embed("source", SimpleNamespace(model_id="test"), None, progress=events.append)
+
+    assert events[1]["metadata"] == {"completedChunks": 1, "restoredChunks": 1, "totalChunks": 1}
+    assert events[-1]["metadata"] == {"completedChunks": 1, "restoredChunks": 1, "totalChunks": 1}
 
 
 def test_stage_progress_precedes_relay_calls(monkeypatch):

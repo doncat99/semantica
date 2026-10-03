@@ -185,7 +185,10 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
                 "confidence": relation.confidence,
             } for relation in relations],
         }
-        return extracted, provider.receipts
+        restored = bool(provider.receipts) and all(
+            getattr(receipt, "_checkpoint_restored", False) is True for receipt in provider.receipts
+        )
+        return extracted, provider.receipts, restored
 
     if progress:
         progress({
@@ -202,6 +205,7 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
             futures[pool.submit(context.copy().run, extract, item)] = index
         extracted_windows = [None] * len(windows)
         completed = progress_base
+        restored = 0
         while futures:
             done, _ = wait(futures, return_when=FIRST_COMPLETED)
             for future in done:
@@ -217,18 +221,24 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
                         waiting.cancel()
                     raise
                 completed += 1
+                if extracted_windows[index][2]:
+                    restored += 1
                 if progress:
                     progress({
                         "stage": "extracting",
                         "percent": min(60, 20 + round((completed / max(1, progress_total)) * 40)),
                         "detail": f"Extracting knowledge {completed} / {progress_total} chunks",
-                        "metadata": {"completedChunks": completed, "totalChunks": progress_total},
+                        "metadata": {
+                            "completedChunks": completed,
+                            "restoredChunks": restored,
+                            "totalChunks": progress_total,
+                        },
                     })
                 next_item = next(pending, None)
                 if next_item is not None:
                     next_index, item = next_item
                     futures[pool.submit(context.copy().run, extract, item)] = next_index
-    for index, ((start, end, window), (extracted, extraction_receipts)) in enumerate(zip(windows, extracted_windows), start=1):
+    for index, ((start, end, window), (extracted, extraction_receipts, _)) in enumerate(zip(windows, extracted_windows), start=1):
         receipts.extend(extraction_receipts if isinstance(extraction_receipts, list) else [extraction_receipts])
         local_ids = {item.get("id") for item in extracted["entities"] if isinstance(item, dict)}
         if None in local_ids or len(local_ids) != len(extracted["entities"]):
@@ -265,6 +275,7 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
         })
     embedded_batches = [None] * len(batches)
     completed = 0
+    restored = 0
     with ThreadPoolExecutor(max_workers=parallelism) as pool:
         pending = iter(enumerate(batches))
         futures = {}
@@ -281,13 +292,20 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
                         waiting.cancel()
                     raise
                 completed += len(batches[index])
+                embedding_receipt = embedded_batches[index][1]
+                if getattr(embedding_receipt, "_checkpoint_restored", False) is True:
+                    restored += len(batches[index])
                 if progress:
                     count = progress_base + completed
                     progress({
                         "stage": "embedding",
                         "percent": min(90, 60 + round((count / max(1, progress_total)) * 30)),
                         "detail": f"Embedding {count} / {progress_total} chunks",
-                        "metadata": {"completedChunks": count, "totalChunks": progress_total},
+                        "metadata": {
+                            "completedChunks": count,
+                            "restoredChunks": restored,
+                            "totalChunks": progress_total,
+                        },
                     })
                 next_item = next(pending, None)
                 if next_item is not None:
@@ -310,7 +328,9 @@ def _relay_json(relay: Any, payload: dict[str, Any], operation: str) -> tuple[di
     cache_key = {"operation": operation, "bindingId": getattr(relay, "binding_id", None), "modelId": relay.model_id, "payload": payload}
     cached = checkpoint.read("relay", cache_key) if checkpoint else None
     if cached is not None:
-        return cached["response"], ModelReceipt.model_validate(cached["receipt"])
+        receipt = ModelReceipt.model_validate(cached["receipt"])
+        object.__setattr__(receipt, "_checkpoint_restored", True)
+        return cached["response"], receipt
     token = os.environ.get(relay.authorization_env)
     if not token:
         raise SnapshotBuildError(f"missing relay authorization environment: {relay.authorization_env}")
