@@ -294,17 +294,39 @@ def test_grounded_relation_keeps_valid_facts_when_peer_is_invalid():
     assert [relation.predicate for relation in relations] == ["shades"]
 
 
+def test_grounded_entity_keeps_valid_mentions_when_repair_stays_invalid():
+    text = "Margaret Franklin leads CFA Institute."
+    invalid = EntitiesResponse(entities=[
+        EntityOut(text="Marg Franklin", label="person", occurrence=0),
+        EntityOut(text="CFA Institute", label="organization", occurrence=0),
+    ])
+    provider = TypedProvider(invalid, invalid)
+
+    entities = extract_entities_llm(
+        text,
+        provider="bifrost",
+        provider_instance=provider,
+        grounding="strict",
+        grounding_retries=1,
+    )
+
+    assert [entity.text for entity in entities] == ["CFA Institute"]
+    assert len(provider.prompts) == 2
+
+
 def test_canonical_strict_extractors_do_not_fallback():
     text = "Exposure affects outcomes."
     provider = TypedProvider(
         EntitiesResponse(entities=[EntityOut(text="invented", label="concept", occurrence=0)]),
         EntitiesResponse(entities=[EntityOut(text="still invented", label="concept", occurrence=0)]),
     )
-    with pytest.raises(ProcessingError, match="outside source text"):
-        NERExtractor(
-            method="llm",
-            provider="bifrost",
-            provider_instance=provider,
-            grounding="strict",
-            grounding_retries=1,
-        ).extract(text)
+    entities = NERExtractor(
+        method="llm",
+        provider="bifrost",
+        provider_instance=provider,
+        grounding="strict",
+        grounding_retries=1,
+    ).extract(text)
+
+    assert entities == []
+    assert len(provider.prompts) == 2

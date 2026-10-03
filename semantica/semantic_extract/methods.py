@@ -1459,7 +1459,13 @@ Grounding requirements:
                     start = e_out.start if hasattr(e_out, "start") else 0
                     end = e_out.end if hasattr(e_out, "end") else 0
                     if grounding == "strict":
-                        start, end, occurrence = _exact_occurrence(text, e_out.text, e_out.occurrence)
+                        try:
+                            start, end, occurrence = _exact_occurrence(text, e_out.text, e_out.occurrence)
+                        except ProcessingError:
+                            if attempt < grounding_retries:
+                                raise
+                            logger.warning("Discarding entity that is not grounded in source text: %r", e_out.text)
+                            continue
                         metadata.update({"mention_id": f"mention:{index}", "span_occurrence": occurrence})
                     try:
                         attributes = extraction_schema.validate_attributes(e_out.label, e_out.attributes) if extraction_schema else dict(e_out.attributes)
