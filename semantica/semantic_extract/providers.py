@@ -308,7 +308,8 @@ class BaseProvider:
         return []
 
     def generate_typed(
-        self, prompt: str, schema: Type[BaseModel], max_retries: int = 3, **kwargs
+        self, prompt: str, schema: Type[BaseModel], max_retries: int = 3,
+        validation_context: Optional[dict[str, Any]] = None, **kwargs
     ) -> BaseModel:
         """
         Generate structured output validated against a Pydantic schema.
@@ -317,7 +318,7 @@ class BaseProvider:
         provider_name = self.__class__.__name__
 
         # Try using instructor first if available
-        if instructor:
+        if instructor and validation_context is None:
             try:
                 client = None
                 mode = instructor.Mode.TOOLS  # Default mode
@@ -682,7 +683,7 @@ class BaseProvider:
                 ):
                     json_result = {"triplets": json_result}
 
-                validated = schema.model_validate(json_result)
+                validated = schema.model_validate(json_result, context=validation_context)
                 return validated
 
             except ValidationError as e:

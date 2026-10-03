@@ -112,6 +112,44 @@ def test_product_output_repairs_citation_shape_through_native_typed_provider(mon
     assert "evidence_id" in prompts[1] and "quote" in prompts[1]
 
 
+def test_product_output_repairs_semantic_citation_and_vocabulary(monkeypatch):
+    from types import SimpleNamespace
+    from semantica import project_snapshot_pipeline as pipeline
+
+    valid = {"dimension_id": "purpose", "item_id": "history", "confidence": 0.9,
+             "citations": [{"evidence_id": "evidence:source", "quote": "Source quote"}]}
+    outputs = [
+        {"assignments": [{**valid, "dimension_id": "invented", "citations": [
+            {"evidence_id": "evidence:source", "quote": "Altered quote"}]}]},
+        {"assignments": [valid]},
+    ]
+    prompts = []
+
+    def relay_response(relay, payload, operation):
+        prompts.append(payload["messages"][0]["content"])
+        result = {"model": relay.model_id, "choices": [{"message": {"content": json.dumps(outputs.pop(0))}}]}
+        return result, ModelReceipt(id=f"receipt:{len(prompts)}", operation=operation, provider="test",
+                                    model=relay.model_id, input_digest=H1, output_digest=H2)
+
+    monkeypatch.setattr(pipeline, "_relay_json", relay_response)
+    context = {
+        "profile": _classification_profile(),
+        "evidence": [{"id": "evidence:source", "quote": "Source quote"}],
+    }
+    result, receipts = pipeline._product_json(
+        SimpleNamespace(model_id="model-1", binding_id="default"),
+        "source_classification",
+        "Classify the source.",
+        context,
+        pipeline._ClassificationOutput,
+    )
+
+    assert result == {"assignments": [valid]}
+    assert [receipt.id for receipt in receipts] == ["receipt:1", "receipt:2"]
+    assert "invented" in prompts[1]
+    assert "Altered quote" in prompts[1]
+
+
 def test_product_output_repair_has_budget_for_schema_and_previous_json(monkeypatch):
     from types import SimpleNamespace
     from semantica import project_snapshot_pipeline as pipeline

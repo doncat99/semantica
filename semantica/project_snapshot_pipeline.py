@@ -22,7 +22,7 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt
+from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, ValidationInfo, model_validator
 
 from .project_source import UnsupportedSourceFormatError, parse_source, source_content_revision
 from .project_checkpoint import SnapshotCheckpoint, active_checkpoint
@@ -88,6 +88,14 @@ class _SemanticCitation(_ProductOutput):
     evidence_id: str = Field(min_length=1)
     quote: str = Field(min_length=1)
 
+    @model_validator(mode="after")
+    def matches_supplied_evidence(self, info: ValidationInfo):
+        context = info.context if isinstance(info.context, dict) else {}
+        evidence = {item.get("id"): item.get("quote") for item in context.get("evidence", []) if isinstance(item, dict)}
+        if evidence.get(self.evidence_id) != self.quote:
+            raise ValueError("citation must use a supplied evidence_id and its exact quote")
+        return self
+
 
 class _ClassificationOutputItem(_ProductOutput):
     dimension_id: str = Field(min_length=1)
@@ -98,6 +106,25 @@ class _ClassificationOutputItem(_ProductOutput):
 
 class _ClassificationOutput(_ProductOutput):
     assignments: list[_ClassificationOutputItem]
+
+    @model_validator(mode="after")
+    def matches_supplied_vocabulary(self, info: ValidationInfo):
+        context = info.context if isinstance(info.context, dict) else {}
+        if "profile" not in context:
+            return self
+        profile = context.get("profile") if isinstance(context.get("profile"), dict) else {}
+        dimensions = {item.get("id"): item for item in profile.get("dimensions", []) if isinstance(item, dict)}
+        seen: set[tuple[str, str]] = set()
+        for assignment in self.assignments:
+            dimension = dimensions.get(assignment.dimension_id)
+            vocabulary = {item.get("id") for item in dimension.get("vocabulary", []) if isinstance(item, dict)} if dimension else set()
+            key = (assignment.dimension_id, assignment.item_id)
+            if assignment.item_id not in vocabulary:
+                raise ValueError("classification must use a supplied dimension_id and vocabulary item_id")
+            if key in seen or (dimension.get("cardinality") == "single" and any(item[0] == assignment.dimension_id for item in seen)):
+                raise ValueError("classification must obey the supplied dimension cardinality")
+            seen.add(key)
+        return self
 
 
 class _ExplanationOutputItem(_ProductOutput):
@@ -114,6 +141,15 @@ class _SynthesisOutputItem(_ProductOutput):
     title: str = Field(min_length=1)
     text: str = Field(min_length=1)
     evidence_ids: list[str] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def uses_supplied_evidence(self, info: ValidationInfo):
+        context = info.context if isinstance(info.context, dict) else {}
+        allowed = {evidence_id for item in context.get("sections", []) if isinstance(item, dict)
+                   for evidence_id in item.get("evidence_ids", []) if isinstance(evidence_id, str)}
+        if any(evidence_id not in allowed for evidence_id in self.evidence_ids):
+            raise ValueError("synthesis must use supplied evidence_ids")
+        return self
 
 
 class _SynthesisOutput(_ProductOutput):
@@ -530,6 +566,7 @@ def _product_json(relay: Any, operation: str, instruction: str, context: dict[st
             f"{instruction}\n\nInput JSON:\n{json.dumps(context, ensure_ascii=False)}",
             schema=schema,
             max_retries=3,
+            validation_context=context,
         )
     except ProcessingError as exc:
         raise _typed_extraction_error(exc) from exc
