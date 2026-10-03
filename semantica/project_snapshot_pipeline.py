@@ -79,6 +79,7 @@ TEXT_WINDOW_OVERLAP = 256
 MODEL_CONTEXT_BYTES = 48_000
 MODEL_REQUEST_BYTES = 80_000
 EXTRACTION_MAX_OUTPUT_TOKENS = 4096
+PRODUCT_MAX_OUTPUT_TOKENS = 8192
 
 
 class _ProductOutput(BaseModel):
@@ -608,6 +609,7 @@ def _product_json(relay: Any, operation: str, instruction: str, context: dict[st
             f"{instruction}\n\nInput JSON:\n{json.dumps(context, ensure_ascii=False)}",
             schema=schema,
             max_retries=3,
+            max_tokens=PRODUCT_MAX_OUTPUT_TOKENS,
             validation_context=context,
         )
     except ProcessingError as exc:

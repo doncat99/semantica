@@ -112,6 +112,35 @@ def test_product_output_repairs_citation_shape_through_native_typed_provider(mon
     assert "evidence_id" in prompts[1] and "quote" in prompts[1]
 
 
+def test_product_output_reserves_more_tokens_than_chunk_extraction(monkeypatch):
+    from types import SimpleNamespace
+    from semantica import project_snapshot_pipeline as pipeline
+
+    payloads = []
+
+    def relay_response(relay, payload, operation):
+        payloads.append(payload)
+        result = {"model": relay.model_id, "choices": [{"message": {"content": json.dumps({"sections": [{
+            "title": "Explanation", "text": "Grounded explanation", "citations": [
+                {"evidence_id": "evidence:source", "quote": "Source quote"},
+            ],
+        }]})}}]}
+        return result, ModelReceipt(id="receipt:1", operation=operation, provider="test",
+                                    model=relay.model_id, input_digest=H1, output_digest=H2)
+
+    monkeypatch.setattr(pipeline, "_relay_json", relay_response)
+    pipeline._product_json(
+        SimpleNamespace(model_id="model-1", binding_id="default"),
+        "knowledge_explanation",
+        "Explain the source.",
+        {"evidence": [{"id": "evidence:source", "quote": "Source quote"}]},
+        pipeline._ExplanationOutput,
+    )
+
+    assert payloads[0]["max_tokens"] == pipeline.PRODUCT_MAX_OUTPUT_TOKENS
+    assert pipeline.PRODUCT_MAX_OUTPUT_TOKENS > pipeline.EXTRACTION_MAX_OUTPUT_TOKENS
+
+
 def test_product_output_repairs_semantic_citation_and_vocabulary(monkeypatch):
     from types import SimpleNamespace
     from semantica import project_snapshot_pipeline as pipeline
