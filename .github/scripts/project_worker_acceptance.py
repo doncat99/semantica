@@ -90,10 +90,10 @@ with tempfile.TemporaryDirectory(prefix="semantica-native-acceptance-") as direc
         for index, (path, mime) in enumerate([(source, "text/plain"), (epub, "application/epub+zip")])]
     parsed_sources = []
     for item in sources:
-        result = invoke("semantica.project_snapshot_worker", {"protocol": "semantica.project-worker.v1", "id": "native-parse", "method": "parse_source", "params": {
+        result = invoke("semantica.semantic_worker", {"protocol": "semantica.semantic-worker.v1", "id": "native-parse", "method": "parse_source", "params": {
             "source": item, "outputDir": str(scratch / "parsed"), "forceOcr": False, "documentProcessing": {"mode": "local"}}})
         parsed_sources.append({key: result[key] for key in ("sourceId", "artifactPath", "artifactDigest")})
-    built = invoke("semantica.project_snapshot_worker", {"protocol": "semantica.project-worker.v1", "id": "native-build", "method": "build_project_snapshot", "params": {
+    built = invoke("semantica.semantic_worker", {"protocol": "semantica.semantic-worker.v1", "id": "native-build", "method": "build_semantic_artifacts", "params": {
         "projectId": "native", "baseSnapshot": None, "inputRevision": "sha256:" + "1" * 64, "outputDir": str(scratch / "output"),
         "recipe": {"id": "deterministic", "version": "1", "forceOcrSourceIds": []}, "sources": sources, "parsedSources": parsed_sources, "documentProcessing": {"mode": "local"},
         "release": {key: manifest[key] for key in ("artifactDigest", "schemaDigest", "mediaTypes")},
@@ -101,12 +101,24 @@ with tempfile.TemporaryDirectory(prefix="semantica-native-acceptance-") as direc
             **({"contextWindowTokens": 500000, "maxOutputTokens": 393216} if key == "model" else {})}
             for key, endpoint, capability in [("model", "chat/completions", "knowledge.snapshot.generate"), ("embedding", "embeddings", "knowledge.snapshot.embed")]}}})
     artifacts = {item["kind"]: {key: item[key] for key in ("path", "digest", "kind", "mediaType")} for item in built["artifacts"]}
+    graph = json.loads(Path(artifacts["semantic-graph"]["path"]).read_text())
+    assert graph["protocol"] == "semantica.semantic-graph.v1"
+    assert graph["artifact_revision"] == built["semanticGraph"]["artifactRevision"]
+    snapshot = {key: value for key, value in graph.items() if key not in
+                ("protocol", "artifact_revision", "input_revision", "release_digest", "schema_digest")}
+    snapshot.update(protocol="semantica.project-snapshot.v1", snapshot_id=graph["artifact_revision"],
+                    project_id="native", base_snapshot_id=None)
+    projected_path = scratch / "projected-snapshot.json"
+    projected_path.write_text(json.dumps(snapshot, ensure_ascii=False) + "\n")
+    import hashlib
+    projected_digest = "sha256:" + hashlib.sha256(projected_path.read_bytes()).hexdigest()
     queried = invoke("semantica.project_query_worker", {"protocol": "semantica.project-query.v1", "id": "native-query", "method": "query", "params": {
-        "projectId": "native", "snapshotId": built["snapshot"]["snapshotId"], "snapshot": artifacts["snapshot"], "retrieval": artifacts["retrieval-index"],
+        "projectId": "native", "snapshotId": graph["artifact_revision"], "snapshot": {
+            "path": str(projected_path), "digest": projected_digest, "kind": "semantic-graph",
+            "mediaType": manifest["mediaTypes"]["semantic-graph"]}, "retrieval": artifacts["retrieval-index"],
         "query": "Ada", "mode": "keyword", "limit": 5}})
     assert queried["contexts"]
     assert all(item["revision"].startswith("sha256:") for item in built["artifacts"] if item["kind"] == "document-representation")
-    snapshot = json.loads(Path(artifacts["snapshot"]["path"]).read_text())
     for representation in snapshot["document_representations"]:
         source = next(item for item in sources if item["sourceId"] == representation["source_id"])
         assert representation["content_hash"] == representation["material_revision_id"] == source["materialRevision"]

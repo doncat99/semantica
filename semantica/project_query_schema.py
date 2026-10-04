@@ -16,7 +16,7 @@ QUERY_PROTOCOL = "semantica.project-query.v1"
 class QueryArtifactRef(DigestModel):
     path: str
     digest: str
-    kind: Literal["snapshot", "retrieval-index"]
+    kind: Literal["semantic-graph", "retrieval-index"]
     media_type: str = Field(alias="mediaType")
 
     @field_validator("path", mode="after")

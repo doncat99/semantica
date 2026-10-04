@@ -778,7 +778,7 @@ class ReleaseRef(DigestModel):
     @field_validator("media_types", mode="after")
     @classmethod
     def validate_media_types(cls, value: Dict[str, str]) -> Dict[str, str]:
-        required = {"document-representation", "retrieval-index", "snapshot"}
+        required = {"document-representation", "retrieval-index", "semantic-graph"}
         missing = required - set(value)
         if missing:
             raise ValueError(f"release mediaTypes missing required keys: {sorted(missing)}")
@@ -787,8 +787,8 @@ class ReleaseRef(DigestModel):
             raise ValueError("document-representation artifact must be JSON")
         if not normalized["retrieval-index"].endswith("+json"):
             raise ValueError("retrieval-index artifact is JSON and must use a +json media type")
-        if not normalized["snapshot"].endswith("+json"):
-            raise ValueError("snapshot artifact must be JSON")
+        if not normalized["semantic-graph"].endswith("+json"):
+            raise ValueError("semantic-graph artifact must be JSON")
         return normalized
 
 
@@ -850,7 +850,7 @@ class ProjectSnapshotBuildRequest(DigestModel):
             raise ValueError("classification requires the model recipe")
         if self.recipe.extraction_spec and self.recipe.id != "model":
             raise ValueError("typed extraction requires the model recipe")
-        if set(self.release.media_types) != {"document-representation", "retrieval-index", "snapshot"}:
+        if set(self.release.media_types) != {"document-representation", "retrieval-index", "semantic-graph"}:
             raise ValueError("release media types must cover all artifact kinds")
         if set(self.relays) != {"embedding", "model"}:
             raise ValueError("relays must contain embedding and model")

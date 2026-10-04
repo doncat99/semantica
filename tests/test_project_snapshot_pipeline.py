@@ -419,7 +419,7 @@ def _request(source: Path, output_dir: Path, *, recipe: str = "deterministic", p
                 "embedding": {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/embeddings", "capability": "knowledge.snapshot.embed", "modelId": "embedding-1", "receipts": "required"},
                 "model": {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/chat/completions", "capability": "knowledge.snapshot.generate", "contextWindowTokens": 500000, "maxOutputTokens": 393216, "modelId": "model-1", "receipts": "required"},
             },
-            "release": {"artifactDigest": H2, "schemaDigest": H3, "mediaTypes": {"document-representation": "application/vnd.semantica.document-representation+json", "retrieval-index": "application/vnd.semantica.retrieval+json", "snapshot": "application/vnd.semantica.project-snapshot+json"}},
+            "release": {"artifactDigest": H2, "schemaDigest": H3, "mediaTypes": {"document-representation": "application/vnd.semantica.document-representation+json", "retrieval-index": "application/vnd.semantica.retrieval+json", "semantic-graph": "application/vnd.semantica.semantic-graph+json"}},
             "sources": [{"filePath": str(source), "materialRevision": source_content_revision(source), "mimeType": "application/epub+zip" if source.suffix == ".epub" else "text/plain", "name": source.name, "sourceId": "source-1"}],
         },
     }
@@ -438,12 +438,12 @@ def test_worker_builds_complete_snapshot_from_real_text_file(tmp_path):
     assert events[0]["type"] == "progress"
     assert events[0]["stage"] == "document_parsing"
     assert response["ok"] is True
-    assert [item["kind"] for item in response["result"]["artifacts"]] == ["document-representation", "retrieval-index", "snapshot"]
+    assert [item["kind"] for item in response["result"]["artifacts"]] == ["document-representation", "retrieval-index", "semantic-graph"]
     assert response["result"]["relayReceipts"] == {"embedding": [], "model": []}
 
-    snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "snapshot")
+    snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "semantic-graph")
     snapshot = ProjectSnapshot.model_validate_json(snapshot_path.read_bytes())
-    assert snapshot.id == response["result"]["snapshot"]["snapshotId"]
+    assert snapshot.id == response["result"]["semanticGraph"]["artifactRevision"]
     assert snapshot.entities
     assert snapshot.relations == []
     assert snapshot.assertions == []
@@ -536,7 +536,7 @@ def test_cross_source_same_name_stays_unresolved(tmp_path):
     assert serve(io.StringIO(json.dumps(request) + "\n"), stdout) == 0
     _, response = _worker_output(stdout)
     assert response["ok"] is True
-    snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "snapshot")
+    snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "semantic-graph")
     snapshot = ProjectSnapshot.model_validate_json(snapshot_path.read_bytes())
     ada_candidates = [entity for entity in snapshot.entities if entity.canonical_name == "Ada Lovelace"]
     assert len(ada_candidates) == 2
@@ -570,7 +570,7 @@ def test_epub_adapter_preserves_adapter_locator_origin(tmp_path):
     assert serve(io.StringIO(json.dumps(request) + "\n"), stdout) == 0
     _, response = _worker_output(stdout)
     assert response["ok"] is True
-    snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "snapshot")
+    snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "semantic-graph")
     snapshot = ProjectSnapshot.model_validate_json(snapshot_path.read_bytes())
     assert snapshot.evidence_spans
     assert {item.locator.origin for item in snapshot.evidence_spans} == {"adapter"}
@@ -659,7 +659,7 @@ def test_model_recipe_uses_bifrost_chat_and_embedding_and_records_receipts(tmp_p
     assert response["ok"] is True
     assert len(response["result"]["relayReceipts"]["model"]) == 8
     assert len(response["result"]["relayReceipts"]["embedding"]) == 1
-    snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "snapshot")
+    snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "semantic-graph")
     snapshot = ProjectSnapshot.model_validate_json(snapshot_path.read_bytes())
     assert len(snapshot.model_receipts) == 9
     extraction_receipts = [receipt for receipt in snapshot.model_receipts if receipt.operation == "structured_extraction"]
@@ -818,7 +818,7 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
         "totalChunks": 2,
     }
     assert response["ok"] is True, response
-    snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "snapshot")
+    snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "semantic-graph")
     snapshot = ProjectSnapshot.model_validate_json(snapshot_path.read_bytes())
     assert len(snapshot.entity_mentions) == 4
     assert len(snapshot.entities) == 2
@@ -828,7 +828,7 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
     assert identity_receipt.id in response["result"]["relayReceipts"]["model"]
     assert all(decision.metadata["model_receipt_id"] == identity_receipt.id for decision in snapshot.identity_decisions)
     initial_explanations = operations.count("knowledge_explanation")
-    request["params"]["baseSnapshot"] = {"snapshotId": snapshot.id, "snapshotPath": str(snapshot_path), "artifactDigest": next(item["digest"] for item in response["result"]["artifacts"] if item["kind"] == "snapshot"), "schemaDigest": H3}
+    request["params"]["baseSnapshot"] = {"snapshotId": snapshot.id, "snapshotPath": str(snapshot_path), "artifactDigest": next(item["digest"] for item in response["result"]["artifacts"] if item["kind"] == "semantic-graph"), "schemaDigest": H3}
     request["params"]["outputDir"] = str(tmp_path / "repeat")
     repeated = build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(request["params"]))["snapshot"]
     assert operations.count("knowledge_explanation") == initial_explanations

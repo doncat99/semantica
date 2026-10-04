@@ -23,6 +23,7 @@ _PARSER_MODULES = {
     "project_remote_docling.py",
     "project_snapshot_schema.py",
     "project_snapshot_worker.py",
+    "semantic_worker.py",
     "project_source.py",
 }
 
@@ -163,12 +164,12 @@ def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, output: P
         "protocol": "ontoscience.semantica-bundle.v1",
         "pythonPath": f"python/{python_name}",
         "schemaDigest": schema_digest,
-        "worker": {"path": f"python/{python_name}", "args": ["-I", "-B", "-m", "semantica.project_snapshot_worker"]},
+        "worker": {"path": f"python/{python_name}", "args": ["-I", "-B", "-m", "semantica.semantic_worker"]},
         "queryWorker": {"path": f"python/{python_name}", "args": ["-I", "-B", "-m", "semantica.project_query_worker"]},
         "mediaTypes": {
             "document-representation": "application/vnd.semantica.document-representation+json",
             "retrieval-index": "application/vnd.semantica.retrieval+json",
-            "snapshot": "application/vnd.semantica.project-snapshot+json",
+            "semantic-graph": "application/vnd.semantica.semantic-graph+json",
         },
         "files": [],
     }

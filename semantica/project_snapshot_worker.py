@@ -88,8 +88,8 @@ def handle_request(raw: Dict[str, Any], progress: Optional[Callable[[Dict[str, A
     })
     artifacts.append({
         "digest": built["snapshot_digest"],
-        "kind": "snapshot",
-        "mediaType": build_request.release.media_types["snapshot"],
+        "kind": "semantic-graph",
+        "mediaType": build_request.release.media_types["semantic-graph"],
         "path": str(built["snapshot_path"]),
         "revision": snapshot.id,
     })
@@ -97,13 +97,11 @@ def handle_request(raw: Dict[str, Any], progress: Optional[Callable[[Dict[str, A
     return _response(request.id, True, result={
         "artifacts": artifacts,
         "relayReceipts": _relay_receipts(receipts),
-        "snapshot": {
-            "baseSnapshotId": snapshot.base_snapshot_id,
+        "semanticGraph": {
+            "artifactRevision": snapshot.id,
             "inputRevision": build_request.input_revision,
-            "projectId": snapshot.project_id,
+            "releaseDigest": build_request.release.artifact_digest,
             "schemaDigest": build_request.release.schema_digest,
-            "semanticaArtifactDigest": build_request.release.artifact_digest,
-            "snapshotId": snapshot.id,
         },
     })
 

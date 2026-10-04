@@ -55,7 +55,7 @@ from .project_snapshot_schema import (
     RetrievalArtifactManifest,
     stable_digest,
 )
-from .semantic_extract import NamedEntityRecognizer, NERExtractor, RelationExtractor
+from .semantic_extract import NamedEntityRecognizer, extract_grounded_window
 from .semantic_extract.providers import BaseProvider
 from .utils.exceptions import ProcessingError
 
@@ -250,40 +250,12 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
     windows = list(_text_windows(text))
     def extract(item):
         window = item[2]
-        provider = _project_model_provider(model_relay)
-        for retry in range(2):
-            try:
-                entities = NERExtractor(
-                    method="llm",
-                    provider="bifrost",
-                    llm_model=model_relay.model_id,
-                    provider_instance=provider,
-                    grounding="strict",
-                    grounding_retries=1,
-                    extraction_spec=extraction_spec,
-                ).extract(window)
-                break
-            except ProcessingError:
-                provider.reject_last()
-                if retry:
-                    raise
-        for retry in range(2):
-            try:
-                relations = RelationExtractor(
-                    method="llm",
-                    provider="bifrost",
-                    llm_model=model_relay.model_id,
-                    provider_instance=provider,
-                    grounding="strict",
-                    grounding_retries=1,
-                    extraction_spec=extraction_spec,
-                    confidence_threshold=0,
-                ).extract(window, entities)
-                break
-            except ProcessingError:
-                provider.reject_last()
-                if retry:
-                    raise
+        entities, relations, provider = extract_grounded_window(
+            window, model=model_relay.model_id,
+            provider_instance=_project_model_provider(model_relay),
+            provider_factory=lambda: _project_model_provider(model_relay),
+            extraction_spec=extraction_spec, retries=1,
+        )
         extracted = {
             "entities": [{
                 "id": entity.metadata["mention_id"],
@@ -2051,15 +2023,20 @@ def _change_delta(
 
 
 def build_project_snapshot(request: ProjectSnapshotBuildRequest, progress=None) -> dict[str, Any]:
-    """Build, validate, and materialize one immutable snapshot and its artifacts."""
+    """Compatibility entry point for the former project snapshot API."""
+    return build_semantic_artifacts(request, progress=progress)
+
+
+def build_semantic_artifacts(request: ProjectSnapshotBuildRequest, progress=None) -> dict[str, Any]:
+    """Build, validate, and materialize Semantica's generic semantic artifacts."""
     token = active_checkpoint.set(SnapshotCheckpoint(request))
     try:
-        return _build_project_snapshot(request, progress=progress)
+        return _build_semantic_artifacts(request, progress=progress)
     finally:
         active_checkpoint.reset(token)
 
 
-def _build_project_snapshot(request: ProjectSnapshotBuildRequest, progress=None) -> dict[str, Any]:
+def _build_semantic_artifacts(request: ProjectSnapshotBuildRequest, progress=None) -> dict[str, Any]:
     if request.recipe.id not in {"deterministic", "model"}:
         raise SnapshotBuildError(
             f"unsupported project snapshot recipe: {request.recipe.id}; "
