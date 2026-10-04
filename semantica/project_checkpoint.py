@@ -47,6 +47,9 @@ class SnapshotCheckpoint:
         self.root = Path(request.output_dir).resolve() / "checkpoint"
         self.root.mkdir(parents=True, exist_ok=True)
         self.resume_roots = [Path(item).resolve() for item in request.resume_checkpoint_dirs]
+        self.resume_model_token_limits = {
+            Path(path).resolve(): limit for path, limit in request.resume_checkpoint_model_token_limits.items()
+        }
         sources = []
         for source in request.sources:
             with Path(source.file_path).open("rb") as stream:
@@ -120,6 +123,40 @@ class SnapshotCheckpoint:
                 return payload
             except (ValueError, KeyError, TypeError, OSError) as exc:
                 raise SnapshotCheckpointError(f"snapshot checkpoint entry failed verification: {path.name}") from exc
+        return None
+
+    def read_with_lower_model_limit(self, key: dict[str, Any]) -> Any | None:
+        payload = key.get("payload")
+        if not isinstance(payload, dict) or not isinstance(payload.get("max_tokens"), int):
+            return None
+        current_limit = payload["max_tokens"]
+        for root in self.resume_roots:
+            prior_limit = self.resume_model_token_limits.get(root)
+            if prior_limit is None or prior_limit <= current_limit:
+                continue
+            old_key = {**key, "payload": {**payload, "max_tokens": prior_limit}}
+            candidate = self._path("relay", old_key).name
+            path = root / candidate
+            if not path.is_file():
+                continue
+            try:
+                entry = json.loads(path.read_bytes())
+                stored = entry["payload"]
+                if entry["digest"] != _digest(_bytes(stored)):
+                    raise ValueError("digest mismatch")
+                response = stored["response"]
+                choices = response["choices"]
+                usage = response["usage"]
+                if (len(choices) != 1 or choices[0].get("finish_reason") != "stop"
+                        or not isinstance(usage.get("completion_tokens"), int)
+                        or usage["completion_tokens"] > current_limit):
+                    continue
+                if self._is_rejected("relay", old_key, entry["digest"]) or self._is_rejected("relay", key, entry["digest"]):
+                    continue
+                self.write("relay", key, stored)
+                return stored
+            except (ValueError, KeyError, TypeError, OSError) as exc:
+                raise SnapshotCheckpointError(f"snapshot checkpoint entry failed verification: {candidate}") from exc
         return None
 
     def write(self, kind: str, key: Any, payload: Any) -> None:

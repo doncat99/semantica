@@ -417,6 +417,8 @@ def _relay_json(relay: Any, payload: dict[str, Any], operation: str) -> tuple[di
     checkpoint = active_checkpoint.get()
     cache_key = {"operation": operation, "bindingId": getattr(relay, "binding_id", None), "modelId": relay.model_id, "payload": payload}
     cached = checkpoint.read("relay", cache_key) if checkpoint else None
+    if cached is None and checkpoint:
+        cached = checkpoint.read_with_lower_model_limit(cache_key)
     if cached is not None:
         receipt = ModelReceipt.model_validate(cached["receipt"])
         object.__setattr__(receipt, "_checkpoint_restored", True)

@@ -826,6 +826,7 @@ class ProjectSnapshotBuildRequest(DigestModel):
     parallelism: int = Field(default=1, ge=1, le=8)
     output_dir: str = Field(alias="outputDir")
     resume_checkpoint_dirs: List[str] = Field(default_factory=list, alias="resumeCheckpointDirs")
+    resume_checkpoint_model_token_limits: Dict[str, int] = Field(default_factory=dict, alias="resumeCheckpointModelTokenLimits")
     recipe: RecipeRef
     relays: Dict[str, RelayRef]
     release: ReleaseRef
@@ -841,6 +842,9 @@ class ProjectSnapshotBuildRequest(DigestModel):
             raise ValueError("outputDir must be absolute")
         if any(not isabs(item) for item in self.resume_checkpoint_dirs):
             raise ValueError("resumeCheckpointDirs must contain absolute paths")
+        if any(path not in self.resume_checkpoint_dirs or limit < 1
+               for path, limit in self.resume_checkpoint_model_token_limits.items()):
+            raise ValueError("resumeCheckpointModelTokenLimits must reference checkpoint paths with positive limits")
         source_ids = {source.source_id for source in self.sources}
         if len(source_ids) != len(self.sources):
             raise ValueError("source ids must be unique")

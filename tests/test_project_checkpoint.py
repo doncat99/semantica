@@ -1,14 +1,17 @@
 import json
+import io
 import os
 from pathlib import Path
 import subprocess
 import sys
 import threading
+import urllib.error
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 import pytest
 
 from semantica.project_checkpoint import SnapshotCheckpoint, SnapshotCheckpointError
+from semantica.project_snapshot_pipeline import build_project_snapshot
 from semantica.project_snapshot_schema import ProjectSnapshotBuildRequest
 from tests.test_project_snapshot_pipeline import _request
 from tests.test_project_snapshot_pipeline import _typed_prompt_context
@@ -50,7 +53,8 @@ def test_worker_process_restart_reuses_durable_parse_and_model_calls(tmp_path):
                     content = {"sections": [{"title": "Knowledge production", "text": "Connected explanation",
                         "evidence_ids": [context["sections"][0]["evidence_ids"][0]]}]}
                 else:
-                    content = {"relations": []} if "Extract source-grounded relations" in prompt else {"entities": []}
+                    content = {"relations": []} if "Extract source-grounded relations" in prompt else {
+                        "entities": [{"text": "A source", "label": "CONCEPT", "occurrence": 0}]}
                 response = {"model": payload["model"], "choices": [{"message": {"content": json.dumps(content)}}]}
             encoded = json.dumps(response).encode()
             self.send_response(200)
@@ -102,11 +106,10 @@ def test_worker_process_restart_reuses_durable_parse_and_model_calls(tmp_path):
         result = json.loads(stdout.strip().splitlines()[-1])
         assert result["ok"], result
         assert parsed_artifact.read_bytes() == parsed_bytes
-        extraction_calls = [item for item in calls if "messages" in item and
-            ("Extract named entities" in item["messages"][0]["content"] or
-             "Extract source-grounded relations" in item["messages"][0]["content"])]
-        assert len(extraction_calls) == 1
-        snapshot_artifact = next(item for item in result["result"]["artifacts"] if item["kind"] == "snapshot")
+        entity_calls = [item for item in calls if "messages" in item and
+            "Extract named entities" in item["messages"][0]["content"]]
+        assert len(entity_calls) == 1
+        snapshot_artifact = next(item for item in result["result"]["artifacts"] if item["kind"] == "semantic-graph")
         snapshot = json.loads(Path(snapshot_artifact["path"]).read_bytes())
         extraction_receipt = next(item for item in snapshot["model_receipts"] if item["operation"] == "structured_extraction")
         assert f":{first_server.server_port}/" in extraction_receipt["parameters"]["relay_url"]
@@ -129,6 +132,79 @@ def test_worker_process_restart_reuses_durable_parse_and_model_calls(tmp_path):
     finally:
         resumed_server.shutdown()
         resumed_server.server_close()
+
+
+def test_quota_failure_new_run_reuses_completed_extraction_windows(tmp_path, monkeypatch):
+    source = tmp_path / "source.txt"
+    source.write_text("A source explains durable knowledge production. " * 110, encoding="utf-8")
+    first = _request(source, tmp_path / "first", recipe="model")
+    first["params"]["parallelism"] = 1
+    first["params"]["relays"]["model"]["maxOutputTokens"] = 393216
+    calls = []
+    quota_exhausted = False
+
+    class Response:
+        status = 200
+
+        def __init__(self, payload):
+            self.payload = json.dumps(payload).encode()
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def read(self):
+            return self.payload
+
+    def relay(request, timeout):
+        nonlocal quota_exhausted
+        payload = json.loads(request.data)
+        if "input" in payload:
+            return Response({"model": payload["model"], "data": [
+                {"index": index, "embedding": [1.0, 0.5]}
+                for index, _ in enumerate(payload["input"])
+            ]})
+        prompt = payload["messages"][0]["content"]
+        calls.append(prompt)
+        if len(calls) == 3:
+            quota_exhausted = True
+        if quota_exhausted:
+            raise urllib.error.HTTPError(request.full_url, 503, "Quota exhausted", {}, io.BytesIO(
+                b'{"error":{"code":"MODEL_GATEWAY_COOLDOWN","retryable":true}}'))
+        if "Explain the supplied knowledge" in prompt:
+            context = _typed_prompt_context(payload)
+            content = {"sections": [{"title": "Knowledge production", "text": context["evidence"][0]["quote"],
+                "citations": [{"evidence_id": item["id"], "quote": item["quote"]} for item in context["evidence"]]}]}
+        elif "Synthesize the supplied grounded explanations" in prompt:
+            context = _typed_prompt_context(payload)
+            content = {"sections": [{"title": "Knowledge production", "text": "Connected explanation",
+                "evidence_ids": [context["sections"][0]["evidence_ids"][0]]}]}
+        else:
+            content = {"relations": []} if "Extract source-grounded relations" in prompt else {
+                "entities": [{"text": "A source", "label": "CONCEPT", "occurrence": 0}]}
+        return Response({"model": payload["model"], "choices": [{"finish_reason": "stop",
+            "message": {"content": json.dumps(content)}}], "usage": {"completion_tokens": 100}})
+
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture")
+    monkeypatch.setattr("urllib.request.urlopen", relay)
+    with pytest.raises(Exception, match="MODEL_GATEWAY_COOLDOWN"):
+        build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(first["params"]))
+    checkpoint = tmp_path / "first" / "checkpoint"
+    assert len(list(checkpoint.glob("relay-*.json"))) == 2
+    first_window_prompts = calls[:2]
+
+    second = _request(source, tmp_path / "second", recipe="model")
+    second["params"]["parallelism"] = 1
+    second["params"]["relays"]["model"]["maxOutputTokens"] = 32768
+    second["params"]["resumeCheckpointDirs"] = [str(checkpoint)]
+    second["params"]["resumeCheckpointModelTokenLimits"] = {str(checkpoint): 393216}
+    quota_exhausted = False
+    result = build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(second["params"]))
+    assert result["snapshot"] is not None
+    assert all(calls.count(prompt) == 1 for prompt in first_window_prompts)
+    assert len(list((tmp_path / "second" / "checkpoint").glob("relay-*.json"))) >= 4
 
 
 def test_checkpoint_rejects_corrupt_payload_and_changed_recipe(tmp_path):
@@ -164,6 +240,39 @@ def test_new_run_reuses_only_matching_verified_relay_entries(tmp_path):
     assert second_checkpoint.read("relay", {"operation": "embedding", "input": ["Beta"]}) is None
     assert second_checkpoint.read("document", {"source": "source-1"}) is None
     assert len(list(second_checkpoint.root.glob("relay-*.json"))) == 1
+
+
+def test_completed_model_response_survives_lower_output_limit(tmp_path):
+    source = tmp_path / "source.txt"
+    source.write_text("A source", encoding="utf-8")
+    first = _request(source, tmp_path / "first", recipe="model")
+    first["params"]["relays"]["model"]["maxOutputTokens"] = 393216
+    first_checkpoint = SnapshotCheckpoint(ProjectSnapshotBuildRequest.model_validate(first["params"]))
+    key = {"operation": "structured_extraction", "bindingId": "default", "modelId": "model-1",
+           "payload": {"model": "model-1", "messages": [{"role": "user", "content": "Extract entities"}],
+                       "max_tokens": 393216}}
+    saved = {"response": {"choices": [{"finish_reason": "stop", "message": {"content": "{}"}}],
+                          "usage": {"completion_tokens": 100}}, "receipt": {"id": "receipt:saved"}}
+    first_checkpoint.write("relay", key, saved)
+    second = _request(source, tmp_path / "second", recipe="model")
+    second["params"]["relays"]["model"]["maxOutputTokens"] = 32768
+    second["params"]["resumeCheckpointDirs"] = [str(first_checkpoint.root)]
+    second["params"]["resumeCheckpointModelTokenLimits"] = {str(first_checkpoint.root): 393216}
+    second_checkpoint = SnapshotCheckpoint(ProjectSnapshotBuildRequest.model_validate(second["params"]))
+    current_key = {**key, "payload": {**key["payload"], "max_tokens": 32768}}
+    assert second_checkpoint.read("relay", current_key) is None
+    assert second_checkpoint.read_with_lower_model_limit(current_key) == saved
+    assert second_checkpoint.read("relay", current_key) == saved
+    second_checkpoint.reject("relay", current_key, saved)
+    assert second_checkpoint.read("relay", current_key) is None
+    assert second_checkpoint.read_with_lower_model_limit(current_key) is None
+
+    first_checkpoint.write("relay", key, {**saved, "response": {**saved["response"],
+        "choices": [{"finish_reason": "length", "message": {"content": "{}"}}]}})
+    assert second_checkpoint.read_with_lower_model_limit(current_key) is None
+    first_checkpoint.write("relay", key, {**saved, "response": {**saved["response"],
+        "usage": {"completion_tokens": 40000}}})
+    assert second_checkpoint.read_with_lower_model_limit(current_key) is None
 
 
 def test_new_run_skips_semantically_rejected_relay_payload(tmp_path):
