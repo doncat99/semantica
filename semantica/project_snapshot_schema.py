@@ -344,7 +344,6 @@ class ChangeDelta(StrictModel):
     added_ids: List[str] = Field(default_factory=list)
     updated_ids: List[str] = Field(default_factory=list)
     retracted_ids: List[str] = Field(default_factory=list)
-    affected_report_ids: List[str] = Field(default_factory=list)
     affected_retrieval_manifest_ids: List[str] = Field(default_factory=list)
     reason: Optional[str] = None
 
@@ -411,7 +410,6 @@ class ProjectSnapshot(KernelModel):
     identity_registry: List[IdentityRegistryEntry] = Field(default_factory=list)
     communities: List[KnowledgeCommunity] = Field(default_factory=list)
     topics: List[KnowledgeTopic] = Field(default_factory=list)
-    reports: List[KnowledgeReport] = Field(default_factory=list)
     source_relations: List[SourceRelation] = Field(default_factory=list)
     source_classifications: List["SourceClassification"] = Field(default_factory=list)
     classification_profile: Optional["ClassificationProfile"] = None
@@ -440,7 +438,6 @@ class ProjectSnapshot(KernelModel):
             "identity_decision": self.identity_decisions,
             "community": self.communities,
             "topic": self.topics,
-            "report": self.reports,
             "conflict": self.conflicts,
             "retrieval_manifest": self.retrieval_manifests,
             "model_receipt": self.model_receipts,
@@ -457,7 +454,6 @@ class ProjectSnapshot(KernelModel):
         source_relation_ids = {item.id for item in self.source_relations}
         community_ids = {item.id for item in self.communities}
         topic_ids = {item.id for item in self.topics}
-        report_ids = {item.id for item in self.reports}
         conflict_ids = {item.id for item in self.conflicts}
         retrieval_ids = {item.id for item in self.retrieval_manifests}
         model_receipt_ids = {item.id for item in self.model_receipts}
@@ -513,25 +509,6 @@ class ProjectSnapshot(KernelModel):
             missing = set(relation.evidence_ids) - evidence_ids
             if missing:
                 raise ValueError(f"relation {relation.id} references unknown evidence ids: {sorted(missing)}")
-        for report in self.reports:
-            if report.entity_id and report.entity_id not in entity_ids:
-                raise ValueError(f"report {report.id} references unknown entity_id")
-            if any(set(section.evidence_ids) - set(report.evidence_ids) for section in report.sections):
-                raise ValueError(f"report {report.id} section evidence is absent from its dependencies")
-            if report.community_id and report.community_id not in community_ids:
-                raise ValueError(f"report {report.id} references unknown community_id")
-            if report.topic_id and report.topic_id not in topic_ids:
-                raise ValueError(f"report {report.id} references unknown topic_id")
-            if report.conflict_id and report.conflict_id not in conflict_ids:
-                raise ValueError(f"report {report.id} references unknown conflict_id")
-            if report.retrieval_manifest_id and report.retrieval_manifest_id not in retrieval_ids:
-                raise ValueError(f"report {report.id} references unknown retrieval_manifest_id")
-            missing = _missing(report.evidence_ids, evidence_ids)
-            if missing:
-                raise ValueError(f"report {report.id} references unknown evidence ids: {missing}")
-            missing = set(report.model_receipt_ids) - model_receipt_ids
-            if missing:
-                raise ValueError(f"report {report.id} references unknown model receipt ids: {sorted(missing)}")
         sources_by_representation = {item.id: item.source_id for item in self.document_representations}
         evidence_by_id = {item.id: item for item in self.evidence_spans}
         classified_sources = set()
@@ -611,7 +588,6 @@ class ProjectSnapshot(KernelModel):
                     raise ValueError(f"retrieval {retrieval.id} references unknown {label} ids: {missing}")
         for label, values, known in (
             ("changed representation", self.change_delta.changed_representation_ids, representation_ids),
-            ("affected report", self.change_delta.affected_report_ids, report_ids),
             ("affected retrieval manifest", self.change_delta.affected_retrieval_manifest_ids, retrieval_ids),
         ):
             missing = _missing(values, known | set(self.change_delta.retracted_ids))

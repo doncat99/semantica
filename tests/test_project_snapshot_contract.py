@@ -121,10 +121,7 @@ def _snapshot_payload():
         "retrieval_manifests": [
             {"id": "retrieval-1", "retrieval_type": "graph", "artifact_hash": H8, "artifact_ref_id": "artifact-retrieval", "record_count": 1, "entity_ids": ["entity-ada"], "relation_ids": ["relation-1"], "community_ids": ["community-1"], "evidence_ids": ["ev-1"], "model_receipt_ids": ["model-1"]}
         ],
-        "reports": [
-            {"id": "report-1", "report_type": "community", "title": "Design", "summary": "Ada is connected to the engine.", "community_id": "community-1", "topic_id": "topic-1", "conflict_id": "conflict-1", "retrieval_manifest_id": "retrieval-1", "evidence_ids": ["ev-1"], "model_receipt_ids": ["model-1"], "content_hash": H2}
-        ],
-        "change_delta": {"base_snapshot_id": "snapshot-base", "changed_representation_ids": ["repr-1"], "added_ids": ["entity-ada"], "affected_report_ids": ["report-1"], "affected_retrieval_manifest_ids": ["retrieval-1"], "reason": "initial import"},
+        "change_delta": {"base_snapshot_id": "snapshot-base", "changed_representation_ids": ["repr-1"], "added_ids": ["entity-ada"], "affected_retrieval_manifest_ids": ["retrieval-1"], "reason": "initial import"},
     }
 
 
@@ -147,8 +144,9 @@ def _build_request_payload():
 
 def test_project_snapshot_contract_covers_kernel_sections():
     props = project_snapshot_json_schema()["properties"]
-    for key in ["lineage", "artifact_manifest", "document_representations", "evidence_spans", "entities", "assertions", "relations", "identity_decisions", "communities", "topics", "reports", "conflicts", "retrieval_manifests", "change_delta", "model_receipts"]:
+    for key in ["lineage", "artifact_manifest", "document_representations", "evidence_spans", "entities", "assertions", "relations", "identity_decisions", "communities", "topics", "conflicts", "retrieval_manifests", "change_delta", "model_receipts"]:
         assert key in props
+    assert "reports" not in props
 
 
 def test_project_snapshot_validates_complete_cross_references():
@@ -156,7 +154,18 @@ def test_project_snapshot_validates_complete_cross_references():
     assert snapshot.protocol == "semantica.project-snapshot.v1"
     assert snapshot.id == "snapshot:one"
     assert snapshot.model_dump()["snapshot_id"] == "snapshot:one"
-    assert snapshot.reports[0].retrieval_manifest_id == "retrieval-1"
+    assert "reports" not in snapshot.model_dump()
+
+
+def test_snapshot_rejects_embedded_reports_and_report_delta():
+    payload = _snapshot_payload()
+    payload["reports"] = []
+    with pytest.raises(ValidationError, match="reports"):
+        ProjectSnapshot.model_validate(payload)
+    payload = _snapshot_payload()
+    payload["change_delta"]["affected_report_ids"] = []
+    with pytest.raises(ValidationError, match="affected_report_ids"):
+        ProjectSnapshot.model_validate(payload)
 
 
 def test_project_snapshot_rejects_bad_hash_and_duplicate_ids():
@@ -206,10 +215,6 @@ def test_project_snapshot_rejects_unknown_community_topic_conflict_retrieval_ref
     with pytest.raises(ValidationError, match="unknown community"):
         ProjectSnapshot.model_validate(bad)
 
-    bad = _snapshot_payload()
-    bad["reports"][0]["topic_id"] = "missing-topic"
-    with pytest.raises(ValidationError, match="unknown topic_id"):
-        ProjectSnapshot.model_validate(bad)
 
 
 def test_build_request_accepts_sources_not_semantic_objects():

@@ -196,7 +196,6 @@ def query_project_snapshot(request: ProjectQueryRequest) -> ProjectQueryResult:
     identity_records = _validated_records(retrieval_payload.get("identity_decisions", []), "identity_decisions", snapshot.identity_decisions, evidence_ids)
     conflict_records = _validated_records(retrieval_payload.get("conflicts", []), "conflicts", snapshot.conflicts, evidence_ids)
     topic_records = _validated_records(retrieval_payload.get("topics"), "topics", snapshot.topics, evidence_ids)
-    report_records = _validated_records(retrieval_payload.get("reports"), "reports", snapshot.reports, evidence_ids)
     evidence_by_id = {item.get("id"): item for item in evidence_records if isinstance(item.get("id"), str)}
     representation_by_id = {item.id: item.model_dump(mode="json", by_alias=True) for item in snapshot.document_representations}
     entity_by_id = {item.get("id"): item for item in entity_records if isinstance(item.get("id"), str)}
@@ -223,8 +222,6 @@ def query_project_snapshot(request: ProjectQueryRequest) -> ProjectQueryResult:
         candidates.append((str(conflict["id"]), "conflict", text, _string_list(conflict.get("evidence_ids", []), "conflict.evidence_ids"), conflict.get("status"), None))
     for topic in topic_records:
         candidates.append((str(topic["id"]), "topic", str(topic.get("title", "")), _string_list(topic.get("evidence_ids", []), "topic.evidence_ids"), None, None))
-    for report in report_records:
-        candidates.append((str(report["id"]), "report", f"{report.get('title', '')} {report.get('summary', '')}", _string_list(report.get("evidence_ids", []), "report.evidence_ids"), None, None))
     for evidence in evidence_records:
         candidates.append((str(evidence["id"]), "evidence", str(evidence.get("quote", "")), [str(evidence["id"])], evidence.get("origin"), None))
 

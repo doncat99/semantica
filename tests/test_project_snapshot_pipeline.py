@@ -31,6 +31,127 @@ def _worker_output(stdout):
     return events, events[-1]
 
 
+def test_scoped_explanation_reuses_native_grounding_and_rejects_foreign_evidence(monkeypatch):
+    from types import SimpleNamespace
+    from semantica import project_snapshot_pipeline as pipeline
+    from semantica.project_snapshot_schema import EvidenceSpan, DocumentLocator
+
+    span = EvidenceSpan(id="evidence:1", representation_id="representation:1", quote="Exact source sentence.",
+                        locator=DocumentLocator(representation_id="representation:1", origin="native",
+                                                quote="Exact source sentence.", quality="precise", start_char=0, end_char=22))
+    snapshot = SimpleNamespace(evidence_spans=[span], entities=[], assertions=[], relations=[])
+    seen = []
+
+    def respond(_relay, operation, _instruction, context, _schema):
+        seen.append((operation, context))
+        return {"sections": [{"title": "Meaning", "text": "Explained from the source.",
+                             "citations": [{"evidence_id": span.id, "quote": span.quote}]}]}, []
+
+    monkeypatch.setattr(pipeline, "_product_json", respond)
+    target = {"id": "chapter:1", "type": "source-scope", "title": "Foundations"}
+    sections, _ = pipeline.explain_evidence(snapshot, target, [span.id], SimpleNamespace(model_id="test"))
+    assert sections[0].evidence_ids == [span.id]
+    assert seen[0][0] == "knowledge_explanation" and seen[0][1]["target"] == target
+    with pytest.raises(pipeline.SnapshotBuildError, match="known evidence"):
+        pipeline.explain_evidence(snapshot, target, ["foreign"], None)
+
+
+def test_native_explanation_synthesizes_multiple_evidence_batches_with_its_target(monkeypatch):
+    from semantica import project_snapshot_pipeline as pipeline
+    from semantica.project_snapshot_schema import EvidenceSpan, DocumentLocator, ReportSection
+
+    spans = {ref: EvidenceSpan(id=ref, representation_id="representation:1", quote=f"Source {ref}",
+        locator=DocumentLocator(representation_id="representation:1", origin="native",
+                                quote=f"Source {ref}", quality="precise", start_char=index * 20,
+                                end_char=index * 20 + len(f"Source {ref}"))) for index, ref in enumerate(("evidence:1", "evidence:2"))}
+    target = {"id": "chapter:1", "type": "source-scope", "title": "Topic"}
+    monkeypatch.setattr(pipeline, "_explanation_contexts", lambda context: [
+        {**context, "evidence": [item]} for item in context["evidence"]])
+    monkeypatch.setattr(pipeline, "_product_json", lambda _relay, _operation, _instruction, batch, _schema: (
+        {"sections": [{"title": "Source", "text": "Explained", "citations": [
+            {"evidence_id": batch["evidence"][0]["id"], "quote": batch["evidence"][0]["quote"]}]}]}, []))
+    seen = []
+
+    def synthesize(actual_target, sections, _relay):
+        seen.append(actual_target)
+        return [ReportSection(title="Combined", text="Synthesis", evidence_ids=["evidence:1"])], []
+
+    monkeypatch.setattr(pipeline, "_synthesize_sections", synthesize)
+    sections, _ = pipeline._grounded_explanation({"target": target, "entities": [], "assertions": [],
+        "relations": [], "evidence": [{"id": span.id, "quote": span.quote} for span in spans.values()]}, spans, None)
+    assert seen == [target]
+    assert len(sections) == 3
+
+
+def test_explanation_reads_verified_semantic_graph_not_project_snapshot(tmp_path):
+    from semantica.semantic_worker import EvidenceExplanationRequest, _verified_snapshot
+    from tests.test_project_snapshot_contract import _snapshot_payload
+
+    graph = _snapshot_payload()
+    graph["protocol"] = "semantica.semantic-graph.v1"
+    graph["artifact_revision"] = graph.pop("snapshot_id")
+    graph.pop("project_id")
+    graph.update(input_revision=H1, release_digest=H2, schema_digest=H3)
+    raw = json.dumps(graph).encode()
+    path = tmp_path / "semantic-graph.json"
+    path.write_bytes(raw)
+    request = EvidenceExplanationRequest.model_validate({"snapshotPath": str(path),
+        "snapshotDigest": "sha256:" + __import__("hashlib").sha256(raw).hexdigest(),
+        "snapshotId": "snapshot:one", "projectId": "project-1", "outputDir": str(tmp_path),
+        "target": {"id": "source:1", "type": "source-scope", "title": "Topic"}, "evidenceIds": ["ev-1"],
+        "relay": {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/chat/completions",
+                  "capability": "knowledge.snapshot.generate", "contextWindowTokens": 4096,
+                  "maxOutputTokens": 1024, "modelId": "model-1", "receipts": "required"}})
+    assert _verified_snapshot(request).id == "snapshot:one"
+
+
+def test_semantic_worker_explains_verified_graph_and_returns_digest_and_receipt(tmp_path, monkeypatch):
+    import hashlib
+    from semantica import semantic_worker
+    from semantica.project_snapshot_schema import ReportSection, ModelReceipt
+    from tests.test_project_snapshot_contract import _snapshot_payload
+
+    graph = _snapshot_payload()
+    graph["protocol"] = "semantica.semantic-graph.v1"
+    graph["artifact_revision"] = graph.pop("snapshot_id")
+    graph.pop("project_id")
+    graph.update(input_revision=H1, release_digest=H2, schema_digest=H3)
+    raw = json.dumps(graph).encode()
+    path = tmp_path / "semantic-graph.json"
+    path.write_bytes(raw)
+    digest = "sha256:" + hashlib.sha256(raw).hexdigest()
+    receipt = ModelReceipt.model_validate(_snapshot_payload()["model_receipts"][0])
+    seen = []
+
+    def explain(snapshot, target, evidence_ids, relay):
+        seen.append((snapshot.id, target, evidence_ids, relay.model_id))
+        return [ReportSection(title="Meaning", text="Grounded explanation.", evidence_ids=["ev-1"])], [receipt]
+
+    monkeypatch.setattr(semantic_worker, "explain_evidence", explain)
+    params = {"snapshotPath": str(path), "snapshotDigest": digest, "snapshotId": "snapshot:one",
+              "projectId": "project-1", "outputDir": str(tmp_path),
+              "target": {"id": "section:1", "type": "source-scope", "title": "First section"},
+              "evidenceIds": ["ev-1"],
+              "relay": {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/chat/completions",
+                        "capability": "knowledge.snapshot.generate", "contextWindowTokens": 4096,
+                        "maxOutputTokens": 1024, "modelId": "model-1", "receipts": "required"}}
+    request = {"protocol": "semantica.semantic-worker.v1", "id": "explain-1", "method": "explain_evidence", "params": params}
+    response = semantic_worker.handle_request(request)
+    assert response["ok"] is True
+    result = response["result"]
+    artifact = json.loads((tmp_path / "evidence-explanation.json").read_text())
+    assert seen == [("snapshot:one", params["target"], ["ev-1"], "model-1")]
+    assert artifact["snapshotDigest"] == digest and artifact["sections"][0]["evidence_ids"] == ["ev-1"]
+    assert artifact["modelReceipts"][0]["id"] == receipt.id
+    assert result["sectionCount"] == result["receiptCount"] == 1
+    assert result["digest"] == "sha256:" + hashlib.sha256((tmp_path / "evidence-explanation.json").read_bytes()).hexdigest()
+
+    (tmp_path / "evidence-explanation.json").unlink()
+    with pytest.raises(semantic_worker.SnapshotBuildError, match="digest"):
+        semantic_worker.handle_request({**request, "params": {**params, "snapshotDigest": H1}})
+    assert not (tmp_path / "evidence-explanation.json").exists()
+
+
 def test_unique_quote_ignores_model_position_but_duplicate_requires_occurrence():
     from semantica.project_snapshot_pipeline import _find_occurrence, SnapshotBuildError
 
@@ -450,7 +571,7 @@ def test_worker_builds_complete_snapshot_from_real_text_file(tmp_path):
     assert snapshot.identity_decisions == []
     assert len(snapshot.communities) == len(snapshot.entities)
     assert len(snapshot.topics) == len(snapshot.communities)
-    assert len(snapshot.reports) == len(snapshot.communities)
+    assert "reports" not in json.loads(snapshot_path.read_text())
     assert snapshot.retrieval_manifests[0].community_ids
     assert snapshot.change_delta.added_ids
     assert snapshot.evidence_spans
@@ -657,18 +778,17 @@ def test_model_recipe_uses_bifrost_chat_and_embedding_and_records_receipts(tmp_p
         server.server_close()
 
     assert response["ok"] is True
-    assert len(response["result"]["relayReceipts"]["model"]) == 8
+    assert len(response["result"]["relayReceipts"]["model"]) >= 2
     assert len(response["result"]["relayReceipts"]["embedding"]) == 1
     snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "semantic-graph")
     snapshot = ProjectSnapshot.model_validate_json(snapshot_path.read_bytes())
-    assert len(snapshot.model_receipts) == 9
+    assert len(snapshot.model_receipts) == len(response["result"]["relayReceipts"]["model"]) + 1
     extraction_receipts = [receipt for receipt in snapshot.model_receipts if receipt.operation == "structured_extraction"]
     assert {receipt.metadata["extraction_stage"] for receipt in extraction_receipts} == {"entities", "relations"}
     assert snapshot.source_classifications[0].assignments[0].item_id == "history"
     assert snapshot.classification_profile.id == "profile:test"
     assert "classification:source-1" in snapshot.change_delta.added_ids
-    assert {report.report_type for report in snapshot.reports} == {"overview", "concept", "topic", "community"}
-    assert all(report.sections and report.evidence_ids and len(report.model_receipt_ids) == 1 for report in snapshot.reports)
+    assert "reports" not in json.loads(snapshot_path.read_text())
     assert all(receipt.input_digest.startswith("sha256:") and receipt.output_digest.startswith("sha256:") for receipt in snapshot.model_receipts)
     assert snapshot.relations[0].status == "candidate"
     assert snapshot.relations[0].evidence_ids
@@ -703,7 +823,7 @@ def test_model_recipe_fails_closed_without_relay_token(tmp_path):
     assert "authorization" in response["error"]["message"]
 
 
-def test_incremental_delta_ignores_audit_time_and_tracks_only_dependent_reports(tmp_path):
+def test_incremental_delta_ignores_audit_time_and_tracks_changed_knowledge(tmp_path):
     first = tmp_path / "first.txt"
     second = tmp_path / "second.txt"
     first.write_text("Ada Lovelace studied mathematics.", encoding="utf-8")
@@ -712,32 +832,29 @@ def test_incremental_delta_ignores_audit_time_and_tracks_only_dependent_reports(
     request["sources"].append({"filePath": str(second), "materialRevision": source_content_revision(second), "mimeType": "text/plain", "name": second.name, "sourceId": "source-2"})
     request["parsedSources"].append(_parsed_ref(request, request["sources"][-1]))
     initial = build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(request))
-    assert all(report.metadata.get("source_ids") for report in initial["snapshot"].reports)
-    assert any(report.metadata["source_ids"] == ["source-1"] for report in initial["snapshot"].reports)
     request["baseSnapshot"] = {"snapshotId": initial["snapshot"].id, "snapshotPath": str(initial["snapshot_path"]), "artifactDigest": initial["snapshot_digest"], "schemaDigest": H3}
     request["inputRevision"] = H2
     request["outputDir"] = str(tmp_path / "identical-build")
     identical = build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(request))["snapshot"]
     assert identical.change_delta.updated_ids == []
-    assert identical.change_delta.affected_report_ids == []
-    assert all(report.evidence_ids for report in identical.reports)
+    assert identical.change_delta.added_ids == []
 
     first.write_text("Grace Hopper studied mathematics.", encoding="utf-8")
     request["sources"][0]["materialRevision"] = source_content_revision(first)
     request["outputDir"] = str(tmp_path / "changed-build")
     request["parsedSources"][0] = _parsed_ref(request, request["sources"][0])
     updated = build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(request))["snapshot"]
-    unchanged_reports = {report.id for report in initial["snapshot"].reports if "Charles Babbage" in report.title}
-    assert unchanged_reports
+    unchanged_entities = {entity.id for entity in initial["snapshot"].entities if "Charles Babbage" in entity.canonical_name}
+    assert unchanged_entities
     changed_representations = {item.id for snapshot in [initial["snapshot"], updated] for item in snapshot.document_representations if item.source_id == "source-1"}
     assert set(updated.change_delta.changed_representation_ids) == changed_representations
     assert len(changed_representations) == 2
-    assert not unchanged_reports.intersection(updated.change_delta.affected_report_ids)
-    removed_reports = {report.id for report in initial["snapshot"].reports if "Ada Lovelace" in report.title}
-    assert removed_reports.issubset(set(updated.change_delta.affected_report_ids))
+    assert not unchanged_entities.intersection(updated.change_delta.updated_ids + updated.change_delta.retracted_ids)
+    removed_entities = {entity.id for entity in initial["snapshot"].entities if "Ada Lovelace" in entity.canonical_name}
+    assert removed_entities.issubset(set(updated.change_delta.retracted_ids))
 
 
-def test_community_and_topic_deltas_affect_only_their_reports(tmp_path):
+def test_community_and_topic_deltas_update_knowledge_without_embedded_reports(tmp_path):
     from semantica.project_snapshot_pipeline import _change_delta
 
     source = tmp_path / "source.txt"
@@ -747,14 +864,10 @@ def test_community_and_topic_deltas_affect_only_their_reports(tmp_path):
     revised.communities[0].title += " revised"
     revised.topics[0].title += " revised"
     delta = _change_delta(base, "next-snapshot", revised.document_representations, revised.entities,
-        revised.assertions, revised.relations, revised.communities, revised.topics, revised.reports,
+        revised.assertions, revised.relations, revised.communities, revised.topics,
         [item.id for item in revised.retrieval_manifests], revised.evidence_spans, revised.source_classifications)
     assert {revised.communities[0].id, revised.topics[0].id}.issubset(delta.updated_ids)
-    affected = {report.id for report in revised.reports if report.community_id == revised.communities[0].id
-        or report.topic_id == revised.topics[0].id
-        or set(report.metadata.get("depends_on", [])).intersection([revised.communities[0].id, revised.topics[0].id])}
-    assert affected
-    assert set(delta.affected_report_ids) == affected
+    assert not any(value.startswith("report:") for value in [*delta.added_ids, *delta.updated_ids, *delta.retracted_ids])
 
 
 def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, monkeypatch):
@@ -827,13 +940,12 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
     identity_receipt = next(receipt for receipt in snapshot.model_receipts if receipt.operation == "identity_resolution")
     assert identity_receipt.id in response["result"]["relayReceipts"]["model"]
     assert all(decision.metadata["model_receipt_id"] == identity_receipt.id for decision in snapshot.identity_decisions)
-    initial_explanations = operations.count("knowledge_explanation")
+    assert operations.count("knowledge_explanation") == 0
     request["params"]["baseSnapshot"] = {"snapshotId": snapshot.id, "snapshotPath": str(snapshot_path), "artifactDigest": next(item["digest"] for item in response["result"]["artifacts"] if item["kind"] == "semantic-graph"), "schemaDigest": H3}
     request["params"]["outputDir"] = str(tmp_path / "repeat")
     repeated = build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(request["params"]))["snapshot"]
-    assert operations.count("knowledge_explanation") == initial_explanations
-    assert repeated.change_delta.affected_report_ids == []
-    assert [report.model_dump() for report in repeated.reports] == [report.model_dump() for report in snapshot.reports]
+    assert operations.count("knowledge_explanation") == 0
+    assert repeated.change_delta.updated_ids == []
     canonical_ids = {entity.id for entity in snapshot.entities}
     assert {relation.source_entity_id for relation in snapshot.relations}.issubset(canonical_ids)
     assert {relation.target_entity_id for relation in snapshot.relations}.issubset(canonical_ids)

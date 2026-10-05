@@ -9,11 +9,16 @@ from __future__ import annotations
 import json
 import os
 import sys
+from hashlib import sha256
+from pathlib import Path
 from typing import Any, Callable, Dict, Optional, TextIO
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .project_snapshot_pipeline import SnapshotBuildError, build_semantic_artifacts, parse_source_artifact
+from .project_snapshot_pipeline import (
+    SnapshotBuildError, _explanation_reports, _report_support_sources, explain_evidence,
+    build_semantic_artifacts, parse_source_artifact,
+)
 from .project_snapshot_schema import (
     ParseSourceRequest,
     ProjectSnapshot,
@@ -24,6 +29,7 @@ from .project_snapshot_schema import (
     project_snapshot_json_schema,
 )
 from .semantic_extract.schema import ExtractionSpecification
+from .project_snapshot_schema import RelayRef
 
 PROTOCOL = "semantica.semantic-worker.v1"
 METHOD = "build_semantic_artifacts"
@@ -45,6 +51,99 @@ class SemanticWorkerRequest(BaseModel):
     def validate_protocol(self) -> None:
         if self.protocol != PROTOCOL:
             raise ValueError(f"unsupported semantic worker protocol: {self.protocol}")
+
+
+class ReadingReportsRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+    snapshot_path: str = Field(alias="snapshotPath")
+    snapshot_digest: str = Field(alias="snapshotDigest")
+    snapshot_id: str = Field(alias="snapshotId")
+    project_id: str = Field(alias="projectId")
+    output_dir: str = Field(alias="outputDir")
+    relay: RelayRef
+
+
+class EvidenceExplanationRequest(ReadingReportsRequest):
+    target: Dict[str, str]
+    evidence_ids: list[str] = Field(alias="evidenceIds", min_length=1)
+
+
+def _verified_snapshot(request: ReadingReportsRequest) -> ProjectSnapshot:
+    path = Path(request.snapshot_path)
+    if not path.is_absolute() or not path.is_file():
+        raise SnapshotBuildError("explanation requires a local snapshot file")
+    raw = path.read_bytes()
+    if f"sha256:{sha256(raw).hexdigest()}" != request.snapshot_digest:
+        raise SnapshotBuildError("explanation snapshot digest does not match")
+    document = json.loads(raw)
+    if document.get("protocol") != "semantica.semantic-graph.v1":
+        raise SnapshotBuildError("explanation requires a semantic graph artifact")
+    document["protocol"] = "semantica.project-snapshot.v1"
+    document["snapshot_id"] = document.pop("artifact_revision")
+    document["project_id"] = request.project_id
+    for field in ("input_revision", "release_digest", "schema_digest"):
+        document.pop(field, None)
+    snapshot = ProjectSnapshot.model_validate(document)
+    if snapshot.id != request.snapshot_id or snapshot.project_id != request.project_id:
+        raise SnapshotBuildError("explanation snapshot identity does not match")
+    if request.relay.capability != "knowledge.snapshot.generate":
+        raise SnapshotBuildError("explanation requires the model generation relay")
+    return snapshot
+
+
+def _explain_evidence(params: Dict[str, Any], progress: Optional[Callable[[Dict[str, Any]], None]]) -> Dict[str, Any]:
+    request = EvidenceExplanationRequest.model_validate(params)
+    if set(request.target) != {"id", "type", "title"} or not all(request.target.values()):
+        raise SnapshotBuildError("explanation target requires id, type and title")
+    snapshot = _verified_snapshot(request)
+    if progress:
+        progress({"stage": "explaining_evidence", "percent": 1, "detail": "Explaining selected evidence"})
+    sections, receipts = explain_evidence(snapshot, request.target, request.evidence_ids, request.relay)
+    payload = {"protocol": "semantica.evidence-explanation.v1", "snapshotId": snapshot.id,
+               "snapshotDigest": request.snapshot_digest, "target": request.target,
+               "sections": [item.model_dump(mode="json") for item in sections],
+               "evidenceIds": sorted({ref for section in sections for ref in section.evidence_ids}),
+               "modelReceipts": [item.model_dump(mode="json", by_alias=True) for item in receipts]}
+    output_dir = Path(request.output_dir)
+    if not output_dir.is_absolute() or not output_dir.is_dir():
+        raise SnapshotBuildError("explanation output directory must exist")
+    output = output_dir / "evidence-explanation.json"
+    data = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    output.write_bytes(data)
+    if progress:
+        progress({"stage": "explaining_evidence", "percent": 100, "detail": "Evidence explanation completed"})
+    return {"path": str(output), "digest": f"sha256:{sha256(data).hexdigest()}",
+            "sectionCount": len(sections), "receiptCount": len(receipts)}
+
+
+def _reading_reports(params: Dict[str, Any], progress: Optional[Callable[[Dict[str, Any]], None]]) -> Dict[str, Any]:
+    request = ReadingReportsRequest.model_validate(params)
+    snapshot = _verified_snapshot(request)
+    if progress:
+        progress({"stage": "reading_reports", "percent": 1, "detail": "Generating reading reports"})
+    passages = [span for span in snapshot.evidence_spans if span.metadata.get("role") == "source-passage"]
+    source_builds = [{"passages": [span for span in passages if span.representation_id == representation.id]}
+                     for representation in snapshot.document_representations]
+    reports, receipts = _explanation_reports(snapshot.project_id, source_builds, snapshot.entities,
+        snapshot.assertions, snapshot.relations, snapshot.communities, snapshot.topics,
+        snapshot.evidence_spans, request.relay)
+    _report_support_sources(snapshot.document_representations, snapshot.evidence_spans,
+        snapshot.entities, snapshot.assertions, snapshot.relations, snapshot.communities,
+        snapshot.topics, reports)
+    if progress:
+        progress({"stage": "reading_reports", "percent": 100, "detail": f"Generated {len(reports)} reading reports"})
+    payload = {"protocol": "semantica.reading-reports.v1", "snapshotId": snapshot.id,
+            "snapshotDigest": request.snapshot_digest,
+            "reports": [report.model_dump(mode="json", by_alias=True) for report in reports],
+            "modelReceipts": [receipt.model_dump(mode="json", by_alias=True) for receipt in receipts]}
+    output_dir = Path(request.output_dir)
+    if not output_dir.is_absolute() or not output_dir.is_dir():
+        raise SnapshotBuildError("reading report output directory must exist")
+    output = output_dir / "reading-reports.json"
+    data = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
+    output.write_bytes(data)
+    return {"path": str(output), "digest": f"sha256:{sha256(data).hexdigest()}",
+            "reportCount": len(reports), "receiptCount": len(receipts)}
 
 
 def _relay_receipts(receipts: list[Any]) -> Dict[str, list[str]]:
@@ -83,6 +182,10 @@ def handle_request(raw: Dict[str, Any], progress: Optional[Callable[[Dict[str, A
         return _response(request.id, True, result={"valid": True, "digest": spec.digest})
     if request.method == "parse_source":
         return _response(request.id, True, result=parse_source_artifact(ParseSourceRequest.model_validate(request.params)))
+    if request.method == "generate_reading_reports":
+        return _response(request.id, True, result=_reading_reports(request.params, progress))
+    if request.method == "explain_evidence":
+        return _response(request.id, True, result=_explain_evidence(request.params, progress))
     if request.method != METHOD:
         raise ValueError(f"unsupported semantic worker method: {request.method}")
     build_request = ProjectSnapshotBuildRequest.model_validate(request.params)
