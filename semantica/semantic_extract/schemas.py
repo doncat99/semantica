@@ -1,5 +1,5 @@
 from typing import List, Optional
-from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
+from pydantic import BaseModel, Field, SkipValidation, field_validator, model_validator, ConfigDict
 
 class EntityOut(BaseModel):
     """Canonical schema for entity extraction output."""
@@ -152,7 +152,9 @@ class GroundedRelationOut(RelationOut):
 
 class GroundedRelationsResponse(BaseModel):
     """Strict source-grounded relation extraction response."""
-    relations: List[GroundedRelationOut] = Field(default_factory=list)
+    relations: List[SkipValidation[GroundedRelationOut]] = Field(
+        ..., description="Candidates validated individually against GroundedRelationOut"
+    )
 
 
 class TripletsResponse(BaseModel):

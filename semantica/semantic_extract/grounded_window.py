@@ -50,7 +50,10 @@ def extract_grounded_window(
                 provider_instance=current_provider, grounding="strict",
                 grounding_retries=1, extraction_spec=specification,
                 confidence_threshold=0,
+                rejection_receipts=getattr(current_provider, "rejections", None),
             )
+            if getattr(current_provider, "rejections", None) and getattr(current_provider, "receipts", None):
+                current_provider.receipts[-1].metadata["rejected_candidates"] = current_provider.rejections
             return entities, relations, current_provider
         except ProcessingError as exc:
             last_error = exc

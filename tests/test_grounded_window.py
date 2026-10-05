@@ -62,3 +62,23 @@ def test_grounded_window_recreates_provider_for_each_retry(monkeypatch):
     assert result[0:2] == ([], [])
     assert attempts[0] is not attempts[1]
     assert attempts[1] is providers[0]
+
+
+def test_grounded_window_records_candidate_rejections_on_model_receipt(monkeypatch):
+    from types import SimpleNamespace
+
+    provider = SimpleNamespace(rejections=[], receipts=[SimpleNamespace(metadata={})])
+    monkeypatch.setattr(grounded_window, "extract_entities_llm", lambda *_args, **_kwargs: [])
+
+    def relations(_text, _entities, **kwargs):
+        kwargs["rejection_receipts"].append({"candidate_index": 0, "reason": "ungrounded condition"})
+        return []
+
+    monkeypatch.setattr(grounded_window, "extract_relations_llm", relations)
+    _, _, actual_provider = grounded_window.extract_grounded_window(
+        "source text", model="model-a", provider_instance=provider,
+    )
+
+    assert actual_provider.receipts[-1].metadata["rejected_candidates"] == [
+        {"candidate_index": 0, "reason": "ungrounded condition"},
+    ]

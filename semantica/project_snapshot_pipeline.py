@@ -491,6 +491,7 @@ class _ProjectModelProvider(BaseProvider):
         self.relay = relay
         self.operation = operation
         self.receipts: list[ModelReceipt] = []
+        self.rejections: list[dict[str, Any]] = []
         self.last_checkpoint_entry = None
 
     def generate(self, prompt: str, **kwargs) -> str:
@@ -532,17 +533,6 @@ class _ProjectModelProvider(BaseProvider):
 
 def _project_model_provider(relay: Any, operation: str = "structured_extraction") -> _ProjectModelProvider:
     return _ProjectModelProvider(relay, operation)
-
-
-def _invalid_fact_qualifiers(qualifiers: Any, quote: Any) -> list[str]:
-    if not isinstance(qualifiers, dict):
-        return ["qualifiers"]
-    invalid = [key for key in qualifiers if key not in {"polarity", "condition", "time", "unit", "value"}]
-    if qualifiers.get("polarity") not in {"positive", "negative"}:
-        invalid.append("polarity")
-    invalid.extend(key for key, value in qualifiers.items() if key != "polarity" and
-                   (not isinstance(value, str) or not value.strip() or not isinstance(quote, str) or value not in quote))
-    return invalid
 
 
 def _embed_texts(texts: list[str], relay: Any) -> tuple[list[list[float]], ModelReceipt]:
@@ -1547,8 +1537,6 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
                 metadata=source_metadata,
             )
             qualifiers = item.get("qualifiers")
-            if _invalid_fact_qualifiers(qualifiers, canonical_quote):
-                raise SnapshotBuildError("fact qualifiers require polarity and exact source-grounded values")
             predicate = " ".join(predicate.split()).casefold()
             key = stable_digest([source.source_id, subject_entity.id, predicate, object_entity.id, qualifiers]).split(":")[1][:32]
             relation_id, assertion_id = "relation:" + key, "assertion:" + key

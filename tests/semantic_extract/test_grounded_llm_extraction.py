@@ -7,6 +7,7 @@ from semantica.semantic_extract.methods import extract_entities_llm, extract_rel
 from semantica.semantic_extract.schemas import (
     EntitiesResponse,
     EntityOut,
+    GroundedRelationsResponse,
     RelationOut,
     RelationsResponse,
 )
@@ -271,7 +272,61 @@ def test_grounded_relation_validates_qualifiers_against_canonical_source_slice()
         grounding_retries=0,
     )
 
-    assert relations == []
+    assert len(relations) == 1
+    assert relations[0].context == text
+    assert relations[0].metadata["qualifiers"]["condition"] == "financially  material"
+
+
+def test_grounded_relation_records_rejected_candidate_without_losing_valid_fact():
+    text = "Reflective roofs do not shade pedestrians."
+    entities = extract_entities_llm(
+        text, provider="bifrost", provider_instance=TypedProvider(EntitiesResponse(entities=[
+            EntityOut(text="Reflective roofs", label="measure", occurrence=0),
+            EntityOut(text="pedestrians", label="population", occurrence=0),
+        ])), grounding="strict",
+    )
+    rejected = []
+    provider = TypedProvider(RelationsResponse(relations=[
+        RelationOut(subject="Reflective roofs", subject_id="mention:0", predicate="shades",
+                    object="pedestrians", object_id="mention:1", evidence=text, evidence_occurrence=0,
+                    qualifiers={"polarity": "negative", "condition": "in summer"}),
+        RelationOut(subject="Reflective roofs", subject_id="mention:0", predicate="shades",
+                    object="pedestrians", object_id="mention:1", evidence=text, evidence_occurrence=0,
+                    qualifiers={"polarity": "negative"}),
+    ]))
+    relations = extract_relations_llm(text, entities, provider="bifrost", provider_instance=provider,
+                                      grounding="strict", grounding_retries=0, rejection_receipts=rejected)
+
+    assert len(relations) == 1
+    assert rejected == [{"candidate_index": 0, "reason": "grounded relation qualifier condition is not an exact evidence substring"}]
+
+
+def test_grounded_relation_isolates_candidate_missing_required_field_after_typed_validation():
+    assert "qualifiers" in GroundedRelationsResponse.model_json_schema()["properties"]["relations"]["items"]["required"]
+    text = "Reflective roofs do not shade pedestrians."
+    entities = extract_entities_llm(
+        text, provider="bifrost", provider_instance=TypedProvider(EntitiesResponse(entities=[
+            EntityOut(text="Reflective roofs", label="measure", occurrence=0),
+            EntityOut(text="pedestrians", label="population", occurrence=0),
+        ])), grounding="strict",
+    )
+
+    class ValidatingProvider(TypedProvider):
+        def generate_typed(self, prompt, schema, **kwargs):
+            return schema.model_validate(self.responses.pop(0))
+
+    candidate = {"subject": "Reflective roofs", "subject_id": "mention:0", "predicate": "shades",
+                 "object": "pedestrians", "object_id": "mention:1", "evidence": text,
+                 "evidence_occurrence": 0, "confidence": 0.9, "qualifiers": {"polarity": "negative"}}
+    provider = ValidatingProvider({"relations": [{key: value for key, value in candidate.items() if key != "qualifiers"}, candidate]})
+    rejected = []
+
+    relations = extract_relations_llm(text, entities, provider="bifrost", provider_instance=provider,
+                                      grounding="strict", grounding_retries=0, rejection_receipts=rejected)
+
+    assert len(relations) == 1
+    assert rejected[0]["candidate_index"] == 0
+    assert "qualifiers" in rejected[0]["reason"]
 
 
 def test_repeated_grounded_quote_retry_includes_range_and_previous_json():

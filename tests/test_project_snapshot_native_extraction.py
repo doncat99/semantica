@@ -24,33 +24,22 @@ def test_project_snapshot_extraction_uses_canonical_semantica_extractors(monkeyp
             output_digest="sha256:" + "2" * 64,
         )]
 
-    class NER:
-        def __init__(self, **kwargs):
-            calls.append(("ner-init", kwargs))
-
-        def extract(self, text):
-            calls.append(("ner", text))
-            return [
-                Entity("Reflective roofs", "measure", 0, 16, 0.9, {"mention_id": "mention:0", "span_occurrence": 0}),
-                Entity("pedestrians", "population", 30, 41, 0.9, {"mention_id": "mention:1", "span_occurrence": 0}),
-            ]
-
-    class Relations:
-        def __init__(self, **kwargs):
-            calls.append(("relation-init", kwargs))
-
-        def extract(self, text, entities):
-            calls.append(("relation", text, entities))
-            return [Relation(
-                entities[0], "shades", entities[1], 0.9,
-                "Reflective roofs do not shade pedestrians.",
-                {"qualifiers": {"polarity": "negative"}, "evidence_start": 0, "evidence_end": 43,
-                 "evidence_occurrence": 0, "subject_id": "mention:0", "object_id": "mention:1"},
-            )]
+    def grounded(text, **kwargs):
+        calls.append(("grounded", text, kwargs))
+        entities = [
+            Entity("Reflective roofs", "measure", 0, 16, 0.9, {"mention_id": "mention:0", "span_occurrence": 0}),
+            Entity("pedestrians", "population", 30, 41, 0.9, {"mention_id": "mention:1", "span_occurrence": 0}),
+        ]
+        relations = [Relation(
+            entities[0], "shades", entities[1], 0.9,
+            "Reflective roofs do not shade pedestrians.",
+            {"qualifiers": {"polarity": "negative"}, "evidence_start": 0, "evidence_end": 43,
+             "evidence_occurrence": 0, "subject_id": "mention:0", "object_id": "mention:1"},
+        )]
+        return entities, relations, Provider()
 
     monkeypatch.setattr(project_snapshot_pipeline, "_project_model_provider", lambda _relay: Provider())
-    monkeypatch.setattr(project_snapshot_pipeline, "NERExtractor", NER)
-    monkeypatch.setattr(project_snapshot_pipeline, "RelationExtractor", Relations)
+    monkeypatch.setattr(project_snapshot_pipeline, "extract_grounded_window", grounded)
     monkeypatch.setattr(
         project_snapshot_pipeline,
         "_embed_texts",
@@ -68,9 +57,8 @@ def test_project_snapshot_extraction_uses_canonical_semantica_extractors(monkeyp
         "Reflective roofs do not shade pedestrians.", SimpleNamespace(model_id="model-1"), object()
     )
 
-    assert [name for name, *_ in calls] == ["ner-init", "ner", "relation-init", "relation"]
-    assert "max_tokens" not in calls[0][1]
-    assert "max_tokens" not in calls[2][1]
+    assert [name for name, *_ in calls] == ["grounded"]
+    assert calls[0][2]["extraction_spec"] is None
     assert result["entities"][0]["name"] == "Reflective roofs"
     assert result["relations"][0]["evidence"] == "Reflective roofs do not shade pedestrians."
     assert embeddings == [{"start_char": 0, "end_char": 42, "vector": [0.1, 0.2]}]
@@ -117,17 +105,10 @@ def test_native_extraction_preserves_retryable_relay_failure(monkeypatch):
         retryable=True,
     )
 
-    class NER:
-        def __init__(self, **_kwargs):
-            pass
+    def grounded(_text, **_kwargs):
+        raise ProcessingError("typed extraction failed") from relay_failure
 
-        def extract(self, _text):
-            try:
-                raise relay_failure
-            except SnapshotBuildError as exc:
-                raise ProcessingError("typed extraction failed") from exc
-
-    monkeypatch.setattr(project_snapshot_pipeline, "NERExtractor", NER)
+    monkeypatch.setattr(project_snapshot_pipeline, "extract_grounded_window", grounded)
 
     with pytest.raises(SnapshotBuildError) as failure:
         project_snapshot_pipeline._extract_and_embed(
