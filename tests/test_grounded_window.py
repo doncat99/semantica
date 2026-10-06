@@ -30,6 +30,22 @@ def test_grounded_window_delegates_to_native_extractors(monkeypatch):
     assert calls[1][3]["grounding"] == "strict"
 
 
+def test_grounded_window_with_no_entities_does_not_extract_relations(monkeypatch):
+    class Provider:
+        pass
+
+    provider = Provider()
+    monkeypatch.setattr(grounded_window, "extract_entities_llm", lambda *_args, **_kwargs: [])
+
+    def relations(*_args, **_kwargs):
+        raise AssertionError("relations cannot be extracted without entities")
+
+    monkeypatch.setattr(grounded_window, "extract_relations_llm", relations)
+    assert grounded_window.extract_grounded_window(
+        "source text", model="model-a", provider_instance=provider,
+    ) == ([], [], provider)
+
+
 def test_grounded_window_recreates_provider_for_each_retry(monkeypatch):
     providers = []
     attempts = []
@@ -68,7 +84,7 @@ def test_grounded_window_records_candidate_rejections_on_model_receipt(monkeypat
     from types import SimpleNamespace
 
     provider = SimpleNamespace(rejections=[], receipts=[SimpleNamespace(metadata={})])
-    monkeypatch.setattr(grounded_window, "extract_entities_llm", lambda *_args, **_kwargs: [])
+    monkeypatch.setattr(grounded_window, "extract_entities_llm", lambda *_args, **_kwargs: ["entity"])
 
     def relations(_text, _entities, **kwargs):
         kwargs["rejection_receipts"].append({"candidate_index": 0, "reason": "ungrounded condition"})

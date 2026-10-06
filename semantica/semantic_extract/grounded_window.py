@@ -45,6 +45,8 @@ def extract_grounded_window(
                 provider_instance=current_provider, grounding="strict",
                 grounding_retries=1, extraction_spec=specification,
             )
+            if not entities:
+                return entities, [], current_provider
             relations = extract_relations_llm(
                 text, entities, provider=provider_name, model=model,
                 provider_instance=current_provider, grounding="strict",
