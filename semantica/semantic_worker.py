@@ -15,21 +15,21 @@ from typing import Any, Callable, Dict, Optional, TextIO
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .project_snapshot_pipeline import (
-    SnapshotBuildError, _explanation_reports, _report_support_sources, explain_evidence,
-    build_semantic_artifacts, parse_source_artifact,
+from .semantic_artifact_pipeline import (
+    SemanticArtifactError, _explanation_reports, _report_support_sources, explain_evidence,
+    bind_parsed_source_artifact, build_semantic_artifacts, parse_source_artifact,
 )
-from .project_snapshot_schema import (
+from .semantic_artifact_schema import (
     ParseSourceRequest,
-    ProjectSnapshot,
-    ProjectSnapshotBuildRequest,
+    SemanticArtifact,
+    SemanticArtifactBuildRequest,
     WorkerRequest,
     WorkerResponse,
     build_request_json_schema,
-    project_snapshot_json_schema,
+    semantic_artifact_json_schema,
 )
 from .semantic_extract.schema import ExtractionSpecification
-from .project_snapshot_schema import RelayRef
+from .semantic_artifact_schema import BindParsedSourceRequest, RelayRef
 
 PROTOCOL = "semantica.semantic-worker.v1"
 METHOD = "build_semantic_artifacts"
@@ -40,7 +40,7 @@ MODEL_RECEIPT_OPERATIONS = {
 
 
 class SemanticWorkerRequest(BaseModel):
-    """Transport request for the generic worker; no project-worker rewrite."""
+    """Transport request for the generic semantic worker."""
 
     model_config = ConfigDict(extra="forbid")
     protocol: str
@@ -68,33 +68,36 @@ class EvidenceExplanationRequest(ReadingReportsRequest):
     evidence_ids: list[str] = Field(alias="evidenceIds", min_length=1)
 
 
-def _verified_snapshot(request: ReadingReportsRequest) -> ProjectSnapshot:
+def _verified_snapshot(request: ReadingReportsRequest) -> SemanticArtifact:
     path = Path(request.snapshot_path)
     if not path.is_absolute() or not path.is_file():
-        raise SnapshotBuildError("explanation requires a local snapshot file")
+        raise SemanticArtifactError("explanation requires a local snapshot file")
     raw = path.read_bytes()
     if f"sha256:{sha256(raw).hexdigest()}" != request.snapshot_digest:
-        raise SnapshotBuildError("explanation snapshot digest does not match")
+        raise SemanticArtifactError("explanation snapshot digest does not match")
     document = json.loads(raw)
     if document.get("protocol") != "semantica.semantic-graph.v1":
-        raise SnapshotBuildError("explanation requires a semantic graph artifact")
-    document["protocol"] = "semantica.project-snapshot.v1"
+        raise SemanticArtifactError("explanation requires a semantic graph artifact")
+    # The graph artifact is the transport representation; explanation consumes
+    # the same bytes as a validated semantic-artifact view with explicit
+    # identity fields. This is a format projection, not a second extraction path.
+    document["protocol"] = "semantica.semantic-artifact.v1"
     document["snapshot_id"] = document.pop("artifact_revision")
     document["project_id"] = request.project_id
     for field in ("input_revision", "release_digest", "schema_digest"):
         document.pop(field, None)
-    snapshot = ProjectSnapshot.model_validate(document)
+    snapshot = SemanticArtifact.model_validate(document)
     if snapshot.id != request.snapshot_id or snapshot.project_id != request.project_id:
-        raise SnapshotBuildError("explanation snapshot identity does not match")
+        raise SemanticArtifactError("explanation snapshot identity does not match")
     if request.relay.capability != "knowledge.snapshot.generate":
-        raise SnapshotBuildError("explanation requires the model generation relay")
+        raise SemanticArtifactError("explanation requires the model generation relay")
     return snapshot
 
 
 def _explain_evidence(params: Dict[str, Any], progress: Optional[Callable[[Dict[str, Any]], None]]) -> Dict[str, Any]:
     request = EvidenceExplanationRequest.model_validate(params)
     if set(request.target) != {"id", "type", "title"} or not all(request.target.values()):
-        raise SnapshotBuildError("explanation target requires id, type and title")
+        raise SemanticArtifactError("explanation target requires id, type and title")
     snapshot = _verified_snapshot(request)
     if progress:
         progress({"stage": "explaining_evidence", "percent": 1, "detail": "Explaining selected evidence"})
@@ -106,7 +109,7 @@ def _explain_evidence(params: Dict[str, Any], progress: Optional[Callable[[Dict[
                "modelReceipts": [item.model_dump(mode="json", by_alias=True) for item in receipts]}
     output_dir = Path(request.output_dir)
     if not output_dir.is_absolute() or not output_dir.is_dir():
-        raise SnapshotBuildError("explanation output directory must exist")
+        raise SemanticArtifactError("explanation output directory must exist")
     output = output_dir / "evidence-explanation.json"
     data = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     output.write_bytes(data)
@@ -138,7 +141,7 @@ def _reading_reports(params: Dict[str, Any], progress: Optional[Callable[[Dict[s
             "modelReceipts": [receipt.model_dump(mode="json", by_alias=True) for receipt in receipts]}
     output_dir = Path(request.output_dir)
     if not output_dir.is_absolute() or not output_dir.is_dir():
-        raise SnapshotBuildError("reading report output directory must exist")
+        raise SemanticArtifactError("reading report output directory must exist")
     output = output_dir / "reading-reports.json"
     data = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
     output.write_bytes(data)
@@ -161,7 +164,7 @@ def _response(request_id: Optional[str], ok: bool, *, result: Optional[Dict[str,
     else:
         payload["error"] = {"type": error.__class__.__name__ if error else "Error",
                              "message": str(error) if error else "unknown error"}
-        if isinstance(error, SnapshotBuildError):
+        if isinstance(error, SemanticArtifactError):
             if error.status is not None:
                 payload["error"]["status"] = error.status
             if error.code:
@@ -175,22 +178,27 @@ def handle_request(raw: Dict[str, Any], progress: Optional[Callable[[Dict[str, A
     request = SemanticWorkerRequest.model_validate(raw)
     request.validate_protocol()
     if request.method == "schema":
-        return _response(request.id, True, result={"semantic_graph": project_snapshot_json_schema(),
+        return _response(request.id, True, result={"semantic_graph": semantic_artifact_json_schema(),
                                                     "build_request": build_request_json_schema()})
     if request.method == "validate_extraction_spec":
         spec = ExtractionSpecification.model_validate(request.params)
         return _response(request.id, True, result={"valid": True, "digest": spec.digest})
     if request.method == "parse_source":
         return _response(request.id, True, result=parse_source_artifact(ParseSourceRequest.model_validate(request.params)))
+    if request.method == "bind_parsed_source":
+        return _response(request.id, True, result=bind_parsed_source_artifact(BindParsedSourceRequest.model_validate(request.params)))
+    if request.method == "validate_artifact":
+        snapshot = SemanticArtifact.model_validate(request.params)
+        return _response(request.id, True, result={"valid": True, "snapshot_id": snapshot.id})
     if request.method == "generate_reading_reports":
         return _response(request.id, True, result=_reading_reports(request.params, progress))
     if request.method == "explain_evidence":
         return _response(request.id, True, result=_explain_evidence(request.params, progress))
     if request.method != METHOD:
         raise ValueError(f"unsupported semantic worker method: {request.method}")
-    build_request = ProjectSnapshotBuildRequest.model_validate(request.params)
+    build_request = SemanticArtifactBuildRequest.model_validate(request.params)
     built = build_semantic_artifacts(build_request, progress=progress)
-    snapshot: ProjectSnapshot = built["snapshot"]
+    snapshot: SemanticArtifact = built["snapshot"]
     artifacts = [{
         "digest": item["artifact_digest"],
         "kind": "document-representation",
@@ -251,7 +259,7 @@ def serve(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> int:
                                          "type": "progress", **event}, ensure_ascii=False, sort_keys=True) + "\n")
                 stdout.flush()
             response = handle_request(raw, progress=emit_progress)
-        except (json.JSONDecodeError, ValidationError, ValueError, TypeError, SnapshotBuildError, OSError) as exc:
+        except (json.JSONDecodeError, ValidationError, ValueError, TypeError, SemanticArtifactError, OSError) as exc:
             response = _response(request_id, False, error=exc)
         stdout.write(json.dumps(response, ensure_ascii=False, sort_keys=True) + "\n")
         stdout.flush()

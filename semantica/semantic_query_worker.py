@@ -8,13 +8,13 @@ from typing import Any, Dict, Optional, TextIO
 
 from pydantic import ValidationError
 
-from .project_query import QueryError, query_project_snapshot
-from .project_query_schema import (
-    ProjectQueryRequest,
+from .semantic_query import QueryError, query_semantic_artifact
+from .semantic_query_schema import (
+    SemanticQueryRequest,
     QueryWorkerRequest,
     QueryWorkerResponse,
 )
-from .project_snapshot_schema import project_snapshot_json_schema
+from .semantic_artifact_schema import semantic_artifact_json_schema
 
 
 def _response(request_id: Optional[str], ok: bool, *, result: Optional[Dict[str, Any]] = None, error: Optional[Exception] = None) -> Dict[str, Any]:
@@ -29,14 +29,14 @@ def _response(request_id: Optional[str], ok: bool, *, result: Optional[Dict[str,
 def handle_request(raw: Dict[str, Any]) -> Dict[str, Any]:
     request = QueryWorkerRequest.model_validate(raw)
     if request.method == "schema":
-        return _response(request.id, True, result={"snapshot": project_snapshot_json_schema()})
-    query = ProjectQueryRequest.model_validate({
+        return _response(request.id, True, result={"snapshot": semantic_artifact_json_schema()})
+    query = SemanticQueryRequest.model_validate({
         **request.params,
         "protocol": request.protocol,
         "id": request.id,
         "method": request.method,
     })
-    result = query_project_snapshot(query)
+    result = query_semantic_artifact(query)
     return _response(request.id, True, result=result.model_dump(mode="json", by_alias=True))
 
 

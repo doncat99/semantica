@@ -11,10 +11,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from semantica.project_checkpoint import SnapshotCheckpoint, SnapshotCheckpointError
-from semantica.project_snapshot_pipeline import build_project_snapshot
-from semantica.project_snapshot_schema import ProjectSnapshotBuildRequest
-from tests.test_project_snapshot_pipeline import _request
-from tests.test_project_snapshot_pipeline import _typed_prompt_context
+from semantica.semantic_artifact_pipeline import build_semantic_artifacts
+from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest
+from tests.test_semantic_artifact import _request, _typed_prompt_context
 
 
 def test_worker_process_restart_reuses_durable_parse_and_model_calls(tmp_path):
@@ -74,7 +73,7 @@ def test_worker_process_restart_reuses_durable_parse_and_model_calls(tmp_path):
         return instance
 
     def worker():
-        return subprocess.Popen([sys.executable, "-m", "semantica.project_snapshot_worker"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+        return subprocess.Popen([sys.executable, "-m", "semantica.semantic_worker"], stdin=subprocess.PIPE, stdout=subprocess.PIPE,
             stderr=subprocess.PIPE, text=True, env={**os.environ, "OPENAI_API_KEY": "fixture"})
 
     first_server = server()
@@ -190,7 +189,7 @@ def test_quota_failure_new_run_reuses_completed_extraction_windows(tmp_path, mon
     monkeypatch.setenv("OPENAI_API_KEY", "fixture")
     monkeypatch.setattr("urllib.request.urlopen", relay)
     with pytest.raises(Exception, match="MODEL_GATEWAY_COOLDOWN"):
-        build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(first["params"]))
+        build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(first["params"]))
     checkpoint = tmp_path / "first" / "checkpoint"
     assert len(list(checkpoint.glob("relay-*.json"))) == 2
     first_window_prompts = calls[:2]
@@ -201,7 +200,7 @@ def test_quota_failure_new_run_reuses_completed_extraction_windows(tmp_path, mon
     second["params"]["resumeCheckpointDirs"] = [str(checkpoint)]
     second["params"]["resumeCheckpointModelTokenLimits"] = {str(checkpoint): 393216}
     quota_exhausted = False
-    result = build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(second["params"]))
+    result = build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(second["params"]))
     assert result["snapshot"] is not None
     assert all(calls.count(prompt) == 1 for prompt in first_window_prompts)
     assert len(list((tmp_path / "second" / "checkpoint").glob("relay-*.json"))) >= 4
@@ -211,7 +210,7 @@ def test_checkpoint_rejects_corrupt_payload_and_changed_recipe(tmp_path):
     source = tmp_path / "source.txt"
     source.write_text("A source")
     request = _request(source, tmp_path / "output")
-    checkpoint = SnapshotCheckpoint(ProjectSnapshotBuildRequest.model_validate(request["params"]))
+    checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(request["params"]))
     checkpoint.write("relay", {"id": 1}, {"response": "original"})
     entry = next(checkpoint.root.glob("relay-*.json"))
     payload = json.loads(entry.read_bytes())
@@ -221,20 +220,20 @@ def test_checkpoint_rejects_corrupt_payload_and_changed_recipe(tmp_path):
         checkpoint.read("relay", {"id": 1})
     request["params"]["recipe"]["forceOcrSourceIds"] = ["source-1"]
     with pytest.raises(SnapshotCheckpointError, match="inputs changed"):
-        SnapshotCheckpoint(ProjectSnapshotBuildRequest.model_validate(request["params"]))
+        SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(request["params"]))
 
 
 def test_new_run_reuses_only_matching_verified_relay_entries(tmp_path):
     source = tmp_path / "source.txt"
     source.write_text("A source")
     first = _request(source, tmp_path / "first")
-    first_checkpoint = SnapshotCheckpoint(ProjectSnapshotBuildRequest.model_validate(first["params"]))
+    first_checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(first["params"]))
     first_checkpoint.write("relay", {"operation": "embedding", "input": ["Alpha"]}, {"response": "saved"})
     first_checkpoint.write("document", {"source": "source-1"}, {"document": "old"})
 
     second = _request(source, tmp_path / "second")
     second["params"]["resumeCheckpointDirs"] = [str(first_checkpoint.root)]
-    second_checkpoint = SnapshotCheckpoint(ProjectSnapshotBuildRequest.model_validate(second["params"]))
+    second_checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(second["params"]))
 
     assert second_checkpoint.read("relay", {"operation": "embedding", "input": ["Alpha"]}) == {"response": "saved"}
     assert second_checkpoint.read("relay", {"operation": "embedding", "input": ["Beta"]}) is None
@@ -247,7 +246,7 @@ def test_completed_model_response_survives_lower_output_limit(tmp_path):
     source.write_text("A source", encoding="utf-8")
     first = _request(source, tmp_path / "first", recipe="model")
     first["params"]["relays"]["model"]["maxOutputTokens"] = 393216
-    first_checkpoint = SnapshotCheckpoint(ProjectSnapshotBuildRequest.model_validate(first["params"]))
+    first_checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(first["params"]))
     key = {"operation": "structured_extraction", "bindingId": "default", "modelId": "model-1",
            "payload": {"model": "model-1", "messages": [{"role": "user", "content": "Extract entities"}],
                        "max_tokens": 393216}}
@@ -258,7 +257,7 @@ def test_completed_model_response_survives_lower_output_limit(tmp_path):
     second["params"]["relays"]["model"]["maxOutputTokens"] = 32768
     second["params"]["resumeCheckpointDirs"] = [str(first_checkpoint.root)]
     second["params"]["resumeCheckpointModelTokenLimits"] = {str(first_checkpoint.root): 393216}
-    second_checkpoint = SnapshotCheckpoint(ProjectSnapshotBuildRequest.model_validate(second["params"]))
+    second_checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(second["params"]))
     current_key = {**key, "payload": {**key["payload"], "max_tokens": 32768}}
     assert second_checkpoint.read("relay", current_key) is None
     assert second_checkpoint.read_with_lower_model_limit(current_key) == saved
@@ -279,7 +278,7 @@ def test_new_run_skips_semantically_rejected_relay_payload(tmp_path):
     source = tmp_path / "source.txt"
     source.write_text("A source")
     first = _request(source, tmp_path / "first")
-    first_checkpoint = SnapshotCheckpoint(ProjectSnapshotBuildRequest.model_validate(first["params"]))
+    first_checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(first["params"]))
     key = {"operation": "structured_extraction", "input": "Alpha"}
     rejected = {"response": "invalid", "receipt": {"id": "receipt:invalid"}}
     first_checkpoint.write("relay", key, rejected)
@@ -287,6 +286,6 @@ def test_new_run_skips_semantically_rejected_relay_payload(tmp_path):
 
     second = _request(source, tmp_path / "second")
     second["params"]["resumeCheckpointDirs"] = [str(first_checkpoint.root)]
-    second_checkpoint = SnapshotCheckpoint(ProjectSnapshotBuildRequest.model_validate(second["params"]))
+    second_checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(second["params"]))
 
     assert second_checkpoint.read("relay", key) is None

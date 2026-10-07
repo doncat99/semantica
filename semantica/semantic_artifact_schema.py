@@ -1,4 +1,4 @@
-"""Semantica-owned project snapshot and worker protocol schemas."""
+"""Semantica-owned semantic artifact and worker protocol schemas."""
 
 from __future__ import annotations
 
@@ -13,8 +13,8 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from .semantic_extract.schema import ExtractionSpecification
 
-SNAPSHOT_PROTOCOL = "semantica.project-snapshot.v1"
-WORKER_PROTOCOL = "semantica.project-worker.v1"
+ARTIFACT_PROTOCOL = "semantica.semantic-artifact.v1"
+WORKER_PROTOCOL = "semantica.semantic-worker.v1"
 SHA256_RE = re.compile(r"^(sha256:)?[0-9a-f]{64}$")
 MATERIAL_REVISION_PATTERN = r"^b3-[0-9a-f]{64}$"
 ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{1,127}$")
@@ -391,8 +391,8 @@ class ArtifactManifest(KernelModel, DigestModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
-class ProjectSnapshot(KernelModel):
-    protocol: Literal[SNAPSHOT_PROTOCOL] = SNAPSHOT_PROTOCOL
+class SemanticArtifact(KernelModel):
+    protocol: Literal[ARTIFACT_PROTOCOL] = ARTIFACT_PROTOCOL
     snapshot_version: int = Field(default=1, ge=1)
     id: str = Field(alias="snapshot_id")
     project_id: str
@@ -421,7 +421,7 @@ class ProjectSnapshot(KernelModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
     @model_validator(mode="after")
-    def validate_references(self) -> "ProjectSnapshot":
+    def validate_references(self) -> "SemanticArtifact":
         if bool(self.extraction_spec) != bool(self.lineage.extraction_spec_digest):
             raise ValueError("snapshot extraction specification and lineage digest must appear together")
         if self.extraction_spec and self.extraction_spec.digest != self.lineage.extraction_spec_digest:
@@ -795,7 +795,7 @@ class ParsedSourceRef(DigestModel):
         return value
 
 
-class ProjectSnapshotBuildRequest(DigestModel):
+class SemanticArtifactBuildRequest(DigestModel):
     project_id: str = Field(alias="projectId")
     base_snapshot: Optional[SnapshotRef] = Field(default=None, alias="baseSnapshot")
     input_revision: str = Field(alias="inputRevision")
@@ -811,7 +811,7 @@ class ProjectSnapshotBuildRequest(DigestModel):
     document_processing: DocumentProcessingProfile = Field(default_factory=DocumentProcessingProfile, alias="documentProcessing")
 
     @model_validator(mode="after")
-    def validate_inputs(self) -> "ProjectSnapshotBuildRequest":
+    def validate_inputs(self) -> "SemanticArtifactBuildRequest":
         if not self.sources:
             raise ValueError("at least one source is required")
         if not isabs(self.output_dir):
@@ -857,10 +857,22 @@ class ParseSourceRequest(StrictModel):
         return value
 
 
+class BindParsedSourceRequest(ParseSourceRequest):
+    parsed_artifact_path: str = Field(alias="parsedArtifactPath")
+    parsed_artifact_digest: str = Field(alias="parsedArtifactDigest")
+
+    @field_validator("parsed_artifact_path", mode="after")
+    @classmethod
+    def validate_parsed_artifact_path(cls, value: str) -> str:
+        if not isabs(value):
+            raise ValueError("parsedArtifactPath must be absolute")
+        return value
+
+
 class WorkerRequest(StrictModel):
     protocol: Literal[WORKER_PROTOCOL] = WORKER_PROTOCOL
     id: str
-    method: Literal["parse_source", "build_project_snapshot", "validate_snapshot", "validate_extraction_spec", "schema"]
+    method: Literal["parse_source", "bind_parsed_source", "build_semantic_artifacts", "validate_artifact", "validate_extraction_spec", "schema"]
     params: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -880,9 +892,9 @@ class WorkerResponse(StrictModel):
     error: Optional[WorkerError] = None
 
 
-def project_snapshot_json_schema() -> Dict[str, Any]:
-    return ProjectSnapshot.model_json_schema()
+def semantic_artifact_json_schema() -> Dict[str, Any]:
+    return SemanticArtifact.model_json_schema()
 
 
 def build_request_json_schema() -> Dict[str, Any]:
-    return ProjectSnapshotBuildRequest.model_json_schema()
+    return SemanticArtifactBuildRequest.model_json_schema()

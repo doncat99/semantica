@@ -11,8 +11,8 @@ from docx import Document
 from PIL import Image, ImageDraw, ImageFont
 from pptx import Presentation
 from openpyxl import Workbook
-from semantica.project_bundle import verify_bundle_inventory
-from semantica.project_source import parse_source, UnsupportedSourceFormatError
+from semantica.bundle import verify_bundle_inventory
+from semantica.source import parse_source, UnsupportedSourceFormatError
 from semantica.project_document_quality import assess_document_quality
 
 
@@ -85,7 +85,7 @@ with tempfile.TemporaryDirectory(prefix="semantica-native-acceptance-") as direc
         archive.writestr("META-INF/container.xml", '<container><rootfiles><rootfile full-path="OEBPS/content.opf"/></rootfiles></container>')
         archive.writestr("OEBPS/content.opf", '<package><manifest><item id="chapter" href="chapter.xhtml" media-type="application/xhtml+xml"/></manifest><spine><itemref idref="chapter"/></spine></package>')
         archive.writestr("OEBPS/chapter.xhtml", "<html><body>Ada Lovelace designed the Analytical Engine.</body></html>")
-    from semantica.project_source import source_content_revision
+    from semantica.source import source_content_revision
     sources = [{"filePath": str(path), "sourceId": f"source-{index}", "name": path.name, "materialRevision": source_content_revision(path), "mimeType": mime}
         for index, (path, mime) in enumerate([(source, "text/plain"), (epub, "application/epub+zip")])]
     parsed_sources = []
@@ -106,15 +106,15 @@ with tempfile.TemporaryDirectory(prefix="semantica-native-acceptance-") as direc
     assert graph["artifact_revision"] == built["semanticGraph"]["artifactRevision"]
     snapshot = {key: value for key, value in graph.items() if key not in
                 ("protocol", "artifact_revision", "input_revision", "release_digest", "schema_digest")}
-    snapshot.update(protocol="semantica.project-snapshot.v1", snapshot_id=graph["artifact_revision"],
+    snapshot.update(protocol="semantica.semantic-artifact.v1", snapshot_id=graph["artifact_revision"],
                     project_id="native", base_snapshot_id=None)
-    projected_path = scratch / "projected-snapshot.json"
-    projected_path.write_text(json.dumps(snapshot, ensure_ascii=False) + "\n")
+    artifact_path = scratch / "semantic-artifact.json"
+    artifact_path.write_text(json.dumps(snapshot, ensure_ascii=False) + "\n")
     import hashlib
-    projected_digest = "sha256:" + hashlib.sha256(projected_path.read_bytes()).hexdigest()
-    queried = invoke("semantica.project_query_worker", {"protocol": "semantica.project-query.v1", "id": "native-query", "method": "query", "params": {
+    artifact_digest = "sha256:" + hashlib.sha256(artifact_path.read_bytes()).hexdigest()
+    queried = invoke("semantica.semantic_query_worker", {"protocol": "semantica.semantic-query.v1", "id": "native-query", "method": "query", "params": {
         "projectId": "native", "snapshotId": graph["artifact_revision"], "snapshot": {
-            "path": str(projected_path), "digest": projected_digest, "kind": "semantic-graph",
+            "path": str(artifact_path), "digest": artifact_digest, "kind": "semantic-graph",
             "mediaType": manifest["mediaTypes"]["semantic-graph"]}, "retrieval": artifacts["retrieval-index"],
         "query": "Ada", "mode": "keyword", "limit": 5}})
     assert queried["contexts"]

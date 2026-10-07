@@ -8,12 +8,12 @@ import pytest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from semantica.project_snapshot_pipeline import _canonical_graph_projection
-from semantica.project_snapshot_pipeline import build_project_snapshot, parse_source_artifact
-from semantica.project_snapshot_schema import ProjectSnapshotBuildRequest, ParseSourceRequest
-from semantica.project_snapshot_schema import KnowledgeEntity, KnowledgeRelation, ModelReceipt, ProjectSnapshot, stable_digest
-from semantica.project_snapshot_worker import serve
-from semantica.project_source import source_content_revision
+from semantica.semantic_artifact_pipeline import _canonical_graph_projection
+from semantica.semantic_artifact_pipeline import build_semantic_artifacts, parse_source_artifact
+from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest, ParseSourceRequest
+from semantica.semantic_artifact_schema import KnowledgeEntity, KnowledgeRelation, ModelReceipt, SemanticArtifact, stable_digest
+from semantica.semantic_worker import serve
+from semantica.source import source_content_revision
 
 H1 = "sha256:" + "1" * 64
 H2 = "sha256:" + "2" * 64
@@ -31,10 +31,20 @@ def _worker_output(stdout):
     return events, events[-1]
 
 
+def _host_snapshot(graph_path, project_id="project-1"):
+    graph = json.loads(graph_path.read_bytes())
+    assert graph.pop("protocol") == "semantica.semantic-graph.v1"
+    snapshot_id = graph.pop("artifact_revision")
+    for field in ("input_revision", "release_digest", "schema_digest"):
+        graph.pop(field)
+    return SemanticArtifact.model_validate({**graph, "protocol": "semantica.semantic-artifact.v1",
+        "snapshot_id": snapshot_id, "project_id": project_id, "base_snapshot_id": None})
+
+
 def test_scoped_explanation_reuses_native_grounding_and_rejects_foreign_evidence(monkeypatch):
     from types import SimpleNamespace
-    from semantica import project_snapshot_pipeline as pipeline
-    from semantica.project_snapshot_schema import EvidenceSpan, DocumentLocator
+    from semantica import semantic_artifact_pipeline as pipeline
+    from semantica.semantic_artifact_schema import EvidenceSpan, DocumentLocator
 
     span = EvidenceSpan(id="evidence:1", representation_id="representation:1", quote="Exact source sentence.",
                         locator=DocumentLocator(representation_id="representation:1", origin="native",
@@ -52,13 +62,13 @@ def test_scoped_explanation_reuses_native_grounding_and_rejects_foreign_evidence
     sections, _ = pipeline.explain_evidence(snapshot, target, [span.id], SimpleNamespace(model_id="test"))
     assert sections[0].evidence_ids == [span.id]
     assert seen[0][0] == "knowledge_explanation" and seen[0][1]["target"] == target
-    with pytest.raises(pipeline.SnapshotBuildError, match="known evidence"):
+    with pytest.raises(pipeline.SemanticArtifactError, match="known evidence"):
         pipeline.explain_evidence(snapshot, target, ["foreign"], None)
 
 
 def test_native_explanation_synthesizes_multiple_evidence_batches_with_its_target(monkeypatch):
-    from semantica import project_snapshot_pipeline as pipeline
-    from semantica.project_snapshot_schema import EvidenceSpan, DocumentLocator, ReportSection
+    from semantica import semantic_artifact_pipeline as pipeline
+    from semantica.semantic_artifact_schema import EvidenceSpan, DocumentLocator, ReportSection
 
     spans = {ref: EvidenceSpan(id=ref, representation_id="representation:1", quote=f"Source {ref}",
         locator=DocumentLocator(representation_id="representation:1", origin="native",
@@ -83,17 +93,17 @@ def test_native_explanation_synthesizes_multiple_evidence_batches_with_its_targe
     assert len(sections) == 3
 
 
-def test_explanation_reads_verified_semantic_graph_not_project_snapshot(tmp_path):
+def test_explanation_reads_verified_semantic_artifact(tmp_path):
     from semantica.semantic_worker import EvidenceExplanationRequest, _verified_snapshot
-    from tests.test_project_snapshot_contract import _snapshot_payload
+    from tests.test_semantic_artifact_contract import _snapshot_payload
 
-    graph = _snapshot_payload()
-    graph["protocol"] = "semantica.semantic-graph.v1"
-    graph["artifact_revision"] = graph.pop("snapshot_id")
-    graph.pop("project_id")
-    graph.update(input_revision=H1, release_digest=H2, schema_digest=H3)
-    raw = json.dumps(graph).encode()
-    path = tmp_path / "semantic-graph.json"
+    artifact = _snapshot_payload()
+    artifact["protocol"] = "semantica.semantic-graph.v1"
+    artifact["artifact_revision"] = artifact.pop("snapshot_id")
+    artifact.pop("project_id")
+    artifact.update(input_revision=H1, release_digest=H2, schema_digest=H3)
+    raw = json.dumps(artifact).encode()
+    path = tmp_path / "semantic-artifact.json"
     path.write_bytes(raw)
     request = EvidenceExplanationRequest.model_validate({"snapshotPath": str(path),
         "snapshotDigest": "sha256:" + __import__("hashlib").sha256(raw).hexdigest(),
@@ -104,12 +114,11 @@ def test_explanation_reads_verified_semantic_graph_not_project_snapshot(tmp_path
                   "maxOutputTokens": 1024, "modelId": "model-1", "receipts": "required"}})
     assert _verified_snapshot(request).id == "snapshot:one"
 
-
 def test_semantic_worker_explains_verified_graph_and_returns_digest_and_receipt(tmp_path, monkeypatch):
     import hashlib
     from semantica import semantic_worker
-    from semantica.project_snapshot_schema import ReportSection, ModelReceipt
-    from tests.test_project_snapshot_contract import _snapshot_payload
+    from semantica.semantic_artifact_schema import ReportSection, ModelReceipt
+    from tests.test_semantic_artifact_contract import _snapshot_payload
 
     graph = _snapshot_payload()
     graph["protocol"] = "semantica.semantic-graph.v1"
@@ -147,23 +156,23 @@ def test_semantic_worker_explains_verified_graph_and_returns_digest_and_receipt(
     assert result["digest"] == "sha256:" + hashlib.sha256((tmp_path / "evidence-explanation.json").read_bytes()).hexdigest()
 
     (tmp_path / "evidence-explanation.json").unlink()
-    with pytest.raises(semantic_worker.SnapshotBuildError, match="digest"):
+    with pytest.raises(semantic_worker.SemanticArtifactError, match="digest"):
         semantic_worker.handle_request({**request, "params": {**params, "snapshotDigest": H1}})
     assert not (tmp_path / "evidence-explanation.json").exists()
 
 
 def test_unique_quote_ignores_model_position_but_duplicate_requires_occurrence():
-    from semantica.project_snapshot_pipeline import _find_occurrence, SnapshotBuildError
+    from semantica.semantic_artifact_pipeline import _find_occurrence, SemanticArtifactError
 
     text = "Green Bonds and Private Equity. Green Bonds"
     assert _find_occurrence(text, "Private Equity", 590) == (16, 30)
-    with pytest.raises(SnapshotBuildError, match="outside its source window"):
+    with pytest.raises(SemanticArtifactError, match="outside its source window"):
         _find_occurrence(text, "Green Bonds", 590)
 
 
 def test_relay_http_failure_preserves_safe_structured_error(monkeypatch):
     from types import SimpleNamespace
-    from semantica.project_snapshot_pipeline import _relay_json, SnapshotBuildError
+    from semantica.semantic_artifact_pipeline import _relay_json, SemanticArtifactError
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-token")
     def rejected(_request, timeout):
@@ -171,7 +180,7 @@ def test_relay_http_failure_preserves_safe_structured_error(monkeypatch):
             b'{"error":{"code":"INTERNAL_ERROR","message":"provider failed for test-token","retryable":true,"status":500}}'))
     monkeypatch.setattr("urllib.request.urlopen", rejected)
     relay = SimpleNamespace(authorization_env="OPENAI_API_KEY", base_url="http://127.0.0.1/v1/chat/completions", model_id="model-1", binding_id="default")
-    with pytest.raises(SnapshotBuildError, match="structured_extraction relay returned HTTP 500: INTERNAL_ERROR") as failure:
+    with pytest.raises(SemanticArtifactError, match="structured_extraction relay returned HTTP 500: INTERNAL_ERROR") as failure:
         _relay_json(relay, {"model": "model-1"}, "structured_extraction")
     assert failure.value.status == 500
     assert failure.value.code == "INTERNAL_ERROR"
@@ -181,7 +190,7 @@ def test_relay_http_failure_preserves_safe_structured_error(monkeypatch):
 
 def test_relay_waits_for_complete_gateway_response(monkeypatch):
     from types import SimpleNamespace
-    from semantica.project_snapshot_pipeline import _relay_json
+    from semantica.semantic_artifact_pipeline import _relay_json
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-token")
     class Response:
@@ -203,7 +212,7 @@ def test_relay_waits_for_complete_gateway_response(monkeypatch):
 
 def test_product_output_repairs_citation_shape_through_native_typed_provider(monkeypatch):
     from types import SimpleNamespace
-    from semantica import project_snapshot_pipeline as pipeline
+    from semantica import semantic_artifact_pipeline as pipeline
 
     outputs = [
         {"assignments": [{"dimension_id": "purpose", "item_id": "history", "confidence": 0.9, "citations": [5]}]},
@@ -235,7 +244,7 @@ def test_product_output_repairs_citation_shape_through_native_typed_provider(mon
 
 def test_product_output_uses_host_admitted_output_limit(monkeypatch):
     from types import SimpleNamespace
-    from semantica import project_snapshot_pipeline as pipeline
+    from semantica import semantic_artifact_pipeline as pipeline
 
     payloads = []
 
@@ -263,7 +272,7 @@ def test_product_output_uses_host_admitted_output_limit(monkeypatch):
 
 def test_product_output_repairs_semantic_citation_and_vocabulary(monkeypatch):
     from types import SimpleNamespace
-    from semantica import project_snapshot_pipeline as pipeline
+    from semantica import semantic_artifact_pipeline as pipeline
 
     valid = {"dimension_id": "purpose", "item_id": "history", "confidence": 0.9,
              "citations": [{"evidence_id": "evidence:source", "quote": "Source quote"}]}
@@ -303,7 +312,7 @@ def test_product_output_repairs_semantic_citation_and_vocabulary(monkeypatch):
 
 def test_product_output_repair_has_budget_for_schema_and_previous_json(monkeypatch):
     from types import SimpleNamespace
-    from semantica import project_snapshot_pipeline as pipeline
+    from semantica import semantic_artifact_pipeline as pipeline
 
     quote = "Grounded evidence. " * 2_400
     outputs = [
@@ -337,7 +346,7 @@ def test_product_output_repair_has_budget_for_schema_and_previous_json(monkeypat
 
 def test_identity_resolution_repairs_invalid_json_through_native_typed_provider(monkeypatch):
     from types import SimpleNamespace
-    from semantica import project_snapshot_pipeline as pipeline
+    from semantica import semantic_artifact_pipeline as pipeline
 
     candidates = [
         {"mention_id": "mention:1", "name": "Alpha", "type": "ORG", "source_id": "source:1",
@@ -371,8 +380,8 @@ def test_identity_resolution_repairs_invalid_json_through_native_typed_provider(
 
 
 def test_relationship_discovery_omits_ungrounded_qualifier_without_losing_valid_relations(monkeypatch):
-    from semantica.project_snapshot_pipeline import _discover_cross_source_relationships
-    from semantica.project_snapshot_schema import DocumentLocator, EvidenceSpan
+    from semantica.semantic_artifact_pipeline import _discover_cross_source_relationships
+    from semantica.semantic_artifact_schema import DocumentLocator, EvidenceSpan
 
     entities = [KnowledgeEntity(id="entity:left", canonical_name="Left", type="concept"),
                 KnowledgeEntity(id="entity:right", canonical_name="Right", type="concept")]
@@ -390,8 +399,8 @@ def test_relationship_discovery_omits_ungrounded_qualifier_without_losing_valid_
              "qualifiers": {"polarity": "positive"}, "citations": citations, "reason": "Both are observed."}
     receipt = ModelReceipt(id="receipt:relationship", operation="relationship_discovery", provider="test",
                            model="model-1", input_digest=H1, output_digest=H2)
-    monkeypatch.setattr("semantica.project_snapshot_pipeline._relationship_candidates", lambda *_: [candidate])
-    monkeypatch.setattr("semantica.project_snapshot_pipeline._relationship_batch",
+    monkeypatch.setattr("semantica.semantic_artifact_pipeline._relationship_candidates", lambda *_: [candidate])
+    monkeypatch.setattr("semantica.semantic_artifact_pipeline._relationship_batch",
                         lambda *_: ([{**valid, "qualifiers": {"polarity": "positive", "unit": "percent"}}, valid], receipt))
 
     assertions, relations, receipts = _discover_cross_source_relationships(
@@ -409,8 +418,8 @@ def _classification_profile():
 
 @pytest.mark.parametrize("corruption", ["unknown-id", "altered-quote", "missing-citation", "unknown-category", "cardinality"])
 def test_semantic_classification_rejects_invalid_model_evidence(tmp_path, monkeypatch, corruption):
-    from semantica.project_snapshot_pipeline import _build_source, _source_passages, _classify_source, SnapshotBuildError
-    from semantica.project_snapshot_schema import ClassificationProfile, SourceBuildInput
+    from semantica.semantic_artifact_pipeline import _build_source, _source_passages, _classify_source, SemanticArtifactError
+    from semantica.semantic_artifact_schema import ClassificationProfile, SourceBuildInput
     source = tmp_path / "source.txt"
     source.write_text("Ada Lovelace designed the Analytical Engine.")
     built = _build_source(SourceBuildInput(filePath=str(source), sourceId="source-1", materialRevision=source_content_revision(source), mimeType="text/plain", name="source.txt"), False)
@@ -429,21 +438,21 @@ def test_semantic_classification_rejects_invalid_model_evidence(tmp_path, monkey
     if corruption == "cardinality":
         assignments.append({**assignment, "item_id": "manual"})
     receipt = ModelReceipt(id="receipt:test", operation="source_classification", provider="test", model="test", input_digest=H1, output_digest=H2)
-    monkeypatch.setattr("semantica.project_snapshot_pipeline._product_json", lambda *args: ({"assignments": assignments}, [receipt]))
-    with pytest.raises(SnapshotBuildError):
+    monkeypatch.setattr("semantica.semantic_artifact_pipeline._product_json", lambda *args: ({"assignments": assignments}, [receipt]))
+    with pytest.raises(SemanticArtifactError):
         _classify_source(built, ClassificationProfile.model_validate(_classification_profile()), None)
 
 
 def test_semantic_classification_preserves_source_offsets_and_unclassified_dimensions(tmp_path, monkeypatch):
-    from semantica.project_snapshot_pipeline import _build_source, _source_passages, _classify_source
-    from semantica.project_snapshot_schema import ClassificationProfile, SourceBuildInput
+    from semantica.semantic_artifact_pipeline import _build_source, _source_passages, _classify_source
+    from semantica.semantic_artifact_schema import ClassificationProfile, SourceBuildInput
     source = tmp_path / "source.txt"
     source.write_text("Ada Lovelace designed the Analytical Engine.")
     built = _build_source(SourceBuildInput(filePath=str(source), sourceId="source-1", materialRevision=source_content_revision(source), mimeType="text/plain", name="source.txt"), False)
     built["passages"] = _source_passages(built)
     span = built["passages"][0]
     receipt = ModelReceipt(id="receipt:test", operation="source_classification", provider="test", model="test", input_digest=H1, output_digest=H2)
-    monkeypatch.setattr("semantica.project_snapshot_pipeline._product_json", lambda *args: ({"assignments": [{"dimension_id": "purpose", "item_id": "history", "confidence": 0.9, "citations": [{"evidence_id": span.id, "quote": span.quote}]}]}, [receipt]))
+    monkeypatch.setattr("semantica.semantic_artifact_pipeline._product_json", lambda *args: ({"assignments": [{"dimension_id": "purpose", "item_id": "history", "confidence": 0.9, "citations": [{"evidence_id": span.id, "quote": span.quote}]}]}, [receipt]))
     classification, _ = _classify_source(built, ClassificationProfile.model_validate(_classification_profile()), None)
     assert classification.assignments[0].evidence_ids == [span.id]
     assert classification.unclassified_dimension_ids == ["topic"]
@@ -451,8 +460,8 @@ def test_semantic_classification_preserves_source_offsets_and_unclassified_dimen
 
 
 def test_docling_evidence_preserves_reading_order_and_physical_locators(tmp_path):
-    from semantica.project_snapshot_pipeline import _build_source, _docling_cell_evidence, _source_passages
-    from semantica.project_snapshot_schema import SourceBuildInput
+    from semantica.semantic_artifact_pipeline import _build_source, _docling_cell_evidence, _source_passages
+    from semantica.semantic_artifact_schema import SourceBuildInput
 
     source_path = tmp_path / "source.pdf"
     source_path.write_bytes(b"source")
@@ -504,15 +513,15 @@ def test_docling_evidence_preserves_reading_order_and_physical_locators(tmp_path
 
 @pytest.mark.parametrize("citation", [[], [{"evidence_id": "evidence:invented", "quote": "unknown"}]])
 def test_explanation_rejects_missing_or_hallucinated_citations(tmp_path, monkeypatch, citation):
-    from semantica.project_snapshot_pipeline import _build_source, _source_passages, _explanation_reports, SnapshotBuildError
-    from semantica.project_snapshot_schema import SourceBuildInput
+    from semantica.semantic_artifact_pipeline import _build_source, _source_passages, _explanation_reports, SemanticArtifactError
+    from semantica.semantic_artifact_schema import SourceBuildInput
     source = tmp_path / "source.txt"
     source.write_text("Ada Lovelace designed the Analytical Engine.")
     built = _build_source(SourceBuildInput(filePath=str(source), sourceId="source-1", materialRevision=source_content_revision(source), mimeType="text/plain", name="source.txt"), False)
     built["passages"] = _source_passages(built)
     receipt = ModelReceipt(id="receipt:test", operation="knowledge_explanation", provider="test", model="test", input_digest=H1, output_digest=H2)
-    monkeypatch.setattr("semantica.project_snapshot_pipeline._product_json", lambda *args: ({"sections": [{"title": "Explanation", "text": "Unsupported claim", "citations": citation}]}, [receipt]))
-    with pytest.raises(SnapshotBuildError):
+    monkeypatch.setattr("semantica.semantic_artifact_pipeline._product_json", lambda *args: ({"sections": [{"title": "Explanation", "text": "Unsupported claim", "citations": citation}]}, [receipt]))
+    with pytest.raises(SemanticArtifactError):
         _explanation_reports("project-1", [built], built["entities"], [], [], [], [], [*built["evidence"], *built["passages"]], None)
 
 
@@ -527,9 +536,9 @@ def _parsed_ref(params, source):
 
 def _request(source: Path, output_dir: Path, *, recipe: str = "deterministic", prepare: bool = True) -> dict:
     request = {
-        "protocol": "semantica.project-worker.v1",
+        "protocol": "semantica.semantic-worker.v1",
         "id": "build-1",
-        "method": "build_project_snapshot",
+        "method": "build_semantic_artifacts",
         "params": {
             "baseSnapshot": None,
             "inputRevision": H1,
@@ -563,7 +572,7 @@ def test_worker_builds_complete_snapshot_from_real_text_file(tmp_path):
     assert response["result"]["relayReceipts"] == {"embedding": [], "model": []}
 
     snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "semantic-graph")
-    snapshot = ProjectSnapshot.model_validate_json(snapshot_path.read_bytes())
+    snapshot = _host_snapshot(snapshot_path)
     assert snapshot.id == response["result"]["semanticGraph"]["artifactRevision"]
     assert snapshot.entities
     assert snapshot.relations == []
@@ -584,8 +593,8 @@ def test_worker_builds_complete_snapshot_from_real_text_file(tmp_path):
 def test_build_rejects_base_snapshot_from_another_project(tmp_path):
     source = tmp_path / "source.txt"
     source.write_text("Ada Lovelace designed the Analytical Engine.", encoding="utf-8")
-    initial_request = ProjectSnapshotBuildRequest.model_validate(_request(source, tmp_path / "initial")["params"])
-    initial = build_project_snapshot(initial_request)
+    initial_request = SemanticArtifactBuildRequest.model_validate(_request(source, tmp_path / "initial")["params"])
+    initial = build_semantic_artifacts(initial_request)
     request = _request(source, tmp_path / "next")["params"]
     request["projectId"] = "project-2"
     request["baseSnapshot"] = {
@@ -595,7 +604,7 @@ def test_build_rejects_base_snapshot_from_another_project(tmp_path):
         "schemaDigest": H3,
     }
     with pytest.raises(Exception, match="project"):
-        build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(request))
+        build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(request))
 
 
 def test_canonical_graph_projection_preserves_snapshot_identity():
@@ -635,7 +644,7 @@ def test_worker_fails_closed_for_unsupported_source_format(tmp_path):
     assert serve(stdin, stdout) == 0
     _, response = _worker_output(stdout)
     assert response["ok"] is False
-    assert response["error"]["type"] == "SnapshotBuildError"
+    assert response["error"]["type"] == "SemanticArtifactError"
     assert "unsupported" in response["error"]["message"].lower()
 
 
@@ -658,7 +667,7 @@ def test_cross_source_same_name_stays_unresolved(tmp_path):
     _, response = _worker_output(stdout)
     assert response["ok"] is True
     snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "semantic-graph")
-    snapshot = ProjectSnapshot.model_validate_json(snapshot_path.read_bytes())
+    snapshot = _host_snapshot(snapshot_path)
     ada_candidates = [entity for entity in snapshot.entities if entity.canonical_name == "Ada Lovelace"]
     assert len(ada_candidates) == 2
     assert ada_candidates[0].id != ada_candidates[1].id
@@ -692,7 +701,7 @@ def test_epub_adapter_preserves_adapter_locator_origin(tmp_path):
     _, response = _worker_output(stdout)
     assert response["ok"] is True
     snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "semantic-graph")
-    snapshot = ProjectSnapshot.model_validate_json(snapshot_path.read_bytes())
+    snapshot = _host_snapshot(snapshot_path)
     assert snapshot.evidence_spans
     assert {item.locator.origin for item in snapshot.evidence_spans} == {"adapter"}
     representation_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "document-representation")
@@ -781,7 +790,7 @@ def test_model_recipe_uses_bifrost_chat_and_embedding_and_records_receipts(tmp_p
     assert len(response["result"]["relayReceipts"]["model"]) >= 2
     assert len(response["result"]["relayReceipts"]["embedding"]) == 1
     snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "semantic-graph")
-    snapshot = ProjectSnapshot.model_validate_json(snapshot_path.read_bytes())
+    snapshot = _host_snapshot(snapshot_path)
     assert len(snapshot.model_receipts) == len(response["result"]["relayReceipts"]["model"]) + 1
     extraction_receipts = [receipt for receipt in snapshot.model_receipts if receipt.operation == "structured_extraction"]
     assert {receipt.metadata["extraction_stage"] for receipt in extraction_receipts} == {"entities", "relations"}
@@ -819,7 +828,7 @@ def test_model_recipe_fails_closed_without_relay_token(tmp_path):
         if previous_token is not None:
             os.environ["OPENAI_API_KEY"] = previous_token
     assert response["ok"] is False
-    assert response["error"]["type"] == "SnapshotBuildError"
+    assert response["error"]["type"] == "SemanticArtifactError"
     assert "authorization" in response["error"]["message"]
 
 
@@ -831,11 +840,11 @@ def test_incremental_delta_ignores_audit_time_and_tracks_changed_knowledge(tmp_p
     request = _request(first, tmp_path / "first-build")["params"]
     request["sources"].append({"filePath": str(second), "materialRevision": source_content_revision(second), "mimeType": "text/plain", "name": second.name, "sourceId": "source-2"})
     request["parsedSources"].append(_parsed_ref(request, request["sources"][-1]))
-    initial = build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(request))
+    initial = build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(request))
     request["baseSnapshot"] = {"snapshotId": initial["snapshot"].id, "snapshotPath": str(initial["snapshot_path"]), "artifactDigest": initial["snapshot_digest"], "schemaDigest": H3}
     request["inputRevision"] = H2
     request["outputDir"] = str(tmp_path / "identical-build")
-    identical = build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(request))["snapshot"]
+    identical = build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(request))["snapshot"]
     assert identical.change_delta.updated_ids == []
     assert identical.change_delta.added_ids == []
 
@@ -843,7 +852,7 @@ def test_incremental_delta_ignores_audit_time_and_tracks_changed_knowledge(tmp_p
     request["sources"][0]["materialRevision"] = source_content_revision(first)
     request["outputDir"] = str(tmp_path / "changed-build")
     request["parsedSources"][0] = _parsed_ref(request, request["sources"][0])
-    updated = build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(request))["snapshot"]
+    updated = build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(request))["snapshot"]
     unchanged_entities = {entity.id for entity in initial["snapshot"].entities if "Charles Babbage" in entity.canonical_name}
     assert unchanged_entities
     changed_representations = {item.id for snapshot in [initial["snapshot"], updated] for item in snapshot.document_representations if item.source_id == "source-1"}
@@ -855,11 +864,11 @@ def test_incremental_delta_ignores_audit_time_and_tracks_changed_knowledge(tmp_p
 
 
 def test_community_and_topic_deltas_update_knowledge_without_embedded_reports(tmp_path):
-    from semantica.project_snapshot_pipeline import _change_delta
+    from semantica.semantic_artifact_pipeline import _change_delta
 
     source = tmp_path / "source.txt"
     source.write_text("Ada Lovelace studied mathematics.", encoding="utf-8")
-    base = build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(_request(source, tmp_path / "build")["params"]))["snapshot"]
+    base = build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(_request(source, tmp_path / "build")["params"]))["snapshot"]
     revised = base.model_copy(deep=True)
     revised.communities[0].title += " revised"
     revised.topics[0].title += " revised"
@@ -917,7 +926,7 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
             provider="fixture", model=relay.model_id, input_digest=stable_digest(payload), output_digest=stable_digest(result))
         return result, receipt
 
-    monkeypatch.setattr("semantica.project_snapshot_pipeline._relay_json", relay_response)
+    monkeypatch.setattr("semantica.semantic_artifact_pipeline._relay_json", relay_response)
     request = _request(first, tmp_path / "build", recipe="model")
     request["params"]["sources"].append({"filePath": str(second), "materialRevision": source_content_revision(second), "mimeType": "text/plain", "name": second.name, "sourceId": "source-2"})
     request["params"]["parsedSources"].append(_parsed_ref(request["params"], request["params"]["sources"][-1]))
@@ -932,7 +941,7 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
     }
     assert response["ok"] is True, response
     snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "semantic-graph")
-    snapshot = ProjectSnapshot.model_validate_json(snapshot_path.read_bytes())
+    snapshot = _host_snapshot(snapshot_path)
     assert len(snapshot.entity_mentions) == 4
     assert len(snapshot.entities) == 2
     assert snapshot.conflicts == []
@@ -941,9 +950,11 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
     assert identity_receipt.id in response["result"]["relayReceipts"]["model"]
     assert all(decision.metadata["model_receipt_id"] == identity_receipt.id for decision in snapshot.identity_decisions)
     assert operations.count("knowledge_explanation") == 0
-    request["params"]["baseSnapshot"] = {"snapshotId": snapshot.id, "snapshotPath": str(snapshot_path), "artifactDigest": next(item["digest"] for item in response["result"]["artifacts"] if item["kind"] == "semantic-graph"), "schemaDigest": H3}
+    base_path = tmp_path / "base-snapshot.json"
+    base_path.write_text(snapshot.model_dump_json(by_alias=True))
+    request["params"]["baseSnapshot"] = {"snapshotId": snapshot.id, "snapshotPath": str(base_path), "artifactDigest": "sha256:" + __import__("hashlib").sha256(base_path.read_bytes()).hexdigest(), "schemaDigest": H3}
     request["params"]["outputDir"] = str(tmp_path / "repeat")
-    repeated = build_project_snapshot(ProjectSnapshotBuildRequest.model_validate(request["params"]))["snapshot"]
+    repeated = build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(request["params"]))["snapshot"]
     assert operations.count("knowledge_explanation") == 0
     assert repeated.change_delta.updated_ids == []
     canonical_ids = {entity.id for entity in snapshot.entities}

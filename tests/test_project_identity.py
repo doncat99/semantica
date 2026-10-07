@@ -2,8 +2,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from semantica.project_identity import resolve_project_identities
-from semantica.project_snapshot_schema import KnowledgeEntity
+from semantica.identity import resolve_project_identities
+from semantica.semantic_artifact_schema import KnowledgeEntity
 
 
 def mention(identifier, name="Ada Lovelace", source="source:one", kind="PERSON"):

@@ -1,4 +1,4 @@
-"""Assemble an immutable project-worker bundle from independently built inputs."""
+"""Assemble an immutable semantic worker bundle from independently built inputs."""
 from __future__ import annotations
 
 import argparse
@@ -21,10 +21,9 @@ _PARSER_MODULES = {
     "project_document_quality.py",
     "project_office.py",
     "project_remote_docling.py",
-    "project_snapshot_schema.py",
-    "project_snapshot_worker.py",
+    "semantic_artifact_schema.py",
     "semantic_worker.py",
-    "project_source.py",
+    "source.py",
 }
 
 
@@ -144,7 +143,7 @@ def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, output: P
         shutil.copy2(office_receipt, output / "office-release.json")
     python = output / "python" / python_name
     # This interpreter is our private copy, not the managed source distribution.
-    subprocess.run([uv, "pip", "install", "--python", str(python), "--system", "--break-system-packages", f"{wheel.resolve()}[project-worker]"], check=True)
+    subprocess.run([uv, "pip", "install", "--python", str(python), "--system", "--break-system-packages", f"{wheel.resolve()}[semantic-worker]"], check=True)
     packages = subprocess.run([str(python), "-I", "-B", "-c",
         "import importlib.metadata as m, json; print(json.dumps(sorted((d.metadata['Name'], d.version) for d in m.distributions())))"],
         capture_output=True, text=True, check=True)
@@ -157,7 +156,7 @@ def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, output: P
                         ignore=shutil.ignore_patterns(".cache", ".git"))
     # CPython -I removes ambient Python paths; -B keeps the immutable tree clean.
     probe = subprocess.run([str(python), "-I", "-B", "-c",
-        "import json; from semantica.project_snapshot_schema import project_snapshot_json_schema; print(json.dumps(project_snapshot_json_schema(), sort_keys=True, separators=(',', ':')))"],
+        "import json; from semantica.semantic_artifact_schema import semantic_artifact_json_schema; print(json.dumps(semantic_artifact_json_schema(), sort_keys=True, separators=(',', ':')))"],
         capture_output=True, text=True, check=True)
     schema_digest = "sha256:" + hashlib.sha256(probe.stdout.strip().encode()).hexdigest()
     manifest = {
@@ -165,7 +164,7 @@ def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, output: P
         "pythonPath": f"python/{python_name}",
         "schemaDigest": schema_digest,
         "worker": {"path": f"python/{python_name}", "args": ["-I", "-B", "-m", "semantica.semantic_worker"]},
-        "queryWorker": {"path": f"python/{python_name}", "args": ["-I", "-B", "-m", "semantica.project_query_worker"]},
+        "queryWorker": {"path": f"python/{python_name}", "args": ["-I", "-B", "-m", "semantica.semantic_query_worker"]},
         "mediaTypes": {
             "document-representation": "application/vnd.semantica.document-representation+json",
             "retrieval-index": "application/vnd.semantica.retrieval+json",

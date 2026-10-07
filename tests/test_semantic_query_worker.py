@@ -5,10 +5,10 @@ import pytest
 from hashlib import sha256
 from pathlib import Path
 
-from semantica.project_query_worker import serve
-from semantica.project_snapshot_pipeline import build_project_snapshot, parse_source_artifact
-from semantica.project_source import source_content_revision
-from semantica.project_snapshot_schema import ParseSourceRequest, ProjectSnapshotBuildRequest
+from semantica.semantic_query_worker import serve
+from semantica.semantic_artifact_pipeline import build_semantic_artifacts, parse_source_artifact
+from semantica.source import source_content_revision
+from semantica.semantic_artifact_schema import ParseSourceRequest, SemanticArtifactBuildRequest
 
 
 H1 = "sha256:" + "1" * 64
@@ -41,7 +41,7 @@ def _build(tmp_path: Path, second_source=False):
             "documentProcessing": {"mode": "local"},
         }))]
     ]
-    request = ProjectSnapshotBuildRequest.model_validate({
+    request = SemanticArtifactBuildRequest.model_validate({
         "baseSnapshot": None,
         "inputRevision": H1,
         "outputDir": str(tmp_path),
@@ -55,12 +55,12 @@ def _build(tmp_path: Path, second_source=False):
         "sources": sources,
         "parsedSources": parsed_sources,
     })
-    return build_project_snapshot(request)
+    return build_semantic_artifacts(request)
 
 
 def _request(built, query="Ada"):
     return {
-        "protocol": "semantica.project-query.v1",
+        "protocol": "semantica.semantic-query.v1",
         "id": "query-1",
         "method": "query",
         "params": {

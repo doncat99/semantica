@@ -4,13 +4,13 @@ from time import sleep
 
 import pytest
 
-from semantica import project_snapshot_pipeline as pipeline
-from semantica.project_source import source_content_revision
-from semantica.project_snapshot_schema import (
+from semantica import semantic_artifact_pipeline as pipeline
+from semantica.source import source_content_revision
+from semantica.semantic_artifact_schema import (
     ClassificationProfile, DocumentLocator, DocumentRepresentation, EvidenceSpan,
     KnowledgeEntity, ModelReceipt, SourceBuildInput,
 )
-from semantica.project_snapshot_worker import _relay_receipts
+from semantica.semantic_worker import _relay_receipts
 from semantica.semantic_extract.types import Entity, Relation
 
 
@@ -25,44 +25,33 @@ def _stub_canonical_extraction(monkeypatch, extract):
             self.receipts = []
             self.result = None
 
-    class NER:
-        def __init__(self, provider_instance, **_kwargs):
-            self.provider = provider_instance
-
-        def extract(self, text):
-            self.provider.result, model_receipt = extract(text, None)
-            self.provider.receipts.append(model_receipt)
-            entities = []
-            for index, item in enumerate(self.provider.result["entities"]):
-                start, end = pipeline._find_occurrence(text, item["name"], item.get("occurrence"))
-                entities.append(Entity(
-                    item["name"], item["type"], start, end, item.get("confidence", 0.9),
-                    {"mention_id": item["id"], "span_occurrence": item.get("occurrence", 0)},
-                ))
-            return entities
-
-    class Relations:
-        def __init__(self, provider_instance, **_kwargs):
-            self.provider = provider_instance
-
-        def extract(self, text, entities):
-            by_id = {entity.metadata["mention_id"]: entity for entity in entities}
-            relations = []
-            for item in self.provider.result["relations"]:
-                start, end = pipeline._find_occurrence(text, item["evidence"], item.get("evidence_occurrence"))
-                relations.append(Relation(
-                    by_id[item["subject"]], item["predicate"], by_id[item["object"]],
-                    item.get("confidence", 0.9), text[start:end], {
-                        "subject_id": item["subject"], "object_id": item["object"],
-                        "evidence_occurrence": item.get("evidence_occurrence", 0),
-                        "qualifiers": item["qualifiers"],
-                    },
-                ))
-            return relations
+    def grounded(text, **_kwargs):
+        provider = _kwargs["provider_instance"]
+        provider.result, model_receipt = extract(text, None)
+        provider.receipts.append(model_receipt)
+        entities = []
+        for item in provider.result["entities"]:
+            start, end = pipeline._find_occurrence(text, item["name"], item.get("occurrence"))
+            entities.append(Entity(
+                item["name"], item["type"], start, end, item.get("confidence", 0.9),
+                {"mention_id": item["id"], "span_occurrence": item.get("occurrence", 0)},
+            ))
+        by_id = {entity.metadata["mention_id"]: entity for entity in entities}
+        relations = []
+        for item in provider.result["relations"]:
+            start, end = pipeline._find_occurrence(text, item["evidence"], item.get("evidence_occurrence"))
+            relations.append(Relation(
+                by_id[item["subject"]], item["predicate"], by_id[item["object"]],
+                item.get("confidence", 0.9), text[start:end], {
+                    "subject_id": item["subject"], "object_id": item["object"],
+                    "evidence_occurrence": item.get("evidence_occurrence", 0),
+                    "qualifiers": item.get("qualifiers", {}),
+                },
+            ))
+        return entities, relations, provider
 
     monkeypatch.setattr(pipeline, "_project_model_provider", lambda _relay: Provider())
-    monkeypatch.setattr(pipeline, "NERExtractor", NER)
-    monkeypatch.setattr(pipeline, "RelationExtractor", Relations)
+    monkeypatch.setattr(pipeline, "extract_grounded_window", grounded)
 
 
 def test_long_extraction_visits_tail_and_preserves_absolute_repeated_mentions(tmp_path, monkeypatch):
@@ -98,7 +87,7 @@ def test_long_extraction_visits_tail_and_preserves_absolute_repeated_mentions(tm
 def test_extraction_rejects_quote_outside_current_window(monkeypatch):
     _stub_canonical_extraction(monkeypatch, lambda *args: ({"entities": [{"id": "tail", "name": "Tail", "type": "CONCEPT", "occurrence": 0}], "relations": []}, receipt("structured_extraction", 1)))
     monkeypatch.setattr(pipeline, "_embed_texts", lambda texts, relay: ([[1.0] for _ in texts], receipt("embedding", 1)))
-    with pytest.raises(pipeline.SnapshotBuildError, match="source window"):
+    with pytest.raises(pipeline.SemanticArtifactError, match="source window"):
         pipeline._extract_and_embed("x" * 10_000 + "Tail", SimpleNamespace(model_id="test"), None)
 
 
@@ -217,7 +206,7 @@ def test_parallel_embedding_batches_are_bounded_and_ordered(monkeypatch):
 ])
 def test_batch_embedding_rejects_invalid_response(monkeypatch, data):
     monkeypatch.setattr(pipeline, "_relay_json", lambda *args: ({"model": "test", "data": data}, receipt("embedding", 1)))
-    with pytest.raises(pipeline.SnapshotBuildError, match="embedding response"):
+    with pytest.raises(pipeline.SemanticArtifactError, match="embedding response"):
         pipeline._embed_texts(["one", "two"], SimpleNamespace(model_id="test"))
 
 
@@ -296,15 +285,15 @@ def test_large_identity_input_uses_native_candidate_blocking(monkeypatch):
 
 
 def test_indivisible_context_is_rejected_without_truncation():
-    with pytest.raises(pipeline.SnapshotBuildError, match="indivisible"):
+    with pytest.raises(pipeline.SemanticArtifactError, match="indivisible"):
         pipeline._context_batches({}, [("evidence", {"quote": "x" * 60_000})])
 
 
 def test_synthesis_cannot_introduce_evidence_from_another_batch(monkeypatch):
-    from semantica.project_snapshot_schema import ReportSection
+    from semantica.semantic_artifact_schema import ReportSection
     monkeypatch.setattr(pipeline, "_product_json", lambda *args: ({"sections": [
         {"title": "Invented", "text": "Unsupported", "evidence_ids": ["other-evidence"]}]}, [receipt("knowledge_synthesis", 1)]))
-    with pytest.raises(pipeline.SnapshotBuildError, match="unsupported evidence"):
+    with pytest.raises(pipeline.SemanticArtifactError, match="unsupported evidence"):
         pipeline._synthesize_sections({"id": "overview"}, [ReportSection(title="Original", text="Supported", evidence_ids=["source-evidence"])], None)
 
 
@@ -405,7 +394,7 @@ def test_relationship_discovery_rejects_evidence_from_one_source(monkeypatch):
         }], receipt("relationship_discovery", 1)
 
     monkeypatch.setattr(pipeline, "_relationship_batch", discover)
-    with pytest.raises(pipeline.SnapshotBuildError, match="both endpoints and sources"):
+    with pytest.raises(pipeline.SemanticArtifactError, match="both endpoints and sources"):
         pipeline._discover_cross_source_relationships("project", builds, entities, [], [], evidence, None)
 
 

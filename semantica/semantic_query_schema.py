@@ -8,9 +8,9 @@ from typing import Dict, List, Literal, Optional
 
 from pydantic import Field, field_validator, model_validator
 
-from .project_snapshot_schema import DigestModel, StrictModel, _validate_media_type
+from .semantic_artifact_schema import DigestModel, StrictModel, _validate_media_type
 
-QUERY_PROTOCOL = "semantica.project-query.v1"
+QUERY_PROTOCOL = "semantica.semantic-query.v1"
 
 
 class QueryArtifactRef(DigestModel):
@@ -45,7 +45,7 @@ class QueryEmbedding(StrictModel):
         return value
 
 
-class ProjectQueryRequest(StrictModel):
+class SemanticQueryRequest(StrictModel):
     protocol: Literal[QUERY_PROTOCOL] = QUERY_PROTOCOL
     id: str
     method: Literal["query", "schema"]
@@ -85,7 +85,7 @@ class QueryHit(StrictModel):
     source_ids: List[str] = Field(default_factory=list, alias="sourceIds")
 
 
-class ProjectQueryResult(StrictModel):
+class SemanticQueryResult(StrictModel):
     project_id: str = Field(alias="projectId")
     snapshot_id: str = Field(alias="snapshotId")
     query: str

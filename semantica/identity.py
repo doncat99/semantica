@@ -4,11 +4,11 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
-from .project_snapshot_schema import (
+from .semantic_artifact_schema import (
     IdentityDecision,
     IdentityRegistryEntry,
     KnowledgeEntity,
-    ProjectSnapshot,
+    SemanticArtifact,
     stable_digest,
 )
 
@@ -18,7 +18,7 @@ def _normalized(value: str) -> str:
 
 
 def resolve_project_identities(*, project_id: str, mentions: list[KnowledgeEntity], judgments: list[dict[str, Any]],
-                               base_snapshot: ProjectSnapshot | None, receipt_id: str | None
+                               base_snapshot: SemanticArtifact | None, receipt_id: str | None
                                ) -> tuple[list[KnowledgeEntity], dict[str, str], list[IdentityDecision], list[IdentityRegistryEntry]]:
     """Resolve current mentions while retaining durable identity history."""
     by_id = {mention.id: mention for mention in mentions}

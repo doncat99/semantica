@@ -9,8 +9,8 @@ from hashlib import sha256
 from pathlib import Path
 from typing import Any, Iterable
 
-from .project_query_schema import ProjectQueryRequest, ProjectQueryResult, QueryHit
-from .project_snapshot_schema import ProjectSnapshot
+from .semantic_query_schema import SemanticQueryRequest, SemanticQueryResult, QueryHit
+from .semantic_artifact_schema import SemanticArtifact
 
 
 class QueryError(RuntimeError):
@@ -79,7 +79,7 @@ def _validated_records(value: Any, field: str, snapshot_items: Iterable[Any], ev
     return records
 
 
-def _validated_evidence_records(value: Any, snapshot: ProjectSnapshot) -> list[dict[str, Any]]:
+def _validated_evidence_records(value: Any, snapshot: SemanticArtifact) -> list[dict[str, Any]]:
     records = _records(value, "evidence")
     expected = {item.id: item.model_dump(mode="json", by_alias=True) for item in snapshot.evidence_spans}
     seen: set[str] = set()
@@ -172,14 +172,14 @@ def _semantic_evidence_scores(request, retrieval, evidence_by_id, representation
     return scores
 
 
-def query_project_snapshot(request: ProjectQueryRequest) -> ProjectQueryResult:
+def query_semantic_artifact(request: SemanticQueryRequest) -> SemanticQueryResult:
     if request.method != "query":
-        raise QueryError("query_project_snapshot requires method=query")
+        raise QueryError("query_semantic_artifact requires method=query")
     snapshot_payload = _load_json(Path(request.snapshot.path), request.snapshot.digest)
     retrieval_payload = _load_json(Path(request.retrieval.path), request.retrieval.digest)
-    snapshot = ProjectSnapshot.model_validate(snapshot_payload)
+    snapshot = SemanticArtifact.model_validate(snapshot_payload)
     if snapshot.project_id != request.project_id or snapshot.id != request.snapshot_id:
-        raise QueryError("query artifacts do not match the requested project snapshot")
+        raise QueryError("query artifacts do not match the requested semantic artifact")
     if not isinstance(retrieval_payload, dict) or retrieval_payload.get("snapshot_id") != snapshot.id:
         raise QueryError("retrieval artifact does not belong to the requested snapshot")
     manifest_id = "retrieval:graph"
@@ -255,7 +255,7 @@ def query_project_snapshot(request: ProjectQueryRequest) -> ProjectQueryResult:
             source_ids=sources,
         ))
     hits.sort(key=lambda item: (-item.score, item.kind, item.id))
-    return ProjectQueryResult(
+    return SemanticQueryResult(
         project_id=snapshot.project_id,
         snapshot_id=snapshot.id,
         query=request.query or "",

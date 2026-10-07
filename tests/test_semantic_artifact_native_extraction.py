@@ -4,9 +4,9 @@ from types import SimpleNamespace
 import pytest
 from pydantic import BaseModel
 
-from semantica import project_snapshot_pipeline
-from semantica.project_snapshot_pipeline import SnapshotBuildError
-from semantica.project_snapshot_schema import ModelReceipt
+from semantica import semantic_artifact_pipeline
+from semantica.semantic_artifact_pipeline import SemanticArtifactError
+from semantica.semantic_artifact_schema import ModelReceipt
 from semantica.semantic_extract.types import Entity, Relation
 from semantica.utils.exceptions import ProcessingError
 
@@ -38,10 +38,10 @@ def test_project_snapshot_extraction_uses_canonical_semantica_extractors(monkeyp
         )]
         return entities, relations, Provider()
 
-    monkeypatch.setattr(project_snapshot_pipeline, "_project_model_provider", lambda _relay: Provider())
-    monkeypatch.setattr(project_snapshot_pipeline, "extract_grounded_window", grounded)
+    monkeypatch.setattr(semantic_artifact_pipeline, "_project_model_provider", lambda _relay: Provider())
+    monkeypatch.setattr(semantic_artifact_pipeline, "extract_grounded_window", grounded)
     monkeypatch.setattr(
-        project_snapshot_pipeline,
+        semantic_artifact_pipeline,
         "_embed_texts",
         lambda texts, _relay: ([[0.1, 0.2] for _ in texts], ModelReceipt(
             id="receipt:embedding",
@@ -53,7 +53,7 @@ def test_project_snapshot_extraction_uses_canonical_semantica_extractors(monkeyp
         )),
     )
 
-    result, embeddings, receipts = project_snapshot_pipeline._extract_and_embed(
+    result, embeddings, receipts = semantic_artifact_pipeline._extract_and_embed(
         "Reflective roofs do not shade pedestrians.", SimpleNamespace(model_id="model-1"), object()
     )
 
@@ -66,7 +66,7 @@ def test_project_snapshot_extraction_uses_canonical_semantica_extractors(monkeyp
 
 
 def test_project_snapshot_has_no_parallel_structured_extractor():
-    source = inspect.getsource(project_snapshot_pipeline)
+    source = inspect.getsource(semantic_artifact_pipeline)
     assert "def _structured_extract" not in source
     assert "return _structured_extract" not in source
 
@@ -88,8 +88,8 @@ def test_project_model_provider_uses_host_admitted_output_limit(monkeypatch):
             output_digest="sha256:" + "2" * 64,
         )
 
-    monkeypatch.setattr(project_snapshot_pipeline, "_relay_json", relay_json)
-    provider = project_snapshot_pipeline._project_model_provider(
+    monkeypatch.setattr(semantic_artifact_pipeline, "_relay_json", relay_json)
+    provider = semantic_artifact_pipeline._project_model_provider(
         SimpleNamespace(model_id="model-1", max_output_tokens=393216)
     )
 
@@ -98,7 +98,7 @@ def test_project_model_provider_uses_host_admitted_output_limit(monkeypatch):
 
 
 def test_native_extraction_preserves_retryable_relay_failure(monkeypatch):
-    relay_failure = SnapshotBuildError(
+    relay_failure = SemanticArtifactError(
         "structured_extraction relay returned HTTP 500: INTERNAL_ERROR",
         status=500,
         code="INTERNAL_ERROR",
@@ -108,10 +108,10 @@ def test_native_extraction_preserves_retryable_relay_failure(monkeypatch):
     def grounded(_text, **_kwargs):
         raise ProcessingError("typed extraction failed") from relay_failure
 
-    monkeypatch.setattr(project_snapshot_pipeline, "extract_grounded_window", grounded)
+    monkeypatch.setattr(semantic_artifact_pipeline, "extract_grounded_window", grounded)
 
-    with pytest.raises(SnapshotBuildError) as failure:
-        project_snapshot_pipeline._extract_and_embed(
+    with pytest.raises(SemanticArtifactError) as failure:
+        semantic_artifact_pipeline._extract_and_embed(
             "Retryable source text", SimpleNamespace(model_id="model-1"), object()
         )
 
@@ -124,18 +124,18 @@ def test_typed_provider_keeps_relay_failure_as_its_cause(monkeypatch):
     class Output(BaseModel):
         entities: list = []
 
-    relay_failure = SnapshotBuildError(
+    relay_failure = SemanticArtifactError(
         "structured_extraction relay returned HTTP 500: INTERNAL_ERROR",
         status=500,
         code="INTERNAL_ERROR",
         retryable=True,
     )
     monkeypatch.setattr(
-        project_snapshot_pipeline,
+        semantic_artifact_pipeline,
         "_relay_json",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(relay_failure),
     )
-    provider = project_snapshot_pipeline._project_model_provider(
+    provider = semantic_artifact_pipeline._project_model_provider(
         SimpleNamespace(model_id="model-1", max_output_tokens=393216)
     )
 

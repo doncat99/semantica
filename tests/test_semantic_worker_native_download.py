@@ -5,8 +5,8 @@ from pathlib import Path
 import urllib.error
 
 
-SCRIPT = Path(__file__).parents[1] / ".github" / "scripts" / "project_worker_native.py"
-SPEC = importlib.util.spec_from_file_location("project_worker_native", SCRIPT)
+SCRIPT = Path(__file__).parents[1] / ".github" / "scripts" / "semantic_worker_native.py"
+SPEC = importlib.util.spec_from_file_location("semantic_worker_native", SCRIPT)
 MODULE = importlib.util.module_from_spec(SPEC)
 assert SPEC.loader
 SPEC.loader.exec_module(MODULE)

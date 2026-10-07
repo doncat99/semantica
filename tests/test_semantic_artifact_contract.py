@@ -6,13 +6,13 @@ import sys
 import pytest
 from pydantic import ValidationError
 
-from semantica.project_snapshot_schema import (
-    ProjectSnapshot,
-    ProjectSnapshotBuildRequest,
+from semantica.semantic_artifact_schema import (
+    SemanticArtifact,
+    SemanticArtifactBuildRequest,
     WorkerRequest,
-    project_snapshot_json_schema,
+    semantic_artifact_json_schema,
 )
-from semantica.project_snapshot_worker import serve
+from semantica.semantic_worker import serve
 
 H1 = "sha256:" + "1" * 64
 H2 = "sha256:" + "2" * 64
@@ -27,10 +27,10 @@ H8 = "sha256:" + "8" * 64
 def test_worker_keeps_parser_diagnostics_out_of_protocol_stdout():
     script = """\
 import os
-from semantica import project_snapshot_worker as worker
+from semantica import semantic_worker as worker
 def handle(raw, progress=None):
     os.write(1, b'Docling table warning\\n')
-    return {'protocol': 'semantica.project-worker.v1', 'id': raw['id'], 'ok': True, 'result': {}}
+    return {'protocol': 'semantica.semantic-worker.v1', 'id': raw['id'], 'ok': True, 'result': {}}
 worker.handle_request = handle
 worker.main()
 """
@@ -38,7 +38,7 @@ worker.main()
         [sys.executable, "-c", script], input='{"id":"parse-1"}\n', capture_output=True, text=True, check=True,
     )
     assert json.loads(result.stdout) == {
-        "protocol": "semantica.project-worker.v1", "id": "parse-1", "ok": True, "result": {},
+        "protocol": "semantica.semantic-worker.v1", "id": "parse-1", "ok": True, "result": {},
     }
     assert "Docling table warning" in result.stderr
 
@@ -143,15 +143,15 @@ def _build_request_payload():
 
 
 def test_project_snapshot_contract_covers_kernel_sections():
-    props = project_snapshot_json_schema()["properties"]
+    props = semantic_artifact_json_schema()["properties"]
     for key in ["lineage", "artifact_manifest", "document_representations", "evidence_spans", "entities", "assertions", "relations", "identity_decisions", "communities", "topics", "conflicts", "retrieval_manifests", "change_delta", "model_receipts"]:
         assert key in props
     assert "reports" not in props
 
 
 def test_project_snapshot_validates_complete_cross_references():
-    snapshot = ProjectSnapshot.model_validate(_snapshot_payload())
-    assert snapshot.protocol == "semantica.project-snapshot.v1"
+    snapshot = SemanticArtifact.model_validate(_snapshot_payload())
+    assert snapshot.protocol == "semantica.semantic-artifact.v1"
     assert snapshot.id == "snapshot:one"
     assert snapshot.model_dump()["snapshot_id"] == "snapshot:one"
     assert "reports" not in snapshot.model_dump()
@@ -161,23 +161,23 @@ def test_snapshot_rejects_embedded_reports_and_report_delta():
     payload = _snapshot_payload()
     payload["reports"] = []
     with pytest.raises(ValidationError, match="reports"):
-        ProjectSnapshot.model_validate(payload)
+        SemanticArtifact.model_validate(payload)
     payload = _snapshot_payload()
     payload["change_delta"]["affected_report_ids"] = []
     with pytest.raises(ValidationError, match="affected_report_ids"):
-        ProjectSnapshot.model_validate(payload)
+        SemanticArtifact.model_validate(payload)
 
 
 def test_project_snapshot_rejects_bad_hash_and_duplicate_ids():
     bad = _snapshot_payload()
     bad["document_representations"][0]["content_hash"] = "not-a-hash"
     with pytest.raises(ValidationError, match="b3-"):
-        ProjectSnapshot.model_validate(bad)
+        SemanticArtifact.model_validate(bad)
 
     dup = _snapshot_payload()
     dup["entities"].append(dict(dup["entities"][0]))
     with pytest.raises(ValidationError, match="duplicate entity id"):
-        ProjectSnapshot.model_validate(dup)
+        SemanticArtifact.model_validate(dup)
 
 
 @pytest.mark.parametrize("section", ["assertions", "relations"])
@@ -197,7 +197,7 @@ def test_project_snapshot_rejects_invalid_fact_qualifiers(section, qualifiers):
     else:
         fact["qualifiers"] = qualifiers
     with pytest.raises(ValidationError, match="qualifier|qualifiers"):
-        ProjectSnapshot.model_validate(payload)
+        SemanticArtifact.model_validate(payload)
 
 
 def test_project_snapshot_rejects_unavailable_or_empty_locator():
@@ -206,26 +206,26 @@ def test_project_snapshot_rejects_unavailable_or_empty_locator():
     locator.pop("start_char")
     locator.pop("end_char")
     with pytest.raises(ValidationError, match="locator requires"):
-        ProjectSnapshot.model_validate(bad)
+        SemanticArtifact.model_validate(bad)
 
 
 def test_project_snapshot_rejects_unknown_community_topic_conflict_retrieval_refs():
     bad = _snapshot_payload()
     bad["retrieval_manifests"][0]["community_ids"] = ["missing-community"]
     with pytest.raises(ValidationError, match="unknown community"):
-        ProjectSnapshot.model_validate(bad)
+        SemanticArtifact.model_validate(bad)
 
 
 
 def test_build_request_accepts_sources_not_semantic_objects():
-    request = ProjectSnapshotBuildRequest.model_validate(_build_request_payload())
+    request = SemanticArtifactBuildRequest.model_validate(_build_request_payload())
     assert request.sources[0].source_id == "source-1"
     assert request.base_snapshot.artifact_digest == H8
 
     bad = _build_request_payload()
     bad["entities"] = [{"id": "host-entity"}]
     with pytest.raises(ValidationError):
-        ProjectSnapshotBuildRequest.model_validate(bad)
+        SemanticArtifactBuildRequest.model_validate(bad)
 
 
 def test_build_request_preserves_host_source_and_provider_model_ids():
@@ -233,18 +233,18 @@ def test_build_request_preserves_host_source_and_provider_model_ids():
     payload["sources"][0]["sourceId"] = "6996f3a7-b132-4474-aa13-d14d746218cd"
     payload["parsedSources"][0]["sourceId"] = payload["sources"][0]["sourceId"]
     payload["relays"]["embedding"]["modelId"] = "nvidia/llama-nemotron-embed-vl-1b-v2:free"
-    request = ProjectSnapshotBuildRequest.model_validate(payload)
+    request = SemanticArtifactBuildRequest.model_validate(payload)
     assert request.sources[0].source_id == payload["sources"][0]["sourceId"]
     assert request.relays["embedding"].model_id == payload["relays"]["embedding"]["modelId"]
 
     payload["relays"]["embedding"]["modelId"] = "../unsafe"
     with pytest.raises(ValidationError, match="model_id"):
-        ProjectSnapshotBuildRequest.model_validate(payload)
+        SemanticArtifactBuildRequest.model_validate(payload)
 
 
 def test_build_request_requires_admitted_model_output_limits():
     payload = _build_request_payload()
-    request = ProjectSnapshotBuildRequest.model_validate(payload)
+    request = SemanticArtifactBuildRequest.model_validate(payload)
     assert request.relays["model"].context_window_tokens == 500000
     assert request.relays["model"].max_output_tokens == 393216
 
@@ -252,12 +252,12 @@ def test_build_request_requires_admitted_model_output_limits():
         bad = _build_request_payload()
         del bad["relays"]["model"][field]
         with pytest.raises(ValidationError, match="model relay requires"):
-            ProjectSnapshotBuildRequest.model_validate(bad)
+            SemanticArtifactBuildRequest.model_validate(bad)
 
     bad = _build_request_payload()
     bad["relays"]["model"]["maxOutputTokens"] = 500001
     with pytest.raises(ValidationError, match="cannot exceed"):
-        ProjectSnapshotBuildRequest.model_validate(bad)
+        SemanticArtifactBuildRequest.model_validate(bad)
 
 
 def test_build_request_and_snapshot_preserve_extraction_specification():
@@ -269,11 +269,11 @@ def test_build_request_and_snapshot_preserve_extraction_specification():
             "ticker": {"type": "string", "description": "Exchange ticker"},
         }}],
     }
-    request = ProjectSnapshotBuildRequest.model_validate(payload)
+    request = SemanticArtifactBuildRequest.model_validate(payload)
     snapshot_payload = _snapshot_payload()
     snapshot_payload["extraction_spec"] = payload["recipe"]["extractionSpec"]
     snapshot_payload["lineage"]["extraction_spec_digest"] = request.recipe.extraction_spec.digest
-    snapshot = ProjectSnapshot.model_validate(snapshot_payload)
+    snapshot = SemanticArtifact.model_validate(snapshot_payload)
 
     assert request.recipe.extraction_spec.digest == snapshot.lineage.extraction_spec_digest
     assert snapshot.extraction_spec.entity_types[0].name == "Issuer"
@@ -283,46 +283,46 @@ def test_build_request_rejects_unsafe_release_and_source_boundaries():
     bad = _build_request_payload()
     bad["sources"][0]["filePath"] = "relative/source.pdf"
     with pytest.raises(ValidationError, match="absolute"):
-        ProjectSnapshotBuildRequest.model_validate(bad)
+        SemanticArtifactBuildRequest.model_validate(bad)
 
     bad = _build_request_payload()
     bad["sources"][0]["mimeType"] = "pdf"
     with pytest.raises(ValidationError, match="MIME type"):
-        ProjectSnapshotBuildRequest.model_validate(bad)
+        SemanticArtifactBuildRequest.model_validate(bad)
 
     bad = _build_request_payload()
     bad["release"]["artifactDigest"] = "not-a-digest"
     with pytest.raises(ValidationError, match="sha256"):
-        ProjectSnapshotBuildRequest.model_validate(bad)
+        SemanticArtifactBuildRequest.model_validate(bad)
 
     bad = _build_request_payload()
     bad["relays"]["model"]["authorizationEnv"] = "secret-token-value"
     with pytest.raises(ValidationError, match="environment variable name"):
-        ProjectSnapshotBuildRequest.model_validate(bad)
+        SemanticArtifactBuildRequest.model_validate(bad)
 
     bad = _build_request_payload()
     bad["relays"]["model"]["baseUrl"] = "https://api.example.com/v1"
     with pytest.raises(ValidationError, match="loopback"):
-        ProjectSnapshotBuildRequest.model_validate(bad)
+        SemanticArtifactBuildRequest.model_validate(bad)
 
     bad = _build_request_payload()
     bad["relays"]["model"]["baseUrl"] = "http://127.0.0.1:9021/v1/responses"
     with pytest.raises(ValidationError, match="chat/completions"):
-        ProjectSnapshotBuildRequest.model_validate(bad)
+        SemanticArtifactBuildRequest.model_validate(bad)
 
 
 def test_jsonl_worker_build_requires_a_real_source_file():
-    request = {"protocol": "semantica.project-worker.v1", "id": "req-1", "method": "build_project_snapshot", "params": _build_request_payload()}
+    request = {"protocol": "semantica.semantic-worker.v1", "id": "req-1", "method": "build_semantic_artifacts", "params": _build_request_payload()}
     stdin = io.StringIO(json.dumps(request) + "\n")
     stdout = io.StringIO()
     assert serve(stdin, stdout) == 0
     response = json.loads(stdout.getvalue())
     assert response["ok"] is False
-    assert response["error"]["type"] in {"SnapshotBuildError", "FileNotFoundError"}
+    assert response["error"]["type"] in {"SemanticArtifactError", "FileNotFoundError"}
 
 
-def test_jsonl_worker_validate_snapshot_method():
-    request = {"protocol": "semantica.project-worker.v1", "id": "validate-1", "method": "validate_snapshot", "params": _snapshot_payload()}
+def test_jsonl_worker_validate_artifact_method():
+    request = {"protocol": "semantica.semantic-worker.v1", "id": "validate-1", "method": "validate_artifact", "params": _snapshot_payload()}
     stdin = io.StringIO(json.dumps(request) + "\n")
     stdout = io.StringIO()
     assert serve(stdin, stdout) == 0
@@ -332,7 +332,7 @@ def test_jsonl_worker_validate_snapshot_method():
 
 
 def test_jsonl_worker_validates_extraction_spec_with_semantica_owned_schema():
-    request = {"protocol": "semantica.project-worker.v1", "id": "spec-1", "method": "validate_extraction_spec", "params": {
+    request = {"protocol": "semantica.semantic-worker.v1", "id": "spec-1", "method": "validate_extraction_spec", "params": {
         "id": "general", "version": "1",
         "entity_types": [{"name": "Concept", "description": "A source-grounded concept"}],
     }}
@@ -345,14 +345,14 @@ def test_jsonl_worker_validates_extraction_spec_with_semantica_owned_schema():
     assert response["result"]["digest"].startswith("sha256:")
 
 
-def test_jsonl_worker_schema_method_returns_snapshot_and_build_request_schema():
-    request = {"protocol": "semantica.project-worker.v1", "id": "schema-1", "method": "schema"}
+def test_jsonl_worker_schema_method_returns_semantic_graph_and_build_request_schema():
+    request = {"protocol": "semantica.semantic-worker.v1", "id": "schema-1", "method": "schema"}
     stdin = io.StringIO(json.dumps(request) + "\n")
     stdout = io.StringIO()
     assert serve(stdin, stdout) == 0
     response = json.loads(stdout.getvalue())
     assert response["ok"] is True
-    assert "document_representations" in response["result"]["snapshot"]["properties"]
+    assert "document_representations" in response["result"]["semantic_graph"]["properties"]
     assert "sources" in response["result"]["build_request"]["properties"]
 
 

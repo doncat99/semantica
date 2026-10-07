@@ -122,7 +122,7 @@ parse-pdf = ["pdfplumber>=0.10.0"]
 # Runtime dependencies for the ProjectSnapshot worker.  The worker entrypoint
 # remains importable from the core wheel, while this extra installs the single
 # document-processing chain used by snapshot builds.
-project-worker = [
+semantic-worker = [
   "blake3==1.0.8",
   "onnxruntime>=1.23.1",
   "python-docx>=1.2.0",
@@ -331,7 +331,6 @@ dev = [
 semantica = "semantica.cli:main"
 semantica-server = "semantica.server:main"
 semantica-worker = "semantica.worker:main"
-semantica-project-worker = "semantica.project_snapshot_worker:main"
 semantica-explorer = "semantica.explorer:main"
 semantica-mcp = "semantica.mcp_server:main"
 

@@ -1,4 +1,4 @@
-name: Project Worker Native Release
+name: Semantic Worker Native Release
 
 on:
   push:
@@ -21,10 +21,10 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="ontoscience-project-worker-${GITHUB_SHA:0:12}"
+          tag="ontoscience-semantic-worker-${GITHUB_SHA:0:12}"
           if ! gh release view "$tag" >/dev/null 2>&1; then
             uv build --wheel --out-dir native-dist
-            gh release create "$tag" --target "$GITHUB_SHA" --title "OntoScience project worker ${GITHUB_SHA:0:12}" --notes 'Immutable worker and native runtime bundles. Platform acceptance and inventories are attached.' native-dist/*.whl
+            gh release create "$tag" --target "$GITHUB_SHA" --title "OntoScience semantic worker ${GITHUB_SHA:0:12}" --notes 'Immutable worker and native runtime bundles. Platform acceptance and inventories are attached.' native-dist/*.whl
           fi
   native:
     needs: wheel
@@ -52,7 +52,7 @@ jobs:
       run:
         shell: bash
     env:
-      UV_CONSTRAINT: ${{ github.workspace }}/.github/requirements/project-worker-${{ matrix.target }}.lock
+      UV_CONSTRAINT: ${{ github.workspace }}/.github/requirements/semantic-worker-${{ matrix.target }}.lock
       UV_TORCH_BACKEND: cpu
       DOCLING_DEVICE: cpu
       ORT_DISABLE_TELEMETRY: '1'
@@ -63,15 +63,15 @@ jobs:
         with:
           version: '0.9.10'
       - name: Fetch immutable native inputs
-        run: uv run --no-project --python 3.12 .github/scripts/project_worker_native.py '${{ matrix.target }}' native-inputs
+        run: uv run --no-project --python 3.12 .github/scripts/semantic_worker_native.py '${{ matrix.target }}' native-inputs
       - name: Fetch wheel and locked model inputs
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="ontoscience-project-worker-${GITHUB_SHA:0:12}"
+          tag="ontoscience-semantic-worker-${GITHUB_SHA:0:12}"
           mkdir -p native-dist
           gh release download "$tag" --pattern '*.whl' --dir native-dist
-          native-inputs/${{ matrix.python }} -I -B .github/scripts/project_worker_models.py .github/requirements/project-worker-models.json native-inputs/models
+          native-inputs/${{ matrix.python }} -I -B .github/scripts/semantic_worker_models.py .github/requirements/semantic-worker-models.json native-inputs/models
       - name: Build native bundle
         run: |
           shopt -s nullglob
@@ -80,17 +80,17 @@ jobs:
             echo "Expected exactly one Semantica wheel, found ${#wheels[@]}" >&2
             exit 1
           fi
-          native-inputs/${{ matrix.python }} -I -B semantica/project_bundle.py --python-root native-inputs/python --wheel "${wheels[0]}" --models-root native-inputs/models --target '${{ matrix.runtime_target }}' --output native-bundle --source-revision "$GITHUB_SHA"
+          native-inputs/${{ matrix.python }} -I -B semantica/bundle.py --python-root native-inputs/python --wheel "${wheels[0]}" --models-root native-inputs/models --target '${{ matrix.runtime_target }}' --output native-bundle --source-revision "$GITHUB_SHA"
       - name: Relocate and validate installed worker
         run: |
           mv native-bundle "$RUNNER_TEMP/semantica-relocated"
-          "$RUNNER_TEMP/semantica-relocated/${{ matrix.python }}" -I -B .github/scripts/project_worker_acceptance.py "$RUNNER_TEMP/semantica-relocated" native-dist/${{ matrix.target }}-acceptance.json
+          "$RUNNER_TEMP/semantica-relocated/${{ matrix.python }}" -I -B .github/scripts/semantic_worker_acceptance.py "$RUNNER_TEMP/semantica-relocated" native-dist/${{ matrix.target }}-acceptance.json
       - name: Archive and publish immutable native release
         env:
           GH_TOKEN: ${{ github.token }}
           COPYFILE_DISABLE: '1'
         run: |
-          tag="ontoscience-project-worker-${GITHUB_SHA:0:12}"
+          tag="ontoscience-semantic-worker-${GITHUB_SHA:0:12}"
           archive="semantica-${{ matrix.target }}-${GITHUB_SHA:0:12}.tar.gz"
           tar -czf "native-dist/$archive" -C "$RUNNER_TEMP/semantica-relocated" .
           cp "$RUNNER_TEMP/semantica-relocated/manifest.json" native-dist/${{ matrix.target }}-manifest.json

@@ -3,7 +3,7 @@ from pathlib import Path
 import pytest
 
 from semantica.project_office import flat_odf_document
-from semantica.project_source import UnsupportedSourceFormatError, parse_source
+from semantica.source import UnsupportedSourceFormatError, parse_source
 
 
 def test_binary_office_routes_once_to_dedicated_owner(tmp_path, monkeypatch):

@@ -10,8 +10,8 @@ import pytest
 
 from semantica.project_checkpoint import SnapshotCheckpoint, active_checkpoint
 from semantica.project_remote_docling import RemoteDoclingError, parse_remote_docling
-from semantica.project_snapshot_schema import ProjectSnapshotBuildRequest
-from tests.test_project_snapshot_pipeline import _request
+from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest
+from tests.test_semantic_artifact import _request
 
 
 def _remote_request(source, output):
@@ -84,9 +84,9 @@ def test_remote_task_survives_actual_process_kill_without_resubmission(tmp_path,
 import json,sys
 from pathlib import Path
 from semantica.project_checkpoint import SnapshotCheckpoint,active_checkpoint
-from semantica.project_snapshot_schema import ProjectSnapshotBuildRequest
-from semantica.project_source import parse_source
-r=ProjectSnapshotBuildRequest.model_validate_json(Path(sys.argv[1]).read_text())
+from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest
+from semantica.source import parse_source
+r=SemanticArtifactBuildRequest.model_validate_json(Path(sys.argv[1]).read_text())
 active_checkpoint.set(SnapshotCheckpoint(r))
 d=parse_source(Path(r.sources[0].file_path),name='source.pdf',mime_type='application/pdf',force_ocr=True,document_processing=r.document_processing.model_dump(mode='json',by_alias=True))
 print(json.dumps({'origin':d.origin,'document':d.document}))
@@ -125,7 +125,7 @@ def test_missing_auth_and_uncertain_submit_fail_closed(tmp_path, gateway, monkey
     profile, calls, _, release, _ = gateway
     source = tmp_path / "source.pdf"
     source.write_bytes(b"fixture")
-    request = ProjectSnapshotBuildRequest.model_validate(_remote_request(source, tmp_path / "output"))
+    request = SemanticArtifactBuildRequest.model_validate(_remote_request(source, tmp_path / "output"))
     checkpoint = SnapshotCheckpoint(request)
     token = active_checkpoint.set(checkpoint)
     try:
@@ -149,7 +149,7 @@ def test_partial_result_is_not_adopted(tmp_path, gateway, monkeypatch):
     monkeypatch.setenv("TEST_DOCLING_KEY", "secret-fixture")
     source = tmp_path / "source.pdf"
     source.write_bytes(b"fixture")
-    request = ProjectSnapshotBuildRequest.model_validate(_remote_request(source, tmp_path / "output"))
+    request = SemanticArtifactBuildRequest.model_validate(_remote_request(source, tmp_path / "output"))
     token = active_checkpoint.set(SnapshotCheckpoint(request))
     try:
         with pytest.raises(RemoteDoclingError, match="not a successful"):
@@ -165,7 +165,7 @@ def test_auth_error_redaction_and_redirect_refusal(tmp_path, gateway, monkeypatc
     monkeypatch.setenv("TEST_DOCLING_KEY", "secret-fixture")
     source = tmp_path / "source.pdf"
     source.write_bytes(b"fixture")
-    request = ProjectSnapshotBuildRequest.model_validate(_remote_request(source, tmp_path / "output"))
+    request = SemanticArtifactBuildRequest.model_validate(_remote_request(source, tmp_path / "output"))
     token = active_checkpoint.set(SnapshotCheckpoint(request))
     try:
         with pytest.raises(RemoteDoclingError, match=f"HTTP {status}") as error:

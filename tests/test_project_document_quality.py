@@ -3,11 +3,11 @@ from pathlib import Path
 import pytest
 
 from semantica.project_document_quality import assess_document_quality
-from semantica.project_source import SourceDocument
+from semantica.source import SourceDocument
 from semantica.project_checkpoint import active_checkpoint
-from semantica.project_snapshot_pipeline import DocumentQualityError, _build_source, parse_source_artifact
-from semantica.project_snapshot_schema import ParseSourceRequest, ProjectSnapshotBuildRequest
-from tests.test_project_snapshot_pipeline import _request
+from semantica.semantic_artifact_pipeline import DocumentQualityError, _build_source, parse_source_artifact
+from semantica.semantic_artifact_schema import ParseSourceRequest, SemanticArtifactBuildRequest
+from tests.test_semantic_artifact import _request
 
 
 def test_native_font_corruption_requires_review_with_exact_location():
@@ -34,7 +34,7 @@ def test_encoding_loss_is_reported():
 def test_ocr_recipe_and_text_revision_have_distinct_evidence_identity(tmp_path: Path):
     source = tmp_path / "source.txt"
     source.write_text("Ada Lovelace designed the Analytical Engine.")
-    request = ProjectSnapshotBuildRequest.model_validate(_request(source, tmp_path / "build")["params"])
+    request = SemanticArtifactBuildRequest.model_validate(_request(source, tmp_path / "build")["params"])
     parsed = (source.read_text(), {"format": "docling", "text": source.read_text()}, "native", request.sources[0].material_revision, "docling", "2")
     native = _build_source(request.sources[0], False, parsed=parsed)
     repaired = _build_source(request.sources[0], True, parsed=(*parsed[:2], "ocr", *parsed[3:]))
@@ -45,7 +45,7 @@ def test_ocr_recipe_and_text_revision_have_distinct_evidence_identity(tmp_path: 
 
 
 def test_failed_quality_is_durable_and_never_enters_knowledge_extraction(tmp_path, monkeypatch):
-    import semantica.project_snapshot_pipeline as pipeline
+    import semantica.semantic_artifact_pipeline as pipeline
     source = tmp_path / "source.pdf"
     source.write_bytes(b"fixture")
     request = _request(source, tmp_path / "build", prepare=False)

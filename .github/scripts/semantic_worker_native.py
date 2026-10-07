@@ -33,7 +33,7 @@ def download(url, destination, digest, attempts=4):
 
 
 def prepare(target, output, *, include_office=False):
-    lock = json.loads(Path(".github/requirements/project-worker-native.json").read_text())
+    lock = json.loads(Path(".github/requirements/semantic-worker-native.json").read_text())
     platform = lock["platforms"][target]
     output.mkdir(parents=True, exist_ok=True)
     download(platform["pythonUrl"], output / "python.tar.gz", platform["pythonSha256"])

@@ -1,4 +1,4 @@
-"""The single source-to-document boundary used by ProjectSnapshot builds."""
+"""The single source-to-document boundary used by SemanticArtifact builds."""
 
 from __future__ import annotations
 

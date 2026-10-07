@@ -1,6 +1,6 @@
-from semantica import project_snapshot_pipeline as pipeline
-from semantica.project_snapshot_schema import KnowledgeAssertion, KnowledgeRelation, SourceBuildInput
-from semantica.project_source import source_content_revision
+from semantica import semantic_artifact_pipeline as pipeline
+from semantica.semantic_artifact_schema import KnowledgeAssertion, KnowledgeRelation, SourceBuildInput
+from semantica.source import source_content_revision
 
 
 def build(tmp_path, text, extraction):
