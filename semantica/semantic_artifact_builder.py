@@ -17,6 +17,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
+from bisect import bisect_left
 from contextvars import copy_context
 from hashlib import sha256
 from pathlib import Path
@@ -337,15 +338,18 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
                     begin, finish = _find_occurrence(window, entity["name"], entity.get("occurrence"))
                     mentions.append(Entity(entity["name"], entity["type"], begin, finish,
                         entity.get("confidence", 0.9), {"mention_id": entity["id"]}))
+                names = {entity.metadata["mention_id"]: entity.text for entity in mentions}
                 candidates = {"relations": [{**relation, "subject_id": relation["subject"],
                     "object_id": relation["object"],
-                    "subject": next(entity.text for entity in mentions if entity.metadata["mention_id"] == relation["subject"]),
-                    "object": next(entity.text for entity in mentions if entity.metadata["mention_id"] == relation["object"]),
+                    "subject": names.get(relation["subject"], ""),
+                    "object": names.get(relation["object"], ""),
                 } for relation in extracted["relations"]]}
                 rejections = []
                 accepted = _parse_grounded_relation_result(candidates, mentions, window,
                     "bifrost", model_relay.model_id, reject_invalid=True, rejections=rejections)
                 if rejections:
+                    if not receipts:
+                        raise SemanticArtifactError("restored extraction has no model receipt", code="CHECKPOINT_RECEIPT_MISSING")
                     extracted = {**extracted, "relations": [{
                         "subject": relation.metadata["subject_id"], "predicate": relation.predicate,
                         "object": relation.metadata["object_id"], "evidence": relation.context,
@@ -1662,9 +1666,11 @@ def _span_id(representation_id: str, start: int, end: int) -> str:
     return readable if len(readable) <= 128 else _evidence_id(["span", representation_id, start, end])
 
 
-def _entity_id(source_id: str, name: str, entity_type: str, text: str, start: int, end: int) -> str:
+def _entity_id(source_id: str, name: str, entity_type: str, text: str, start: int, occurrences: dict[str, list[int]]) -> str:
     """Anchor an occurrence without making ordinary sentence edits change its ID."""
-    occurrence = sum(1 for match in re.finditer(re.escape(name), text[:end], re.IGNORECASE) if match.start() < start)
+    if name not in occurrences:
+        occurrences[name] = [match.start() for match in re.finditer(re.escape(name), text, re.IGNORECASE)]
+    occurrence = bisect_left(occurrences[name], start)
     key = [source_id, entity_type.casefold(), _normalized_text(name), occurrence]
     return "mention:" + stable_digest(key).split(":")[1][:32]
 
@@ -1707,6 +1713,7 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
     representation_artifact_id = f"artifact:{representation_id}"
     source_locations = _docling_locations(document, text)
     entities: dict[str, KnowledgeEntity] = {}
+    occurrences: dict[str, list[int]] = {}
     entities_by_ref: dict[str, KnowledgeEntity] = {}
     evidence: dict[str, EvidenceSpan] = {}
     if model_result is None:
@@ -1746,7 +1753,7 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
             confidence=item.get("confidence"),
             metadata=source_metadata,
         )
-        entity_id = _entity_id(source.source_id, name, entity_type, text, start, end)
+        entity_id = _entity_id(source.source_id, name, entity_type, text, start, occurrences)
         current = entities.get(entity_id)
         if current is None:
             entities[entity_id] = KnowledgeEntity(
@@ -1783,7 +1790,7 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
             if not subject_entity or not object_entity:
                 raise SemanticArtifactError("relation endpoint is absent from extracted entities")
             if subject_entity.id == object_entity.id:
-                raise SemanticArtifactError("self relations are not accepted")
+                raise SemanticArtifactError("self relations are not accepted", code="SEMANTIC_SELF_RELATION")
             start, end = (item["_start"], item["_end"]) if "_start" in item else _find_occurrence(text, quote.strip(), item.get("evidence_occurrence"))
             canonical_quote = text[start:end]
             if canonical_quote != quote.strip():

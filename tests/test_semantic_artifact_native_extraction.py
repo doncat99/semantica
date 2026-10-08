@@ -2,6 +2,7 @@ import inspect
 from types import SimpleNamespace
 
 import pytest
+import re
 from pydantic import BaseModel
 
 from semantica import semantic_artifact_builder
@@ -9,6 +10,35 @@ from semantica.semantic_artifact_builder import SemanticArtifactError
 from semantica.semantic_artifact_schema import ModelReceipt
 from semantica.semantic_extract.types import Entity, Relation
 from semantica.utils.exceptions import ProcessingError
+
+
+def test_entity_occurrence_index_preserves_identity_and_scans_each_name_once(monkeypatch):
+    text = "Roof roof rooftop ROOF Roof"
+    original = re.finditer
+    calls = []
+    def scan(*args, **kwargs):
+        calls.append(args)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(semantic_artifact_builder.re, "finditer", scan)
+    cache = {}
+    for match in original("Roof", text, re.IGNORECASE):
+        occurrence = sum(1 for prior in original("Roof", text[:match.end()], re.IGNORECASE) if prior.start() < match.start())
+        expected = "mention:" + semantic_artifact_builder.stable_digest(["source", "object", "roof", occurrence]).split(":")[1][:32]
+        assert semantic_artifact_builder._entity_id("source", "Roof", "object", text, match.start(), cache) == expected
+    assert len(calls) == 1
+
+
+def test_worker_internal_failure_retains_code_location_without_source_content():
+    from semantica.semantic_worker import _response
+    try:
+        raise SemanticArtifactError("private document contents", code="SEMANTIC_SELF_RELATION")
+    except SemanticArtifactError as error:
+        response = _response("request-1", False, error=error)
+    diagnostic = response["error"]["diagnostic"]
+    assert diagnostic["code"] == "SEMANTIC_SELF_RELATION"
+    assert diagnostic["fault"]["function"] == "test_worker_internal_failure_retains_code_location_without_source_content"
+    assert diagnostic["fault"]["line"] > 0
+    assert "private document" not in str(diagnostic)
 
 
 def test_build_parallelism_accepts_host_ceiling_and_rejects_overflow():
