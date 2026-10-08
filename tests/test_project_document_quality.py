@@ -5,7 +5,7 @@ import pytest
 from semantica.project_document_quality import assess_document_quality
 from semantica.source import SourceDocument
 from semantica.project_checkpoint import active_checkpoint
-from semantica.semantic_artifact_pipeline import DocumentQualityError, _build_source, parse_source_artifact
+from semantica.semantic_artifact_builder import DocumentQualityError, _build_source, parse_source_artifact
 from semantica.semantic_artifact_schema import ParseSourceRequest, SemanticArtifactBuildRequest
 from tests.test_semantic_artifact import _request
 
@@ -45,7 +45,7 @@ def test_ocr_recipe_and_text_revision_have_distinct_evidence_identity(tmp_path: 
 
 
 def test_failed_quality_is_durable_and_never_enters_knowledge_extraction(tmp_path, monkeypatch):
-    import semantica.semantic_artifact_pipeline as pipeline
+    import semantica.semantic_artifact_builder as pipeline
     source = tmp_path / "source.pdf"
     source.write_bytes(b"fixture")
     request = _request(source, tmp_path / "build", prepare=False)

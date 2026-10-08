@@ -4,7 +4,7 @@ from time import sleep
 
 import pytest
 
-from semantica import semantic_artifact_pipeline as pipeline
+from semantica import semantic_artifact_builder as pipeline
 from semantica.source import source_content_revision
 from semantica.semantic_artifact_schema import (
     ClassificationProfile, DocumentLocator, DocumentRepresentation, EvidenceSpan,
@@ -66,7 +66,7 @@ def test_long_extraction_visits_tail_and_preserves_absolute_repeated_mentions(tm
     _stub_canonical_extraction(monkeypatch, extract)
     monkeypatch.setattr(pipeline, "_embed_texts", lambda texts, relay: ([[1.0, 0.0] for _ in texts], receipt("embedding", len(calls))))
     extracted, embeddings, receipts = pipeline._extract_and_embed(text, SimpleNamespace(model_id="test"), None)
-    assert len(calls) > 10 and all(len(item) <= pipeline.TEXT_WINDOW_CHARS for item in calls)
+    assert len(calls) >= 5 and all(len(item) <= pipeline.TEXT_WINDOW_CHARS for item in calls)
     assert len(receipts) == len(calls) + (len(calls) + 7) // 8
     assert embeddings[-1]["end_char"] == len(text)
     covered = set()
@@ -78,14 +78,14 @@ def test_long_extraction_visits_tail_and_preserves_absolute_repeated_mentions(tm
     built = pipeline._build_source(SourceBuildInput(filePath=str(source), sourceId="long", materialRevision=source_content_revision(source), name=source.name, mimeType="text/plain"), False, extracted)
     assert any(entity.canonical_name == "Tail" for entity in built["entities"])
     ada = [entity for entity in built["entities"] if entity.canonical_name == "Ada"]
-    assert len(ada) > 10 and all(len(entity.evidence_ids) == 1 for entity in ada)
+    assert len(ada) >= 5 and all(len(entity.evidence_ids) == 1 for entity in ada)
     for span in built["evidence"]:
         assert text[span.locator.start_char:span.locator.end_char] == span.quote
     assert max(span.locator.start_char for span in built["evidence"]) > len(text) - 30
 
 
-def test_extraction_rejects_quote_outside_current_window(monkeypatch):
-    _stub_canonical_extraction(monkeypatch, lambda *args: ({"entities": [{"id": "tail", "name": "Tail", "type": "CONCEPT", "occurrence": 0}], "relations": []}, receipt("structured_extraction", 1)))
+def test_extraction_rejects_unlocated_quote(monkeypatch):
+    _stub_canonical_extraction(monkeypatch, lambda *args: ({"entities": [{"id": "missing", "name": "NotPresent", "type": "CONCEPT", "occurrence": 0}], "relations": []}, receipt("structured_extraction", 1)))
     monkeypatch.setattr(pipeline, "_embed_texts", lambda texts, relay: ([[1.0] for _ in texts], receipt("embedding", 1)))
     with pytest.raises(pipeline.SemanticArtifactError, match="source window"):
         pipeline._extract_and_embed("x" * 10_000 + "Tail", SimpleNamespace(model_id="test"), None)

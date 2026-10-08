@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, Optional, TextIO
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .semantic_artifact_pipeline import (
+from .semantic_artifact_builder import (
     SemanticArtifactError, _explanation_reports, _report_support_sources, explain_evidence,
     bind_parsed_source_artifact, build_semantic_artifacts, parse_source_artifact,
 )

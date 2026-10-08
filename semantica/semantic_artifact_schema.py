@@ -799,7 +799,7 @@ class SemanticArtifactBuildRequest(DigestModel):
     project_id: str = Field(alias="projectId")
     base_snapshot: Optional[SnapshotRef] = Field(default=None, alias="baseSnapshot")
     input_revision: str = Field(alias="inputRevision")
-    parallelism: int = Field(default=1, ge=1, le=8)
+    parallelism: int = Field(default=1, ge=1, le=16)
     output_dir: str = Field(alias="outputDir")
     resume_checkpoint_dirs: List[str] = Field(default_factory=list, alias="resumeCheckpointDirs")
     resume_checkpoint_model_token_limits: Dict[str, int] = Field(default_factory=dict, alias="resumeCheckpointModelTokenLimits")

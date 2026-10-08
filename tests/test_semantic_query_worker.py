@@ -6,7 +6,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from semantica.semantic_query_worker import serve
-from semantica.semantic_artifact_pipeline import build_semantic_artifacts, parse_source_artifact
+from semantica.semantic_artifact_builder import build_semantic_artifacts, parse_source_artifact
 from semantica.source import source_content_revision
 from semantica.semantic_artifact_schema import ParseSourceRequest, SemanticArtifactBuildRequest
 

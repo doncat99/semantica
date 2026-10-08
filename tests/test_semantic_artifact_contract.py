@@ -142,14 +142,14 @@ def _build_request_payload():
     }
 
 
-def test_project_snapshot_contract_covers_kernel_sections():
+def test_semantic_artifact_contract_covers_kernel_sections():
     props = semantic_artifact_json_schema()["properties"]
     for key in ["lineage", "artifact_manifest", "document_representations", "evidence_spans", "entities", "assertions", "relations", "identity_decisions", "communities", "topics", "conflicts", "retrieval_manifests", "change_delta", "model_receipts"]:
         assert key in props
     assert "reports" not in props
 
 
-def test_project_snapshot_validates_complete_cross_references():
+def test_semantic_artifact_validates_complete_cross_references():
     snapshot = SemanticArtifact.model_validate(_snapshot_payload())
     assert snapshot.protocol == "semantica.semantic-artifact.v1"
     assert snapshot.id == "snapshot:one"
@@ -168,7 +168,7 @@ def test_snapshot_rejects_embedded_reports_and_report_delta():
         SemanticArtifact.model_validate(payload)
 
 
-def test_project_snapshot_rejects_bad_hash_and_duplicate_ids():
+def test_semantic_artifact_rejects_bad_hash_and_duplicate_ids():
     bad = _snapshot_payload()
     bad["document_representations"][0]["content_hash"] = "not-a-hash"
     with pytest.raises(ValidationError, match="b3-"):
@@ -189,7 +189,7 @@ def test_project_snapshot_rejects_bad_hash_and_duplicate_ids():
     {"polarity": "positive", "condition": ""},
     {"polarity": "positive", "value": 42},
 ])
-def test_project_snapshot_rejects_invalid_fact_qualifiers(section, qualifiers):
+def test_semantic_artifact_rejects_invalid_fact_qualifiers(section, qualifiers):
     payload = _snapshot_payload()
     fact = payload[section][0]
     if qualifiers is None:
@@ -200,7 +200,7 @@ def test_project_snapshot_rejects_invalid_fact_qualifiers(section, qualifiers):
         SemanticArtifact.model_validate(payload)
 
 
-def test_project_snapshot_rejects_unavailable_or_empty_locator():
+def test_semantic_artifact_rejects_unavailable_or_empty_locator():
     bad = _snapshot_payload()
     locator = bad["evidence_spans"][0]["locator"]
     locator.pop("start_char")
@@ -209,7 +209,7 @@ def test_project_snapshot_rejects_unavailable_or_empty_locator():
         SemanticArtifact.model_validate(bad)
 
 
-def test_project_snapshot_rejects_unknown_community_topic_conflict_retrieval_refs():
+def test_semantic_artifact_rejects_unknown_community_topic_conflict_retrieval_refs():
     bad = _snapshot_payload()
     bad["retrieval_manifests"][0]["community_ids"] = ["missing-community"]
     with pytest.raises(ValidationError, match="unknown community"):

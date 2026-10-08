@@ -11,7 +11,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import pytest
 
 from semantica.project_checkpoint import SnapshotCheckpoint, SnapshotCheckpointError
-from semantica.semantic_artifact_pipeline import build_semantic_artifacts
+from semantica.semantic_artifact_builder import build_semantic_artifacts
 from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest
 from tests.test_semantic_artifact import _request, _typed_prompt_context
 

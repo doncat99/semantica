@@ -13,20 +13,20 @@ def test_material_revision_matches_shared_blake3_known_vector(tmp_path):
 
 
 def test_worker_rejects_changed_bytes_before_parsing(tmp_path, monkeypatch):
-    from semantica.semantic_artifact_pipeline import _parse_source, SemanticArtifactError
+    from semantica.semantic_artifact_builder import _parse_source, SemanticArtifactError
     from semantica.semantic_artifact_schema import SourceBuildInput
     source = tmp_path / "source.txt"
     source.write_bytes(b"abc")
     revision = source_content_revision(source)
     request = SourceBuildInput(filePath=str(source), sourceId="s1", materialRevision=revision, name=source.name, mimeType="text/plain")
     source.write_bytes(b"changed")
-    monkeypatch.setattr("semantica.semantic_artifact_pipeline.parse_source", lambda *args, **kwargs: pytest.fail("changed source reached parser"))
+    monkeypatch.setattr("semantica.semantic_artifact_builder.parse_source", lambda *args, **kwargs: pytest.fail("changed source reached parser"))
     with pytest.raises(SemanticArtifactError, match="material revision"):
         _parse_source(request, False)
 
 
 def test_worker_preserves_material_identity_in_representation(tmp_path):
-    from semantica.semantic_artifact_pipeline import _build_source
+    from semantica.semantic_artifact_builder import _build_source
     from semantica.semantic_artifact_schema import SourceBuildInput
     source = tmp_path / "source.txt"
     source.write_bytes(b"Ada Lovelace designed the Analytical Engine.")

@@ -58,6 +58,8 @@ from .semantic_artifact_schema import (
 )
 from .semantic_extract import NamedEntityRecognizer, extract_grounded_window
 from .semantic_extract.providers import BaseProvider
+from .split.structural_chunker import StructuralChunker
+from .split.sliding_window_chunker import SlidingWindowChunker
 from .utils.exceptions import ProcessingError
 
 
@@ -75,8 +77,9 @@ class DocumentQualityError(SemanticArtifactError):
     """A parsed representation needs an explicit repair before knowledge production."""
 
 
-TEXT_WINDOW_CHARS = 4096
-TEXT_WINDOW_OVERLAP = 256
+# Target size for the native structural chunker.  Structure boundaries may
+# produce a slightly larger chunk when an indivisible section is encountered.
+TEXT_WINDOW_CHARS = 12288
 MODEL_CONTEXT_BYTES = 48_000
 MODEL_REQUEST_BYTES = 80_000
 
@@ -237,11 +240,31 @@ def _context_batches(base: dict[str, Any], records: list[tuple[str, Any]], max_b
 
 
 def _text_windows(text: str):
-    for start in range(0, len(text), TEXT_WINDOW_CHARS - TEXT_WINDOW_OVERLAP):
-        end = min(len(text), start + TEXT_WINDOW_CHARS)
-        yield start, end, text[start:end]
-        if end == len(text):
-            break
+    """Yield native structure-aware chunks with source offsets."""
+    cursor = 0
+    for chunk in StructuralChunker(
+        respect_headers=True,
+        respect_sections=True,
+        max_chunk_size=TEXT_WINDOW_CHARS,
+    ).chunk(text):
+        start = cursor
+        end = min(len(text), chunk.end_index)
+        if end > start:
+            if end - start <= TEXT_WINDOW_CHARS:
+                yield start, end, text[start:end]
+            else:
+                part_cursor = start
+                for part in SlidingWindowChunker(chunk_size=TEXT_WINDOW_CHARS, overlap=0).chunk(text[start:end]):
+                    part_start = part_cursor
+                    part_end = start + min(end - start, part.end_index)
+                    if part_end > part_start:
+                        yield part_start, part_end, text[part_start:part_end]
+                        part_cursor = part_end
+                if part_cursor < end:
+                    yield part_cursor, end, text[part_cursor:end]
+            cursor = end
+    if cursor < len(text):
+        yield cursor, len(text), text[cursor:]
 
 
 def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extraction_spec=None, progress=None, progress_base: int = 0, progress_total: int = 1, parallelism: int = 1):
@@ -292,7 +315,12 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
     with ThreadPoolExecutor(max_workers=parallelism) as pool:
         pending = iter(enumerate(windows))
         futures = {}
-        for index, item in [next(pending, None) for _ in range(min(parallelism, len(windows)))]:
+        target_workers = min(8, parallelism)
+        while len(futures) < target_workers:
+            next_item = next(pending, None)
+            if next_item is None:
+                break
+            index, item = next_item
             futures[pool.submit(context.copy().run, extract, item)] = index
         extracted_windows = [None] * len(windows)
         completed = progress_base
@@ -325,8 +353,11 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
                             "totalChunks": progress_total,
                         },
                     })
-                next_item = next(pending, None)
-                if next_item is not None:
+                target_workers = min(parallelism, 8 + (completed // 8) * 4)
+                while len(futures) < target_workers:
+                    next_item = next(pending, None)
+                    if next_item is None:
+                        break
                     next_index, item = next_item
                     futures[pool.submit(context.copy().run, extract, item)] = next_index
     for index, ((start, end, window), (extracted, extraction_receipts, _)) in enumerate(zip(windows, extracted_windows), start=1):
@@ -370,7 +401,12 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
     with ThreadPoolExecutor(max_workers=parallelism) as pool:
         pending = iter(enumerate(batches))
         futures = {}
-        for index, batch in [next(pending, None) for _ in range(min(parallelism, len(batches)))]:
+        target_workers = min(8, parallelism)
+        while len(futures) < target_workers:
+            next_item = next(pending, None)
+            if next_item is None:
+                break
+            index, batch = next_item
             futures[pool.submit(context.copy().run, _embed_texts, [window for _, _, window in batch], embedding_relay)] = index
         while futures:
             done, _ = wait(futures, return_when=FIRST_COMPLETED)
@@ -398,8 +434,11 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
                             "totalChunks": progress_total,
                         },
                     })
-                next_item = next(pending, None)
-                if next_item is not None:
+                target_workers = min(parallelism, 8 + (completed // 8) * 4)
+                while len(futures) < target_workers:
+                    next_item = next(pending, None)
+                    if next_item is None:
+                        break
                     next_index, batch = next_item
                     futures[pool.submit(context.copy().run, _embed_texts, [window for _, _, window in batch], embedding_relay)] = next_index
     for batch, (vectors, receipt) in zip(batches, embedded_batches):
@@ -501,7 +540,7 @@ class _ProjectModelProvider(BaseProvider):
             "model": self.relay.model_id,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0,
-            "max_tokens": self.relay.max_output_tokens,
+            "max_tokens": min(self.relay.max_output_tokens, 8192) if self.operation == "structured_extraction" else self.relay.max_output_tokens,
             "response_format": {"type": "json_object"},
         }
         response, receipt = _relay_json(self.relay, payload, self.operation)

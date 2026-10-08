@@ -1,4 +1,4 @@
-from semantica import semantic_artifact_pipeline as pipeline
+from semantica import semantic_artifact_builder as pipeline
 from semantica.semantic_artifact_schema import KnowledgeAssertion, KnowledgeRelation, SourceBuildInput
 from semantica.source import source_content_revision
 

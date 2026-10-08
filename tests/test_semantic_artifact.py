@@ -8,8 +8,8 @@ import pytest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from semantica.semantic_artifact_pipeline import _canonical_graph_projection
-from semantica.semantic_artifact_pipeline import build_semantic_artifacts, parse_source_artifact
+from semantica.semantic_artifact_builder import _canonical_graph_projection
+from semantica.semantic_artifact_builder import build_semantic_artifacts, parse_source_artifact
 from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest, ParseSourceRequest
 from semantica.semantic_artifact_schema import KnowledgeEntity, KnowledgeRelation, ModelReceipt, SemanticArtifact, stable_digest
 from semantica.semantic_worker import serve
@@ -43,7 +43,7 @@ def _host_snapshot(graph_path, project_id="project-1"):
 
 def test_scoped_explanation_reuses_native_grounding_and_rejects_foreign_evidence(monkeypatch):
     from types import SimpleNamespace
-    from semantica import semantic_artifact_pipeline as pipeline
+    from semantica import semantic_artifact_builder as pipeline
     from semantica.semantic_artifact_schema import EvidenceSpan, DocumentLocator
 
     span = EvidenceSpan(id="evidence:1", representation_id="representation:1", quote="Exact source sentence.",
@@ -67,7 +67,7 @@ def test_scoped_explanation_reuses_native_grounding_and_rejects_foreign_evidence
 
 
 def test_native_explanation_synthesizes_multiple_evidence_batches_with_its_target(monkeypatch):
-    from semantica import semantic_artifact_pipeline as pipeline
+    from semantica import semantic_artifact_builder as pipeline
     from semantica.semantic_artifact_schema import EvidenceSpan, DocumentLocator, ReportSection
 
     spans = {ref: EvidenceSpan(id=ref, representation_id="representation:1", quote=f"Source {ref}",
@@ -162,7 +162,7 @@ def test_semantic_worker_explains_verified_graph_and_returns_digest_and_receipt(
 
 
 def test_unique_quote_ignores_model_position_but_duplicate_requires_occurrence():
-    from semantica.semantic_artifact_pipeline import _find_occurrence, SemanticArtifactError
+    from semantica.semantic_artifact_builder import _find_occurrence, SemanticArtifactError
 
     text = "Green Bonds and Private Equity. Green Bonds"
     assert _find_occurrence(text, "Private Equity", 590) == (16, 30)
@@ -172,7 +172,7 @@ def test_unique_quote_ignores_model_position_but_duplicate_requires_occurrence()
 
 def test_relay_http_failure_preserves_safe_structured_error(monkeypatch):
     from types import SimpleNamespace
-    from semantica.semantic_artifact_pipeline import _relay_json, SemanticArtifactError
+    from semantica.semantic_artifact_builder import _relay_json, SemanticArtifactError
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-token")
     def rejected(_request, timeout):
@@ -190,7 +190,7 @@ def test_relay_http_failure_preserves_safe_structured_error(monkeypatch):
 
 def test_relay_waits_for_complete_gateway_response(monkeypatch):
     from types import SimpleNamespace
-    from semantica.semantic_artifact_pipeline import _relay_json
+    from semantica.semantic_artifact_builder import _relay_json
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-token")
     class Response:
@@ -212,7 +212,7 @@ def test_relay_waits_for_complete_gateway_response(monkeypatch):
 
 def test_product_output_repairs_citation_shape_through_native_typed_provider(monkeypatch):
     from types import SimpleNamespace
-    from semantica import semantic_artifact_pipeline as pipeline
+    from semantica import semantic_artifact_builder as pipeline
 
     outputs = [
         {"assignments": [{"dimension_id": "purpose", "item_id": "history", "confidence": 0.9, "citations": [5]}]},
@@ -244,7 +244,7 @@ def test_product_output_repairs_citation_shape_through_native_typed_provider(mon
 
 def test_product_output_uses_host_admitted_output_limit(monkeypatch):
     from types import SimpleNamespace
-    from semantica import semantic_artifact_pipeline as pipeline
+    from semantica import semantic_artifact_builder as pipeline
 
     payloads = []
 
@@ -272,7 +272,7 @@ def test_product_output_uses_host_admitted_output_limit(monkeypatch):
 
 def test_product_output_repairs_semantic_citation_and_vocabulary(monkeypatch):
     from types import SimpleNamespace
-    from semantica import semantic_artifact_pipeline as pipeline
+    from semantica import semantic_artifact_builder as pipeline
 
     valid = {"dimension_id": "purpose", "item_id": "history", "confidence": 0.9,
              "citations": [{"evidence_id": "evidence:source", "quote": "Source quote"}]}
@@ -312,7 +312,7 @@ def test_product_output_repairs_semantic_citation_and_vocabulary(monkeypatch):
 
 def test_product_output_repair_has_budget_for_schema_and_previous_json(monkeypatch):
     from types import SimpleNamespace
-    from semantica import semantic_artifact_pipeline as pipeline
+    from semantica import semantic_artifact_builder as pipeline
 
     quote = "Grounded evidence. " * 2_400
     outputs = [
@@ -346,7 +346,7 @@ def test_product_output_repair_has_budget_for_schema_and_previous_json(monkeypat
 
 def test_identity_resolution_repairs_invalid_json_through_native_typed_provider(monkeypatch):
     from types import SimpleNamespace
-    from semantica import semantic_artifact_pipeline as pipeline
+    from semantica import semantic_artifact_builder as pipeline
 
     candidates = [
         {"mention_id": "mention:1", "name": "Alpha", "type": "ORG", "source_id": "source:1",
@@ -380,7 +380,7 @@ def test_identity_resolution_repairs_invalid_json_through_native_typed_provider(
 
 
 def test_relationship_discovery_omits_ungrounded_qualifier_without_losing_valid_relations(monkeypatch):
-    from semantica.semantic_artifact_pipeline import _discover_cross_source_relationships
+    from semantica.semantic_artifact_builder import _discover_cross_source_relationships
     from semantica.semantic_artifact_schema import DocumentLocator, EvidenceSpan
 
     entities = [KnowledgeEntity(id="entity:left", canonical_name="Left", type="concept"),
@@ -399,8 +399,8 @@ def test_relationship_discovery_omits_ungrounded_qualifier_without_losing_valid_
              "qualifiers": {"polarity": "positive"}, "citations": citations, "reason": "Both are observed."}
     receipt = ModelReceipt(id="receipt:relationship", operation="relationship_discovery", provider="test",
                            model="model-1", input_digest=H1, output_digest=H2)
-    monkeypatch.setattr("semantica.semantic_artifact_pipeline._relationship_candidates", lambda *_: [candidate])
-    monkeypatch.setattr("semantica.semantic_artifact_pipeline._relationship_batch",
+    monkeypatch.setattr("semantica.semantic_artifact_builder._relationship_candidates", lambda *_: [candidate])
+    monkeypatch.setattr("semantica.semantic_artifact_builder._relationship_batch",
                         lambda *_: ([{**valid, "qualifiers": {"polarity": "positive", "unit": "percent"}}, valid], receipt))
 
     assertions, relations, receipts = _discover_cross_source_relationships(
@@ -418,7 +418,7 @@ def _classification_profile():
 
 @pytest.mark.parametrize("corruption", ["unknown-id", "altered-quote", "missing-citation", "unknown-category", "cardinality"])
 def test_semantic_classification_rejects_invalid_model_evidence(tmp_path, monkeypatch, corruption):
-    from semantica.semantic_artifact_pipeline import _build_source, _source_passages, _classify_source, SemanticArtifactError
+    from semantica.semantic_artifact_builder import _build_source, _source_passages, _classify_source, SemanticArtifactError
     from semantica.semantic_artifact_schema import ClassificationProfile, SourceBuildInput
     source = tmp_path / "source.txt"
     source.write_text("Ada Lovelace designed the Analytical Engine.")
@@ -438,13 +438,13 @@ def test_semantic_classification_rejects_invalid_model_evidence(tmp_path, monkey
     if corruption == "cardinality":
         assignments.append({**assignment, "item_id": "manual"})
     receipt = ModelReceipt(id="receipt:test", operation="source_classification", provider="test", model="test", input_digest=H1, output_digest=H2)
-    monkeypatch.setattr("semantica.semantic_artifact_pipeline._product_json", lambda *args: ({"assignments": assignments}, [receipt]))
+    monkeypatch.setattr("semantica.semantic_artifact_builder._product_json", lambda *args: ({"assignments": assignments}, [receipt]))
     with pytest.raises(SemanticArtifactError):
         _classify_source(built, ClassificationProfile.model_validate(_classification_profile()), None)
 
 
 def test_semantic_classification_preserves_source_offsets_and_unclassified_dimensions(tmp_path, monkeypatch):
-    from semantica.semantic_artifact_pipeline import _build_source, _source_passages, _classify_source
+    from semantica.semantic_artifact_builder import _build_source, _source_passages, _classify_source
     from semantica.semantic_artifact_schema import ClassificationProfile, SourceBuildInput
     source = tmp_path / "source.txt"
     source.write_text("Ada Lovelace designed the Analytical Engine.")
@@ -452,7 +452,7 @@ def test_semantic_classification_preserves_source_offsets_and_unclassified_dimen
     built["passages"] = _source_passages(built)
     span = built["passages"][0]
     receipt = ModelReceipt(id="receipt:test", operation="source_classification", provider="test", model="test", input_digest=H1, output_digest=H2)
-    monkeypatch.setattr("semantica.semantic_artifact_pipeline._product_json", lambda *args: ({"assignments": [{"dimension_id": "purpose", "item_id": "history", "confidence": 0.9, "citations": [{"evidence_id": span.id, "quote": span.quote}]}]}, [receipt]))
+    monkeypatch.setattr("semantica.semantic_artifact_builder._product_json", lambda *args: ({"assignments": [{"dimension_id": "purpose", "item_id": "history", "confidence": 0.9, "citations": [{"evidence_id": span.id, "quote": span.quote}]}]}, [receipt]))
     classification, _ = _classify_source(built, ClassificationProfile.model_validate(_classification_profile()), None)
     assert classification.assignments[0].evidence_ids == [span.id]
     assert classification.unclassified_dimension_ids == ["topic"]
@@ -460,7 +460,7 @@ def test_semantic_classification_preserves_source_offsets_and_unclassified_dimen
 
 
 def test_docling_evidence_preserves_reading_order_and_physical_locators(tmp_path):
-    from semantica.semantic_artifact_pipeline import _build_source, _docling_cell_evidence, _source_passages
+    from semantica.semantic_artifact_builder import _build_source, _docling_cell_evidence, _source_passages
     from semantica.semantic_artifact_schema import SourceBuildInput
 
     source_path = tmp_path / "source.pdf"
@@ -513,14 +513,14 @@ def test_docling_evidence_preserves_reading_order_and_physical_locators(tmp_path
 
 @pytest.mark.parametrize("citation", [[], [{"evidence_id": "evidence:invented", "quote": "unknown"}]])
 def test_explanation_rejects_missing_or_hallucinated_citations(tmp_path, monkeypatch, citation):
-    from semantica.semantic_artifact_pipeline import _build_source, _source_passages, _explanation_reports, SemanticArtifactError
+    from semantica.semantic_artifact_builder import _build_source, _source_passages, _explanation_reports, SemanticArtifactError
     from semantica.semantic_artifact_schema import SourceBuildInput
     source = tmp_path / "source.txt"
     source.write_text("Ada Lovelace designed the Analytical Engine.")
     built = _build_source(SourceBuildInput(filePath=str(source), sourceId="source-1", materialRevision=source_content_revision(source), mimeType="text/plain", name="source.txt"), False)
     built["passages"] = _source_passages(built)
     receipt = ModelReceipt(id="receipt:test", operation="knowledge_explanation", provider="test", model="test", input_digest=H1, output_digest=H2)
-    monkeypatch.setattr("semantica.semantic_artifact_pipeline._product_json", lambda *args: ({"sections": [{"title": "Explanation", "text": "Unsupported claim", "citations": citation}]}, [receipt]))
+    monkeypatch.setattr("semantica.semantic_artifact_builder._product_json", lambda *args: ({"sections": [{"title": "Explanation", "text": "Unsupported claim", "citations": citation}]}, [receipt]))
     with pytest.raises(SemanticArtifactError):
         _explanation_reports("project-1", [built], built["entities"], [], [], [], [], [*built["evidence"], *built["passages"]], None)
 
@@ -864,7 +864,7 @@ def test_incremental_delta_ignores_audit_time_and_tracks_changed_knowledge(tmp_p
 
 
 def test_community_and_topic_deltas_update_knowledge_without_embedded_reports(tmp_path):
-    from semantica.semantic_artifact_pipeline import _change_delta
+    from semantica.semantic_artifact_builder import _change_delta
 
     source = tmp_path / "source.txt"
     source.write_text("Ada Lovelace studied mathematics.", encoding="utf-8")
@@ -926,7 +926,7 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
             provider="fixture", model=relay.model_id, input_digest=stable_digest(payload), output_digest=stable_digest(result))
         return result, receipt
 
-    monkeypatch.setattr("semantica.semantic_artifact_pipeline._relay_json", relay_response)
+    monkeypatch.setattr("semantica.semantic_artifact_builder._relay_json", relay_response)
     request = _request(first, tmp_path / "build", recipe="model")
     request["params"]["sources"].append({"filePath": str(second), "materialRevision": source_content_revision(second), "mimeType": "text/plain", "name": second.name, "sourceId": "source-2"})
     request["params"]["parsedSources"].append(_parsed_ref(request["params"], request["params"]["sources"][-1]))

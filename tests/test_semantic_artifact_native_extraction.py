@@ -4,14 +4,26 @@ from types import SimpleNamespace
 import pytest
 from pydantic import BaseModel
 
-from semantica import semantic_artifact_pipeline
-from semantica.semantic_artifact_pipeline import SemanticArtifactError
+from semantica import semantic_artifact_builder
+from semantica.semantic_artifact_builder import SemanticArtifactError
 from semantica.semantic_artifact_schema import ModelReceipt
 from semantica.semantic_extract.types import Entity, Relation
 from semantica.utils.exceptions import ProcessingError
 
 
-def test_project_snapshot_extraction_uses_canonical_semantica_extractors(monkeypatch):
+def test_build_parallelism_accepts_host_ceiling_and_rejects_overflow():
+    from pydantic import TypeAdapter, ValidationError
+    from typing import Annotated
+    from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest
+
+    field = SemanticArtifactBuildRequest.model_fields["parallelism"]
+    adapter = TypeAdapter(Annotated[int, *field.metadata])
+    assert adapter.validate_python(16) == 16
+    with pytest.raises(ValidationError):
+        adapter.validate_python(17)
+
+
+def test_semantic_artifact_extraction_uses_canonical_semantica_extractors(monkeypatch):
     calls = []
 
     class Provider:
@@ -38,10 +50,10 @@ def test_project_snapshot_extraction_uses_canonical_semantica_extractors(monkeyp
         )]
         return entities, relations, Provider()
 
-    monkeypatch.setattr(semantic_artifact_pipeline, "_project_model_provider", lambda _relay: Provider())
-    monkeypatch.setattr(semantic_artifact_pipeline, "extract_grounded_window", grounded)
+    monkeypatch.setattr(semantic_artifact_builder, "_project_model_provider", lambda _relay: Provider())
+    monkeypatch.setattr(semantic_artifact_builder, "extract_grounded_window", grounded)
     monkeypatch.setattr(
-        semantic_artifact_pipeline,
+        semantic_artifact_builder,
         "_embed_texts",
         lambda texts, _relay: ([[0.1, 0.2] for _ in texts], ModelReceipt(
             id="receipt:embedding",
@@ -53,7 +65,7 @@ def test_project_snapshot_extraction_uses_canonical_semantica_extractors(monkeyp
         )),
     )
 
-    result, embeddings, receipts = semantic_artifact_pipeline._extract_and_embed(
+    result, embeddings, receipts = semantic_artifact_builder._extract_and_embed(
         "Reflective roofs do not shade pedestrians.", SimpleNamespace(model_id="model-1"), object()
     )
 
@@ -65,8 +77,8 @@ def test_project_snapshot_extraction_uses_canonical_semantica_extractors(monkeyp
     assert {receipt.operation for receipt in receipts} == {"structured_extraction", "embedding"}
 
 
-def test_project_snapshot_has_no_parallel_structured_extractor():
-    source = inspect.getsource(semantic_artifact_pipeline)
+def test_semantic_artifact_has_no_parallel_structured_extractor():
+    source = inspect.getsource(semantic_artifact_builder)
     assert "def _structured_extract" not in source
     assert "return _structured_extract" not in source
 
@@ -88,13 +100,13 @@ def test_project_model_provider_uses_host_admitted_output_limit(monkeypatch):
             output_digest="sha256:" + "2" * 64,
         )
 
-    monkeypatch.setattr(semantic_artifact_pipeline, "_relay_json", relay_json)
-    provider = semantic_artifact_pipeline._project_model_provider(
+    monkeypatch.setattr(semantic_artifact_builder, "_relay_json", relay_json)
+    provider = semantic_artifact_builder._project_model_provider(
         SimpleNamespace(model_id="model-1", max_output_tokens=393216)
     )
 
     assert provider.generate("prompt", max_tokens=2048) == '{"entities": []}'
-    assert request["max_tokens"] == 393216
+    assert request["max_tokens"] == 8192
 
 
 def test_native_extraction_preserves_retryable_relay_failure(monkeypatch):
@@ -108,10 +120,10 @@ def test_native_extraction_preserves_retryable_relay_failure(monkeypatch):
     def grounded(_text, **_kwargs):
         raise ProcessingError("typed extraction failed") from relay_failure
 
-    monkeypatch.setattr(semantic_artifact_pipeline, "extract_grounded_window", grounded)
+    monkeypatch.setattr(semantic_artifact_builder, "extract_grounded_window", grounded)
 
     with pytest.raises(SemanticArtifactError) as failure:
-        semantic_artifact_pipeline._extract_and_embed(
+        semantic_artifact_builder._extract_and_embed(
             "Retryable source text", SimpleNamespace(model_id="model-1"), object()
         )
 
@@ -131,11 +143,11 @@ def test_typed_provider_keeps_relay_failure_as_its_cause(monkeypatch):
         retryable=True,
     )
     monkeypatch.setattr(
-        semantic_artifact_pipeline,
+        semantic_artifact_builder,
         "_relay_json",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(relay_failure),
     )
-    provider = semantic_artifact_pipeline._project_model_provider(
+    provider = semantic_artifact_builder._project_model_provider(
         SimpleNamespace(model_id="model-1", max_output_tokens=393216)
     )
 
