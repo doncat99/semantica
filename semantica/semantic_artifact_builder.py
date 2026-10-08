@@ -58,6 +58,8 @@ from .semantic_artifact_schema import (
 )
 from .semantic_extract import NamedEntityRecognizer, extract_grounded_window
 from .semantic_extract.providers import BaseProvider
+from .semantic_extract.methods import _parse_grounded_relation_result
+from .semantic_extract.types import Entity
 from .split.structural_chunker import StructuralChunker
 from .split.sliding_window_chunker import SlidingWindowChunker
 from .pipeline.parallelism_manager import ParallelismManager, Task
@@ -329,7 +331,31 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
                 receipts = [ModelReceipt.model_validate(item) for item in cached.get("receipts", [])]
                 for receipt in receipts:
                     object.__setattr__(receipt, "_checkpoint_restored", True)
-                return cached["extracted"], receipts, True
+                extracted = cached["extracted"]
+                mentions = []
+                for entity in extracted["entities"]:
+                    begin, finish = _find_occurrence(window, entity["name"], entity.get("occurrence"))
+                    mentions.append(Entity(entity["name"], entity["type"], begin, finish,
+                        entity.get("confidence", 0.9), {"mention_id": entity["id"]}))
+                candidates = {"relations": [{**relation, "subject_id": relation["subject"],
+                    "object_id": relation["object"],
+                    "subject": next(entity.text for entity in mentions if entity.metadata["mention_id"] == relation["subject"]),
+                    "object": next(entity.text for entity in mentions if entity.metadata["mention_id"] == relation["object"]),
+                } for relation in extracted["relations"]]}
+                rejections = []
+                accepted = _parse_grounded_relation_result(candidates, mentions, window,
+                    "bifrost", model_relay.model_id, reject_invalid=True, rejections=rejections)
+                if rejections:
+                    extracted = {**extracted, "relations": [{
+                        "subject": relation.metadata["subject_id"], "predicate": relation.predicate,
+                        "object": relation.metadata["object_id"], "evidence": relation.context,
+                        "evidence_occurrence": relation.metadata["evidence_occurrence"],
+                        "qualifiers": relation.metadata["qualifiers"], "confidence": relation.confidence,
+                    } for relation in accepted]}
+                    receipts[-1].metadata.setdefault("rejected_candidates", []).extend(rejections)
+                    checkpoint.write("chunk-extraction", checkpoint_key, {"extracted": extracted,
+                        "receipts": [receipt.model_dump(mode="json", by_alias=True) for receipt in receipts]})
+                return extracted, receipts, True
         window = item[2]
         entities, relations, provider = extract_grounded_window(
             window, model=model_relay.model_id,

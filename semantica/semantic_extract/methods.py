@@ -2624,7 +2624,12 @@ def _parse_grounded_relation_result(
             object_entity = entities_by_id.get(item.get("object_id"))
             if subject is None or object_entity is None:
                 raise ProcessingError("grounded relation endpoint does not reference an entity mention")
-            if subject is object_entity:
+            if subject is object_entity or (
+                subject.start_char == object_entity.start_char
+                and subject.end_char == object_entity.end_char
+                and subject.text.casefold() == object_entity.text.casefold()
+                and subject.label.casefold() == object_entity.label.casefold()
+            ):
                 raise ProcessingError("grounded relation cannot connect an entity mention to itself")
             if item.get("subject") != subject.text or item.get("object") != object_entity.text:
                 raise ProcessingError("grounded relation endpoint text does not match its mention")

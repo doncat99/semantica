@@ -419,3 +419,19 @@ def test_canonical_strict_extractors_do_not_fallback():
 
     assert entities == []
     assert len(provider.prompts) == 2
+
+
+def test_grounded_relations_reject_duplicate_mentions_at_same_source_span():
+    from semantica.semantic_extract.methods import _parse_grounded_relation_result
+    from semantica.semantic_extract.types import Entity
+    text = "The committee supervises reporting."
+    entities = [Entity("committee", "organization", 4, 13, 0.9, {"mention_id": f"mention:{i}"}) for i in range(2)]
+    result = {"relations": [{"subject": "committee", "subject_id": "mention:0", "predicate": "related_to",
+        "object": "committee", "object_id": "mention:1", "evidence": text,
+        "evidence_occurrence": 0, "confidence": 0.9, "qualifiers": {"polarity": "positive"}}]}
+    with pytest.raises(ProcessingError, match="itself"):
+        _parse_grounded_relation_result(result, entities, text, "bifrost", "test")
+    rejected = []
+    assert _parse_grounded_relation_result(result, entities, text, "bifrost", "test", reject_invalid=True, rejections=rejected) == []
+    assert len(rejected) == 1
+    assert "itself" in rejected[0]["reason"]

@@ -157,3 +157,31 @@ def test_typed_provider_keeps_relay_failure_as_its_cause(monkeypatch):
         provider.generate_typed("extract entities", Output, max_retries=1)
 
     assert failure.value.__cause__ is relay_failure
+
+
+def test_restored_chunk_uses_native_grounding_without_repeating_model_calls(monkeypatch):
+    from semantica.project_checkpoint import active_checkpoint
+    text = "The committee supervises reporting."
+    receipt = ModelReceipt(id="receipt:restored", operation="structured_extraction", provider="test", model="model-1",
+        input_digest="sha256:" + "1" * 64, output_digest="sha256:" + "2" * 64)
+    extracted = {"entities": [{"id": f"mention:{i}", "name": "committee", "type": "organization", "occurrence": 0} for i in range(2)],
+        "relations": [{"subject": "mention:0", "predicate": "related_to", "object": "mention:1",
+            "evidence": text, "evidence_occurrence": 0, "qualifiers": {"polarity": "positive"}, "confidence": 0.9}]}
+    writes = []
+    class Checkpoint:
+        def read(self, kind, key):
+            return {"extracted": extracted, "receipts": [receipt.model_dump(mode="json")]} if kind == "chunk-extraction" else None
+        def write(self, kind, key, value):
+            writes.append(value)
+    monkeypatch.setattr(semantic_artifact_builder, "_text_windows", lambda _: [(0, len(text), text)])
+    monkeypatch.setattr(semantic_artifact_builder, "_embed_batch_checkpointed", lambda *_: ([[0.1]], receipt))
+    monkeypatch.setattr(semantic_artifact_builder, "extract_grounded_window", lambda *_a, **_k: pytest.fail("restored chunks must not call model"))
+    token = active_checkpoint.set(Checkpoint())
+    try:
+        result, _, receipts = semantic_artifact_builder._extract_and_embed(text, SimpleNamespace(model_id="model-1"), object())
+    finally:
+        active_checkpoint.reset(token)
+    assert result["relations"] == []
+    assert len(result["entities"]) == 2
+    assert len(writes) == 1
+    assert "itself" in receipts[0].metadata["rejected_candidates"][0]["reason"]
