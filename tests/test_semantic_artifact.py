@@ -186,6 +186,56 @@ def test_relay_http_failure_preserves_safe_structured_error(monkeypatch):
     assert failure.value.code == "INTERNAL_ERROR"
     assert failure.value.retryable is True
     assert "test-token" not in str(failure.value)
+    assert "provider failed" not in str(failure.value)
+
+
+def test_relay_preserves_diagnostics_after_large_error_message(monkeypatch):
+    from types import SimpleNamespace
+    from semantica.semantic_artifact_builder import _relay_json, SemanticArtifactError
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-token")
+    body = json.dumps({"error": {"code": "MODEL_GATEWAY_COOLDOWN", "message": "private " * 1000,
+        "diagnostic": {"origin": "local_cooldown", "status": 403,
+                       "code": "pre_consume_token_quota_failed", "upstreamRequestId": "upstream-1"}}}).encode()
+    def rejected(_request, timeout):
+        raise urllib.error.HTTPError("http://127.0.0.1/", 503, "Unavailable", {}, io.BytesIO(body))
+    monkeypatch.setattr("urllib.request.urlopen", rejected)
+    relay = SimpleNamespace(authorization_env="OPENAI_API_KEY", base_url="http://127.0.0.1/", model_id="m", binding_id="default")
+    with pytest.raises(SemanticArtifactError) as failure:
+        _relay_json(relay, {"model": "m"}, "structured_extraction")
+    assert failure.value.diagnostic["code"] == "pre_consume_token_quota_failed"
+    assert failure.value.diagnostic["upstreamRequestId"] == "upstream-1"
+    assert "private" not in str(failure.value)
+
+
+def test_relay_failure_recursively_projects_only_safe_gateway_diagnostics():
+    from semantica.semantic_artifact_builder import _safe_diagnostic, _safe_gateway_receipt
+
+    diagnostic = _safe_diagnostic({
+        "origin": "upstream_http_error", "status": 503, "upstreamRequestId": "upstream-1",
+        "safeDetails": "secret provider response", "trigger": {
+            "occurredAt": "2026-10-08T00:00:00Z", "code": "MODEL_GATEWAY_COOLDOWN",
+            "requestId": "local-1", "message": "secret nested message", "token": "secret-token",
+        }, "token": "secret-token",
+    })
+    assert diagnostic == {
+        "origin": "upstream_http_error", "status": 503, "upstreamRequestId": "upstream-1",
+        "trigger": {"occurredAt": "2026-10-08T00:00:00Z", "code": "MODEL_GATEWAY_COOLDOWN", "requestId": "local-1"},
+    }
+
+    receipt = _safe_gateway_receipt({
+        "requestId": "local-1", "policyRevision": "v1", "requested": {"bindingId": "default", "modelId": "m"},
+        "attempts": [{"bindingId": "default", "modelId": "m", "index": 0, "status": 503,
+                     "errorCode": "UPSTREAM_UNAVAILABLE", "errorMessage": "secret response",
+                     "diagnostic": {"origin": "upstream_http_error", "status": 503,
+                                    "safeDetails": "secret provider response", "token": "secret-token"}}],
+        "diagnostic": {"origin": "upstream_http_error", "status": 503, "safeDetails": "secret response"},
+        "prompt": "private source content",
+    })
+    rendered = json.dumps(receipt)
+    assert "secret" not in rendered
+    assert "private source" not in rendered
+    assert receipt["attempts"][0]["diagnostic"] == {"origin": "upstream_http_error", "status": 503}
 
 
 def test_relay_waits_for_complete_gateway_response(monkeypatch):

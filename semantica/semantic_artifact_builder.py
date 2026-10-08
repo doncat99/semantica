@@ -12,11 +12,11 @@ import math
 import os
 import re
 import tempfile
+import threading
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
-from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
 from contextvars import copy_context
 from hashlib import sha256
 from pathlib import Path
@@ -60,17 +60,25 @@ from .semantic_extract import NamedEntityRecognizer, extract_grounded_window
 from .semantic_extract.providers import BaseProvider
 from .split.structural_chunker import StructuralChunker
 from .split.sliding_window_chunker import SlidingWindowChunker
+from .pipeline.parallelism_manager import ParallelismManager, Task
 from .utils.exceptions import ProcessingError
 
 
 class SemanticArtifactError(RuntimeError):
     """Raised when a source cannot be represented by the single Semantica chain."""
 
-    def __init__(self, message: str, *, status: int | None = None, code: str | None = None, retryable: bool = False):
+    def __init__(self, message: str, *, status: int | None = None, code: str | None = None,
+                 retryable: bool = False, retry_after_ms: int | None = None,
+                 upstream_request_id: str | None = None, diagnostic: dict[str, Any] | None = None,
+                 gateway: dict[str, Any] | None = None):
         super().__init__(message)
         self.status = status
         self.code = code
         self.retryable = retryable
+        self.retry_after_ms = retry_after_ms
+        self.upstream_request_id = upstream_request_id
+        self.diagnostic = diagnostic
+        self.gateway = gateway
 
 
 class DocumentQualityError(SemanticArtifactError):
@@ -210,6 +218,10 @@ def _typed_extraction_error(error: ProcessingError) -> SemanticArtifactError:
                 status=cause.status,
                 code=cause.code,
                 retryable=cause.retryable,
+                retry_after_ms=cause.retry_after_ms,
+                upstream_request_id=cause.upstream_request_id,
+                diagnostic=cause.diagnostic,
+                gateway=cause.gateway,
             )
         cause = cause.__cause__
     return SemanticArtifactError(str(error))
@@ -249,7 +261,7 @@ def _text_windows(text: str):
     ).chunk(text):
         start = cursor
         end = min(len(text), chunk.end_index)
-        if end > start:
+        if end > start and text[start:end].strip():
             if end - start <= TEXT_WINDOW_CHARS:
                 yield start, end, text[start:end]
             else:
@@ -257,14 +269,41 @@ def _text_windows(text: str):
                 for part in SlidingWindowChunker(chunk_size=TEXT_WINDOW_CHARS, overlap=0).chunk(text[start:end]):
                     part_start = part_cursor
                     part_end = start + min(end - start, part.end_index)
-                    if part_end > part_start:
+                    if part_end > part_start and text[part_start:part_end].strip():
                         yield part_start, part_end, text[part_start:part_end]
                         part_cursor = part_end
-                if part_cursor < end:
+                if part_cursor < end and text[part_cursor:end].strip():
                     yield part_cursor, end, text[part_cursor:end]
             cursor = end
-    if cursor < len(text):
+    if cursor < len(text) and text[cursor:].strip():
         yield cursor, len(text), text[cursor:]
+
+
+def _native_parallel_map(items: list[Any], handler: Any, parallelism: int, on_complete: Any = None) -> list[Any]:
+    """Run work through Semantica's canonical parallelism manager.
+
+    The artifact builder owns ordering and checkpoint semantics, while worker
+    scheduling, failure collection, and worker limits remain a Semantica
+    runtime concern.  This prevents a second ad-hoc executor policy from
+    drifting away from the rest of the library.
+    """
+    context = copy_context()
+    def run(index: int, item: Any):
+        value = context.copy().run(handler, item)
+        if on_complete is not None:
+            on_complete(index, value)
+        return value
+    tasks = [Task(task_id=str(index), handler=run, args=(index, item))
+             for index, item in enumerate(items)]
+    results = ParallelismManager(max_workers=max(1, parallelism)).execute_parallel(
+        tasks
+    )
+    ordered = [None] * len(items)
+    for result in results:
+        if not result.success:
+            raise result.error or ProcessingError(f"parallel task {result.task_id} failed")
+        ordered[int(result.task_id)] = result.result
+    return ordered
 
 
 def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extraction_spec=None, progress=None, progress_base: int = 0, progress_total: int = 1, parallelism: int = 1):
@@ -273,6 +312,24 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
     seen_entities, seen_relations = set(), set()
     windows = list(_text_windows(text))
     def extract(item):
+        start, end, window = item
+        checkpoint = active_checkpoint.get()
+        checkpoint_key = {
+            "sourceText": _digest_bytes(text.encode("utf-8")),
+            "window": {"start": start, "end": end, "digest": _digest_bytes(window.encode("utf-8"))},
+            "model": getattr(model_relay, "model_id", None),
+            "bindingId": getattr(model_relay, "binding_id", None),
+            "contextWindowTokens": getattr(model_relay, "context_window_tokens", None),
+            "maxOutputTokens": getattr(model_relay, "max_output_tokens", None),
+            "spec": getattr(extraction_spec, "digest", None),
+        }
+        if checkpoint:
+            cached = checkpoint.read("chunk-extraction", checkpoint_key)
+            if cached is not None:
+                receipts = [ModelReceipt.model_validate(item) for item in cached.get("receipts", [])]
+                for receipt in receipts:
+                    object.__setattr__(receipt, "_checkpoint_restored", True)
+                return cached["extracted"], receipts, True
         window = item[2]
         entities, relations, provider = extract_grounded_window(
             window, model=model_relay.model_id,
@@ -302,6 +359,11 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
         restored = bool(provider.receipts) and all(
             getattr(receipt, "_checkpoint_restored", False) is True for receipt in provider.receipts
         )
+        if checkpoint:
+            checkpoint.write("chunk-extraction", checkpoint_key, {
+                "extracted": extracted,
+                "receipts": [receipt.model_dump(mode="json", by_alias=True) for receipt in provider.receipts],
+            })
         return extracted, provider.receipts, restored
 
     if progress:
@@ -311,55 +373,28 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
             "detail": f"Extracting knowledge {progress_base} / {progress_total} chunks",
             "metadata": {"completedChunks": progress_base, "totalChunks": progress_total},
         })
-    context = copy_context()
-    with ThreadPoolExecutor(max_workers=parallelism) as pool:
-        pending = iter(enumerate(windows))
-        futures = {}
-        target_workers = min(8, parallelism)
-        while len(futures) < target_workers:
-            next_item = next(pending, None)
-            if next_item is None:
-                break
-            index, item = next_item
-            futures[pool.submit(context.copy().run, extract, item)] = index
-        extracted_windows = [None] * len(windows)
-        completed = progress_base
-        restored = 0
-        while futures:
-            done, _ = wait(futures, return_when=FIRST_COMPLETED)
-            for future in done:
-                index = futures.pop(future)
-                try:
-                    extracted_windows[index] = future.result()
-                except ProcessingError as exc:
-                    for waiting in futures:
-                        waiting.cancel()
-                    raise _typed_extraction_error(exc) from exc
-                except Exception:
-                    for waiting in futures:
-                        waiting.cancel()
-                    raise
-                completed += 1
-                if extracted_windows[index][2]:
-                    restored += 1
-                if progress:
-                    progress({
-                        "stage": "extracting",
-                        "percent": min(60, 20 + round((completed / max(1, progress_total)) * 40)),
-                        "detail": f"Extracting knowledge {completed} / {progress_total} chunks",
-                        "metadata": {
-                            "completedChunks": completed,
-                            "restoredChunks": restored,
-                            "totalChunks": progress_total,
-                        },
-                    })
-                target_workers = min(parallelism, 8 + (completed // 8) * 4)
-                while len(futures) < target_workers:
-                    next_item = next(pending, None)
-                    if next_item is None:
-                        break
-                    next_index, item = next_item
-                    futures[pool.submit(context.copy().run, extract, item)] = next_index
+    extracted_windows = [None] * len(windows)
+    completed = progress_base
+    restored = 0
+    progress_lock = threading.Lock()
+    def extraction_complete(index: int, value: Any):
+        nonlocal completed, restored
+        with progress_lock:
+            extracted_windows[index] = value
+            completed += 1
+            if value[2]:
+                restored += 1
+            if progress:
+                progress({
+                    "stage": "extracting",
+                    "percent": min(60, 20 + round((completed / max(1, progress_total)) * 40)),
+                    "detail": f"Extracting knowledge {completed} / {progress_total} chunks",
+                    "metadata": {"completedChunks": completed, "restoredChunks": restored, "totalChunks": progress_total},
+                })
+    try:
+        _native_parallel_map(windows, extract, parallelism, extraction_complete)
+    except ProcessingError as exc:
+        raise _typed_extraction_error(exc) from exc
     for index, ((start, end, window), (extracted, extraction_receipts, _)) in enumerate(zip(windows, extracted_windows), start=1):
         receipts.extend(extraction_receipts if isinstance(extraction_receipts, list) else [extraction_receipts])
         local_ids = {item.get("id") for item in extracted["entities"] if isinstance(item, dict)}
@@ -398,49 +433,22 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
     embedded_batches = [None] * len(batches)
     completed = 0
     restored = 0
-    with ThreadPoolExecutor(max_workers=parallelism) as pool:
-        pending = iter(enumerate(batches))
-        futures = {}
-        target_workers = min(8, parallelism)
-        while len(futures) < target_workers:
-            next_item = next(pending, None)
-            if next_item is None:
-                break
-            index, batch = next_item
-            futures[pool.submit(context.copy().run, _embed_texts, [window for _, _, window in batch], embedding_relay)] = index
-        while futures:
-            done, _ = wait(futures, return_when=FIRST_COMPLETED)
-            for future in done:
-                index = futures.pop(future)
-                try:
-                    embedded_batches[index] = future.result()
-                except Exception:
-                    for waiting in futures:
-                        waiting.cancel()
-                    raise
-                completed += len(batches[index])
-                embedding_receipt = embedded_batches[index][1]
-                if getattr(embedding_receipt, "_checkpoint_restored", False) is True:
-                    restored += len(batches[index])
-                if progress:
-                    count = progress_base + completed
-                    progress({
-                        "stage": "embedding",
-                        "percent": min(90, 60 + round((count / max(1, progress_total)) * 30)),
-                        "detail": f"Embedding {count} / {progress_total} chunks",
-                        "metadata": {
-                            "completedChunks": count,
-                            "restoredChunks": restored,
-                            "totalChunks": progress_total,
-                        },
-                    })
-                target_workers = min(parallelism, 8 + (completed // 8) * 4)
-                while len(futures) < target_workers:
-                    next_item = next(pending, None)
-                    if next_item is None:
-                        break
-                    next_index, batch = next_item
-                    futures[pool.submit(context.copy().run, _embed_texts, [window for _, _, window in batch], embedding_relay)] = next_index
+    def embedding_complete(index: int, value: Any):
+        nonlocal completed, restored
+        with progress_lock:
+            embedded_batches[index] = value
+            completed += len(batches[index])
+            if getattr(value[1], "_checkpoint_restored", False) is True:
+                restored += len(batches[index])
+            if progress:
+                count = progress_base + completed
+                progress({
+                    "stage": "embedding",
+                    "percent": min(90, 60 + round((count / max(1, progress_total)) * 30)),
+                    "detail": f"Embedding {count} / {progress_total} chunks",
+                    "metadata": {"completedChunks": count, "restoredChunks": restored, "totalChunks": progress_total},
+                })
+    _native_parallel_map(batches, lambda batch: _embed_batch_checkpointed(batch, text, embedding_relay), parallelism, embedding_complete)
     for batch, (vectors, receipt) in zip(batches, embedded_batches):
         receipts.append(receipt)
         embeddings.extend({"start_char": start, "end_char": end, "vector": vector}
@@ -482,23 +490,28 @@ def _relay_json(relay: Any, payload: dict[str, Any], operation: str) -> tuple[di
                 raise SemanticArtifactError(f"{operation} relay returned HTTP {response.status}")
     except urllib.error.HTTPError as exc:
         try:
-            failure = json.loads(exc.read(4096))
+            failure = json.loads(exc.read())
             relay_error = failure.get("error", {})
             code = relay_error.get("code")
-            detail = relay_error.get("message")
             retryable = relay_error.get("retryable")
+            retry_after_ms = relay_error.get("retryAfterMs")
+            upstream_request_id = relay_error.get("upstreamRequestId")
+            diagnostic = relay_error.get("diagnostic")
+            gateway = relay_error.get("gateway")
         except (ValueError, AttributeError, TypeError):
-            code, detail, retryable = None, None, None
+            code, retryable = None, None
+            retry_after_ms, upstream_request_id, diagnostic, gateway = None, None, None, None
         safe_code = code if isinstance(code, str) and 0 < len(code) <= 80 and all(char.isalnum() or char in "_-" for char in code) else None
-        safe_detail = detail.strip()[:1000] if isinstance(detail, str) and detail.strip() else None
-        if safe_detail:
-            safe_detail = safe_detail.replace(token, "[REDACTED]").replace(urllib.parse.quote(token, safe=""), "[REDACTED]")
-        message = f"{operation} relay returned HTTP {exc.code}" + (f": {safe_code}" if safe_code else "") + (f": {safe_detail}" if safe_detail else "")
+        message = f"{operation} relay returned HTTP {exc.code}" + (f": {safe_code}" if safe_code else "")
         raise SemanticArtifactError(
             message,
             status=exc.code,
             code=safe_code,
             retryable=retryable if isinstance(retryable, bool) else exc.code == 429 or 500 <= exc.code <= 599,
+            retry_after_ms=retry_after_ms if isinstance(retry_after_ms, int) and not isinstance(retry_after_ms, bool) and retry_after_ms >= 0 else None,
+            upstream_request_id=upstream_request_id if isinstance(upstream_request_id, str) and len(upstream_request_id) <= 200 else None,
+            diagnostic=_safe_diagnostic(diagnostic),
+            gateway=_safe_gateway_receipt(gateway),
         ) from exc
     except (urllib.error.URLError, TimeoutError) as exc:
         raise SemanticArtifactError(f"{operation} relay request failed") from exc
@@ -523,6 +536,99 @@ def _relay_json(relay: Any, payload: dict[str, Any], operation: str) -> tuple[di
     return decoded, receipt
 
 
+def _safe_diagnostic(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    origins = {"local_cooldown", "upstream_http_error", "provider_error", "no_channel", "timeout",
+               "quota_denied", "auth_denied", "network_error", "protocol_error"}
+    diagnostic: dict[str, Any] = {}
+    if value.get("origin") in origins:
+        diagnostic["origin"] = value["origin"]
+    if isinstance(value.get("upstreamRequestSent"), bool):
+        diagnostic["upstreamRequestSent"] = value["upstreamRequestSent"]
+    endpoint = value.get("endpoint")
+    if isinstance(endpoint, str):
+        try:
+            parsed = urllib.parse.urlsplit(endpoint)
+            if parsed.scheme in {"http", "https"} and parsed.hostname and not parsed.username and not parsed.password:
+                diagnostic["endpoint"] = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))[:500]
+        except ValueError:
+            pass
+    for key in ("status", "retryAfterMs"):
+        item = value.get(key)
+        if isinstance(item, int) and not isinstance(item, bool) and item >= 0:
+            diagnostic[key] = item
+    for key in ("upstreamRequestId", "blockedUntil", "code"):
+        item = value.get(key)
+        if isinstance(item, str) and 0 < len(item) <= 200 and all(char.isalnum() or char in "._:-TZ+" for char in item):
+            diagnostic[key] = item
+    trigger = value.get("trigger")
+    if isinstance(trigger, dict):
+        safe_trigger = {}
+        for key in ("occurredAt", "requestId", "code"):
+            item = trigger.get(key)
+            if isinstance(item, str) and 0 < len(item) <= 200 and all(char.isalnum() or char in "._:-TZ+" for char in item):
+                safe_trigger[key] = item
+        status = trigger.get("status")
+        if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599:
+            safe_trigger["status"] = status
+        if "occurredAt" in safe_trigger:
+            diagnostic["trigger"] = safe_trigger
+    return diagnostic or None
+
+
+def _safe_target(value: Any) -> dict[str, str] | None:
+    if not isinstance(value, dict):
+        return None
+    target = {}
+    for key in ("bindingId", "modelId"):
+        item = value.get(key)
+        if isinstance(item, str) and 0 < len(item) <= 200 and all(char.isalnum() or char in "._:/-" for char in item):
+            target[key] = item
+    return target if len(target) == 2 else None
+
+
+def _safe_gateway_receipt(value: Any) -> dict[str, Any] | None:
+    if not isinstance(value, dict):
+        return None
+    receipt: dict[str, Any] = {}
+    for key in ("requestId", "policyRevision"):
+        item = value.get(key)
+        if isinstance(item, str) and 0 < len(item) <= 200 and all(char.isalnum() or char in "._:-" for char in item):
+            receipt[key] = item
+    for key in ("requested", "actual"):
+        target = _safe_target(value.get(key))
+        if target:
+            receipt[key] = target
+    diagnostic = _safe_diagnostic(value.get("diagnostic"))
+    if diagnostic:
+        receipt["diagnostic"] = diagnostic
+    attempts = value.get("attempts")
+    if isinstance(attempts, list):
+        safe_attempts = []
+        for attempt in attempts[:32]:
+            if not isinstance(attempt, dict):
+                continue
+            target = _safe_target(attempt)
+            if not target:
+                continue
+            safe_attempt = dict(target)
+            for key in ("index", "durationMs", "status", "inputTokens", "outputTokens", "firstOutputMs"):
+                item = attempt.get(key)
+                if isinstance(item, int) and not isinstance(item, bool) and item >= 0:
+                    safe_attempt[key] = item
+            for key in ("startedAt", "outcome", "errorCode"):
+                item = attempt.get(key)
+                if isinstance(item, str) and 0 < len(item) <= 200 and all(char.isalnum() or char in "._:-TZ+" for char in item):
+                    safe_attempt[key] = item
+            diagnostic = _safe_diagnostic(attempt.get("diagnostic"))
+            if diagnostic:
+                safe_attempt["diagnostic"] = diagnostic
+            safe_attempts.append(safe_attempt)
+        receipt["attempts"] = safe_attempts
+    return receipt or None
+
+
 class _ProjectModelProvider(BaseProvider):
     """Bifrost relay transport for canonical Semantica extractors."""
 
@@ -540,7 +646,11 @@ class _ProjectModelProvider(BaseProvider):
             "model": self.relay.model_id,
             "messages": [{"role": "user", "content": prompt}],
             "temperature": 0,
-            "max_tokens": min(self.relay.max_output_tokens, 8192) if self.operation == "structured_extraction" else self.relay.max_output_tokens,
+            # The host has already applied Semantica's output-budget policy.
+            # Do not impose a second, smaller cap here: it changes the actual
+            # request, invalidates the admitted model selection, and can turn
+            # valid structured output into avoidable truncation.
+            "max_tokens": self.relay.max_output_tokens,
             "response_format": {"type": "json_object"},
         }
         response, receipt = _relay_json(self.relay, payload, self.operation)
@@ -573,6 +683,39 @@ class _ProjectModelProvider(BaseProvider):
 
 def _project_model_provider(relay: Any, operation: str = "structured_extraction") -> _ProjectModelProvider:
     return _ProjectModelProvider(relay, operation)
+
+
+def _embed_batch_checkpointed(batch: list[tuple[int, int, str]], source_text: str, relay: Any):
+    """Embed one deterministic batch and persist its completed artifact.
+
+    Relay response caching alone is insufficient for restartability: the
+    caller still has to rebuild the whole in-memory extraction result before it
+    can publish a snapshot.  A batch artifact is keyed by the immutable source
+    text, offsets, model binding and ordered input, so a restart can reuse the
+    completed vectors without issuing another request.
+    """
+    checkpoint = active_checkpoint.get()
+    texts = [window for _, _, window in batch]
+    key = {
+        "sourceText": _digest_bytes(source_text.encode("utf-8")),
+        "windows": [{"start": start, "end": end, "digest": _digest_bytes(window.encode("utf-8"))}
+                    for start, end, window in batch],
+        "model": getattr(relay, "model_id", None),
+        "bindingId": getattr(relay, "binding_id", None),
+    }
+    if checkpoint:
+        cached = checkpoint.read("embedding-batch", key)
+        if cached is not None:
+            receipt = ModelReceipt.model_validate(cached["receipt"])
+            object.__setattr__(receipt, "_checkpoint_restored", True)
+            return cached["vectors"], receipt
+    vectors, receipt = _embed_texts(texts, relay)
+    if checkpoint:
+        checkpoint.write("embedding-batch", key, {
+            "vectors": vectors,
+            "receipt": receipt.model_dump(mode="json", by_alias=True),
+        })
+    return vectors, receipt
 
 
 def _embed_texts(texts: list[str], relay: Any) -> tuple[list[list[float]], ModelReceipt]:

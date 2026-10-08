@@ -171,6 +171,14 @@ def _response(request_id: Optional[str], ok: bool, *, result: Optional[Dict[str,
                 payload["error"]["code"] = error.code
             if error.retryable:
                 payload["error"]["retryable"] = True
+            if error.retry_after_ms is not None:
+                payload["error"]["retryAfterMs"] = error.retry_after_ms
+            if error.upstream_request_id:
+                payload["error"]["upstreamRequestId"] = error.upstream_request_id
+            if error.diagnostic:
+                payload["error"]["diagnostic"] = error.diagnostic
+            if error.gateway:
+                payload["error"]["gateway"] = error.gateway
     return payload
 
 

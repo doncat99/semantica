@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from contextvars import ContextVar
+from copy import deepcopy
 from datetime import datetime, timezone
 from hashlib import sha256, file_digest
 import json
@@ -21,6 +22,27 @@ def _bytes(value: Any) -> bytes:
 
 def _digest(value: bytes) -> str:
     return "sha256:" + sha256(value).hexdigest()
+
+
+def _resume_compatible(previous: Any, current: dict[str, Any]) -> bool:
+    if not isinstance(previous, dict):
+        return False
+    candidate = deepcopy(previous)
+    if candidate == current:
+        return True
+    previous_relays = candidate.get("relays")
+    current_relays = current.get("relays")
+    previous_model = previous_relays.get("model") if isinstance(previous_relays, dict) else None
+    current_model = current_relays.get("model") if isinstance(current_relays, dict) else None
+    if not isinstance(previous_model, dict) or not isinstance(current_model, dict):
+        return False
+    previous_limit = previous_model.get("maxOutputTokens")
+    current_limit = current_model.get("maxOutputTokens")
+    if not isinstance(previous_limit, int) or not isinstance(current_limit, int) or previous_limit <= current_limit:
+        return False
+    previous_model["maxOutputTokens"] = current_limit
+    candidate["inputRevision"] = current["inputRevision"]
+    return candidate == current
 
 
 def _atomic_json(path: Path, value: Any) -> None:
@@ -46,10 +68,7 @@ class SnapshotCheckpoint:
     def __init__(self, request: Any):
         self.root = Path(request.output_dir).resolve() / "checkpoint"
         self.root.mkdir(parents=True, exist_ok=True)
-        self.resume_roots = [Path(item).resolve() for item in request.resume_checkpoint_dirs]
-        self.resume_model_token_limits = {
-            Path(path).resolve(): limit for path, limit in request.resume_checkpoint_model_token_limits.items()
-        }
+        resume_roots = [Path(item).resolve() for item in request.resume_checkpoint_dirs]
         sources = []
         for source in request.sources:
             with Path(source.file_path).open("rb") as stream:
@@ -62,8 +81,34 @@ class SnapshotCheckpoint:
             "recipe": request.recipe.model_dump(mode="json", by_alias=True),
             "documentProcessing": request.document_processing.model_dump(mode="json", by_alias=True),
             "release": request.release.model_dump(mode="json", by_alias=True),
-            "relays": {name: {"modelId": relay.model_id, "bindingId": relay.binding_id, "capability": relay.capability} for name, relay in request.relays.items()}}
+            "relays": {name: {
+                "modelId": relay.model_id,
+                "bindingId": relay.binding_id,
+                "capability": relay.capability,
+                **({"contextWindowTokens": relay.context_window_tokens}
+                   if relay.context_window_tokens is not None else {}),
+                **({"maxOutputTokens": relay.max_output_tokens}
+                   if relay.max_output_tokens is not None else {}),
+            } for name, relay in request.relays.items()}}
         self.fence = _digest(_bytes(inputs))
+        self.resume_root_fences = {}
+        self.resume_roots = []
+        for root in resume_roots:
+            try:
+                previous = json.loads((root / "manifest.json").read_bytes())
+            except (ValueError, OSError) as exc:
+                raise SnapshotCheckpointError(f"resume checkpoint manifest is unreadable: {root}") from exc
+            previous_inputs = previous.get("inputs") if isinstance(previous, dict) else None
+            previous_fence = previous.get("fence") if isinstance(previous, dict) else None
+            if not isinstance(previous_fence, str) or previous_fence != _digest(_bytes(previous_inputs)):
+                raise SnapshotCheckpointError(f"resume checkpoint manifest failed verification: {root}")
+            if _resume_compatible(previous_inputs, inputs):
+                self.resume_roots.append(root)
+                self.resume_root_fences[root] = previous_fence
+        self.resume_model_token_limits = {
+            Path(path).resolve(): limit for path, limit in request.resume_checkpoint_model_token_limits.items()
+            if Path(path).resolve() in self.resume_root_fences
+        }
         manifest = self.root / "manifest.json"
         if manifest.exists():
             try:
@@ -105,8 +150,13 @@ class SnapshotCheckpoint:
     def read(self, kind: str, key: Any) -> Any | None:
         local_path = self._path(kind, key)
         paths = [local_path]
-        if kind == "relay":
-            paths.extend(root / local_path.name for root in self.resume_roots)
+        # Every completed production artifact is resumable.  Restricting
+        # resume roots to relay responses forced a restarted build to issue
+        # no new model calls yet still rebuild all extracted chunks and
+        # embeddings in memory.  The input fence and payload digest protect
+        # each copied artifact, so document, chunk and embedding entries can
+        # safely be reused across process boundaries.
+        paths.extend(root / local_path.name for root in self.resume_roots)
         for path in paths:
             if not path.is_file():
                 continue
@@ -114,7 +164,8 @@ class SnapshotCheckpoint:
                 entry = json.loads(path.read_bytes())
                 payload = entry["payload"]
                 local = path.parent == self.root
-                if (local and entry["fence"] != self.fence) or entry["digest"] != _digest(_bytes(payload)):
+                expected_fence = self.fence if local else self.resume_root_fences[path.parent]
+                if entry["fence"] != expected_fence or entry["digest"] != _digest(_bytes(payload)):
                     raise ValueError("digest mismatch")
                 if self._is_rejected(kind, key, entry["digest"]):
                     continue
@@ -142,7 +193,7 @@ class SnapshotCheckpoint:
             try:
                 entry = json.loads(path.read_bytes())
                 stored = entry["payload"]
-                if entry["digest"] != _digest(_bytes(stored)):
+                if entry["fence"] != self.resume_root_fences[root] or entry["digest"] != _digest(_bytes(stored)):
                     raise ValueError("digest mismatch")
                 response = stored["response"]
                 choices = response["choices"]

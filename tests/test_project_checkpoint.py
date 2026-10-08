@@ -135,7 +135,9 @@ def test_worker_process_restart_reuses_durable_parse_and_model_calls(tmp_path):
 
 def test_quota_failure_new_run_reuses_completed_extraction_windows(tmp_path, monkeypatch):
     source = tmp_path / "source.txt"
-    source.write_text("A source explains durable knowledge production. " * 110, encoding="utf-8")
+    # Keep two substantive native windows so the test exercises checkpoint
+    # reuse without relying on a trailing whitespace-only chunk.
+    source.write_text("A source explains durable knowledge production. " * 300, encoding="utf-8")
     first = _request(source, tmp_path / "first", recipe="model")
     first["params"]["parallelism"] = 1
     first["params"]["relays"]["model"]["maxOutputTokens"] = 393216
@@ -203,7 +205,9 @@ def test_quota_failure_new_run_reuses_completed_extraction_windows(tmp_path, mon
     result = build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(second["params"]))
     assert result["snapshot"] is not None
     assert all(calls.count(prompt) == 1 for prompt in first_window_prompts)
-    assert len(list((tmp_path / "second" / "checkpoint").glob("relay-*.json"))) >= 4
+    second_checkpoint = tmp_path / "second" / "checkpoint"
+    assert len(list(second_checkpoint.glob("chunk-extraction-*.json"))) >= 2
+    assert len(list(second_checkpoint.glob("embedding-batch-*.json"))) >= 1
 
 
 def test_checkpoint_rejects_corrupt_payload_and_changed_recipe(tmp_path):
@@ -237,8 +241,43 @@ def test_new_run_reuses_only_matching_verified_relay_entries(tmp_path):
 
     assert second_checkpoint.read("relay", {"operation": "embedding", "input": ["Alpha"]}) == {"response": "saved"}
     assert second_checkpoint.read("relay", {"operation": "embedding", "input": ["Beta"]}) is None
-    assert second_checkpoint.read("document", {"source": "source-1"}) is None
+    assert second_checkpoint.read("document", {"source": "source-1"}) == {"document": "old"}
     assert len(list(second_checkpoint.root.glob("relay-*.json"))) == 1
+    assert len(list(second_checkpoint.root.glob("document-*.json"))) == 1
+
+
+def test_new_run_does_not_reuse_checkpoint_after_recipe_change(tmp_path):
+    source = tmp_path / "source.txt"
+    source.write_text("A source", encoding="utf-8")
+    first = _request(source, tmp_path / "first")
+    first_checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(first["params"]))
+    first_checkpoint.write("document", {"source": "source-1"}, {"document": "old"})
+
+    second = _request(source, tmp_path / "second")
+    second["params"]["recipe"]["forceOcrSourceIds"] = ["source-1"]
+    second["params"]["resumeCheckpointDirs"] = [str(first_checkpoint.root)]
+    second_checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(second["params"]))
+
+    assert second_checkpoint.read("document", {"source": "source-1"}) is None
+
+
+def test_external_checkpoint_entry_must_match_its_manifest_fence(tmp_path):
+    source = tmp_path / "source.txt"
+    source.write_text("A source", encoding="utf-8")
+    first = _request(source, tmp_path / "first")
+    first_checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(first["params"]))
+    first_checkpoint.write("document", {"source": "source-1"}, {"document": "saved"})
+    entry_path = next(first_checkpoint.root.glob("document-*.json"))
+    entry = json.loads(entry_path.read_bytes())
+    entry["fence"] = "sha256:" + "0" * 64
+    entry_path.write_text(json.dumps(entry), encoding="utf-8")
+
+    second = _request(source, tmp_path / "second")
+    second["params"]["resumeCheckpointDirs"] = [str(first_checkpoint.root)]
+    second_checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(second["params"]))
+
+    with pytest.raises(SnapshotCheckpointError, match="failed verification"):
+        second_checkpoint.read("document", {"source": "source-1"})
 
 
 def test_completed_model_response_survives_lower_output_limit(tmp_path):
