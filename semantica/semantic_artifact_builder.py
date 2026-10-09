@@ -213,9 +213,13 @@ class _IdentityOutput(_ProductOutput):
 
 
 def _typed_extraction_error(error: ProcessingError) -> SemanticArtifactError:
+    parallel_context = getattr(error, "parallel_context", None)
     cause: BaseException | None = error
     while cause is not None:
         if isinstance(cause, SemanticArtifactError):
+            diagnostic = dict(cause.diagnostic or {})
+            if parallel_context is not None:
+                diagnostic["parallelTask"] = parallel_context
             return SemanticArtifactError(
                 str(error),
                 status=cause.status,
@@ -223,11 +227,12 @@ def _typed_extraction_error(error: ProcessingError) -> SemanticArtifactError:
                 retryable=cause.retryable,
                 retry_after_ms=cause.retry_after_ms,
                 upstream_request_id=cause.upstream_request_id,
-                diagnostic=cause.diagnostic,
+                diagnostic=diagnostic or None,
                 gateway=cause.gateway,
             )
         cause = cause.__cause__
-    return SemanticArtifactError(str(error))
+    diagnostic = {"parallelTask": parallel_context} if parallel_context is not None else None
+    return SemanticArtifactError(str(error), diagnostic=diagnostic)
 
 
 def _context_size(value: Any) -> int:
@@ -299,12 +304,30 @@ def _native_parallel_map(items: list[Any], handler: Any, parallelism: int, on_co
     tasks = [Task(task_id=str(index), handler=run, args=(index, item))
              for index, item in enumerate(items)]
     results = ParallelismManager(max_workers=max(1, parallelism)).execute_parallel(
-        tasks
+        tasks,
+        fail_fast_permanent=True,
     )
     ordered = [None] * len(items)
     for result in results:
         if not result.success:
-            raise result.error or ProcessingError(f"parallel task {result.task_id} failed")
+            cause = result.error or ProcessingError(f"parallel task {result.task_id} failed")
+            failure = ProcessingError(
+                f"parallel task {result.task_id} failed: {type(cause).__name__}: {cause}"
+            )
+            if hasattr(cause, "retryable"):
+                failure.retryable = cause.retryable
+            if isinstance((item := items[int(result.task_id)]), tuple) and len(item) >= 2 \
+                    and isinstance(item[0], int) and isinstance(item[1], int):
+                failure.parallel_context = {
+                    "taskId": result.task_id,
+                    "windowStart": item[0],
+                    "windowEnd": item[1],
+                }
+            else:
+                failure.parallel_context = {"taskId": result.task_id}
+            failure.parallel_context["errorType"] = type(cause).__name__
+            failure.parallel_context["errorMessage"] = str(cause)[:500]
+            raise failure from cause
         ordered[int(result.task_id)] = result.result
     return ordered
 
@@ -1666,10 +1689,32 @@ def _span_id(representation_id: str, start: int, end: int) -> str:
     return readable if len(readable) <= 128 else _evidence_id(["span", representation_id, start, end])
 
 
-def _entity_id(source_id: str, name: str, entity_type: str, text: str, start: int, occurrences: dict[str, list[int]]) -> str:
+def _entity_occurrence_index(text: str, names: list[str]) -> dict[str, list[int]]:
+    # Python IGNORECASE adds these four Unicode characters to ASCII letter matches.
+    fold = str.maketrans("ABCDEFGHIJKLMNOPQRSTUVWXYZİıſK", "abcdefghijklmnopqrstuvwxyziisk")
+    folded_text = text.translate(fold)
+    matches: dict[str, list[int]] = {}
+    index: dict[str, list[int]] = {}
+    for name in names:
+        if name in index:
+            continue
+        if name.isascii():
+            key = name.lower()
+            if key not in matches:
+                positions = []
+                start = 0
+                while (match_start := folded_text.find(key, start)) != -1:
+                    positions.append(match_start)
+                    start = match_start + len(key)
+                matches[key] = positions
+            index[name] = matches[key]
+        else:
+            index[name] = [match.start() for match in re.finditer(re.escape(name), text, re.IGNORECASE)]
+    return index
+
+
+def _entity_id(source_id: str, name: str, entity_type: str, start: int, occurrences: dict[str, list[int]]) -> str:
     """Anchor an occurrence without making ordinary sentence edits change its ID."""
-    if name not in occurrences:
-        occurrences[name] = [match.start() for match in re.finditer(re.escape(name), text, re.IGNORECASE)]
     occurrence = bisect_left(occurrences[name], start)
     key = [source_id, entity_type.casefold(), _normalized_text(name), occurrence]
     return "mention:" + stable_digest(key).split(":")[1][:32]
@@ -1713,7 +1758,6 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
     representation_artifact_id = f"artifact:{representation_id}"
     source_locations = _docling_locations(document, text)
     entities: dict[str, KnowledgeEntity] = {}
-    occurrences: dict[str, list[int]] = {}
     entities_by_ref: dict[str, KnowledgeEntity] = {}
     evidence: dict[str, EvidenceSpan] = {}
     if model_result is None:
@@ -1723,6 +1767,8 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
         ]
     else:
         entities_raw = model_result["entities"]
+    occurrences = _entity_occurrence_index(text, [item["name"].strip() for item in entities_raw
+        if isinstance(item, dict) and isinstance(item.get("name"), str) and item["name"].strip()])
     for item in entities_raw:
         if not isinstance(item, dict):
             raise SemanticArtifactError("entity extraction result must contain objects")
@@ -1753,7 +1799,7 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
             confidence=item.get("confidence"),
             metadata=source_metadata,
         )
-        entity_id = _entity_id(source.source_id, name, entity_type, text, start, occurrences)
+        entity_id = _entity_id(source.source_id, name, entity_type, start, occurrences)
         current = entities.get(entity_id)
         if current is None:
             entities[entity_id] = KnowledgeEntity(

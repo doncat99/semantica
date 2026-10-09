@@ -182,6 +182,9 @@ def _response(request_id: Optional[str], ok: bool, *, result: Optional[Dict[str,
         if error is not None and "diagnostic" not in payload["error"]:
             code = payload["error"].setdefault("code", "SEMANTIC_WORKER_INTERNAL_ERROR")
             diagnostic = {"origin": "protocol_error", "code": code}
+            parallel_context = getattr(error, "parallel_context", None)
+            if parallel_context is not None:
+                diagnostic["parallelTask"] = parallel_context
             frame = error.__traceback__
             if frame is not None:
                 while frame.tb_next is not None:

@@ -227,6 +227,31 @@ class TestVerboseModeAssignment(unittest.TestCase):
             except Exception:
                 pass  # other errors are OK — we only care NameError is gone
 
+    def test_transport_failure_is_not_retried_through_instructor_fallback(self):
+        provider = self._make_openai_provider()
+
+        class Schema(BaseModel):
+            value: str
+
+        error = RuntimeError("gateway cooldown")
+        error.status_code = 429
+        mock_client = MagicMock()
+        mock_client.chat.completions.create.side_effect = error
+        mock_instructor = MagicMock()
+        mock_instructor.from_openai.return_value = mock_client
+        mock_instructor.from_provider.side_effect = Exception("unsupported provider registration")
+        mock_instructor.Mode.TOOLS = "tools"
+        provider.generate_structured = MagicMock(side_effect=AssertionError("must not retry transport failure"))
+        provider.generate = MagicMock(side_effect=AssertionError("must not retry transport failure"))
+
+        with patch("semantica.semantic_extract.providers.instructor", mock_instructor):
+            with self.assertRaisesRegex(RuntimeError, "gateway cooldown"):
+                provider.generate_typed("prompt", Schema)
+
+        mock_client.chat.completions.create.assert_called_once()
+        provider.generate_structured.assert_not_called()
+        provider.generate.assert_not_called()
+
     def test_generate_typed_verbose_true_logs(self):
         """When verbose=True, generate_typed must log the confirmation line."""
         provider = self._make_openai_provider()

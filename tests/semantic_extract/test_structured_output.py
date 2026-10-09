@@ -199,5 +199,21 @@ def test_base_provider_repairs_typed_output_with_schema_and_previous_response(mo
     assert '"text":"Alpha"' in retry_prompt.replace(" ", "")
     assert "Field required" in retry_prompt
 
+
+def test_base_provider_does_not_duplicate_transport_failure_with_plain_request(monkeypatch):
+    class GatewayError(Exception):
+        status_code = 503
+
+    provider = BaseProvider()
+    provider.generate_structured = MagicMock(side_effect=GatewayError("overloaded"))
+    provider.generate = MagicMock(side_effect=AssertionError("transport failure must not fall back to plain generate"))
+    monkeypatch.setattr("semantica.semantic_extract.providers.instructor", None)
+
+    with pytest.raises(Exception) as failure:
+        provider.generate_typed("Return JSON.", EntitiesResponse, max_retries=1)
+
+    assert isinstance(failure.value.__cause__, GatewayError)
+    provider.generate.assert_not_called()
+
 if __name__ == "__main__":
     pytest.main([__file__])

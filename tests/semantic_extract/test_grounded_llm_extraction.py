@@ -7,6 +7,7 @@ from semantica.semantic_extract.methods import extract_entities_llm, extract_rel
 from semantica.semantic_extract.schemas import (
     EntitiesResponse,
     EntityOut,
+    GroundedEntitiesResponse,
     GroundedRelationsResponse,
     RelationOut,
     RelationsResponse,
@@ -20,13 +21,15 @@ class TypedProvider:
         self.responses = list(responses)
         self.prompts = []
         self.schemas = []
+        self.kwargs = []
 
     def is_available(self):
         return True
 
-    def generate_typed(self, prompt, schema, **_kwargs):
+    def generate_typed(self, prompt, schema, **kwargs):
         self.prompts.append(prompt)
         self.schemas.append(schema)
+        self.kwargs.append(kwargs)
         return self.responses.pop(0)
 
 
@@ -122,6 +125,8 @@ def test_grounded_native_extractors_preserve_mentions_evidence_and_qualifiers():
     assert relations[0].metadata["evidence_start"] == 0
     assert "subject_id" in provider.prompts[1]
     assert "exact contiguous substring" in provider.prompts[1]
+    assert "exact, case-sensitive" in provider.prompts[1]
+    assert "entity-list" in provider.prompts[0]
     assert "table-of-contents" in provider.prompts[0]
     assert "navigation labels" in provider.prompts[0]
     assert provider.schemas[0].__name__ == "GroundedEntitiesResponse"
@@ -204,6 +209,8 @@ def test_grounded_native_extractors_retry_invalid_grounding():
     )
     assert [relation.predicate for relation in relations] == ["affects"]
     assert "does not reference an entity mention" in relation_provider.prompts[1]
+    assert "candidate_index=0" in relation_provider.prompts[1]
+    assert '"subject_id": "invented"' in relation_provider.prompts[1]
 
 
 def test_unique_grounded_quote_uses_its_deterministic_occurrence():
@@ -302,7 +309,14 @@ def test_grounded_relation_records_rejected_candidate_without_losing_valid_fact(
 
 
 def test_grounded_relation_isolates_candidate_missing_required_field_after_typed_validation():
-    assert "qualifiers" in GroundedRelationsResponse.model_json_schema()["properties"]["relations"]["items"]["required"]
+    item_schema = GroundedRelationsResponse.model_json_schema()["properties"]["relations"]["items"]
+    relation_schema = GroundedRelationsResponse.model_json_schema()["$defs"]["GroundedRelationOut"]
+    required = relation_schema["required"]
+    assert "qualifiers" in required
+    assert "subject_id" in required and "object_id" in required
+    assert "subject" not in required and "object" not in required
+    assert "subject" not in relation_schema["properties"]
+    assert "object" not in relation_schema["properties"]
     text = "Reflective roofs do not shade pedestrians."
     entities = extract_entities_llm(
         text, provider="bifrost", provider_instance=TypedProvider(EntitiesResponse(entities=[
@@ -349,6 +363,23 @@ def test_repeated_grounded_quote_retry_includes_range_and_previous_json():
     assert '"occurrence": 7' in provider.prompts[1]
 
 
+def test_strict_grounding_delegates_semantic_repair_to_one_outer_retry():
+    text = "A affects B."
+    entity_provider = TypedProvider(EntitiesResponse(entities=[
+        EntityOut(text="A", label="concept", occurrence=0),
+        EntityOut(text="B", label="concept", occurrence=0),
+    ]))
+    entities = extract_entities_llm(text, provider="bifrost", provider_instance=entity_provider, grounding="strict")
+    assert entity_provider.kwargs[0]["max_retries"] == 1
+
+    relation_provider = TypedProvider(RelationsResponse(relations=[RelationOut(
+        subject="A", subject_id="mention:0", predicate="affects", object="B", object_id="mention:1",
+        evidence=text, evidence_occurrence=0, qualifiers={"polarity": "positive"},
+    )]))
+    extract_relations_llm(text, entities, provider="bifrost", provider_instance=relation_provider, grounding="strict")
+    assert relation_provider.kwargs[0]["max_retries"] == 1
+
+
 def test_grounded_relation_keeps_valid_facts_when_peer_is_invalid():
     text = "Reflective roofs do not shade pedestrians."
     entities = extract_entities_llm(
@@ -381,6 +412,72 @@ def test_grounded_relation_keeps_valid_facts_when_peer_is_invalid():
         grounding_retries=0,
     )
     assert [relation.predicate for relation in relations] == ["shades"]
+
+
+def test_malformed_relation_sibling_is_rejected_without_semantic_repair():
+    text = "Reflective roofs shade pedestrians."
+    entities = extract_entities_llm(
+        text,
+        provider="bifrost",
+        provider_instance=TypedProvider(EntitiesResponse(entities=[
+            EntityOut(text="Reflective roofs", label="measure", occurrence=0),
+            EntityOut(text="pedestrians", label="population", occurrence=0),
+        ])),
+        grounding="strict",
+    )
+    valid = {
+        "subject_id": "mention:0", "object_id": "mention:1", "predicate": "shades",
+        "evidence": text, "evidence_occurrence": 0, "confidence": 0.9,
+        "qualifiers": {"polarity": "positive"},
+    }
+    provider = TypedProvider({"relations": [{"subject_id": "mention:0"}, valid]})
+    rejected = []
+
+    relations = extract_relations_llm(
+        text, entities, provider="bifrost", provider_instance=provider,
+        grounding="strict", grounding_retries=1, rejection_receipts=rejected,
+    )
+
+    assert [relation.predicate for relation in relations] == ["shades"]
+    assert len(provider.prompts) == 1
+    assert rejected[0]["candidate_index"] == 0
+    assert rejected[0]["kind"] == "schema"
+
+
+def test_malformed_entity_sibling_is_rejected_without_semantic_repair():
+    text = "CFA Institute publishes standards."
+    provider = TypedProvider(GroundedEntitiesResponse.model_validate({"entities": [
+        {"text": "CFA Institute", "occurrence": 0},
+        {"text": "standards", "label": "concept", "occurrence": 0},
+    ]}))
+    rejected = []
+
+    entities = extract_entities_llm(
+        text, provider="bifrost", provider_instance=provider,
+        grounding="strict", grounding_retries=1, rejection_receipts=rejected,
+    )
+
+    assert [entity.text for entity in entities] == ["standards"]
+    assert entities[0].metadata["mention_id"] == "mention:0"
+    assert len(provider.prompts) == 1
+    assert rejected[0]["candidate_index"] == 0
+    assert rejected[0]["kind"] == "schema"
+
+
+def test_strict_entity_rejects_normalized_text_instead_of_mutating_provenance():
+    text = "CFA Institute publishes standards."
+    provider = TypedProvider(GroundedEntitiesResponse.model_validate({"entities": [
+        {"text": " CFA Institute ", "label": "organization", "occurrence": 0},
+    ]}))
+    rejected = []
+
+    entities = extract_entities_llm(
+        text, provider="bifrost", provider_instance=provider,
+        grounding="strict", grounding_retries=0, rejection_receipts=rejected,
+    )
+
+    assert entities == []
+    assert rejected[0]["kind"] == "schema"
 
 
 def test_grounded_entity_keeps_valid_mentions_when_repair_stays_invalid():
@@ -435,3 +532,93 @@ def test_grounded_relations_reject_duplicate_mentions_at_same_source_span():
     assert _parse_grounded_relation_result(result, entities, text, "bifrost", "test", reject_invalid=True, rejections=rejected) == []
     assert len(rejected) == 1
     assert "itself" in rejected[0]["reason"]
+
+
+def test_grounded_relation_uses_id_endpoints_without_redundant_model_text():
+    from semantica.semantic_extract.methods import _parse_grounded_relation_result
+    from semantica.semantic_extract.types import Entity
+
+    text = "Exposure affects outcomes."
+    entities = [
+        Entity("Exposure", "concept", 0, 8, 0.9, {"mention_id": "mention:0"}),
+        Entity("outcomes", "concept", 17, 25, 0.9, {"mention_id": "mention:1"}),
+    ]
+    result = {"relations": [{
+        "subject_id": "mention:0",
+        "object_id": "mention:1",
+        "predicate": "affects",
+        "evidence": text,
+        "evidence_occurrence": 0,
+        "confidence": 0.9,
+        "qualifiers": {"polarity": "positive"},
+    }]}
+
+    relations = _parse_grounded_relation_result(result, entities, text, "bifrost", "test")
+
+    assert relations[0].subject is entities[0]
+    assert relations[0].object is entities[1]
+
+
+def test_grounded_relation_ignores_noncanonical_endpoint_text_but_keeps_id_validation():
+    from semantica.semantic_extract.methods import _parse_grounded_relation_result
+    from semantica.semantic_extract.types import Entity
+
+    text = "Exposure affects outcomes."
+    entities = [
+        Entity("Exposure", "concept", 0, 8, 0.9, {"mention_id": "mention:0"}),
+        Entity("outcomes", "concept", 17, 25, 0.9, {"mention_id": "mention:1"}),
+    ]
+    result = {"relations": [{
+        "subject": "wrong endpoint",
+        "object": "also wrong",
+        "subject_id": "mention:0",
+        "object_id": "mention:1",
+        "predicate": "affects",
+        "evidence": text,
+        "evidence_occurrence": 0,
+        "confidence": 0.9,
+        "qualifiers": {"polarity": "positive"},
+    }]}
+
+    relations = _parse_grounded_relation_result(result, entities, text, "bifrost", "test")
+
+    assert relations[0].subject.text == "Exposure"
+    assert relations[0].object.text == "outcomes"
+
+@pytest.mark.parametrize('first', [{'predicate': 'uses'}, {'relations': 'invalid'}, {'relations': [{}, 'qualifiers']}])
+def test_strict_relation_repairs_invalid_envelope_with_previous_json(first):
+    import json
+    from semantica.semantic_extract.providers import BaseProvider
+    from semantica.semantic_extract.types import Entity
+    class JsonProvider(BaseProvider):
+        def __init__(self):
+            super().__init__(model='test')
+            self.prompts = []
+            self.responses = [first, {'relations': []}]
+        def is_available(self): return True
+        def generate(self, prompt, **kwargs):
+            self.prompts.append(prompt)
+            return json.dumps(self.responses.pop(0))
+    provider = JsonProvider()
+    entities = [Entity('A', 'thing', 0, 1, .9, {'mention_id': 'mention:0'})]
+    result = extract_relations_llm('A', entities, provider='bifrost',
+        provider_instance=provider, grounding='strict', grounding_retries=1)
+    assert result == []
+    assert len(provider.prompts) == 2
+    assert json.dumps(first, ensure_ascii=False) in provider.prompts[1]
+
+
+def test_strict_relation_keeps_valid_sibling_beside_scalar():
+    from semantica.semantic_extract.types import Entity
+    entities = [Entity('A', 'thing', 0, 1, .9, {'mention_id': 'mention:0'}),
+                Entity('B', 'thing', 7, 8, .9, {'mention_id': 'mention:1'})]
+    response = GroundedRelationsResponse.model_validate({'relations': [
+        {'subject_id': 'mention:0', 'object_id': 'mention:1', 'predicate': 'uses',
+         'evidence': 'A uses B', 'evidence_occurrence': 0, 'qualifiers': {'polarity': 'positive'}}, 'qualifiers']})
+    rejected = []
+    provider = TypedProvider(response)
+    result = extract_relations_llm('A uses B', entities, provider='bifrost', provider_instance=provider,
+        grounding='strict', grounding_retries=1, rejection_receipts=rejected)
+    assert len(result) == 1
+    assert len(provider.prompts) == 1
+    assert rejected == [{'candidate_index': 1, 'reason': 'grounded relation must be an object', 'kind': 'schema'}]

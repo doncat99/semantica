@@ -9,6 +9,25 @@ from .schema import ExtractionSpecification
 from .types import Entity, Relation
 
 
+def _retryable_failure(error: BaseException) -> bool:
+    """Retry only transport/gateway failures, never deterministic validation errors."""
+    current: BaseException | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if (
+            getattr(current, "retryable", False) is True
+            or getattr(current, "retry_after_ms", None) is not None
+            or getattr(current, "retryAfterMs", None) is not None
+        ):
+            return True
+        status = getattr(current, "status", getattr(current, "status_code", None))
+        if isinstance(status, int) and (status == 429 or 500 <= status <= 599):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
+
+
 def extract_grounded_window(
     text: str,
     *,
@@ -43,14 +62,17 @@ def extract_grounded_window(
             entities = extract_entities_llm(
                 text, provider=provider_name, model=model,
                 provider_instance=current_provider, grounding="strict",
-                grounding_retries=1, extraction_spec=specification,
+                max_retries=1, grounding_retries=1, extraction_spec=specification,
+                rejection_receipts=getattr(current_provider, "rejections", None),
             )
             if not entities:
+                if getattr(current_provider, "rejections", None) and getattr(current_provider, "receipts", None):
+                    current_provider.receipts[-1].metadata["rejected_candidates"] = current_provider.rejections
                 return entities, [], current_provider
             relations = extract_relations_llm(
                 text, entities, provider=provider_name, model=model,
                 provider_instance=current_provider, grounding="strict",
-                grounding_retries=1, extraction_spec=specification,
+                max_retries=1, grounding_retries=1, extraction_spec=specification,
                 confidence_threshold=0,
                 rejection_receipts=getattr(current_provider, "rejections", None),
             )
@@ -62,6 +84,6 @@ def extract_grounded_window(
             reject = getattr(current_provider, "reject_last", None)
             if callable(reject):
                 reject()
-            if attempt >= max(0, retries):
+            if attempt >= max(0, retries) or not _retryable_failure(exc):
                 raise
     raise last_error or ProcessingError("grounded extraction failed")

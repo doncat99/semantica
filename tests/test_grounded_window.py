@@ -61,7 +61,9 @@ def test_grounded_window_recreates_provider_for_each_retry(monkeypatch):
     def entities(text, **kwargs):
         attempts.append(kwargs["provider_instance"])
         if len(attempts) == 1:
-            raise grounded_window.ProcessingError("retry")
+            error = grounded_window.ProcessingError("retry")
+            error.retryable = True
+            raise error
         return []
 
     def relations(text, found, **kwargs):
@@ -84,7 +86,12 @@ def test_grounded_window_records_candidate_rejections_on_model_receipt(monkeypat
     from types import SimpleNamespace
 
     provider = SimpleNamespace(rejections=[], receipts=[SimpleNamespace(metadata={})])
-    monkeypatch.setattr(grounded_window, "extract_entities_llm", lambda *_args, **_kwargs: ["entity"])
+    def entities(_text, **kwargs):
+        assert kwargs["rejection_receipts"] is provider.rejections
+        kwargs["rejection_receipts"].append({"candidate_index": 1, "kind": "schema"})
+        return ["entity"]
+
+    monkeypatch.setattr(grounded_window, "extract_entities_llm", entities)
 
     def relations(_text, _entities, **kwargs):
         kwargs["rejection_receipts"].append({"candidate_index": 0, "reason": "ungrounded condition"})
@@ -96,5 +103,6 @@ def test_grounded_window_records_candidate_rejections_on_model_receipt(monkeypat
     )
 
     assert actual_provider.receipts[-1].metadata["rejected_candidates"] == [
+        {"candidate_index": 1, "kind": "schema"},
         {"candidate_index": 0, "reason": "ungrounded condition"},
     ]

@@ -20,12 +20,26 @@ def test_entity_occurrence_index_preserves_identity_and_scans_each_name_once(mon
         calls.append(args)
         return original(*args, **kwargs)
     monkeypatch.setattr(semantic_artifact_builder.re, "finditer", scan)
-    cache = {}
+    cache = semantic_artifact_builder._entity_occurrence_index(text, ["Roof", "Roof"])
     for match in original("Roof", text, re.IGNORECASE):
         occurrence = sum(1 for prior in original("Roof", text[:match.end()], re.IGNORECASE) if prior.start() < match.start())
         expected = "mention:" + semantic_artifact_builder.stable_digest(["source", "object", "roof", occurrence]).split(":")[1][:32]
-        assert semantic_artifact_builder._entity_id("source", "Roof", "object", text, match.start(), cache) == expected
-    assert len(calls) == 1
+        assert semantic_artifact_builder._entity_id("source", "Roof", "object", match.start(), cache) == expected
+    assert calls == []
+
+
+def test_occurrence_index_uses_literal_search_without_changing_unicode_matching(monkeypatch):
+    text = "I İ ı i S ſ s K K k Σ σ ς ß ẞ é É aaaa"
+    names = ["I", "i", "S", "K", "Σ", "ß", "é", "aa"]
+    original = re.finditer
+    expected = {name: [m.start() for m in original(re.escape(name), text, re.IGNORECASE)] for name in names}
+    scans = []
+    def scan(pattern, source, flags=0):
+        scans.append(flags)
+        return original(pattern, source, flags)
+    monkeypatch.setattr(semantic_artifact_builder.re, "finditer", scan)
+    assert semantic_artifact_builder._entity_occurrence_index(text, names) == expected
+    assert sum(flags == re.IGNORECASE for flags in scans) == 3
 
 
 def test_worker_internal_failure_retains_code_location_without_source_content():
@@ -39,6 +53,63 @@ def test_worker_internal_failure_retains_code_location_without_source_content():
     assert diagnostic["fault"]["function"] == "test_worker_internal_failure_retains_code_location_without_source_content"
     assert diagnostic["fault"]["line"] > 0
     assert "private document" not in str(diagnostic)
+
+
+def test_parallel_extraction_failure_retains_task_and_window_context(monkeypatch):
+    relay_failure = SemanticArtifactError(
+        "structured_extraction relay returned HTTP 404",
+        status=404,
+        code="UPSTREAM_NOT_FOUND",
+        retryable=True,
+    )
+
+    monkeypatch.setattr(
+        semantic_artifact_builder,
+        "_text_windows",
+        lambda _text: [(12, 34, "window")],
+    )
+
+    def grounded(_text, **_kwargs):
+        raise ProcessingError("grounded extraction failed") from relay_failure
+
+    monkeypatch.setattr(semantic_artifact_builder, "extract_grounded_window", grounded)
+
+    with pytest.raises(SemanticArtifactError) as failure:
+        semantic_artifact_builder._extract_and_embed(
+            "source", SimpleNamespace(model_id="model-1"), object(), parallelism=1
+        )
+
+    assert failure.value.status == 404
+    assert failure.value.code == "UPSTREAM_NOT_FOUND"
+    assert failure.value.diagnostic["parallelTask"] == {
+        "taskId": "0",
+        "windowStart": 12,
+        "windowEnd": 34,
+        "errorType": "ProcessingError",
+        "errorMessage": "grounded extraction failed",
+    }
+
+
+def test_worker_internal_failure_keeps_parallel_task_context():
+    from semantica.semantic_worker import _response
+
+    error = ProcessingError("parallel task 3 failed")
+    error.parallel_context = {
+        "taskId": "3",
+        "windowStart": 100,
+        "windowEnd": 200,
+        "errorType": "ProcessingError",
+        "errorMessage": "parallel task 3 failed",
+    }
+    response = _response("request-2", False, error=error)
+
+    assert response["error"]["diagnostic"]["parallelTask"] == {
+        "taskId": "3",
+        "windowStart": 100,
+        "windowEnd": 200,
+        "errorType": "ProcessingError",
+        "errorMessage": "parallel task 3 failed",
+    }
 
 
 def test_build_parallelism_accepts_host_ceiling_and_rejects_overflow():
@@ -162,6 +233,95 @@ def test_native_extraction_preserves_retryable_relay_failure(monkeypatch):
     assert failure.value.status == 500
     assert failure.value.code == "INTERNAL_ERROR"
     assert failure.value.retryable is True
+
+
+def test_native_parallel_map_propagates_permanent_failure_for_fail_fast():
+    calls = []
+
+    def grounded(item):
+        calls.append(item)
+        if item == "permanent":
+            raise SemanticArtifactError("unauthorized", status=401, retryable=False)
+        return item
+
+    with pytest.raises(ProcessingError) as failure:
+        semantic_artifact_builder._native_parallel_map(
+            ["permanent", "queued"], grounded, parallelism=1
+        )
+
+    assert failure.value.retryable is False
+    assert calls == ["permanent"]
+
+
+def test_provider_preserves_permanent_relay_failure_through_structured_wrapper():
+    from semantica.semantic_extract.providers import BaseProvider
+
+    class Provider(BaseProvider):
+        def generate(self, _prompt, **_kwargs):
+            raise SemanticArtifactError("unauthorized", status=401, retryable=False)
+
+    with pytest.raises(ProcessingError) as failure:
+        Provider().generate_structured("return JSON", max_retries=1)
+
+    assert failure.value.retryable is False
+    assert isinstance(failure.value.__cause__, SemanticArtifactError)
+
+
+def test_provider_does_not_retry_or_raw_fallback_permanent_relay_failure():
+    from semantica.semantic_extract.providers import BaseProvider
+
+    calls = []
+
+    class Provider(BaseProvider):
+        def generate(self, _prompt, **_kwargs):
+            calls.append("generate")
+            raise SemanticArtifactError("quota unavailable", status=503, retryable=False)
+
+    with pytest.raises(ProcessingError) as failure:
+        Provider().generate_typed("return JSON", dict, max_retries=3)
+
+    assert calls == ["generate"]
+    assert failure.value.retryable is False
+    assert isinstance(failure.value.__cause__, SemanticArtifactError)
+
+
+def test_provider_treats_relay_error_body_as_permanent_before_sdk_retry():
+    from semantica.semantic_extract.providers import BaseProvider
+
+    calls = []
+
+    class Provider(BaseProvider):
+        def generate(self, _prompt, **_kwargs):
+            calls.append("generate")
+            error = RuntimeError("gateway rejected request")
+            error.status_code = 503
+            error.body = {"error": {"code": "DEFAULT_SERVICE_QUOTA_UNAVAILABLE", "retryable": False}}
+            raise error
+
+    with pytest.raises(ProcessingError) as failure:
+        Provider().generate_typed("return JSON", dict, max_retries=3)
+
+    assert calls == ["generate"]
+    assert failure.value.retryable is False
+
+
+def test_provider_does_not_manual_fallback_for_unauthorized_sdk_error():
+    from semantica.semantic_extract.providers import BaseProvider
+
+    calls = []
+
+    class Provider(BaseProvider):
+        def generate(self, _prompt, **_kwargs):
+            calls.append("generate")
+            error = RuntimeError("unauthorized")
+            error.status_code = 401
+            raise error
+
+    with pytest.raises(ProcessingError) as failure:
+        Provider().generate_typed("return JSON", dict, max_retries=3)
+
+    assert calls == ["generate"]
+    assert failure.value.retryable is False
 
 
 def test_typed_provider_keeps_relay_failure_as_its_cause(monkeypatch):

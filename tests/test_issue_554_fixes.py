@@ -84,7 +84,7 @@ class _StubEntitiesResponse:
         self.entities = entities
 
     @classmethod
-    def model_validate(cls, data):
+    def model_validate(cls, data, context=None):
         if not isinstance(data, dict) or "entities" not in data:
             raise ValueError(f"Expected dict with 'entities' key, got: {data!r}")
         return cls([_StubEntityOut(**e) for e in data["entities"]])

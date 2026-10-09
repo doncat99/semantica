@@ -163,6 +163,39 @@ class BaseProvider:
             if key in source and source[key] is not None:
                 target[key] = source[key]
 
+    @staticmethod
+    def _is_permanent_failure(error: Exception) -> bool:
+        """Recognize explicit gateway permanence before SDK retry heuristics."""
+        retryable = getattr(error, "retryable", None)
+        if isinstance(retryable, bool):
+            return retryable is False
+        for attr in ("body", "details"):
+            value = getattr(error, attr, None)
+            if not isinstance(value, dict):
+                continue
+            nested = value.get("error", value)
+            if isinstance(nested, dict) and nested.get("retryable") is False:
+                return True
+        status = getattr(error, "status_code", getattr(error, "status", None))
+        return status in {400, 401, 403, 422}
+
+    @staticmethod
+    def _is_transport_failure(error: Exception) -> bool:
+        """Keep gateway failures on the caller's retry policy."""
+        if BaseProvider._is_permanent_failure(error):
+            return False
+        status = getattr(error, "status_code", getattr(error, "status", None))
+        if isinstance(status, int) and (status in (408, 429) or status >= 500):
+            return True
+        if (
+            getattr(error, "retryable", False) is True
+            or getattr(error, "retryAfterMs", None) is not None
+            or getattr(error, "retry_after_ms", None) is not None
+        ):
+            return True
+        code = str(getattr(error, "code", "")).lower()
+        return code in {"timeout", "rate_limit_exceeded", "server_error", "api_connection_error"}
+
     def generate(self, prompt: str, **kwargs) -> str:
         """Generate text - must be implemented."""
         raise NotImplementedError
@@ -292,6 +325,11 @@ class BaseProvider:
 
             except (ProcessingError, Exception) as e:
                 last_error = e
+                if self._is_permanent_failure(e):
+                    setattr(e, "retryable", False)
+                    break
+                if getattr(e, "retryable", None) is False:
+                    break
                 if attempt < max_retries - 1:
                     wait_time = (attempt + 1) * 2  # Simple backoff
                     self.logger.warning(
@@ -304,7 +342,10 @@ class BaseProvider:
                     )
 
         if last_error:
-            raise ProcessingError(f"Failed to generate structured output: {last_error}")
+            wrapped = ProcessingError(f"Failed to generate structured output: {last_error}")
+            if hasattr(last_error, "retryable"):
+                wrapped.retryable = last_error.retryable
+            raise wrapped from last_error
         return []
 
     def generate_typed(
@@ -521,6 +562,11 @@ class BaseProvider:
                         # with Mode.JSON before giving up entirely.
                         # Custom-base_url providers already use Mode.JSON from the start,
                         # so we only retry here for the standard OpenAI path.
+                        if self._is_permanent_failure(primary_err):
+                            setattr(primary_err, "retryable", False)
+                            raise
+                        if self._is_transport_failure(primary_err):
+                            raise
                         if (
                             provider_name == "OpenAIProvider"
                             and not getattr(self, "base_url", None)
@@ -561,6 +607,11 @@ class BaseProvider:
                         )
                     return response
             except Exception as e:
+                if self._is_permanent_failure(e):
+                    setattr(e, "retryable", False)
+                    raise
+                if self._is_transport_failure(e):
+                    raise
                 self.logger.warning(
                     "Instructor generation failed (%s), falling back to manual repair loop.",
                     e,
@@ -581,6 +632,13 @@ class BaseProvider:
                         current_prompt, max_retries=1, **kwargs
                     )
                 except Exception as struct_err:
+                    if self._is_permanent_failure(struct_err):
+                        setattr(struct_err, "retryable", False)
+                        raise
+                    if getattr(struct_err, "retryable", None) is False:
+                        raise
+                    if self._is_transport_failure(struct_err):
+                        raise
                     self.logger.warning(
                         "generate_structured failed (%s); retrying with plain generate() + JSON parse.",
                         struct_err,
@@ -742,14 +800,24 @@ class BaseProvider:
 
             except Exception as e:
                 last_error = e
+                if getattr(e, "retryable", None) is False:
+                    break
                 if attempt < max_retries - 1:
                     time.sleep(1)
                 else:
                     self.logger.error(f"Typed generation failed: {e}")
 
-        raise ProcessingError(
+        failure = ProcessingError(
             f"Failed to generate typed output after {max_retries} attempts: {last_error}"
-        ) from last_error
+        )
+        if isinstance(last_error, ValidationError):
+            failure.previous_json = json_result
+        if hasattr(last_error, "retryable"):
+            failure.retryable = last_error.retryable
+        cause = last_error
+        while isinstance(cause, ProcessingError) and cause.__cause__ is not None:
+            cause = cause.__cause__
+        raise failure from cause
 
 
 class OpenAIProvider(BaseProvider):

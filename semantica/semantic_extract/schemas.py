@@ -1,5 +1,5 @@
-from typing import List, Optional
-from pydantic import BaseModel, Field, SkipValidation, field_validator, model_validator, ConfigDict
+from typing import Any, List, Optional
+from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 
 class EntityOut(BaseModel):
     """Canonical schema for entity extraction output."""
@@ -133,7 +133,7 @@ class GroundedEntityOut(EntityOut):
 
 class GroundedEntitiesResponse(BaseModel):
     """Strict source-grounded entity extraction response."""
-    entities: List[GroundedEntityOut] = Field(default_factory=list)
+    entities: List[dict[str, Any] | GroundedEntityOut | Any] = Field(...)
 
 
 class RelationsResponse(BaseModel):
@@ -141,19 +141,41 @@ class RelationsResponse(BaseModel):
     relations: List[RelationOut] = Field(default_factory=list)
 
 
-class GroundedRelationOut(RelationOut):
-    """Relation output whose source evidence fields are mandatory."""
+class GroundedRelationOut(BaseModel):
+    """Strict relation output keyed by source mention IDs.
+
+    Endpoint text is derived from the supplied mention IDs by the grounded
+    parser, so the model does not have to generate the same endpoint twice.
+    """
+    model_config = ConfigDict(populate_by_name=True, extra="ignore")
+
+    predicate: str = Field(..., description="Relation type or predicate")
+    confidence: float = Field(0.9, description="Confidence score between 0 and 1")
     subject_id: str = Field(..., description="Exact source entity mention identifier")
     object_id: str = Field(..., description="Exact target entity mention identifier")
     evidence: str = Field(..., description="Exact supporting source quote")
     evidence_occurrence: int = Field(..., ge=0, description="Zero-based evidence quote occurrence")
     qualifiers: dict = Field(..., description="Grounded relation qualifiers")
 
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def normalize_confidence(cls, v):
+        if isinstance(v, str):
+            try:
+                v = float(v)
+            except ValueError:
+                return 0.9
+        if isinstance(v, (int, float)):
+            return max(0.0, min(1.0, float(v)))
+        return 0.9
+
 
 class GroundedRelationsResponse(BaseModel):
     """Strict source-grounded relation extraction response."""
-    relations: List[SkipValidation[GroundedRelationOut]] = Field(
-        ..., description="Candidates validated individually against GroundedRelationOut"
+    # Keep the envelope typed while retaining raw siblings for independent
+    # validation in the grounded parser.
+    relations: List[dict[str, Any] | GroundedRelationOut | Any] = Field(
+        ..., description="Relation candidates validated independently by the grounded parser"
     )
 
 

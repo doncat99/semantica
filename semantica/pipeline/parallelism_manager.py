@@ -165,6 +165,8 @@ class ParallelismManager:
         self, tasks: List[Task], **options
     ) -> List[ParallelExecutionResult]:
         """Execute tasks using thread pool."""
+        if options.get("fail_fast_permanent", False):
+            return self._execute_with_threads_fail_fast(tasks, options)
         results = []
         max_workers = options.get("max_workers", self.max_workers)
 
@@ -202,6 +204,61 @@ class ParallelismManager:
                         )
                     )
 
+        return results
+
+    @staticmethod
+    def _is_permanent_failure(error: Exception) -> bool:
+        """Only an explicit retryable=False error stops new work."""
+        return getattr(error, "retryable", None) is False
+
+    def _execute_with_threads_fail_fast(
+        self, tasks: List[Task], options: Dict[str, Any]
+    ) -> List[ParallelExecutionResult]:
+        """Keep a bounded submission window and stop feeding it on permanent failure."""
+        results: List[ParallelExecutionResult] = []
+        max_workers = max(1, options.get("max_workers", self.max_workers))
+        executor = ThreadPoolExecutor(max_workers=max_workers)
+        pending: Dict[Any, Task] = {}
+        next_index = 0
+        stop_dispatch = False
+
+        def submit_next() -> None:
+            nonlocal next_index
+            if stop_dispatch or next_index >= len(tasks):
+                return
+            task = tasks[next_index]
+            next_index += 1
+            pending[executor.submit(task.handler, *task.args, **task.kwargs)] = task
+
+        try:
+            while len(pending) < max_workers and next_index < len(tasks):
+                submit_next()
+            while pending:
+                for future in as_completed(list(pending)):
+                    task = pending.pop(future)
+                    start_time = time.time()
+                    try:
+                        value = future.result()
+                        results.append(ParallelExecutionResult(
+                            task_id=task.task_id, success=True, result=value,
+                            execution_time=time.time() - start_time,
+                        ))
+                    except Exception as error:
+                        results.append(ParallelExecutionResult(
+                            task_id=task.task_id, success=False, error=error,
+                            execution_time=time.time() - start_time,
+                        ))
+                        if self._is_permanent_failure(error):
+                            stop_dispatch = True
+                            for queued in pending:
+                                queued.cancel()
+                            pending = {f: t for f, t in pending.items() if not f.cancelled()}
+                    if not stop_dispatch:
+                        submit_next()
+                    break
+        finally:
+            # Running calls are allowed to finish; only queued futures are cancelled.
+            executor.shutdown(wait=True, cancel_futures=True)
         return results
 
     def _execute_with_processes(
