@@ -1,0 +1,11 @@
+{
+  "tagPrefix": "ontoscience-semantic-worker-",
+  "titlePrefix": "OntoScience semantic worker ",
+  "uvVersion": "0.9.10",
+  "pythonVersion": "3.12",
+  "targets": {
+    "darwin-arm64": {"runtimeTarget": "darwin-arm64", "python": "python/bin/python3"},
+    "linux-x64": {"runtimeTarget": "linux-x64", "python": "python/bin/python3"},
+    "win-x64": {"runtimeTarget": "win32-x64", "python": "python/python.exe"}
+  }
+}

@@ -2,7 +2,7 @@ name: Semantic Worker Native Release
 
 on:
   push:
-    tags: ['ontoscience-native-*']
+    tags: ['ontoscience-semantic-worker-*']
   workflow_dispatch:
 
 permissions:
@@ -21,9 +21,9 @@ jobs:
       - env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="ontoscience-semantic-worker-${GITHUB_SHA:0:12}"
+          tag="$(uv run --no-project --python 3.12 .github/scripts/semantic_worker_release.py tag "$GITHUB_SHA")"
           if ! gh release view "$tag" >/dev/null 2>&1; then
-            uv build --wheel --out-dir native-dist
+            uv run --no-project --python 3.12 .github/scripts/semantic_worker_release.py wheel --output native-dist
             gh release create "$tag" --target "$GITHUB_SHA" --title "OntoScience semantic worker ${GITHUB_SHA:0:12}" --notes 'Immutable worker and native runtime bundles. Platform acceptance and inventories are attached.' native-dist/*.whl
           fi
   native:
@@ -68,7 +68,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          tag="ontoscience-semantic-worker-${GITHUB_SHA:0:12}"
+          tag="$(uv run --no-project --python 3.12 .github/scripts/semantic_worker_release.py tag "$GITHUB_SHA")"
           mkdir -p native-dist
           gh release download "$tag" --pattern '*.whl' --dir native-dist
           native-inputs/${{ matrix.python }} -I -B .github/scripts/semantic_worker_models.py .github/requirements/semantic-worker-models.json native-inputs/models
@@ -80,7 +80,7 @@ jobs:
             echo "Expected exactly one Semantica wheel, found ${#wheels[@]}" >&2
             exit 1
           fi
-          native-inputs/${{ matrix.python }} -I -B semantica/bundle.py --python-root native-inputs/python --wheel "${wheels[0]}" --models-root native-inputs/models --target '${{ matrix.runtime_target }}' --output native-bundle --source-revision "$GITHUB_SHA"
+          uv run --no-project --python 3.12 .github/scripts/semantic_worker_release.py bundle --target '${{ matrix.target }}' --native-inputs native-inputs --wheel "${wheels[0]}" --models native-inputs/models --output native-bundle --source-revision "$GITHUB_SHA"
       - name: Relocate and validate installed worker
         run: |
           mv native-bundle "$RUNNER_TEMP/semantica-relocated"
@@ -90,7 +90,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           COPYFILE_DISABLE: '1'
         run: |
-          tag="ontoscience-semantic-worker-${GITHUB_SHA:0:12}"
+          tag="$(uv run --no-project --python 3.12 .github/scripts/semantic_worker_release.py tag "$GITHUB_SHA")"
           archive="semantica-${{ matrix.target }}-${GITHUB_SHA:0:12}.tar.gz"
           tar -czf "native-dist/$archive" -C "$RUNNER_TEMP/semantica-relocated" .
           cp "$RUNNER_TEMP/semantica-relocated/manifest.json" native-dist/${{ matrix.target }}-manifest.json
