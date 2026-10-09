@@ -8,24 +8,28 @@ on:
 permissions:
   contents: read
 
+env:
+  UV_VERSION: '0.9.10'
+  RELEASE_SCRIPT: .github/scripts/semantic_worker_release.py
+
 jobs:
   wheel:
     runs-on: ubuntu-24.04
-    permissions:
-      contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
         with:
-          version: '0.9.10'
-      - env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tag="$(uv run --no-project --python 3.12 .github/scripts/semantic_worker_release.py tag "$GITHUB_SHA")"
-          if ! gh release view "$tag" >/dev/null 2>&1; then
-            uv run --no-project --python 3.12 .github/scripts/semantic_worker_release.py wheel --output native-dist
-            gh release create "$tag" --target "$GITHUB_SHA" --title "OntoScience semantic worker ${GITHUB_SHA:0:12}" --notes 'Immutable worker and native runtime bundles. Platform acceptance and inventories are attached.' native-dist/*.whl
-          fi
+          version: ${{ env.UV_VERSION }}
+      - name: Build universal wheel
+        run: uv run --no-project --python 3.12 "$RELEASE_SCRIPT" wheel --output native-dist
+      - name: Pass wheel to platform jobs
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: semantic-worker-wheel
+          path: native-dist/*.whl
+          if-no-files-found: error
+          retention-days: 1
+
   native:
     needs: wheel
     strategy:
@@ -34,20 +38,15 @@ jobs:
         include:
           - runner: macos-14
             target: darwin-arm64
-            runtime_target: darwin-arm64
             python: python/bin/python3
           - runner: ubuntu-24.04
             target: linux-x64
-            runtime_target: linux-x64
             python: python/bin/python3
           - runner: windows-2022
             target: win-x64
-            runtime_target: win32-x64
             python: python/python.exe
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
-    permissions:
-      contents: write
     defaults:
       run:
         shell: bash
@@ -61,17 +60,16 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
       - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
         with:
-          version: '0.9.10'
+          version: ${{ env.UV_VERSION }}
       - name: Fetch immutable native inputs
         run: uv run --no-project --python 3.12 .github/scripts/semantic_worker_native.py '${{ matrix.target }}' native-inputs
-      - name: Fetch wheel and locked model inputs
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          tag="$(uv run --no-project --python 3.12 .github/scripts/semantic_worker_release.py tag "$GITHUB_SHA")"
-          mkdir -p native-dist
-          gh release download "$tag" --pattern '*.whl' --dir native-dist
-          native-inputs/${{ matrix.python }} -I -B .github/scripts/semantic_worker_models.py .github/requirements/semantic-worker-models.json native-inputs/models
+      - name: Fetch wheel artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: semantic-worker-wheel
+          path: native-dist
+      - name: Fetch locked model inputs
+        run: native-inputs/${{ matrix.python }} -I -B .github/scripts/semantic_worker_models.py .github/requirements/semantic-worker-models.json native-inputs/models
       - name: Build native bundle
         run: |
           shopt -s nullglob
@@ -80,27 +78,47 @@ jobs:
             echo "Expected exactly one Semantica wheel, found ${#wheels[@]}" >&2
             exit 1
           fi
-          uv run --no-project --python 3.12 .github/scripts/semantic_worker_release.py bundle --target '${{ matrix.target }}' --native-inputs native-inputs --wheel "${wheels[0]}" --models native-inputs/models --output native-bundle --source-revision "$GITHUB_SHA"
+          uv run --no-project --python 3.12 "$RELEASE_SCRIPT" bundle --target '${{ matrix.target }}' --native-inputs native-inputs --wheel "${wheels[0]}" --models native-inputs/models --output native-bundle --source-revision "$GITHUB_SHA"
       - name: Relocate and validate installed worker
         run: |
           mv native-bundle "$RUNNER_TEMP/semantica-relocated"
           "$RUNNER_TEMP/semantica-relocated/${{ matrix.python }}" -I -B .github/scripts/semantic_worker_acceptance.py "$RUNNER_TEMP/semantica-relocated" native-dist/${{ matrix.target }}-acceptance.json
-      - name: Archive and publish immutable native release
+      - name: Prepare platform release artifacts
         env:
-          GH_TOKEN: ${{ github.token }}
           COPYFILE_DISABLE: '1'
         run: |
-          tag="$(uv run --no-project --python 3.12 .github/scripts/semantic_worker_release.py tag "$GITHUB_SHA")"
           archive="semantica-${{ matrix.target }}-${GITHUB_SHA:0:12}.tar.gz"
           tar -czf "native-dist/$archive" -C "$RUNNER_TEMP/semantica-relocated" .
           cp "$RUNNER_TEMP/semantica-relocated/manifest.json" native-dist/${{ matrix.target }}-manifest.json
-          for artifact in native-dist/*; do
-            name="$(basename "$artifact")"
-            if gh release view "$tag" --json assets --jq '.assets[].name' | grep -Fxq "$name"; then
-              mkdir -p existing-release
-              gh release download "$tag" --pattern "$name" --dir existing-release
-              cmp "$artifact" "existing-release/$name"
-            else
-              gh release upload "$tag" "$artifact"
-            fi
-          done
+          rm -f native-dist/*.whl
+      - name: Pass platform artifacts to publish job
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: semantic-worker-${{ matrix.target }}
+          path: native-dist/*
+          if-no-files-found: error
+          retention-days: 1
+
+  publish:
+    needs: [wheel, native]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - uses: astral-sh/setup-uv@d0d8abe699bfb85fec6de9f7adb5ae17292296ff
+        with:
+          version: ${{ env.UV_VERSION }}
+      - name: Collect final release artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          pattern: semantic-worker-*
+          path: release-dist
+          merge-multiple: true
+      - name: Create release and publish final assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          tag="$(uv run --no-project --python 3.12 "$RELEASE_SCRIPT" tag "$GITHUB_SHA")"
+          title="OntoScience semantic worker ${GITHUB_SHA:0:12}"
+          gh release create "$tag" --target "$GITHUB_SHA" --title "$title" --notes 'Immutable worker and native runtime bundles. Platform acceptance and inventories are attached.' release-dist/*
