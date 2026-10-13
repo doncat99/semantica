@@ -157,6 +157,13 @@ class GroundedRelationOut(BaseModel):
     evidence_occurrence: int = Field(..., ge=0, description="Zero-based evidence quote occurrence")
     qualifiers: dict = Field(..., description="Grounded relation qualifiers")
 
+    @field_validator("qualifiers", mode="before")
+    @classmethod
+    def unwrap_singleton_qualifiers(cls, value):
+        if isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict):
+            return value[0]
+        return value
+
     @field_validator("confidence", mode="before")
     @classmethod
     def normalize_confidence(cls, v):

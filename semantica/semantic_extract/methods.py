@@ -2383,6 +2383,7 @@ an exact complete supporting quote copied from this window. `evidence_occurrence
 zero-based ordinal of that quote's exact, case-sensitive, non-overlapping match in this
 window (the first match is 0); it is not a character offset, relation index, page number,
 or an ordinal from another window.
+qualifiers must be a JSON object, not an array: {{"polarity": "positive"}}.
 qualifiers allows only polarity, condition, time, unit, value; polarity is required and is
 positive or negative. Every other qualifier must be an exact contiguous substring of the
 evidence (source whitespace may differ; the stored value uses the source's whitespace).

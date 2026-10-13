@@ -414,6 +414,35 @@ def test_grounded_relation_keeps_valid_facts_when_peer_is_invalid():
     assert [relation.predicate for relation in relations] == ["shades"]
 
 
+@pytest.mark.parametrize("qualifiers", [{"polarity": "positive"}, [{"polarity": "positive"}]])
+def test_grounded_relation_normalizes_singleton_qualifiers_without_model_retry(qualifiers):
+    from semantica.semantic_extract.methods import _parse_grounded_relation_result
+    from semantica.semantic_extract.types import Entity
+
+    text = "A uses B."
+    entities = [Entity("A", "CONCEPT", 0, 1, 0.9, {"mention_id": "mention:0"}),
+                Entity("B", "CONCEPT", 7, 8, 0.9, {"mention_id": "mention:1"})]
+    candidate = {"subject_id": "mention:0", "object_id": "mention:1", "predicate": "uses",
+                 "evidence": text, "evidence_occurrence": 0, "qualifiers": qualifiers}
+    relations = _parse_grounded_relation_result({"relations": [candidate]}, entities, text, "bifrost", "test")
+    assert relations[0].metadata["qualifiers"] == {"polarity": "positive"}
+    assert candidate["qualifiers"] == qualifiers
+
+
+@pytest.mark.parametrize("qualifiers", [[], [{"polarity": "positive"}, {"polarity": "negative"}], ["positive"],
+                                       [{"polarity": "invalid"}], [{"polarity": "positive", "condition": "absent"}]])
+def test_grounded_relation_singleton_normalization_preserves_validation(qualifiers):
+    from semantica.semantic_extract.methods import _parse_grounded_relation_result
+    from semantica.semantic_extract.types import Entity
+
+    entities = [Entity("A", "CONCEPT", 0, 1, 0.9, {"mention_id": "mention:0"}),
+                Entity("B", "CONCEPT", 7, 8, 0.9, {"mention_id": "mention:1"})]
+    candidate = {"subject_id": "mention:0", "object_id": "mention:1", "predicate": "uses",
+                 "evidence": "A uses B.", "evidence_occurrence": 0, "qualifiers": qualifiers}
+    with pytest.raises(ProcessingError):
+        _parse_grounded_relation_result({"relations": [candidate]}, entities, "A uses B.", "bifrost", "test")
+
+
 def test_malformed_relation_sibling_is_rejected_without_semantic_repair():
     text = "Reflective roofs shade pedestrians."
     entities = extract_entities_llm(
