@@ -345,7 +345,8 @@ class DuplicateDetector:
         Args:
             entities: List of entity dictionaries to group
             threshold: Minimum similarity threshold (overrides instance default)
-            **options: Additional detection options passed to detect_duplicates()
+            **options: Detection options; candidates may supply already admitted pairs
+                       instead of running similarity detection.
 
         Returns:
             List of DuplicateGroup objects, each containing:
@@ -382,9 +383,11 @@ class DuplicateDetector:
             )
 
             # Detect duplicate candidates
-            candidates = self.detect_duplicates(
-                entities, threshold=threshold, **options
-            )
+            candidates = options.pop("candidates", None)
+            if candidates is None:
+                candidates = self.detect_duplicates(
+                    entities, threshold=threshold, **options
+                )
 
             self.progress_tracker.update_tracking(
                 tracking_id, message="Building duplicate groups..."

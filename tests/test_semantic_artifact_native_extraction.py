@@ -377,7 +377,7 @@ def test_restored_chunk_uses_native_grounding_without_repeating_model_calls(monk
     assert "itself" in receipts[0].metadata["rejected_candidates"][0]["reason"]
 
 
-def test_source_assembly_rejects_collapsed_self_relation_without_losing_valid_facts(tmp_path):
+def test_source_assembly_preserves_relations_when_distinct_refs_share_identity(tmp_path):
     from semantica.semantic_artifact_schema import SourceBuildInput
     from semantica.source import source_content_revision
     path = tmp_path / 'source.txt'
@@ -398,12 +398,9 @@ def test_source_assembly_rejects_collapsed_self_relation_without_losing_valid_fa
     built = semantic_artifact_builder._build_source(source, False, result,
         (text, {'format': 'text'}, 'native', source.material_revision, 'text', '1'))
     assert len(built['entities']) == 2
-    assert len(built['relations']) == len(built['assertions']) == 1
-    assert built['relations'][0].source_entity_id != built['relations'][0].target_entity_id
-    assert built['representation'].metadata['rejected_candidates'] == [{
-        'reason': 'SEMANTIC_SELF_RELATION', 'subject': 'a', 'object': 'duplicate',
-        'predicate': 'owns', 'entity_id': built['relations'][0].source_entity_id,
-    }]
+    assert len(built['relations']) == len(built['assertions']) == 2
+    assert built['relations'][0].source_entity_id == built['relations'][0].target_entity_id
+    assert not built['representation'].metadata.get('rejected_candidates')
 
 
 def test_whitespace_variants_share_occurrence_numbers_before_identity_resolution():
@@ -418,19 +415,23 @@ def test_whitespace_variants_share_occurrence_numbers_before_identity_resolution
     assert semantic_artifact_builder._entity_id('source', names[0], 'EVENT', positions[1], index) == ids[1]
 
 
-def test_identity_remap_preserves_mentions_but_rejects_collapsed_relations():
-    representation = SimpleNamespace(metadata={})
-    builds = [{'representation': representation, 'evidence': [SimpleNamespace(id='proof')]}]
-    assertions = [SimpleNamespace(id='a1', subject_id='first', object_entity_id='second', evidence_ids=['proof']),
-                  SimpleNamespace(id='a2', subject_id='first', object_entity_id='bond', evidence_ids=['proof'])]
-    relations = [SimpleNamespace(id='r1', source_entity_id='first', target_entity_id='second', evidence_ids=['proof']),
-                 SimpleNamespace(id='r2', source_entity_id='first', target_entity_id='bond', evidence_ids=['proof'])]
-    accepted_assertions, accepted_relations = semantic_artifact_builder._remap_identity_facts(
-        assertions, relations, {'first': 'paris', 'second': 'paris', 'bond': 'bond'}, builds)
-    assert [item.id for item in accepted_assertions] == ['a2']
-    assert [item.id for item in accepted_relations] == ['r2']
-    assert accepted_relations[0].source_entity_id == 'paris'
-    assert representation.metadata['rejected_candidates'] == [{
-        'reason': 'SEMANTIC_SELF_RELATION_AFTER_IDENTITY', 'relation_id': 'r1',
-        'entity_id': 'paris', 'evidence_ids': ['proof'],
-    }]
+def test_identity_remap_preserves_collapsed_facts_through_native_graph(monkeypatch):
+    from semantica.kg import GraphBuilder
+    from semantica.semantic_artifact_schema import KnowledgeEntity
+    calls = []
+    original = GraphBuilder._remap_relationship_endpoints
+    def tracked(self, relationships, entities):
+        calls.append(True)
+        return original(self, relationships, entities)
+    monkeypatch.setattr(GraphBuilder, '_remap_relationship_endpoints', tracked)
+    assertions = [SimpleNamespace(id='a1', subject_id='first', object_entity_id='second', evidence_ids=['proof'])]
+    relations = [SimpleNamespace(id='r1', source_entity_id='first', target_entity_id='second', evidence_ids=['proof'])]
+    entities = [KnowledgeEntity(id='canonical', canonical_name='Example', type='CONCEPT', evidence_ids=['proof'],
+                               metadata={'mention_ids': ['first', 'second']})]
+    kept_assertions, kept_relations = semantic_artifact_builder._remap_identity_facts(
+        assertions, relations, {'first': 'canonical', 'second': 'canonical'}, entities)
+    assert [item.id for item in kept_assertions] == ['a1']
+    assert [item.id for item in kept_relations] == ['r1']
+    assert kept_relations[0].source_entity_id == kept_relations[0].target_entity_id == 'canonical'
+    assert kept_assertions[0].subject_id == kept_assertions[0].object_entity_id == 'canonical'
+    assert calls

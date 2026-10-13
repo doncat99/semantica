@@ -1847,11 +1847,6 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
             object_entity = entities_by_ref.get(object_name)
             if not subject_entity or not object_entity:
                 raise SemanticArtifactError("relation endpoint is absent from extracted entities")
-            if subject_entity.id == object_entity.id:
-                rejected_candidates.append({"reason": "SEMANTIC_SELF_RELATION",
-                    "subject": subject, "object": object_name, "predicate": predicate,
-                    "entity_id": subject_entity.id})
-                continue
             start, end = (item["_start"], item["_end"]) if "_start" in item else _find_occurrence(text, quote.strip(), item.get("evidence_occurrence"))
             canonical_quote = text[start:end]
             if canonical_quote != quote.strip():
@@ -2243,25 +2238,26 @@ def _semantic_organization(
     return identities, communities, topics, conflicts
 
 
-def _remap_identity_facts(assertions, relations, remap, source_builds):
-    """Canonical identity merging preserves mentions, never a collapsed binary fact."""
+def _remap_identity_facts(assertions, relations, remap, entities):
+    """Project assertion references and retain every native-remapped relationship."""
+    from .kg import EntityResolver, GraphBuilder
     for assertion in assertions:
         assertion.subject_id = remap[assertion.subject_id]
         if assertion.object_entity_id:
             assertion.object_entity_id = remap[assertion.object_entity_id]
-    accepted = []
-    owners = {span.id: source["representation"] for source in source_builds for span in source["evidence"]}
+    graph = GraphBuilder(resolve_conflicts=False, fail_closed=True).build({
+        "entities": [{"id": entity.id, "name": entity.canonical_name, "type": entity.type,
+                      "merged_from": entity.metadata.get("mention_ids", [])} for entity in entities],
+        "relationships": [{"id": relation.id, "source": relation.source_entity_id,
+                           "target": relation.target_entity_id} for relation in relations],
+    }, entity_resolver=EntityResolver(strategy="exact", exact_key=lambda item: item["id"]))
+    endpoints = {item["id"]: item for item in graph["relationships"]}
+    if set(endpoints) != {relation.id for relation in relations}:
+        raise SemanticArtifactError("native identity remapping changed fact identities")
     for relation in relations:
-        relation.source_entity_id = remap[relation.source_entity_id]
-        relation.target_entity_id = remap[relation.target_entity_id]
-        if relation.source_entity_id == relation.target_entity_id:
-            rejection = {"reason": "SEMANTIC_SELF_RELATION_AFTER_IDENTITY", "relation_id": relation.id,
-                         "entity_id": relation.source_entity_id, "evidence_ids": relation.evidence_ids}
-            for owner in {id(owners[ref]): owners[ref] for ref in relation.evidence_ids if ref in owners}.values():
-                owner.metadata.setdefault("rejected_candidates", []).append(rejection)
-        else:
-            accepted.append(relation)
-    return ([item for item in assertions if item.subject_id != item.object_entity_id], accepted)
+        relation.source_entity_id = endpoints[relation.id]["source"]
+        relation.target_entity_id = endpoints[relation.id]["target"]
+    return assertions, relations
 
 
 def _report_support_sources(representations, evidence, entities, assertions, relations, communities, topics, reports):
@@ -2457,7 +2453,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
             project_id=request.project_id, mentions=mentions, judgments=judgments,
             base_snapshot=base_snapshot, receipt_id=identity_receipts[0].id if identity_receipts else None,
         )
-        assertions, relations = _remap_identity_facts(assertions, relations, remap, source_builds)
+        assertions, relations = _remap_identity_facts(assertions, relations, remap, entities)
         discovered_assertions, discovered_relations, relationship_receipts = _discover_cross_source_relationships(
             request.project_id, source_builds, entities, assertions, relations, evidence, request.relays["model"],
         )

@@ -182,3 +182,33 @@ def test_identity_decisions_are_immutable_and_split_has_no_single_target():
         SimpleNamespace(entities=separated, identity_decisions=decisions, identity_registry=registry),
     )
     assert [item.model_dump(mode="json") for item in next_decisions] == frozen
+
+
+def test_project_identity_delegates_matching_grouping_and_merging_to_native_owners(monkeypatch):
+    from semantica.kg.entity_resolver import EntityResolver
+    from semantica.deduplication.entity_merger import EntityMerger
+    from semantica.deduplication.duplicate_detector import DuplicateDetector
+    calls = []
+    for cls, method in [(EntityResolver, 'detect_duplicate_groups'),
+                        (DuplicateDetector, 'detect_duplicate_groups'),
+                        (EntityMerger, 'merge_entity_group')]:
+        original = getattr(cls, method, None)
+        def spy(self, *args, _original=original, _method=method, **kwargs):
+            calls.append(_method)
+            return _original(self, *args, **kwargs)
+        monkeypatch.setattr(cls, method, spy, raising=False)
+    entities, mapping, _ = resolve([mention('mention:first'), mention('mention:second')], [])
+    assert len(entities) == 1
+    assert mapping['mention:first'] == mapping['mention:second']
+    assert set(calls) == {'detect_duplicate_groups', 'merge_entity_group'}
+
+
+def test_native_merge_preserves_attribute_values_and_conflicts():
+    first, second = mention('mention:first'), mention('mention:second')
+    first.attributes = {'period': [2025], 'kind': 'fund'}
+    second.attributes = {'period': [2026], 'region': 'global'}
+    entities, _, _ = resolve([first, second], [{'mention_ids': [first.id, second.id],
+        'evidence_ids': [*first.evidence_ids, *second.evidence_ids], 'reason': 'same evidenced identity'}])
+    assert entities[0].attributes == {'kind': 'fund', 'region': 'global'}
+    assert entities[0].metadata['attribute_conflicts'] == {'period': [[2025], [2026]]}
+    assert first.attributes['period'] == [2025]

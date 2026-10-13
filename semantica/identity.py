@@ -4,6 +4,9 @@ from __future__ import annotations
 from collections import defaultdict
 from typing import Any
 
+from .kg.entity_resolver import EntityResolver
+from .deduplication.duplicate_detector import DuplicateCandidate
+
 from .semantic_artifact_schema import (
     IdentityDecision,
     IdentityRegistryEntry,
@@ -106,42 +109,32 @@ def resolve_project_identities(*, project_id: str, mentions: list[KnowledgeEntit
         admitted.append({**judgment, "decision_type": decision_type, "mention_ids": sorted(ids),
                          "evidence_ids": sorted(set(evidence_ids)), "reason": reason.strip()})
 
-    parent = {mention.id: mention.id for mention in mentions}
+    native_mentions = {
+        mention.id: {"id": mention.id, "name": mention.canonical_name, "type": mention.type,
+                     "properties": mention.attributes, "metadata": mention.metadata}
+        for mention in mentions
+    }
+    resolver = EntityResolver(strategy="exact", exact_key=lambda item: (
+        item["type"].casefold(), _normalized(item["name"]), stable_digest(item["properties"]),
+        tuple(sorted(set(item["metadata"].get("source_ids", [])))),
+    ))
 
-    def find(item: str) -> str:
-        while parent[item] != item:
-            parent[item] = parent[parent[item]]
-            item = parent[item]
-        return item
+    def connected_groups(id_groups, universe):
+        candidates = [DuplicateCandidate(native_mentions[ids[0]], native_mentions[item], 1.0, 1.0)
+                      for group in id_groups if (ids := sorted(group)) for item in ids[1:]]
+        native_groups = resolver.duplicate_detector.detect_duplicate_groups(
+            [native_mentions[item] for item in sorted(universe)], candidates=candidates)
+        groups = [{item["id"] for item in group.entities} for group in native_groups]
+        covered = set().union(*groups) if groups else set()
+        return groups + [{item} for item in sorted(universe - covered)]
 
-    def union(left: str, right: str) -> None:
-        left_root, right_root = find(left), find(right)
-        if left_root != right_root:
-            parent[max(left_root, right_root)] = min(left_root, right_root)
-
-    exact_groups: dict[tuple[str, str, str, tuple[str, ...]], list[str]] = defaultdict(list)
-    for mention in mentions:
-        exact_groups[(mention.type.casefold(), _normalized(mention.canonical_name), stable_digest(mention.attributes),
-                      tuple(sorted(set(mention.metadata.get("source_ids", [])))))].append(mention.id)
-    for ids in exact_groups.values():
-        for mention_id in ids[1:]:
-            union(ids[0], mention_id)
-
+    exact_groups = [{item["id"] for item in group.entities}
+                    for group in resolver.detect_duplicate_groups(list(native_mentions.values()))]
     inherited_groups: dict[str, list[str]] = defaultdict(list)
     for mention_id, entity_id in inherited.items():
         inherited_groups[entity_id].append(mention_id)
-    for ids in inherited_groups.values():
-        for mention_id in ids[1:]:
-            union(ids[0], mention_id)
-    for judgment in admitted:
-        if judgment["decision_type"] == "merge":
-            for mention_id in judgment["mention_ids"][1:]:
-                union(judgment["mention_ids"][0], mention_id)
-
-    groups_by_root: dict[str, set[str]] = defaultdict(set)
-    for mention_id in by_id:
-        groups_by_root[find(mention_id)].add(mention_id)
-    groups = list(groups_by_root.values())
+    groups = connected_groups([*exact_groups, *inherited_groups.values(),
+        *(judgment["mention_ids"] for judgment in admitted if judgment["decision_type"] == "merge")], set(by_id))
 
     current_merges = [set(judgment["mention_ids"]) for judgment in admitted if judgment["decision_type"] == "merge"]
     split_constraints = [
@@ -166,25 +159,9 @@ def resolve_project_identities(*, project_id: str, mentions: list[KnowledgeEntit
                 continue
             partition_members = set().union(*(set(items) for items in partition))
             outsiders = group - partition_members
-            link_parent = {item: item for item in group}
-
-            def link_find(item: str) -> str:
-                while link_parent[item] != item:
-                    link_parent[item] = link_parent[link_parent[item]]
-                    item = link_parent[item]
-                return item
-
-            for merge in explicit_merges:
-                members = sorted(group.intersection(merge))
-                for item in members[1:]:
-                    left, right = link_find(members[0]), link_find(item)
-                    if left != right:
-                        link_parent[max(left, right)] = min(left, right)
-            links: dict[str, set[str]] = defaultdict(set)
-            for item in group:
-                links[link_find(item)].add(item)
+            links = connected_groups([group.intersection(merge) for merge in explicit_merges], group)
             buckets = {index: set(items) for index, items in live}
-            for component in links.values():
+            for component in links:
                 targets = [index for index, items in enumerate(partition) if component.intersection(items)]
                 if len(targets) > 1:
                     raise ValueError("identity merge violates a persisted split")
@@ -198,6 +175,14 @@ def resolve_project_identities(*, project_id: str, mentions: list[KnowledgeEntit
             separated.extend(buckets.values())
         groups = separated
     groups.sort(key=lambda group: sorted(group))
+
+    # Native property rules preserve all observed values; the artifact distinguishes
+    # unambiguous attributes from conflicts instead of silently selecting one.
+    merge_mentions = {key: {**item, "properties": {name: {stable_digest(value): value}
+                      for name, value in item["properties"].items()}} for key, item in native_mentions.items()}
+    for name in {name for mention in mentions for name in mention.attributes}:
+        resolver.entity_merger.merge_strategy_manager.add_property_rule(
+            name, "merge_all", conflict_resolution=lambda left, right: {**left, **right})
 
     assigned_entity_ids: set[str] = set()
     canonical: list[KnowledgeEntity] = []
@@ -217,27 +202,26 @@ def resolve_project_identities(*, project_id: str, mentions: list[KnowledgeEntit
         assigned_entity_ids.add(entity_id)
 
         members = [by_id[item] for item in ids]
+        merged = (resolver.entity_merger.merge_entity_group([merge_mentions[item] for item in ids]).merged_entity
+                  if len(ids) > 1 else merge_mentions[ids[0]])
         names = sorted({member.canonical_name for member in members} | {alias for member in members for alias in member.aliases})
         previous_name = previous_entities.get(entity_id).canonical_name if entity_id in previous_entities else None
         if previous_name is None:
             previous_name = next((entry.canonical_name for entry in registry.values() if entry.entity_id == entity_id), None)
         canonical_name = previous_name if previous_name in names else names[0]
-        attribute_values = {
-            name: {stable_digest(value): value for member in members for name, value in member.attributes.items()}
-            for name in {name for member in members for name in member.attributes}
-        }
+        attribute_values = merged["properties"]
         attributes = {name: next(iter(values.values())) for name, values in attribute_values.items() if len(values) == 1}
         attribute_conflicts = {name: list(values.values()) for name, values in attribute_values.items() if len(values) > 1}
         canonical.append(KnowledgeEntity(
             id=entity_id,
             canonical_name=canonical_name,
-            type=members[0].type,
+            type=merged["type"],
             attributes=attributes,
             aliases=[name for name in names if name != canonical_name],
             evidence_ids=sorted({item for member in members for item in member.evidence_ids}),
             status="accepted" if len(ids) > 1 else members[0].status,
             metadata={
-                "mention_ids": ids,
+                "mention_ids": sorted(merged.get("merged_from", ids)),
                 "source_ids": sorted({item for member in members for item in member.metadata.get("source_ids", [])}),
                 **({"attribute_conflicts": attribute_conflicts} if attribute_conflicts else {}),
             },
