@@ -1821,6 +1821,7 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
             entities_by_ref[local_id] = entities[entity_id]
     assertions: list[KnowledgeAssertion] = []
     relations: list[KnowledgeRelation] = []
+    rejected_candidates = []
     if model_result is not None:
         for item in model_result["relations"]:
             if not isinstance(item, dict):
@@ -1836,7 +1837,10 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
             if not subject_entity or not object_entity:
                 raise SemanticArtifactError("relation endpoint is absent from extracted entities")
             if subject_entity.id == object_entity.id:
-                raise SemanticArtifactError("self relations are not accepted", code="SEMANTIC_SELF_RELATION")
+                rejected_candidates.append({"reason": "SEMANTIC_SELF_RELATION",
+                    "subject": subject, "object": object_name, "predicate": predicate,
+                    "entity_id": subject_entity.id})
+                continue
             start, end = (item["_start"], item["_end"]) if "_start" in item else _find_occurrence(text, quote.strip(), item.get("evidence_occurrence"))
             canonical_quote = text[start:end]
             if canonical_quote != quote.strip():
@@ -1872,6 +1876,8 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
         artifact_ref_id=representation_artifact_id,
         metadata={"representation_revision": representation_revision, "text_length": len(text), "source_name": source.name, "document": document},
     )
+    if rejected_candidates:
+        representation.metadata["rejected_candidates"] = rejected_candidates
     return {"source": source, "text": text, "representation": representation, "evidence": list(evidence.values()), "entities": list(entities.values()), "assertions": assertions, "relations": relations, "artifact_id": representation_artifact_id, "document": document, "source_locations": source_locations}
 
 

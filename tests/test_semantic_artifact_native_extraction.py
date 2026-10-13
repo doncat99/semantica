@@ -375,3 +375,32 @@ def test_restored_chunk_uses_native_grounding_without_repeating_model_calls(monk
     assert len(result["entities"]) == 2
     assert len(writes) == 1
     assert "itself" in receipts[0].metadata["rejected_candidates"][0]["reason"]
+
+
+def test_source_assembly_rejects_collapsed_self_relation_without_losing_valid_facts(tmp_path):
+    from semantica.semantic_artifact_schema import SourceBuildInput
+    from semantica.source import source_content_revision
+    path = tmp_path / 'source.txt'
+    text = 'Fund owns Bond.'
+    path.write_text(text)
+    source = SourceBuildInput(filePath=str(path), sourceId='source-1',
+        materialRevision=source_content_revision(path), name=path.name, mimeType='text/plain')
+    result = {'entities': [
+        {'id': 'a', 'name': 'Fund', 'type': 'organization', 'occurrence': 0},
+        {'id': 'duplicate', 'name': 'Fund', 'type': 'organization', 'occurrence': 0},
+        {'id': 'b', 'name': 'Bond', 'type': 'asset', 'occurrence': 0},
+    ], 'relations': [
+        {'subject': 'a', 'object': 'duplicate', 'predicate': 'owns', 'evidence': text,
+         'evidence_occurrence': 0, 'qualifiers': {'polarity': 'positive'}},
+        {'subject': 'a', 'object': 'b', 'predicate': 'owns', 'evidence': text,
+         'evidence_occurrence': 0, 'qualifiers': {'polarity': 'positive'}},
+    ]}
+    built = semantic_artifact_builder._build_source(source, False, result,
+        (text, {'format': 'text'}, 'native', source.material_revision, 'text', '1'))
+    assert len(built['entities']) == 2
+    assert len(built['relations']) == len(built['assertions']) == 1
+    assert built['relations'][0].source_entity_id != built['relations'][0].target_entity_id
+    assert built['representation'].metadata['rejected_candidates'] == [{
+        'reason': 'SEMANTIC_SELF_RELATION', 'subject': 'a', 'object': 'duplicate',
+        'predicate': 'owns', 'entity_id': built['relations'][0].source_entity_id,
+    }]
