@@ -328,3 +328,24 @@ def test_new_run_skips_semantically_rejected_relay_payload(tmp_path):
     second_checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(second["params"]))
 
     assert second_checkpoint.read("relay", key) is None
+
+
+def test_package_upgrade_reuses_verified_completed_chunks(tmp_path):
+    source = tmp_path / "source.txt"
+    source.write_text("A source")
+    first = _request(source, tmp_path / "first", recipe="model")
+    prior = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(first["params"]))
+    key = {"sourceText": "same-text", "window": {"start": 0, "end": 8, "digest": "same-window"}}
+    saved = {"extracted": {"entities": [], "relations": []}, "receipts": []}
+    prior.write("chunk-extraction", key, saved)
+    original = next(prior.root.glob("chunk-extraction-*.json")).read_bytes()
+    second = _request(source, tmp_path / "second", recipe="model")
+    second["params"]["release"]["artifactDigest"] = "sha256:" + "9" * 64
+    second["params"]["inputRevision"] = "sha256:" + "8" * 64
+    second["params"]["resumeCheckpointDirs"] = [str(prior.root)]
+    upgraded = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(second["params"]))
+    assert upgraded.read("chunk-extraction", key) == saved
+    assert next(prior.root.glob("chunk-extraction-*.json")).read_bytes() == original
+    entry = json.loads(next(upgraded.root.glob("chunk-extraction-*.json")).read_bytes())
+    assert entry["fence"] == upgraded.fence
+    assert upgraded.fence != prior.fence

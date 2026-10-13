@@ -30,6 +30,15 @@ def _resume_compatible(previous: Any, current: dict[str, Any]) -> bool:
     candidate = deepcopy(previous)
     if candidate == current:
         return True
+    previous_release = candidate.get("release")
+    current_release = current.get("release")
+    if isinstance(previous_release, dict) and isinstance(current_release, dict):
+        if previous_release.get("artifactDigest") != current_release.get("artifactDigest"):
+            # Package identity is provenance; schema, recipe and source bytes fence reuse.
+            previous_release["artifactDigest"] = current_release.get("artifactDigest")
+            candidate["inputRevision"] = current.get("inputRevision")
+            if candidate == current:
+                return True
     previous_relays = candidate.get("relays")
     current_relays = current.get("relays")
     previous_model = previous_relays.get("model") if isinstance(previous_relays, dict) else None
