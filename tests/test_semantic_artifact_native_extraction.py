@@ -404,3 +404,15 @@ def test_source_assembly_rejects_collapsed_self_relation_without_losing_valid_fa
         'reason': 'SEMANTIC_SELF_RELATION', 'subject': 'a', 'object': 'duplicate',
         'predicate': 'owns', 'entity_id': built['relations'][0].source_entity_id,
     }]
+
+
+def test_whitespace_variants_share_occurrence_numbers_before_identity_resolution():
+    text = 'Paris Agreement and Paris  Agreement and Paris\nAgreement'
+    names = ['Paris Agreement', 'Paris  Agreement', 'Paris\nAgreement']
+    positions = [0, 20, 41]
+    index = semantic_artifact_builder._entity_occurrence_index(text, names)
+    assert all(index[name] == positions for name in names)
+    ids = [semantic_artifact_builder._entity_id('source', name, 'EVENT', start, index)
+           for name, start in zip(names, positions)]
+    assert len(set(ids)) == 3
+    assert semantic_artifact_builder._entity_id('source', names[0], 'EVENT', positions[1], index) == ids[1]

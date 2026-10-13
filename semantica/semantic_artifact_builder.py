@@ -1698,7 +1698,14 @@ def _entity_occurrence_index(text: str, names: list[str]) -> dict[str, list[int]
     for name in names:
         if name in index:
             continue
-        if name.isascii():
+        if len(name.split()) > 1:
+            # ID normalization and occurrence numbering must use the same whitespace equivalence.
+            key = _normalized_text(name)
+            if key not in matches:
+                pattern = r"\s+".join(re.escape(part) for part in name.split())
+                matches[key] = [match.start() for match in re.finditer(pattern, text, re.IGNORECASE)]
+            index[name] = matches[key]
+        elif name.isascii():
             key = name.lower()
             if key not in matches:
                 positions = []
