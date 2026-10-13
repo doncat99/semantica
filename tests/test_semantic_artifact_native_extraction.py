@@ -416,3 +416,21 @@ def test_whitespace_variants_share_occurrence_numbers_before_identity_resolution
            for name, start in zip(names, positions)]
     assert len(set(ids)) == 3
     assert semantic_artifact_builder._entity_id('source', names[0], 'EVENT', positions[1], index) == ids[1]
+
+
+def test_identity_remap_preserves_mentions_but_rejects_collapsed_relations():
+    representation = SimpleNamespace(metadata={})
+    builds = [{'representation': representation, 'evidence': [SimpleNamespace(id='proof')]}]
+    assertions = [SimpleNamespace(id='a1', subject_id='first', object_entity_id='second', evidence_ids=['proof']),
+                  SimpleNamespace(id='a2', subject_id='first', object_entity_id='bond', evidence_ids=['proof'])]
+    relations = [SimpleNamespace(id='r1', source_entity_id='first', target_entity_id='second', evidence_ids=['proof']),
+                 SimpleNamespace(id='r2', source_entity_id='first', target_entity_id='bond', evidence_ids=['proof'])]
+    accepted_assertions, accepted_relations = semantic_artifact_builder._remap_identity_facts(
+        assertions, relations, {'first': 'paris', 'second': 'paris', 'bond': 'bond'}, builds)
+    assert [item.id for item in accepted_assertions] == ['a2']
+    assert [item.id for item in accepted_relations] == ['r2']
+    assert accepted_relations[0].source_entity_id == 'paris'
+    assert representation.metadata['rejected_candidates'] == [{
+        'reason': 'SEMANTIC_SELF_RELATION_AFTER_IDENTITY', 'relation_id': 'r1',
+        'entity_id': 'paris', 'evidence_ids': ['proof'],
+    }]

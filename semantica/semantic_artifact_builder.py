@@ -2243,6 +2243,27 @@ def _semantic_organization(
     return identities, communities, topics, conflicts
 
 
+def _remap_identity_facts(assertions, relations, remap, source_builds):
+    """Canonical identity merging preserves mentions, never a collapsed binary fact."""
+    for assertion in assertions:
+        assertion.subject_id = remap[assertion.subject_id]
+        if assertion.object_entity_id:
+            assertion.object_entity_id = remap[assertion.object_entity_id]
+    accepted = []
+    owners = {span.id: source["representation"] for source in source_builds for span in source["evidence"]}
+    for relation in relations:
+        relation.source_entity_id = remap[relation.source_entity_id]
+        relation.target_entity_id = remap[relation.target_entity_id]
+        if relation.source_entity_id == relation.target_entity_id:
+            rejection = {"reason": "SEMANTIC_SELF_RELATION_AFTER_IDENTITY", "relation_id": relation.id,
+                         "entity_id": relation.source_entity_id, "evidence_ids": relation.evidence_ids}
+            for owner in {id(owners[ref]): owners[ref] for ref in relation.evidence_ids if ref in owners}.values():
+                owner.metadata.setdefault("rejected_candidates", []).append(rejection)
+        else:
+            accepted.append(relation)
+    return ([item for item in assertions if item.subject_id != item.object_entity_id], accepted)
+
+
 def _report_support_sources(representations, evidence, entities, assertions, relations, communities, topics, reports):
     source_by_representation = {item.id: item.source_id for item in representations}
     records = {item.id: item for group in (evidence, entities, assertions, relations, communities, topics) for item in group}
@@ -2436,13 +2457,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
             project_id=request.project_id, mentions=mentions, judgments=judgments,
             base_snapshot=base_snapshot, receipt_id=identity_receipts[0].id if identity_receipts else None,
         )
-        for assertion in assertions:
-            assertion.subject_id = remap[assertion.subject_id]
-            if assertion.object_entity_id:
-                assertion.object_entity_id = remap[assertion.object_entity_id]
-        for relation in relations:
-            relation.source_entity_id = remap[relation.source_entity_id]
-            relation.target_entity_id = remap[relation.target_entity_id]
+        assertions, relations = _remap_identity_facts(assertions, relations, remap, source_builds)
         discovered_assertions, discovered_relations, relationship_receipts = _discover_cross_source_relationships(
             request.project_id, source_builds, entities, assertions, relations, evidence, request.relays["model"],
         )
