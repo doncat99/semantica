@@ -1212,7 +1212,7 @@ def _grounded_explanation(context: dict[str, Any], spans: dict[str, EvidenceSpan
     return sections, receipts
 
 
-def _identity_judgments(source_builds: list[dict[str, Any]], relay: Any, base_snapshot: SemanticArtifact | None = None):
+def _identity_judgments(source_builds: list[dict[str, Any]], relay: Any, base_snapshot: SemanticArtifact | None = None, parallelism: int = 1):
     candidates = []
     previous = {mention_id: entity.id for entity in base_snapshot.entities for mention_id in entity.metadata.get("mention_ids", [])} if base_snapshot else {}
     split_partitions = [decision.metadata.get("partition", []) for decision in base_snapshot.identity_decisions if decision.decision_type == "split"] if base_snapshot else []
@@ -1251,8 +1251,9 @@ def _identity_judgments(source_builds: list[dict[str, Any]], relay: Any, base_sn
         by_id = {item["mention_id"]: item for item in candidates}
         candidate_pairs = [(by_id[left["id"]], by_id[right["id"]]) for left, right, _score in similar
                            if left["type"].casefold() == right["type"].casefold()]
-    admitted, receipts = [], []
-    for left, right in candidate_pairs:
+    def compare(pair):
+        left, right = pair
+        admitted, receipts = [], []
         packets = []
         for candidate in (left, right):
             base = {key: value for key, value in candidate.items() if key != "evidence"}
@@ -1277,7 +1278,10 @@ def _identity_judgments(source_builds: list[dict[str, Any]], relay: Any, base_sn
                             or not isinstance(judgment.get("reason"), str) or not judgment["reason"].strip()):
                         raise SemanticArtifactError("identity pair judgment has unsupported members or evidence")
                     admitted.append({**judgment, "_receipt_ids": [receipt.id for receipt in batch_receipts]})
-    return admitted, receipts
+        return admitted, receipts
+    results = _native_parallel_map(candidate_pairs, compare, parallelism)
+    return ([judgment for judgments, _ in results for judgment in judgments],
+            [receipt for _, receipts in results for receipt in receipts])
 
 
 def _identity_batch(candidates: list[dict[str, Any]], relay: Any):
@@ -2426,7 +2430,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
     identity_decisions = []
     identity_registry = []
     if request.recipe.id == "model":
-        judgments, identity_receipts = _identity_judgments(source_builds, request.relays["model"], base_snapshot)
+        judgments, identity_receipts = _identity_judgments(source_builds, request.relays["model"], base_snapshot, request.parallelism)
         model_receipts.extend(identity_receipts)
         entities, remap, identity_decisions, identity_registry = resolve_project_identities(
             project_id=request.project_id, mentions=mentions, judgments=judgments,

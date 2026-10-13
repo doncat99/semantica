@@ -266,7 +266,8 @@ def test_identity_batches_compare_cross_source_aliases_without_name_filter(monke
     assert len(pairs) == 6 and 6 < len(receipts) < 100
 
 
-def test_large_identity_input_uses_native_candidate_blocking(monkeypatch):
+@pytest.mark.parametrize("parallelism", [1, 3])
+def test_large_identity_input_uses_native_candidate_blocking(monkeypatch, parallelism):
     builds = []
     for index in range(200):
         source_id = f"source-{index}"
@@ -277,11 +278,24 @@ def test_large_identity_input_uses_native_candidate_blocking(monkeypatch):
         builds.append({"source": SimpleNamespace(source_id=source_id), "text": span.quote,
                        "entities": [entity], "evidence": [span]})
     calls = []
-    monkeypatch.setattr(pipeline, "_identity_batch", lambda pair, _relay: (calls.append(pair) or ([], [])))
+    lock = Lock()
+    active = peak = 0
+    def compare(pair, _relay):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+        sleep(0.001)
+        with lock:
+            active -= 1
+            calls.append(pair)
+        return [], []
+    monkeypatch.setattr(pipeline, "_identity_batch", compare)
 
-    pipeline._identity_judgments(builds, None)
+    pipeline._identity_judgments(builds, None, parallelism=parallelism)
 
-    assert len(calls) < 800
+    assert 0 < len(calls) < 800
+    assert peak == parallelism
 
 
 def test_indivisible_context_is_rejected_without_truncation():
