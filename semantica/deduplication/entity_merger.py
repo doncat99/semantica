@@ -85,6 +85,22 @@ class EntityMerger:
         >>> history = merger.get_merge_history()
     """
 
+    @staticmethod
+    def merge_qualified_facts(facts, *, identity):
+        """Merge equal qualified facts, preserving every independent support."""
+        from copy import deepcopy
+        grouped = {}
+        for fact in facts:
+            identifier = identity(fact)
+            if identifier not in grouped:
+                grouped[identifier] = deepcopy({**fact, "id": identifier})
+            target = grouped[identifier]
+            target["evidence_ids"] = sorted(set(target.get("evidence_ids", [])).union(fact.get("evidence_ids", [])))
+            target["support_ids"] = list(target["evidence_ids"])
+            if isinstance(target.get("object"), str) and isinstance(fact.get("object"), str):
+                target["object"] = min(target["object"], fact["object"])
+        return [grouped[key] for key in sorted(grouped)]
+
     def __init__(
         self,
         preserve_provenance: bool = True,

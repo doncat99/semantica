@@ -61,3 +61,19 @@ def test_document_parser_digest_ignores_extraction_code_but_tracks_parser_inputs
 
     assert document_parser_digest(extraction_only) == original
     assert document_parser_digest(parser_change) != original
+
+
+def test_parser_digest_excludes_protocol_and_nonparser_dependencies():
+    def item(name, digest):
+        return {"path": "python/lib/site-packages/" + name, "size": 1, "sha256": digest}
+    files = [item("semantica/source.py", "source"), item("docling/core.py", "parser"),
+             item("semantica/semantic_worker.py", "protocol"), item("semantica/project_checkpoint.py", "checkpoint"),
+             item("openai/client.py", "llm")]
+    closure = {files[1]["path"]}
+    before = document_parser_digest(files, closure)
+    changed = [dict(value) for value in files]
+    for value in changed[2:]:
+        value["sha256"] = "changed"
+    assert document_parser_digest(changed, closure) == before
+    changed[1]["sha256"] = "parser-changed"
+    assert document_parser_digest(changed, closure) != before

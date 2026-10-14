@@ -934,6 +934,18 @@ class ContextRetriever:
             self.logger.warning(f"Graph retrieval failed: {e}")
             return []
     
+    @staticmethod
+    def lexical_score(query: str, text: str) -> float:
+        """Unicode token coverage with a normalized exact-phrase bonus."""
+        import re
+        query_tokens = re.findall(r"[\w]+", query.casefold(), flags=re.UNICODE)
+        text_tokens = re.findall(r"[\w]+", text.casefold(), flags=re.UNICODE)
+        if not query_tokens or not text_tokens:
+            return 0.0
+        coverage = len(set(query_tokens) & set(text_tokens)) / len(set(query_tokens))
+        phrase = " ".join(query_tokens) in " ".join(text_tokens)
+        return coverage + (0.25 if phrase else 0.0)
+
     def _keyword_match_entities(self, entities, query, max_results):
         """Fallback keyword matching for entities."""
         query_lower = query.lower()

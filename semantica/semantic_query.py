@@ -3,49 +3,44 @@
 from __future__ import annotations
 
 import json
-import math
-import re
+from functools import lru_cache
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Iterable
 
 from .semantic_query_schema import SemanticQueryRequest, SemanticQueryResult, QueryHit
 from .semantic_artifact_schema import SemanticArtifact
+from .context.context_retriever import ContextRetriever
+from .vector_store.vector_store import VectorRetriever
 
 
 class QueryError(RuntimeError):
     """Raised when an artifact cannot be queried safely."""
 
 
-def _digest_file(path: Path) -> str:
-    return f"sha256:{sha256(path.read_bytes()).hexdigest()}"
+@lru_cache(maxsize=2)
+def _load_admitted_json(path: Path, digest: str, identity: tuple[int, ...]) -> Any:
+    payload = path.read_bytes()
+    current = path.stat()
+    if (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns) != identity:
+        raise QueryError(f"query artifact changed during admission: {path}")
+    if f"sha256:{sha256(payload).hexdigest()}" != digest:
+        raise QueryError(f"query artifact digest does not match: {path}")
+    return json.loads(payload.decode("utf-8"))
 
 
 def _load_json(path: Path, digest: str) -> Any:
-    if not path.is_file():
-        raise QueryError(f"query artifact is not a file: {path}")
-    if _digest_file(path) != digest:
-        raise QueryError(f"query artifact digest does not match: {path}")
     try:
-        return json.loads(path.read_text(encoding="utf-8"))
+        stat = path.stat()
+        return _load_admitted_json(path.resolve(), digest,
+            (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
     except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
         raise QueryError(f"query artifact is not valid UTF-8 JSON: {path}") from exc
 
 
-def _tokens(value: str) -> list[str]:
-    return re.findall(r"[\w]+", value.casefold(), flags=re.UNICODE)
-
-
-def _score(query: str, text: str) -> float:
-    query_tokens = set(_tokens(query))
-    text_tokens = set(_tokens(text))
-    if not query_tokens or not text_tokens:
-        return 0.0
-    overlap = len(query_tokens & text_tokens) / len(query_tokens)
-    normalized_query = " ".join(_tokens(query))
-    normalized_text = " ".join(_tokens(text))
-    phrase_bonus = 0.25 if normalized_query in normalized_text else 0.0
-    return overlap + phrase_bonus
+@lru_cache(maxsize=2)
+def _load_snapshot(path: Path, digest: str, identity: tuple[int, ...]) -> SemanticArtifact:
+    return SemanticArtifact.model_validate(_load_admitted_json(path, digest, identity))
 
 
 def _string_list(value: Any, field: str) -> list[str]:
@@ -137,29 +132,24 @@ def _semantic_evidence_scores(request, retrieval, evidence_by_id, representation
     if not isinstance(dimension, int) or dimension < 1 or len(vector) != dimension:
         raise QueryError("query embedding dimensions do not match the snapshot")
 
-    def norm(values):
-        if not all(isinstance(value, (float, int)) and not isinstance(value, bool) and math.isfinite(value) for value in values):
-            raise QueryError("embedding vector contains invalid values")
-        length = math.sqrt(math.fsum(value * value for value in values))
-        if not math.isfinite(length) or length <= 0:
-            raise QueryError("embedding vector has no valid norm")
-        return length
-
-    query_norm = norm(vector)
     chunks = _records(retrieval.get("embeddings"), "embeddings")
     if not chunks:
         raise QueryError("snapshot contains no embedding vectors; rebuild is required")
-    source_scores = {}
     for chunk in chunks:
-        values = chunk.get("vector")
         start, end = chunk.get("start_char"), chunk.get("end_char")
-        if not isinstance(values, list) or len(values) != dimension:
-            raise QueryError("snapshot embedding dimensions are inconsistent")
-        if not isinstance(start, int) or not isinstance(end, int) or start < 0 or end <= start:
+        if (isinstance(start, bool) or isinstance(end, bool) or not isinstance(start, int)
+                or not isinstance(end, int) or start < 0 or end <= start):
             raise QueryError("snapshot embedding has invalid evidence coordinates")
-        cosine = math.fsum(a * b for a, b in zip(vector, values)) / (query_norm * norm(values))
-        score = (max(-1.0, min(1.0, cosine)) + 1.0) / 2.0
-        source_scores.setdefault(chunk.get("source_id"), []).append((start, end, score))
+    try:
+        ranked = VectorRetriever().search_similar(vector, [chunk.get("vector") for chunk in chunks],
+                                                   [str(index) for index in range(len(chunks))], k=len(chunks))
+    except (ValueError, TypeError) as exc:
+        raise QueryError(f"snapshot embedding space is invalid: {exc}") from exc
+    source_scores = {}
+    for hit in ranked:
+        chunk = chunks[int(hit["id"])]
+        score = (max(-1.0, min(1.0, hit["score"])) + 1.0) / 2.0
+        source_scores.setdefault(chunk.get("source_id"), []).append((chunk["start_char"], chunk["end_char"], score))
     scores = {}
     for evidence_id, evidence in evidence_by_id.items():
         representation = representations.get(evidence.get("representation_id"), {})
@@ -175,9 +165,10 @@ def _semantic_evidence_scores(request, retrieval, evidence_by_id, representation
 def query_semantic_artifact(request: SemanticQueryRequest) -> SemanticQueryResult:
     if request.method != "query":
         raise QueryError("query_semantic_artifact requires method=query")
-    snapshot_payload = _load_json(Path(request.snapshot.path), request.snapshot.digest)
     retrieval_payload = _load_json(Path(request.retrieval.path), request.retrieval.digest)
-    snapshot = SemanticArtifact.model_validate(snapshot_payload)
+    stat = Path(request.snapshot.path).stat()
+    snapshot = _load_snapshot(Path(request.snapshot.path).resolve(), request.snapshot.digest,
+        (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
     if snapshot.project_id != request.project_id or snapshot.id != request.snapshot_id:
         raise QueryError("query artifacts do not match the requested semantic artifact")
     if not isinstance(retrieval_payload, dict) or retrieval_payload.get("snapshot_id") != snapshot.id:
@@ -188,14 +179,30 @@ def query_semantic_artifact(request: SemanticQueryRequest) -> SemanticQueryResul
     if graph_manifest is None or graph_manifest.artifact_hash != request.retrieval.digest:
         raise QueryError("retrieval artifact is not the snapshot graph manifest")
 
-    evidence_ids = {item.id for item in snapshot.evidence_spans}
-    evidence_records = _validated_evidence_records(retrieval_payload.get("evidence"), snapshot)
-    entity_records = _validated_records(retrieval_payload.get("entities"), "entities", snapshot.entities, evidence_ids)
-    assertion_records = _validated_records(retrieval_payload.get("assertions"), "assertions", snapshot.assertions, evidence_ids)
-    relation_records = _validated_records(retrieval_payload.get("relations"), "relations", snapshot.relations, evidence_ids)
-    identity_records = _validated_records(retrieval_payload.get("identity_decisions", []), "identity_decisions", snapshot.identity_decisions, evidence_ids)
-    conflict_records = _validated_records(retrieval_payload.get("conflicts", []), "conflicts", snapshot.conflicts, evidence_ids)
-    topic_records = _validated_records(retrieval_payload.get("topics"), "topics", snapshot.topics, evidence_ids)
+    if retrieval_payload.get("format") == "semantica.retrieval-reference.v1":
+        duplicate_fields = {"entities", "assertions", "relations", "identity_decisions", "conflicts", "topics", "evidence"}
+        if duplicate_fields.intersection(retrieval_payload):
+            raise QueryError("reference retrieval artifact cannot duplicate snapshot records")
+        def records(items):
+            return [item.model_dump(mode="json", by_alias=True) for item in items]
+        evidence_records = records(snapshot.evidence_spans)
+        entity_records = records(snapshot.entities)
+        assertion_records = records(snapshot.assertions)
+        relation_records = records(snapshot.relations)
+        identity_records = records(snapshot.identity_decisions)
+        conflict_records = records(snapshot.conflicts)
+        topic_records = records(snapshot.topics)
+    elif "format" in retrieval_payload:
+        raise QueryError("unsupported retrieval artifact format")
+    else:
+        evidence_ids = {item.id for item in snapshot.evidence_spans}
+        evidence_records = _validated_evidence_records(retrieval_payload.get("evidence"), snapshot)
+        entity_records = _validated_records(retrieval_payload.get("entities"), "entities", snapshot.entities, evidence_ids)
+        assertion_records = _validated_records(retrieval_payload.get("assertions"), "assertions", snapshot.assertions, evidence_ids)
+        relation_records = _validated_records(retrieval_payload.get("relations"), "relations", snapshot.relations, evidence_ids)
+        identity_records = _validated_records(retrieval_payload.get("identity_decisions", []), "identity_decisions", snapshot.identity_decisions, evidence_ids)
+        conflict_records = _validated_records(retrieval_payload.get("conflicts", []), "conflicts", snapshot.conflicts, evidence_ids)
+        topic_records = _validated_records(retrieval_payload.get("topics"), "topics", snapshot.topics, evidence_ids)
     evidence_by_id = {item.get("id"): item for item in evidence_records if isinstance(item.get("id"), str)}
     representation_by_id = {item.id: item.model_dump(mode="json", by_alias=True) for item in snapshot.document_representations}
     entity_by_id = {item.get("id"): item for item in entity_records if isinstance(item.get("id"), str)}
@@ -240,7 +247,7 @@ def query_semantic_artifact(request: SemanticQueryRequest) -> SemanticQueryResul
                 continue
             score = max(matches)
         else:
-            score = _score(request.query or "", text)
+            score = ContextRetriever.lexical_score(request.query or "", text)
             if score <= 0:
                 continue
         hits.append(QueryHit(

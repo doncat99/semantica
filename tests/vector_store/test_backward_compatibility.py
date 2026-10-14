@@ -18,7 +18,7 @@ class TestVectorStoreBackwardCompatibility:
     def setup_method(self):
         """Set up test fixtures."""
         # Create vector store with default configuration
-        self.vector_store = VectorStore(backend="inmemory", dimension=384)
+        self.vector_store = VectorStore(backend="inmemory", dimension=4)
         
         # Sample vectors and metadata
         self.sample_vectors = [
@@ -171,7 +171,7 @@ class TestVectorStoreBackwardCompatibility:
             self.vector_store.save(temp_dir)
             
             # Create new store and load
-            new_store = VectorStore(backend="inmemory", dimension=384)
+            new_store = VectorStore(backend="inmemory", dimension=4)
             new_store.load(temp_dir)
             
             # Verify loaded data
@@ -207,7 +207,8 @@ class TestVectorStoreBackwardCompatibility:
         vectors = [np.array([0.1, 0.2]), np.array([0.3, 0.4])]
         ids = ["vec1", "vec2"]
         
-        index = self.vector_store.indexer.create_index(vectors, ids)
+        from semantica.vector_store.vector_store import VectorIndexer
+        index = VectorIndexer(dimension=2).create_index(vectors, ids)
         assert index is not None
         
         # Test retriever
@@ -254,7 +255,7 @@ class TestVectorStoreNewFeaturesCompatibility:
     
     def setup_method(self):
         """Set up test fixtures."""
-        self.vector_store = VectorStore(backend="inmemory", dimension=384)
+        self.vector_store = VectorStore(backend="inmemory", dimension=4)
     
     def test_new_attributes_exist_but_dont_interfere(self):
         """Test that new attributes exist but don't interfere with existing functionality."""
@@ -272,7 +273,7 @@ class TestVectorStoreNewFeaturesCompatibility:
     def test_decision_pipeline_initialization_optional(self):
         """Test that decision pipeline initialization is optional."""
         # Should work without graph store
-        store = VectorStore(backend="inmemory", dimension=384)
+        store = VectorStore(backend="inmemory", dimension=4)
         
         # Existing functionality should work
         vectors = [np.array([0.1, 0.2, 0.3, 0.4])]
@@ -283,7 +284,7 @@ class TestVectorStoreNewFeaturesCompatibility:
     def test_hybrid_calculator_initialization_optional(self):
         """Test that hybrid calculator initialization is optional."""
         # Should work without any special setup
-        store = VectorStore(backend="inmemory", dimension=384)
+        store = VectorStore(backend="inmemory", dimension=4)
         
         # Existing functionality should work
         query_vector = np.array([0.1, 0.2, 0.3, 0.4])
@@ -293,7 +294,7 @@ class TestVectorStoreNewFeaturesCompatibility:
     
     def test_existing_methods_signatures_unchanged(self):
         """Test that existing method signatures are unchanged."""
-        store = VectorStore(backend="inmemory", dimension=384)
+        store = VectorStore(backend="inmemory", dimension=4)
         
         # Check method signatures
         import inspect
@@ -321,7 +322,7 @@ class TestVectorStoreNewFeaturesCompatibility:
     
     def test_existing_return_types_unchanged(self):
         """Test that existing method return types are unchanged."""
-        store = VectorStore(backend="inmemory", dimension=384)
+        store = VectorStore(backend="inmemory", dimension=4)
         
         vectors = [np.array([0.1, 0.2, 0.3, 0.4])]
         metadata = [{"type": "test"}]
@@ -359,14 +360,14 @@ class TestVectorStorePerformanceCompatibility:
     
     def setup_method(self):
         """Set up test fixtures."""
-        self.vector_store = VectorStore(backend="inmemory", dimension=384)
+        self.vector_store = VectorStore(backend="inmemory", dimension=4)
     
     def test_basic_performance_unchanged(self):
         """Test that basic performance characteristics are unchanged."""
         import time
         
         # Store performance
-        vectors = [np.random.rand(384) for _ in range(100)]
+        vectors = [np.random.rand(4) for _ in range(100)]
         start_time = time.time()
         vector_ids = self.vector_store.store_vectors(vectors)
         store_time = time.time() - start_time
@@ -375,7 +376,7 @@ class TestVectorStorePerformanceCompatibility:
         assert store_time < 5.0  # Should be reasonably fast
         
         # Search performance
-        query_vector = np.random.rand(384)
+        query_vector = np.random.rand(4)
         start_time = time.time()
         results = self.vector_store.search_vectors(query_vector, k=10)
         search_time = time.time() - start_time
@@ -388,7 +389,7 @@ class TestVectorStorePerformanceCompatibility:
         import sys
         
         # Store a reasonable number of vectors
-        vectors = [np.random.rand(384) for _ in range(1000)]
+        vectors = [np.random.rand(4) for _ in range(1000)]
         self.vector_store.store_vectors(vectors)
         
         # Check that memory usage is reasonable (basic check)

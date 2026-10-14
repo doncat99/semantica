@@ -164,37 +164,46 @@ class BaseProvider:
                 target[key] = source[key]
 
     @staticmethod
+    def _error_chain(error: BaseException):
+        seen = set()
+        while error is not None and id(error) not in seen:
+            seen.add(id(error))
+            yield error
+            error = error.__cause__ or error.__context__
+
+    @staticmethod
     def _is_permanent_failure(error: Exception) -> bool:
         """Recognize explicit gateway permanence before SDK retry heuristics."""
-        retryable = getattr(error, "retryable", None)
-        if isinstance(retryable, bool):
-            return retryable is False
-        for attr in ("body", "details"):
-            value = getattr(error, attr, None)
-            if not isinstance(value, dict):
-                continue
-            nested = value.get("error", value)
-            if isinstance(nested, dict) and nested.get("retryable") is False:
+        chain = list(BaseProvider._error_chain(error))
+        for item in chain:
+            if getattr(item, "retryable", None) is False:
                 return True
-        status = getattr(error, "status_code", getattr(error, "status", None))
-        return status in {400, 401, 403, 422}
+            for attr in ("body", "details"):
+                value = getattr(item, attr, None)
+                nested = value.get("error", value) if isinstance(value, dict) else None
+                if isinstance(nested, dict) and nested.get("retryable") is False:
+                    return True
+        return any(getattr(item, "retryable", None) is not True and
+                   getattr(item, "status_code", getattr(item, "status", None)) in {400, 401, 403, 422}
+                   for item in chain)
 
     @staticmethod
     def _is_transport_failure(error: Exception) -> bool:
         """Keep gateway failures on the caller's retry policy."""
         if BaseProvider._is_permanent_failure(error):
             return False
-        status = getattr(error, "status_code", getattr(error, "status", None))
-        if isinstance(status, int) and (status in (408, 429) or status >= 500):
-            return True
-        if (
-            getattr(error, "retryable", False) is True
-            or getattr(error, "retryAfterMs", None) is not None
-            or getattr(error, "retry_after_ms", None) is not None
-        ):
-            return True
-        code = str(getattr(error, "code", "")).lower()
-        return code in {"timeout", "rate_limit_exceeded", "server_error", "api_connection_error"}
+        for item in BaseProvider._error_chain(error):
+            status = getattr(item, "status_code", getattr(item, "status", None))
+            if isinstance(status, int) and (status in (408, 429) or 500 <= status <= 599):
+                return True
+            if (getattr(item, "retryable", False) is True
+                    or getattr(item, "retryAfterMs", None) is not None
+                    or getattr(item, "retry_after_ms", None) is not None):
+                return True
+            if str(getattr(item, "code", "")).lower() in {
+                "timeout", "rate_limit_exceeded", "server_error", "api_connection_error"}:
+                return True
+        return False
 
     def generate(self, prompt: str, **kwargs) -> str:
         """Generate text - must be implemented."""

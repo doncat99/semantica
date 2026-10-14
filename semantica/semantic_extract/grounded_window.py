@@ -7,25 +7,12 @@ from ..utils.exceptions import ProcessingError
 from .methods import extract_entities_llm, extract_relations_llm
 from .schema import ExtractionSpecification
 from .types import Entity, Relation
+from .providers import BaseProvider
 
 
 def _retryable_failure(error: BaseException) -> bool:
     """Retry only transport/gateway failures, never deterministic validation errors."""
-    current: BaseException | None = error
-    seen: set[int] = set()
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if (
-            getattr(current, "retryable", False) is True
-            or getattr(current, "retry_after_ms", None) is not None
-            or getattr(current, "retryAfterMs", None) is not None
-        ):
-            return True
-        status = getattr(current, "status", getattr(current, "status_code", None))
-        if isinstance(status, int) and (status == 429 or 500 <= status <= 599):
-            return True
-        current = current.__cause__ or current.__context__
-    return False
+    return BaseProvider._is_transport_failure(error)
 
 
 def extract_grounded_window(

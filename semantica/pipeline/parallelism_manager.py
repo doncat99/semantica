@@ -64,6 +64,17 @@ class ParallelExecutionResult:
     execution_time: float = 0.0
 
 
+def _execute_task(task: Task) -> ParallelExecutionResult:
+    started = time.perf_counter()
+    try:
+        return ParallelExecutionResult(task_id=task.task_id, success=True,
+                                       result=task.handler(*task.args, **task.kwargs),
+                                       execution_time=time.perf_counter() - started)
+    except Exception as error:
+        return ParallelExecutionResult(task_id=task.task_id, success=False, error=error,
+                                       execution_time=time.perf_counter() - started)
+
+
 class ParallelismManager:
     """
     Parallelism management system.
@@ -161,148 +172,58 @@ class ParallelismManager:
             )
             raise
 
-    def _execute_with_threads(
-        self, tasks: List[Task], **options
-    ) -> List[ParallelExecutionResult]:
-        """Execute tasks using thread pool."""
+    def _execute_with_threads(self, tasks: List[Task], **options) -> List[ParallelExecutionResult]:
+        """Execute tasks using the same timed task primitive as process execution."""
         if options.get("fail_fast_permanent", False):
             return self._execute_with_threads_fail_fast(tasks, options)
-        results = []
-        max_workers = options.get("max_workers", self.max_workers)
-
-        with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all tasks
-            future_to_task = {
-                executor.submit(task.handler, *task.args, **task.kwargs): task
-                for task in tasks
-            }
-
-            # Collect results
-            for future in as_completed(future_to_task):
-                task = future_to_task[future]
-                start_time = time.time()
-
-                try:
-                    result = future.result()
-                    execution_time = time.time() - start_time
-                    results.append(
-                        ParallelExecutionResult(
-                            task_id=task.task_id,
-                            success=True,
-                            result=result,
-                            execution_time=execution_time,
-                        )
-                    )
-                except Exception as e:
-                    execution_time = time.time() - start_time
-                    results.append(
-                        ParallelExecutionResult(
-                            task_id=task.task_id,
-                            success=False,
-                            error=e,
-                            execution_time=execution_time,
-                        )
-                    )
-
-        return results
+        with ThreadPoolExecutor(max_workers=options.get("max_workers", self.max_workers)) as executor:
+            futures = [executor.submit(_execute_task, task) for task in tasks]
+            return [future.result() for future in as_completed(futures)]
 
     @staticmethod
     def _is_permanent_failure(error: Exception) -> bool:
-        """Only an explicit retryable=False error stops new work."""
-        return getattr(error, "retryable", None) is False
+        from ..semantic_extract.providers import BaseProvider
+        return BaseProvider._is_permanent_failure(error)
 
-    def _execute_with_threads_fail_fast(
-        self, tasks: List[Task], options: Dict[str, Any]
-    ) -> List[ParallelExecutionResult]:
+    def _execute_with_threads_fail_fast(self, tasks: List[Task], options: Dict[str, Any]) -> List[ParallelExecutionResult]:
         """Keep a bounded submission window and stop feeding it on permanent failure."""
         results: List[ParallelExecutionResult] = []
         max_workers = max(1, options.get("max_workers", self.max_workers))
         executor = ThreadPoolExecutor(max_workers=max_workers)
-        pending: Dict[Any, Task] = {}
+        pending = set()
         next_index = 0
         stop_dispatch = False
 
         def submit_next() -> None:
             nonlocal next_index
-            if stop_dispatch or next_index >= len(tasks):
-                return
-            task = tasks[next_index]
-            next_index += 1
-            pending[executor.submit(task.handler, *task.args, **task.kwargs)] = task
+            if not stop_dispatch and next_index < len(tasks):
+                pending.add(executor.submit(_execute_task, tasks[next_index]))
+                next_index += 1
 
         try:
             while len(pending) < max_workers and next_index < len(tasks):
                 submit_next()
             while pending:
                 for future in as_completed(list(pending)):
-                    task = pending.pop(future)
-                    start_time = time.time()
-                    try:
-                        value = future.result()
-                        results.append(ParallelExecutionResult(
-                            task_id=task.task_id, success=True, result=value,
-                            execution_time=time.time() - start_time,
-                        ))
-                    except Exception as error:
-                        results.append(ParallelExecutionResult(
-                            task_id=task.task_id, success=False, error=error,
-                            execution_time=time.time() - start_time,
-                        ))
-                        if self._is_permanent_failure(error):
-                            stop_dispatch = True
-                            for queued in pending:
-                                queued.cancel()
-                            pending = {f: t for f, t in pending.items() if not f.cancelled()}
-                    if not stop_dispatch:
-                        submit_next()
+                    pending.remove(future)
+                    result = future.result()
+                    results.append(result)
+                    if result.error and self._is_permanent_failure(result.error):
+                        stop_dispatch = True
+                        for queued in pending:
+                            queued.cancel()
+                        pending = {f for f in pending if not f.cancelled()}
+                    submit_next()
                     break
         finally:
-            # Running calls are allowed to finish; only queued futures are cancelled.
             executor.shutdown(wait=True, cancel_futures=True)
         return results
 
-    def _execute_with_processes(
-        self, tasks: List[Task], **options
-    ) -> List[ParallelExecutionResult]:
-        """Execute tasks using process pool."""
-        results = []
-        max_workers = options.get("max_workers", self.max_workers)
-
-        with ProcessPoolExecutor(max_workers=max_workers) as executor:
-            # Submit all tasks
-            future_to_task = {
-                executor.submit(task.handler, *task.args, **task.kwargs): task
-                for task in tasks
-            }
-
-            # Collect results
-            for future in as_completed(future_to_task):
-                task = future_to_task[future]
-                start_time = time.time()
-
-                try:
-                    result = future.result()
-                    execution_time = time.time() - start_time
-                    results.append(
-                        ParallelExecutionResult(
-                            task_id=task.task_id,
-                            success=True,
-                            result=result,
-                            execution_time=execution_time,
-                        )
-                    )
-                except Exception as e:
-                    execution_time = time.time() - start_time
-                    results.append(
-                        ParallelExecutionResult(
-                            task_id=task.task_id,
-                            success=False,
-                            error=e,
-                            execution_time=execution_time,
-                        )
-                    )
-
-        return results
+    def _execute_with_processes(self, tasks: List[Task], **options) -> List[ParallelExecutionResult]:
+        """Measure execution inside the child, excluding pool queue time."""
+        with ProcessPoolExecutor(max_workers=options.get("max_workers", self.max_workers)) as executor:
+            futures = [executor.submit(_execute_task, task) for task in tasks]
+            return [future.result() for future in as_completed(futures)]
 
     def execute_pipeline_steps_parallel(
         self, steps: List[PipelineStep], data: Any, **options

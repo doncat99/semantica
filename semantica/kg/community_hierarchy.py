@@ -884,7 +884,7 @@ class CommunityHierarchyBuilder:
 
         return refined
 
-    def _leiden_communities_native(
+    def detect_leiden_partition(
         self,
         G: Union[nx.Graph, nx.DiGraph],
         resolution: float = 1.0,
@@ -1080,7 +1080,7 @@ class CommunityHierarchyBuilder:
         except (ImportError, Exception):
             pass
 
-        return self._leiden_communities_native(
+        return self.detect_leiden_partition(
             G, resolution=resolution, seed=self.seed, weight=weight
         )
 

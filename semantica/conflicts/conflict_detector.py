@@ -103,6 +103,51 @@ class ConflictDetector:
     • Provides investigation guides
     """
 
+    @staticmethod
+    def qualified_polarity_groups(facts):
+        """Find opposing polarities only under identical recorded qualifiers."""
+        import json
+        from collections import defaultdict
+        groups = defaultdict(list)
+        for fact in facts:
+            qualifiers = {key: value for key, value in fact["qualifiers"].items() if key != "polarity"}
+            key = json.dumps([fact["subject"], fact["predicate"], fact["object"], qualifiers],
+                             ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            groups[key].append(fact)
+        return [members for members in groups.values()
+                if {item["qualifiers"].get("polarity") for item in members} == {"positive", "negative"}]
+
+    @staticmethod
+    def unresolved_identity_groups(entities, decisions=()):
+        """Expose same-type homonyms except identities already separated by evidence."""
+        from collections import defaultdict
+        split_pairs = set()
+        for decision in decisions:
+            if decision.get("decision_type") != "split":
+                continue
+            partition = decision.get("metadata", {}).get("partition", [])
+            for index, group in enumerate(partition):
+                for other in partition[index + 1:]:
+                    split_pairs.update(frozenset((left, right)) for left in group for right in other)
+        groups = defaultdict(list)
+        for entity in entities:
+            groups[(" ".join(entity["name"].casefold().split()), entity["type"].casefold())].append(entity)
+        unresolved = []
+        for members in groups.values():
+            if len(members) < 2 or len({source for item in members for source in item.get("source_ids", [])}) < 2:
+                continue
+            pending = []
+            for index, left in enumerate(members):
+                for right in members[index + 1:]:
+                    left_ids = left.get("mention_ids", [left["id"]])
+                    right_ids = right.get("mention_ids", [right["id"]])
+                    if any(frozenset((a, b)) in split_pairs for a in left_ids for b in right_ids):
+                        continue
+                    pending.extend((left, right))
+            if pending:
+                unresolved.append(list({item["id"]: item for item in pending}.values()))
+        return unresolved
+
     def __init__(self, config: Optional[Dict[str, Any]] = None, **kwargs):
         """
         Initialize conflict detector.

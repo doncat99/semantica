@@ -11,7 +11,7 @@ from docx import Document
 from PIL import Image, ImageDraw, ImageFont
 from pptx import Presentation
 from openpyxl import Workbook
-from semantica.bundle import verify_bundle_inventory
+from semantica.bundle import verify_bundle_inventory, parser_dependency_files, document_parser_digest
 from semantica.source import parse_source, UnsupportedSourceFormatError
 from semantica.project_document_quality import assess_document_quality
 
@@ -19,6 +19,8 @@ from semantica.project_document_quality import assess_document_quality
 root = Path(sys.argv[1]).resolve()
 destination = Path(sys.argv[2]).resolve()
 manifest = json.loads((root / "manifest.json").read_text())
+parser_files = parser_dependency_files(root)
+assert document_parser_digest(manifest["files"], parser_files) == manifest["documentParserDigest"]
 assert Path(sys.executable).is_relative_to(root)
 assert "semantica" in str(parse_source.__code__.co_filename)
 assert Path(parse_source.__code__.co_filename).is_relative_to(root)
@@ -127,4 +129,5 @@ with tempfile.TemporaryDirectory(prefix="semantica-native-acceptance-") as direc
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps({"artifactDigest": manifest["artifactDigest"], "schemaDigest": manifest["schemaDigest"],
         "parsers": parsed, "queryContexts": len(queried["contexts"]), "documentQualityAdmission": True,
-        "representationRevisions": True, "postRunInventoryVerified": True, "deterministicProtocolOnly": True}, indent=2) + "\n")
+        "representationRevisions": True, "postRunInventoryVerified": True, "deterministicProtocolOnly": True,
+        "parserDependencyClosureVerified": True, "parserDependencyFiles": len(parser_files)}, indent=2) + "\n")

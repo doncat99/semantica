@@ -35,7 +35,7 @@ class TestVectorStore(unittest.TestCase):
         self.MockVectorRetriever.assert_called_once()
 
     def test_store_vectors(self):
-        store = VectorStore(backend="inmemory")
+        store = VectorStore(backend="inmemory", dimension=2)
         vectors = [np.array([0.1, 0.2]), np.array([0.3, 0.4])]
         metadata = [{"id": "1"}, {"id": "2"}]
 
@@ -47,7 +47,7 @@ class TestVectorStore(unittest.TestCase):
         store.indexer.create_index.assert_called_once()
 
     def test_search_vectors(self):
-        store = VectorStore(backend="inmemory")
+        store = VectorStore(backend="inmemory", dimension=2)
         # Pre-populate store (though search uses retriever which we mock)
         store.vectors = {"v1": np.array([0.1]), "v2": np.array([0.2])}
 
@@ -61,7 +61,7 @@ class TestVectorStore(unittest.TestCase):
         store.retriever.search_similar.assert_called_once()
 
     def test_update_vectors(self):
-        store = VectorStore(backend="inmemory")
+        store = VectorStore(backend="inmemory", dimension=1)
         store.vectors = {"v1": np.array([0.1])}
 
         new_vector = np.array([0.9])
@@ -71,7 +71,7 @@ class TestVectorStore(unittest.TestCase):
         store.indexer.create_index.assert_called()
 
     def test_delete_vectors(self):
-        store = VectorStore(backend="inmemory")
+        store = VectorStore(backend="inmemory", dimension=2)
         store.vectors = {"v1": np.array([0.1]), "v2": np.array([0.2])}
         store.metadata = {"v1": {}, "v2": {}}
 
@@ -82,7 +82,7 @@ class TestVectorStore(unittest.TestCase):
         store.indexer.create_index.assert_called()
 
     def test_get_vector_and_metadata(self):
-        store = VectorStore(backend="inmemory")
+        store = VectorStore(backend="inmemory", dimension=2)
         vec = np.array([0.1])
         meta = {"info": "test"}
         store.vectors = {"v1": vec}
@@ -94,7 +94,7 @@ class TestVectorStore(unittest.TestCase):
 
     def test_store_vectors_metadata_forwarding(self):
         """Test that metadata is correctly forwarded to backends that support it."""
-        store = VectorStore(backend="inmemory")
+        store = VectorStore(backend="inmemory", dimension=2)
         
         class MockBackendWithMetadata:
             def __init__(self):
@@ -116,7 +116,7 @@ class TestVectorStore(unittest.TestCase):
 
     def test_store_vectors_strict_backend(self):
         """Test that metadata is dropped for strict backends without TypeError."""
-        store = VectorStore(backend="inmemory")
+        store = VectorStore(backend="inmemory", dimension=2)
         
         class MockBackendStrict:
             def __init__(self):
@@ -139,7 +139,7 @@ class TestVectorStore(unittest.TestCase):
 
     def test_filter_by_metadata_inmemory(self):
         """Test _filter_by_metadata on inmemory backend."""
-        store = VectorStore(backend="inmemory")
+        store = VectorStore(backend="inmemory", dimension=2)
         store.metadata = {
             "v1": {"category": "finance", "amount": 100, "tags": ["a", "b"]},
             "v2": {"category": "finance", "amount": 500, "tags": ["b", "c"]},
@@ -170,7 +170,7 @@ class TestVectorStore(unittest.TestCase):
 
     def test_filter_by_metadata_persistent_backend_delegation(self):
         """Test that persistent backend delegates filter_by_metadata without AttributeError."""
-        store = VectorStore(backend="inmemory")
+        store = VectorStore(backend="inmemory", dimension=2)
         # Simulate persistent backend by deleting self.metadata attribute if any
         if hasattr(store, "metadata"):
             delattr(store, "metadata")
@@ -190,7 +190,7 @@ class TestVectorStore(unittest.TestCase):
 
     def test_filter_by_metadata_backend_not_implemented(self):
         """Test that missing filter_by_metadata method raises NotImplementedError."""
-        store = VectorStore(backend="inmemory")
+        store = VectorStore(backend="inmemory", dimension=2)
         if hasattr(store, "metadata"):
             delattr(store, "metadata")
 
@@ -252,7 +252,9 @@ class TestCreateIndexFunction(unittest.TestCase):
     def test_create_index_with_default_config(self):
         from semantica.vector_store.methods import create_index
 
-        vectors = [np.array([0.1, 0.2, 0.3]), np.array([0.4, 0.5, 0.6])]
+        from semantica.vector_store.config import vector_store_config
+        dimension = vector_store_config.get_all().get("dimension", 768)
+        vectors = [np.full(dimension, 0.1), np.full(dimension, 0.4)]
         index = create_index(vectors, ids=["a", "b"])
         self.assertIsNotNone(index)
 

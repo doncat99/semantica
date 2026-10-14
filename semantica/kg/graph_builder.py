@@ -362,6 +362,10 @@ class GraphBuilder:
             self._extractor_cache[key] = extractor_cls(method=method, **self.config)
         return self._extractor_cache[key]
 
+    def remap_relationship_endpoints(self, entities, relationships):
+        """Apply admitted native identity aliases without re-resolving the graph."""
+        return self._remap_relationship_endpoints(entities, relationships)
+
     def _remap_relationship_endpoints(
         self,
         entities: List[Dict[str, Any]],

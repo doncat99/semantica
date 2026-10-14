@@ -1,4 +1,19 @@
 from semantica.semantic_extract import grounded_window
+import pytest
+
+
+@pytest.mark.parametrize("wrapped", [False, True])
+def test_explicit_permanent_failure_overrides_retry_status_and_delay(wrapped):
+    error = grounded_window.ProcessingError("permanent")
+    error.retryable = False
+    error.status = 503
+    error.retry_after_ms = 100
+    if wrapped:
+        outer = grounded_window.ProcessingError("wrapped")
+        outer.retryable = True
+        outer.__cause__ = error
+        error = outer
+    assert not grounded_window._retryable_failure(error)
 
 
 def test_grounded_window_delegates_to_native_extractors(monkeypatch):

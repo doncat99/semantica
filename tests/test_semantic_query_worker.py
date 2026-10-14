@@ -87,6 +87,11 @@ def _request(built, query="Ada"):
 def _rewrite_artifacts(built, *, snapshot_change=None, retrieval_change=None):
     snapshot = json.loads(built["snapshot_path"].read_text())
     retrieval = json.loads(built["retrieval_path"].read_text())
+    if retrieval_change and retrieval.pop("format", None) == "semantica.retrieval-reference.v1":
+        for field, key in (("entities", "entities"), ("assertions", "assertions"), ("relations", "relations"),
+                           ("identity_decisions", "identity_decisions"), ("conflicts", "conflicts"),
+                           ("topics", "topics"), ("evidence", "evidence_spans")):
+            retrieval[field] = deepcopy(snapshot[key])
     if snapshot_change:
         snapshot_change(snapshot)
     if retrieval_change:

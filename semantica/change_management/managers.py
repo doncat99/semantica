@@ -193,6 +193,23 @@ class TemporalVersionManager(BaseVersionManager):
 
         return list(entities or []), list(relationships or [])
 
+    @staticmethod
+    def compare_collections(previous, current):
+        """Compare named semantic collections by stable ID, including non-graph state."""
+        result = {"added_ids": [], "updated_ids": [], "removed_ids": []}
+        for collection in sorted(set(previous) | set(current)):
+            def indexed(items):
+                mapped = {item["id"]: item for item in items}
+                if len(mapped) != len(items):
+                    raise ValidationError("semantic collection contains duplicate IDs")
+                return mapped
+            before = indexed(previous.get(collection, []))
+            after = indexed(current.get(collection, []))
+            result["added_ids"].extend(set(after) - set(before))
+            result["removed_ids"].extend(set(before) - set(after))
+            result["updated_ids"].extend(key for key in set(before) & set(after) if before[key] != after[key])
+        return {key: sorted(set(ids)) for key, ids in result.items()}
+
     def compare_versions(
         self,
         v1_label_or_dict,

@@ -518,6 +518,10 @@ class VectorStore:
         Returns:
             List of vector IDs
         """
+        if len(vectors):
+            validate_vector_matrix(vectors, dimension=self.dimension)
+        if metadata is not None and len(metadata) != len(vectors):
+            raise ValueError("metadata must cover every vector")
         # Delegate to backend store if available
         if self._backend_store:
             # Handle different method names across backend stores
@@ -845,6 +849,10 @@ class VectorStore:
         self, vector_ids: List[str], new_vectors: List[np.ndarray], metadata: Optional[List[Dict[str, Any]]] = None, **options
     ) -> bool:
         """Update existing vectors."""
+        if len(new_vectors):
+            validate_vector_matrix(new_vectors, dimension=self.dimension)
+        if len(vector_ids) != len(new_vectors) or (metadata is not None and len(metadata) != len(vector_ids)):
+            raise ValueError("IDs and metadata must cover every updated vector")
         # Delegate to backend store if available
         if self._backend_store:
             if hasattr(self._backend_store, 'update'):
@@ -1441,6 +1449,20 @@ def _matches_filter(metadata: Dict[str, Any], filters: Dict[str, Any]) -> bool:
     return True
 
 
+def validate_vector_matrix(vectors, *, dimension=None):
+    """Admit one finite, nonzero vector space without padding or truncation."""
+    matrix = np.asarray(vectors)
+    if matrix.ndim != 2 or matrix.shape[1] < 1 or matrix.dtype.kind not in "fiu":
+        raise ValueError("vectors must be a two-dimensional numeric matrix")
+    if dimension is not None and matrix.shape[1] != dimension:
+        raise ValueError("embedding dimensions do not match the index")
+    matrix = matrix.astype(np.float64, copy=False)
+    norms = np.linalg.norm(matrix, axis=1)
+    if not np.isfinite(matrix).all() or not np.isfinite(norms).all() or (norms <= 0).any():
+        raise ValueError("embedding vectors require finite values and positive norms")
+    return matrix
+
+
 class VectorIndexer:
     """Vector indexing engine."""
 
@@ -1464,22 +1486,13 @@ class VectorIndexer:
         Returns:
             Index object
         """
-        if not vectors:
+        if len(vectors) == 0:
             return None
 
-        # Convert to numpy array with consistent dimensions
-        if isinstance(vectors[0], list):
-            vectors = [np.array(v) for v in vectors]
-        
-        # Ensure all vectors have same dimension
-        if vectors:
-            target_dim = len(vectors[0])
-            vectors = [v if len(v) == target_dim else np.pad(v, (0, max(0, target_dim - len(v))))[:target_dim] for v in vectors]
-        
-        vectors = np.vstack(vectors)
-
-        # Simple in-memory index (would use FAISS, etc. in production)
-        self.index = {"vectors": vectors, "ids": ids or list(range(len(vectors)))}
+        vectors = validate_vector_matrix(vectors, dimension=self.dimension)
+        if ids is not None and (len(ids) != len(vectors) or len(set(ids)) != len(ids)):
+            raise ValueError("vector IDs must be unique and cover every vector")
+        self.index = {"vectors": vectors, "ids": ids if ids is not None else list(range(len(vectors)))}
 
         return self.index
 
@@ -1526,34 +1539,18 @@ class VectorRetriever:
         Returns:
             List of results with scores
         """
-        if not vectors:
+        if len(vectors) == 0:
             return []
 
-        # Convert to numpy with consistent dimensions
-        if isinstance(vectors[0], list):
-            vectors = [np.array(v) for v in vectors]
-        
-        # Ensure all vectors have same dimension as query
-        query_dim = len(query_vector) if isinstance(query_vector, (list, np.ndarray)) else 0
-        if query_dim > 0:
-            vectors = [v if len(v) == query_dim else np.pad(v, (0, max(0, query_dim - len(v))))[:query_dim] for v in vectors]
-        
-        vectors = np.vstack(vectors)
-
-        if isinstance(query_vector, list):
-            query_vector = np.array(query_vector)
-
-        # Calculate cosine similarity with epsilon to avoid division by zero
-        epsilon = 1e-10
-        query_norm = np.linalg.norm(query_vector)
-        vector_norms = np.linalg.norm(vectors, axis=1)
-
-        similarities = np.dot(vectors, query_vector) / (
-            (vector_norms * query_norm) + epsilon
-        )
-
-        # Get top k
-        top_indices = np.argsort(similarities)[::-1][:k]
+        query = validate_vector_matrix([query_vector])[0]
+        vectors = validate_vector_matrix(vectors, dimension=len(query))
+        if len(ids) != len(vectors) or len(set(ids)) != len(ids):
+            raise ValueError("vector IDs must be unique and cover every vector")
+        if isinstance(k, bool) or not isinstance(k, int) or k < 1:
+            raise ValueError("k must be a positive integer")
+        similarities = np.dot(vectors, query) / (np.linalg.norm(vectors, axis=1) * np.linalg.norm(query))
+        # Stable ordering makes ties reproducible across platforms.
+        top_indices = np.argsort(-similarities, kind="stable")[:k]
 
         results = []
         for idx in top_indices:
@@ -1568,6 +1565,38 @@ class VectorRetriever:
             )
 
         return results
+
+    def cross_source_pairs(self, vectors, ids, source_ids, *, min_similarity=0.0, max_pairs=10000):
+        """Exact eligible pairs; exceeding the budget fails before downstream work.
+
+        Negative/orthogonal vectors are not semantic candidates. No top-k
+        truncation silently drops positive candidates when the budget is exceeded.
+        """
+        if len(ids) != len(source_ids):
+            raise ValueError("source scopes must cover every vector")
+        if isinstance(max_pairs, bool) or not isinstance(max_pairs, int) or max_pairs < 1:
+            raise ValueError("candidate budget must be positive")
+        if not np.isfinite(min_similarity) or not -1 <= min_similarity <= 1:
+            raise ValueError("candidate similarity threshold is invalid")
+        matrix = validate_vector_matrix(vectors)
+        if len(ids) != len(matrix) or len(set(ids)) != len(ids):
+            raise ValueError("vector IDs must be unique and cover every vector")
+        pairs = []
+        for index, vector in enumerate(matrix):
+            neighbors = [other for other in range(index + 1, len(matrix))
+                         if source_ids[index] and source_ids[other]
+                         and len(set(source_ids[index]) | set(source_ids[other])) > 1]
+            if not neighbors:
+                continue
+            hits = self.search_similar(vector, [matrix[other] for other in neighbors],
+                                       [ids[other] for other in neighbors], k=len(neighbors))
+            for hit in hits:
+                if hit["score"] <= min_similarity:
+                    continue
+                if len(pairs) >= max_pairs:
+                    raise ValueError(f"cross-source candidate budget exceeded ({max_pairs}); narrow the source scope")
+                pairs.append((ids[index], hit["id"]))
+        return sorted(pairs)
 
     def search_by_metadata(
         self,

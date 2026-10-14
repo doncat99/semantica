@@ -5,7 +5,10 @@ import base64
 from hashlib import sha256
 import json
 import os
+import math
 from pathlib import Path
+from time import monotonic
+from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
@@ -22,7 +25,12 @@ class _NoRedirect(HTTPRedirectHandler):
         return None
 
 
-def parse_remote_docling(path: Path, *, name: str, force_ocr: bool, profile: dict) -> dict:
+def parse_remote_docling(path: Path, *, name: str, force_ocr: bool, profile: dict,
+                         wait_timeout_seconds: float = 1800,
+                         cancelled: Callable[[], bool] | None = None) -> dict:
+    if not math.isfinite(wait_timeout_seconds) or wait_timeout_seconds <= 0:
+        raise RemoteDoclingError("remote Docling wait deadline must be positive and finite")
+    deadline = monotonic() + wait_timeout_seconds
     endpoint = profile.get("endpoint", "").rstrip("/")
     parsed = urlsplit(endpoint)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
@@ -38,11 +46,21 @@ def parse_remote_docling(path: Path, *, name: str, force_ocr: bool, profile: dic
     state = checkpoint.read("remote-docling", key)
     opener = build_opener(_NoRedirect())
 
+    def remaining() -> float:
+        if cancelled is not None and cancelled():
+            raise RemoteDoclingError("remote Docling wait cancelled; task state retained")
+        budget = deadline - monotonic()
+        if budget <= 0:
+            task_id = state.get("taskId", "unknown") if state else "unknown"
+            raise RemoteDoclingError(f"remote Docling wait deadline exceeded; task {task_id} retained for resume")
+        return budget
+
     def request(route: str, body: dict | None = None) -> dict:
         encoded = json.dumps(body).encode("utf-8") if body is not None else None
+        timeout = min(75, remaining())
         try:
             headers = {"Content-Type": "application/json", **({"X-OntoScience-Auth-Token": token} if token else {})}
-            with opener.open(Request(endpoint + route, data=encoded, headers=headers), timeout=75) as response:
+            with opener.open(Request(endpoint + route, data=encoded, headers=headers), timeout=timeout) as response:
                 result = json.load(response)
         except HTTPError as exc:
             raise RemoteDoclingError(f"remote Docling HTTP {exc.code}; task state retained") from None

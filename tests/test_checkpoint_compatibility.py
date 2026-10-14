@@ -54,3 +54,39 @@ def test_unchanged_package_rejects_changed_input_revision():
     previous = inputs()
     current = {**previous, "inputRevision": "unknown-change"}
     assert not _resume_compatible(previous, current)
+
+LEGACY_SCHEMA = 'sha256:8a854744a4d9c27c911509b010fd5c1330ae49b63d64313f21ca405c3311e93b'
+REFLEXIVITY_SCHEMA = 'sha256:300ace367257438ced05c790042721db3da818f5f94c0ed3dab5a5290e90801a'
+
+def test_additive_reflexivity_schema_preserves_completed_stages():
+    previous = inputs()
+    previous['release']['schemaDigest'] = LEGACY_SCHEMA
+    current = deepcopy(previous)
+    current['release'].update(artifactDigest='new-package', schemaDigest=REFLEXIVITY_SCHEMA)
+    current['inputRevision'] = 'new-input'
+    assert _resume_compatible(previous, current)
+    current['recipe']['version'] = '2'
+    assert not _resume_compatible(previous, current)
+
+def test_reflexivity_schema_migration_has_exact_direction_and_shape():
+    from semantica.semantic_artifact_schema import artifact_schema_compatible, semantic_artifact_json_schema, stable_digest
+    assert stable_digest(semantic_artifact_json_schema()) == REFLEXIVITY_SCHEMA
+    assert artifact_schema_compatible(LEGACY_SCHEMA, REFLEXIVITY_SCHEMA)
+    assert not artifact_schema_compatible(REFLEXIVITY_SCHEMA, LEGACY_SCHEMA)
+    assert not artifact_schema_compatible(LEGACY_SCHEMA, 'future-schema')
+
+
+def test_explicit_processing_contract_admits_only_known_legacy_and_rejects_semantic_changes():
+    from semantica.project_checkpoint import PROCESSING_CONTRACTS
+    previous = inputs()
+    previous["release"]["schemaDigest"] = LEGACY_SCHEMA
+    current = deepcopy(previous)
+    current["release"].update(artifactDigest="new-package", schemaDigest=REFLEXIVITY_SCHEMA)
+    current["inputRevision"] = "new-input"
+    current["processingContracts"] = deepcopy(PROCESSING_CONTRACTS)
+    assert _resume_compatible(previous, current)
+    current["processingContracts"]["chunkExtraction"] = "changed-prompt-v2"
+    assert not _resume_compatible(previous, current)
+    current["processingContracts"] = deepcopy(PROCESSING_CONTRACTS)
+    previous["release"]["schemaDigest"] = "unknown-schema"
+    assert not _resume_compatible(previous, current)

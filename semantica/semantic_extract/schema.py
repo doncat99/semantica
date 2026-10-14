@@ -31,7 +31,7 @@ import os
 from dataclasses import dataclass, field
 from typing import Any, Dict, FrozenSet, Iterable, List, Literal, Mapping, Optional, Set
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictBool, model_serializer, model_validator
 
 
 class ExtractionAttribute(BaseModel):
@@ -63,6 +63,14 @@ class ExtractionRelationType(BaseModel):
     description: str = Field(min_length=1)
     domain: List[str] = Field(default_factory=list)
     range: List[str] = Field(default_factory=list)
+    reflexive: Optional[StrictBool] = None
+
+    @model_serializer(mode="wrap")
+    def serialize_policy(self, handler):
+        result = handler(self)
+        if self.reflexive is None:
+            result.pop("reflexive", None)
+        return result
 
 
 class ExtractionExampleEntity(BaseModel):
@@ -184,6 +192,7 @@ class Predicate:
     name: str
     domain: FrozenSet[str] = frozenset()
     range: FrozenSet[str] = frozenset()
+    reflexive: Optional[bool] = None
 
 
 @dataclass
@@ -208,7 +217,7 @@ class ExtractionSchema:
         return cls(
             concepts=frozenset(item.name for item in specification.entity_types),
             predicates={
-                item.name: Predicate(item.name, frozenset(item.domain), frozenset(item.range))
+                item.name: Predicate(item.name, frozenset(item.domain), frozenset(item.range), item.reflexive)
                 for item in specification.relation_types
             },
             specification=specification,

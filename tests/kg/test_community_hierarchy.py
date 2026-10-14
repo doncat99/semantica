@@ -899,14 +899,17 @@ class TestCommunityHierarchyEdgeCases:
         with pytest.raises(ValueError, match="collision detected"):
             builder.build(adj)
 
-    def test_builder_fallback_flag_resets_on_subsequent_builds(self):
+    def test_builder_fallback_flag_resets_on_subsequent_builds(self, monkeypatch):
         builder = CommunityHierarchyBuilder(algorithm="louvain", seed=42)
-
+        original = nx.algorithms.community.louvain_communities
+        def fail_partition(*args, **kwargs):
+            raise nx.NetworkXError("injected partition failure")
+        monkeypatch.setattr(nx.algorithms.community, "louvain_communities", fail_partition)
         g_fail = nx.Graph()
         g_fail.add_edge("a", "b", weight=0.0)
         h1 = builder.build(g_fail)
         assert h1.metadata.get("fallback") is True
-
+        monkeypatch.setattr(nx.algorithms.community, "louvain_communities", original)
         g_ok = nx.karate_club_graph()
         h2 = builder.build(g_ok)
         assert h2.metadata.get("fallback") is False

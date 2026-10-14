@@ -451,7 +451,7 @@ def test_relationship_discovery_omits_ungrounded_qualifier_without_losing_valid_
                            model="model-1", input_digest=H1, output_digest=H2)
     monkeypatch.setattr("semantica.semantic_artifact_builder._relationship_candidates", lambda *_: [candidate])
     monkeypatch.setattr("semantica.semantic_artifact_builder._relationship_batch",
-                        lambda *_: ([{**valid, "qualifiers": {"polarity": "positive", "unit": "percent"}}, valid], receipt))
+                        lambda *_: ([{**valid, "qualifiers": {"polarity": "positive", "unit": "percent"}}, valid], [receipt]))
 
     assertions, relations, receipts = _discover_cross_source_relationships(
         "project-1", [], entities, [], [], evidence, None)
@@ -620,6 +620,7 @@ def test_worker_builds_complete_snapshot_from_real_text_file(tmp_path):
     assert response["ok"] is True
     assert [item["kind"] for item in response["result"]["artifacts"]] == ["document-representation", "retrieval-index", "semantic-graph"]
     assert response["result"]["relayReceipts"] == {"embedding": [], "model": []}
+    assert not (tmp_path / "snapshot.json").exists()
 
     snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "semantic-graph")
     snapshot = _host_snapshot(snapshot_path)
@@ -726,8 +727,8 @@ def test_cross_source_same_name_stays_unresolved(tmp_path):
     assert snapshot.conflicts[0].conflict_type == "identity"
     retrieval_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "retrieval-index")
     retrieval = json.loads(retrieval_path.read_text())
-    assert retrieval["identity_decisions"] == []
-    assert retrieval["conflicts"] == [snapshot.conflicts[0].model_dump(mode="json", by_alias=True)]
+    assert retrieval["format"] == "semantica.retrieval-reference.v1"
+    assert "identity_decisions" not in retrieval and "conflicts" not in retrieval
 
 
 def test_epub_adapter_preserves_adapter_locator_origin(tmp_path):
@@ -1013,9 +1014,7 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
     assert {assertion.subject_id for assertion in snapshot.assertions}.issubset(canonical_ids)
     retrieval_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "retrieval-index")
     retrieval = json.loads(retrieval_path.read_text())
-    assert retrieval["identity_decisions"] == [
-        decision.model_dump(mode="json", by_alias=True) for decision in snapshot.identity_decisions
-    ]
-    assert retrieval["conflicts"] == []
+    assert retrieval["format"] == "semantica.retrieval-reference.v1"
+    assert "identity_decisions" not in retrieval and "conflicts" not in retrieval
     for entity in snapshot.entities:
         assert set(retrieval["provenance"]["entities"][entity.id]["source_documents"]) == {"source-1", "source-2"}

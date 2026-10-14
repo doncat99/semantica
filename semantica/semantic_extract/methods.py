@@ -177,6 +177,8 @@ def _exact_occurrence(text: str, quote: str, occurrence: Optional[int]) -> tuple
 
 
 def _grounded_qualifiers(value: Any, evidence: str) -> dict:
+    if isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict):
+        value = value[0]
     if not isinstance(value, dict):
         raise ProcessingError("grounded relation qualifiers must be an object")
     unsupported = set(value) - _FACT_QUALIFIERS
@@ -1467,7 +1469,7 @@ Grounding requirements:
             active_schema = GroundedEntitiesResponse if grounding == "strict" else EntitiesResponse
             result_obj = None
             try:
-                result_obj = llm.generate_typed(prompt, schema=active_schema, **kwargs)
+                result_obj = llm.generate_typed(prompt, schema=active_schema, extraction_stage="entities", **kwargs)
                 entities = []
                 for index, e_out in enumerate(result_obj.entities):
                     if grounding == "strict":
@@ -2424,7 +2426,7 @@ Source text:
         for attempt in range(grounding_retries + 1):
             result_obj = None
             try:
-                result_obj = llm.generate_typed(prompt, schema=active_schema, **call_kwargs)
+                result_obj = llm.generate_typed(prompt, schema=active_schema, extraction_stage="relations", **call_kwargs)
                 if grounding == "strict":
                     relations = _parse_grounded_relation_result(
                         result_obj,
@@ -2695,12 +2697,14 @@ def _parse_grounded_relation_result(
             object_entity = entities_by_id.get(item.get("object_id"))
             if subject is None or object_entity is None:
                 raise ProcessingError("grounded relation endpoint does not reference an entity mention")
-            if subject is object_entity or (
+            predicate = item.get("predicate")
+            policy = extraction_schema.predicates.get(predicate) if extraction_schema and isinstance(predicate, str) else None
+            if (subject is object_entity or (
                 subject.start_char == object_entity.start_char
                 and subject.end_char == object_entity.end_char
                 and subject.text.casefold() == object_entity.text.casefold()
                 and subject.label.casefold() == object_entity.label.casefold()
-            ):
+            )) and not (policy and policy.reflexive is True):
                 raise ProcessingError("grounded relation cannot connect an entity mention to itself")
             predicate = item.get("predicate")
             if not isinstance(predicate, str) or not predicate.strip():

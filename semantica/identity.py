@@ -20,6 +20,48 @@ def _normalized(value: str) -> str:
     return " ".join(value.casefold().split())
 
 
+def admit_identity_judgments(judgments: list[dict[str, Any]], by_id: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+    """Validate decision membership, evidence, type and partition at every entry point."""
+    used: set[str] = set()
+    admitted: list[dict[str, Any]] = []
+    for judgment in judgments:
+        if not isinstance(judgment, dict):
+            raise ValueError("identity judgment must be an object")
+        decision_type = judgment.get("decision_type", "merge")
+        ids = judgment.get("mention_ids")
+        reason = judgment.get("reason")
+        evidence_ids = judgment.get("evidence_ids")
+        if (decision_type not in {"merge", "split"}
+                or not isinstance(ids, list) or len(ids) < 2
+                or any(not isinstance(item, str) or item not in by_id for item in ids)
+                or len(set(ids)) != len(ids) or used.intersection(ids)
+                or not isinstance(reason, str) or not reason.strip()
+                or not isinstance(evidence_ids, list) or any(not isinstance(item, str) for item in evidence_ids)):
+            raise ValueError("identity judgment contains unknown, duplicate, overlapping, or unsupported mentions")
+        admitted_evidence = {item for mention_id in ids for item in by_id[mention_id]["evidence_ids"]}
+        if (not set(evidence_ids).issubset(admitted_evidence)
+                or any(not set(by_id[item]["evidence_ids"]).intersection(evidence_ids) for item in ids)):
+            raise ValueError("identity judgment must cite evidence from every mention")
+        if len({by_id[item]["type"].casefold() for item in ids}) != 1:
+            raise ValueError("identity judgment cannot combine incompatible entity types")
+        if decision_type == "merge" and any(other in by_id[item].get("separate_from", [])
+                for item in ids for other in ids if other != item):
+            raise ValueError("identity merge violates a supplied separation constraint")
+        if decision_type == "split":
+            partition = judgment.get("groups")
+            flattened = [item for group in partition for item in group] if isinstance(partition, list) and all(isinstance(group, list) for group in partition) else []
+            if (not isinstance(partition, list) or len(partition) < 2
+                    or any(not group for group in partition)
+                    or len(flattened) != len(set(flattened))
+                    or set(flattened) != set(ids)):
+                raise ValueError("identity split must partition every mentioned identity exactly once")
+        used.update(ids)
+        admitted.append({**judgment, "decision_type": decision_type, "mention_ids": sorted(ids),
+                         "evidence_ids": sorted(set(evidence_ids)), "reason": reason.strip()})
+
+    return admitted
+
+
 def resolve_project_identities(*, project_id: str, mentions: list[KnowledgeEntity], judgments: list[dict[str, Any]],
                                base_snapshot: SemanticArtifact | None, receipt_id: str | None
                                ) -> tuple[list[KnowledgeEntity], dict[str, str], list[IdentityDecision], list[IdentityRegistryEntry]]:
@@ -73,41 +115,10 @@ def resolve_project_identities(*, project_id: str, mentions: list[KnowledgeEntit
                         for group in partition)):
             persisted_splits.append((partition, index))
 
-    used: set[str] = set()
-    admitted: list[dict[str, Any]] = []
-    for judgment in judgments:
-        if not isinstance(judgment, dict):
-            raise ValueError("identity judgment must be an object")
-        decision_type = judgment.get("decision_type", "merge")
-        ids = judgment.get("mention_ids")
-        reason = judgment.get("reason")
-        evidence_ids = judgment.get("evidence_ids")
-        if (decision_type not in {"merge", "split"}
-                or not isinstance(ids, list) or len(ids) < 2
-                or any(not isinstance(item, str) or item not in by_id for item in ids)
-                or len(set(ids)) != len(ids) or used.intersection(ids)
-                or not isinstance(reason, str) or not reason.strip()
-                or not isinstance(evidence_ids, list) or any(not isinstance(item, str) for item in evidence_ids)):
-            raise ValueError("identity judgment contains unknown, duplicate, overlapping, or unsupported mentions")
-        admitted_evidence = {item for mention_id in ids for item in by_id[mention_id].evidence_ids}
-        if (not set(evidence_ids).issubset(admitted_evidence)
-                or any(not set(by_id[item].evidence_ids).intersection(evidence_ids) for item in ids)):
-            raise ValueError("identity judgment must cite evidence from every mention")
-        if len({by_id[item].type.casefold() for item in ids}) != 1:
-            raise ValueError("identity judgment cannot combine incompatible entity types")
-        if receipt_id is None:
-            raise ValueError("identity judgment requires an admitted model receipt")
-        if decision_type == "split":
-            partition = judgment.get("groups")
-            flattened = [item for group in partition for item in group] if isinstance(partition, list) and all(isinstance(group, list) for group in partition) else []
-            if (not isinstance(partition, list) or len(partition) < 2
-                    or any(not group for group in partition)
-                    or len(flattened) != len(set(flattened))
-                    or set(flattened) != set(ids)):
-                raise ValueError("identity split must partition every mentioned identity exactly once")
-        used.update(ids)
-        admitted.append({**judgment, "decision_type": decision_type, "mention_ids": sorted(ids),
-                         "evidence_ids": sorted(set(evidence_ids)), "reason": reason.strip()})
+    admitted = admit_identity_judgments(judgments, {key: {"type": item.type, "evidence_ids": item.evidence_ids}
+                                                  for key, item in by_id.items()})
+    if admitted and receipt_id is None:
+        raise ValueError("identity judgment requires an admitted model receipt")
 
     native_mentions = {
         mention.id: {"id": mention.id, "name": mention.canonical_name, "type": mention.type,

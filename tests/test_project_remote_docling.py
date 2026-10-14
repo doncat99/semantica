@@ -14,6 +14,40 @@ from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest
 from tests.test_semantic_artifact import _request
 
 
+def test_remote_wait_deadline_preserves_task_for_resume(tmp_path, monkeypatch):
+    from semantica import project_remote_docling as module
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"fixture")
+    checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(
+        _remote_request(source, tmp_path / "output")))
+    calls = []
+    now = [0.0]
+
+    class Opener:
+        def open(self, request, timeout):
+            import io
+            calls.append(request.full_url)
+            if request.data:
+                return io.BytesIO(b'{"task_id":"task-1"}')
+            now[0] += 2
+            return io.BytesIO(b'{"task_id":"task-1","task_status":"pending"}')
+
+    monkeypatch.setattr(module, "build_opener", lambda *_: Opener())
+    monkeypatch.setattr(module, "monotonic", lambda: now[0], raising=False)
+    monkeypatch.setenv("TEST_DOCLING_KEY", "fixture")
+    profile = {"endpoint": "http://localhost/docling", "authorizationEnv": "TEST_DOCLING_KEY"}
+    token = active_checkpoint.set(checkpoint)
+    try:
+        for _ in range(2):
+            with pytest.raises(RemoteDoclingError, match="deadline.*task-1"):
+                parse_remote_docling(source, name=source.name, force_ocr=False,
+                                    profile=profile, wait_timeout_seconds=3)
+        assert sum("/convert/" in url for url in calls) == 1
+        assert sum("/status/" in url for url in calls) == 4
+    finally:
+        active_checkpoint.reset(token)
+
+
 def _remote_request(source, output):
     params = _request(source, output, prepare=False)["params"]
     params["sources"][0]["mimeType"] = "application/pdf"

@@ -39,20 +39,6 @@ MODEL_RECEIPT_OPERATIONS = {
 }
 
 
-class SemanticWorkerRequest(BaseModel):
-    """Transport request for the generic semantic worker."""
-
-    model_config = ConfigDict(extra="forbid")
-    protocol: str
-    id: str
-    method: str
-    params: Dict[str, Any] = Field(default_factory=dict)
-
-    def validate_protocol(self) -> None:
-        if self.protocol != PROTOCOL:
-            raise ValueError(f"unsupported semantic worker protocol: {self.protocol}")
-
-
 class ReadingReportsRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True)
     snapshot_path: str = Field(alias="snapshotPath")
@@ -192,12 +178,11 @@ def _response(request_id: Optional[str], ok: bool, *, result: Optional[Dict[str,
                 diagnostic["fault"] = {"file": Path(frame.tb_frame.f_code.co_filename).name,
                     "function": frame.tb_frame.f_code.co_name, "line": frame.tb_lineno}
             payload["error"]["diagnostic"] = diagnostic
-    return payload
+    return WorkerResponse.model_validate(payload).model_dump(mode="json", by_alias=True, exclude_none=True, exclude_unset=True)
 
 
 def handle_request(raw: Dict[str, Any], progress: Optional[Callable[[Dict[str, Any]], None]] = None) -> Dict[str, Any]:
-    request = SemanticWorkerRequest.model_validate(raw)
-    request.validate_protocol()
+    request = WorkerRequest.model_validate(raw)
     if request.method == "schema":
         return _response(request.id, True, result={"semantic_graph": semantic_artifact_json_schema(),
                                                     "build_request": build_request_json_schema()})
@@ -218,7 +203,7 @@ def handle_request(raw: Dict[str, Any], progress: Optional[Callable[[Dict[str, A
     if request.method != METHOD:
         raise ValueError(f"unsupported semantic worker method: {request.method}")
     build_request = SemanticArtifactBuildRequest.model_validate(request.params)
-    built = build_semantic_artifacts(build_request, progress=progress)
+    built = build_semantic_artifacts(build_request, progress=progress, persist_snapshot=False)
     snapshot: SemanticArtifact = built["snapshot"]
     artifacts = [{
         "digest": item["artifact_digest"],

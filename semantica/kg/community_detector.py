@@ -124,156 +124,57 @@ class CommunityDetector:
         if not self.progress_tracker.enabled:
             self.progress_tracker.enabled = True
 
-    def detect_communities_louvain(
-        self, graph: Any, resolution: float = 1.0, max_iter: int = 10, **options
-    ) -> Dict[str, Any]:
-        """
-        Detect communities using Louvain algorithm.
+    def detect_communities_greedy_modularity(self, graph, resolution=1.0, **options):
+        """Run NetworkX greedy modularity explicitly, preserving isolated nodes."""
+        if not self.use_networkx:
+            raise RuntimeError("greedy_modularity requires NetworkX")
+        from networkx.algorithms import community
+        nx_graph = self._to_networkx(graph)
+        if nx_graph.number_of_edges() == 0:
+            groups = [{node} for node in nx_graph.nodes]
+            modularity = 0.0
+        else:
+            groups = list(community.greedy_modularity_communities(nx_graph, resolution=resolution))
+            modularity = community.modularity(nx_graph, groups, resolution=resolution)
+        groups = sorted((sorted(group) for group in groups), key=lambda group: tuple(group))
+        return {"communities": groups,
+                "node_assignments": {node: index for index, group in enumerate(groups) for node in group},
+                "modularity": modularity, "algorithm": "greedy_modularity"}
 
-        This method applies the Louvain algorithm for community detection,
-        which optimizes modularity through iterative greedy optimization.
-        Uses NetworkX implementation when available, with fallback to basic
-        greedy modularity approach.
+    def detect_communities_louvain(self, graph: Any, resolution: float = 1.0,
+                                   max_iter: int = 10, **options) -> Dict[str, Any]:
+        """Run genuine NetworkX Louvain; never substitute a different algorithm."""
+        if not self.use_networkx:
+            raise RuntimeError("louvain requires NetworkX")
+        from networkx.algorithms import community
+        nx_graph = self._to_networkx(graph)
+        if nx_graph.number_of_edges() == 0:
+            groups = [{node} for node in nx_graph.nodes]
+            modularity = 0.0
+        else:
+            groups = community.louvain_communities(nx_graph, resolution=resolution,
+                                                   seed=options.get("seed", 0))
+            modularity = community.modularity(nx_graph, groups, resolution=resolution)
+        groups = sorted((sorted(group) for group in groups), key=lambda group: tuple(group))
+        return {"communities": groups,
+                "node_assignments": {node: index for index, group in enumerate(groups) for node in group},
+                "modularity": modularity, "algorithm": "louvain"}
 
-        Args:
-            graph: Input graph for community detection (dict, object with
-                  relationships, or NetworkX graph)
-            resolution: Resolution parameter for modularity optimization
-                       (default: 1.0, higher values favor smaller communities)
-            max_iter: Maximum iterations for basic implementation (default: 10)
-            **options: Additional detection options (unused)
-
-        Returns:
-            dict: Community detection results containing:
-                - communities: List of community lists (each list contains node IDs)
-                - node_assignments: Dictionary mapping node IDs to community IDs
-                - modularity: Calculated modularity score
-                - algorithm: Algorithm name ("louvain")
-        """
-        # Track community detection
-        tracking_id = self.progress_tracker.start_tracking(
-            file=None,
-            module="kg",
-            submodule="CommunityDetector",
-            message="Detecting communities using Louvain algorithm",
-        )
-
-        try:
-            self.logger.info("Detecting communities using Louvain algorithm")
-
-            if self.use_networkx:
-                try:
-                    import networkx.algorithms.community as nx_comm
-
-                    nx_graph = self._to_networkx(graph)
-                    
-                    # An empty graph has no communities. A graph with nodes but
-                    # no edges still has singleton communities.
-                    num_nodes = nx_graph.number_of_nodes()
-                    num_edges = nx_graph.number_of_edges()
-                    self.logger.debug(f"Graph stats: nodes={num_nodes}, edges={num_edges}")
-
-                    if num_nodes == 0:
-                        self.logger.warning("Graph is empty, returning 0 communities")
-                        self.progress_tracker.stop_tracking(
-                            tracking_id,
-                            status="completed",
-                            message="Detected 0 communities (empty graph)",
-                        )
-                        return {
-                            "communities": [],
-                            "node_assignments": {},
-                            "modularity": 0.0,
-                            "algorithm": "louvain",
-                        }
-
-                    resolution = options.get("resolution", 1.0)
-
-                    self.progress_tracker.update_tracking(
-                        tracking_id, message="Detecting communities with NetworkX..."
-                    )
-                    # Use greedy modularity communities (Louvain-like)
-                    communities = nx_comm.greedy_modularity_communities(
-                        nx_graph, resolution=resolution
-                    )
-
-                    # Convert to node assignments
-                    node_communities = {}
-                    for i, community in enumerate(communities):
-                        for node in community:
-                            node_communities[node] = i
-
-                    modularity = nx_comm.modularity(nx_graph, communities)
-
-                    result = {
-                        "communities": list(communities),
-                        "node_assignments": node_communities,
-                        "modularity": modularity,
-                        "algorithm": "louvain",
-                    }
-                    self.progress_tracker.stop_tracking(
-                        tracking_id,
-                        status="completed",
-                        message=f"Detected {len(communities)} communities",
-                    )
-                    return result
-                except Exception as e:
-                    import traceback
-                    self.logger.warning(
-                        f"NetworkX Louvain failed: {e}, using basic implementation. Traceback: {traceback.format_exc()}"
-                    )
-
-            self.progress_tracker.update_tracking(
-                tracking_id, message="Using basic community detection..."
-            )
-            # Basic greedy modularity implementation
-            adjacency = self._build_adjacency(graph)
-            result = self._basic_community_detection(
-                adjacency, algorithm="louvain", **options
-            )
-            self.progress_tracker.stop_tracking(
-                tracking_id,
-                status="completed",
-                message=f"Detected {len(result.get('communities', []))} communities",
-            )
-            return result
-
-        except Exception as e:
-            self.progress_tracker.stop_tracking(
-                tracking_id, status="failed", message=str(e)
-            )
-            raise
-
-    def detect_communities_leiden(
-        self, graph: Any, resolution: float = 1.0, max_iter: int = 10, **options
-    ) -> Dict[str, Any]:
-        """
-        Detect communities using Leiden algorithm.
-
-        This method applies the Leiden algorithm for community detection,
-        which is similar to Louvain but includes a refinement step for better
-        quality. Currently uses Louvain implementation as Leiden refinement
-        requires additional libraries.
-
-        Args:
-            graph: Input graph for community detection
-            resolution: Resolution parameter for modularity optimization
-                       (default: 1.0)
-            max_iter: Maximum iterations (default: 10)
-            **options: Additional detection options
-
-        Returns:
-            dict: Community detection results (same format as Louvain)
-        """
-        self.logger.info("Detecting communities using Leiden algorithm")
-
-        # Leiden is similar to Louvain but with refinement
-        # For now, use Louvain-like approach (full Leiden requires igraph)
-        result = self.detect_communities_louvain(
-            graph, resolution=resolution, max_iter=max_iter, **options
-        )
-        result["algorithm"] = "leiden"
-        return result
+    def detect_communities_leiden(self, graph: Any, resolution: float = 1.0,
+                                  max_iter: int = 10, **options) -> Dict[str, Any]:
+        """Use the native hierarchy owner's Leiden refinement, not Louvain."""
+        if not self.use_networkx:
+            raise RuntimeError("leiden requires NetworkX")
+        from .community_hierarchy import CommunityHierarchyBuilder
+        from networkx.algorithms import community
+        nx_graph = self._to_networkx(graph)
+        groups = CommunityHierarchyBuilder(algorithm="leiden", seed=options.get("seed", 0)).detect_leiden_partition(
+            nx_graph, resolution=resolution, seed=options.get("seed", 0), max_iter=max_iter)
+        groups = sorted((sorted(group) for group in groups if group), key=lambda group: tuple(group))
+        modularity = community.modularity(nx_graph, groups, resolution=resolution) if nx_graph.number_of_edges() else 0.0
+        return {"communities": groups,
+                "node_assignments": {node: index for index, group in enumerate(groups) for node in group},
+                "modularity": modularity, "algorithm": "leiden"}
 
     def detect_overlapping_communities(
         self, graph: Any, k: int = 3, min_size: int = 3, **options
@@ -481,11 +382,13 @@ class CommunityDetector:
         """
         # 'method' is an alias for 'algorithm'
         if method is not None:
-            algorithm = method if method in ("louvain", "leiden", "overlapping") else "louvain"
+            algorithm = method
 
         self.logger.info(f"Detecting communities using {algorithm} algorithm")
 
-        if algorithm == "louvain":
+        if algorithm == "greedy_modularity":
+            return self.detect_communities_greedy_modularity(graph, **options)
+        elif algorithm == "louvain":
             return self.detect_communities_louvain(graph, **options)
         elif algorithm == "leiden":
             return self.detect_communities_leiden(graph, **options)

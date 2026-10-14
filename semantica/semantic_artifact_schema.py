@@ -872,7 +872,7 @@ class BindParsedSourceRequest(ParseSourceRequest):
 class WorkerRequest(StrictModel):
     protocol: Literal[WORKER_PROTOCOL] = WORKER_PROTOCOL
     id: str
-    method: Literal["parse_source", "bind_parsed_source", "build_semantic_artifacts", "validate_artifact", "validate_extraction_spec", "schema"]
+    method: Literal["parse_source", "bind_parsed_source", "build_semantic_artifacts", "validate_artifact", "validate_extraction_spec", "schema", "generate_reading_reports", "explain_evidence"]
     params: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -882,6 +882,10 @@ class WorkerError(StrictModel):
     status: Optional[int] = None
     code: Optional[str] = None
     retryable: bool = False
+    retry_after_ms: Optional[int] = Field(default=None, alias="retryAfterMs")
+    upstream_request_id: Optional[str] = Field(default=None, alias="upstreamRequestId")
+    diagnostic: Optional[Dict[str, Any]] = None
+    gateway: Optional[Dict[str, Any]] = None
 
 
 class WorkerResponse(StrictModel):
@@ -898,3 +902,11 @@ def semantic_artifact_json_schema() -> Dict[str, Any]:
 
 def build_request_json_schema() -> Dict[str, Any]:
     return SemanticArtifactBuildRequest.model_json_schema()
+
+
+def artifact_schema_compatible(previous: str, current: str) -> bool:
+    """Admit only the known additive, optional reflexivity contract extension."""
+    return previous == current or (previous, current) == (
+        "sha256:8a854744a4d9c27c911509b010fd5c1330ae49b63d64313f21ca405c3311e93b",
+        "sha256:300ace367257438ced05c790042721db3da818f5f94c0ed3dab5a5290e90801a",
+    )

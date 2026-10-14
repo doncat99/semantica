@@ -307,7 +307,7 @@ def test_synthesis_cannot_introduce_evidence_from_another_batch(monkeypatch):
     from semantica.semantic_artifact_schema import ReportSection
     monkeypatch.setattr(pipeline, "_product_json", lambda *args: ({"sections": [
         {"title": "Invented", "text": "Unsupported", "evidence_ids": ["other-evidence"]}]}, [receipt("knowledge_synthesis", 1)]))
-    with pytest.raises(pipeline.SemanticArtifactError, match="unsupported evidence"):
+    with pytest.raises(pipeline.SemanticArtifactError, match="supplied evidence_ids"):
         pipeline._synthesize_sections({"id": "overview"}, [ReportSection(title="Original", text="Supported", evidence_ids=["source-evidence"])], None)
 
 
@@ -362,7 +362,7 @@ def test_relationship_discovery_uses_cross_source_candidates_and_exact_evidence(
             "citations": [{"evidence_id": row["id"], "quote": row["quote"]}
                            for row in candidate["evidence"] if row["id"].startswith("passage-")],
             "reason": "Both sources explicitly identify glucose as the stored and released energy carrier.",
-        }], receipt("relationship_discovery", 1)
+        }], [receipt("relationship_discovery", 1)]
 
     monkeypatch.setattr(pipeline, "_relationship_batch", discover)
     assertions, relations, receipts = pipeline._discover_cross_source_relationships(
@@ -405,7 +405,7 @@ def test_relationship_discovery_rejects_evidence_from_one_source(monkeypatch):
             "predicate": "related", "qualifiers": {"polarity": "positive"},
             "citations": [{"evidence_id": citation["id"], "quote": citation["quote"]}],
             "reason": "Unsupported",
-        }], receipt("relationship_discovery", 1)
+        }], [receipt("relationship_discovery", 1)]
 
     monkeypatch.setattr(pipeline, "_relationship_batch", discover)
     with pytest.raises(pipeline.SemanticArtifactError, match="both endpoints and sources"):

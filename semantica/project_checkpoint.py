@@ -24,15 +24,36 @@ def _digest(value: bytes) -> str:
     return "sha256:" + sha256(value).hexdigest()
 
 
+# These identify processing semantics, independently of package/build identity.
+PROCESSING_CONTRACTS = {
+    "chunkExtraction": "structural-grounded-v1",
+    "embedding": "gateway-batch-space-v1",
+    "sourceDocument": "located-document-v1",
+}
+LEGACY_PROCESSING_SCHEMAS = {
+    "sha256:8a854744a4d9c27c911509b010fd5c1330ae49b63d64313f21ca405c3311e93b",
+    "sha256:300ace367257438ced05c790042721db3da818f5f94c0ed3dab5a5290e90801a",
+}
+
+
 def _resume_compatible(previous: Any, current: dict[str, Any]) -> bool:
     if not isinstance(previous, dict):
         return False
+    from .semantic_artifact_schema import artifact_schema_compatible
+
     candidate = deepcopy(previous)
+    if "processingContracts" not in candidate and "processingContracts" in current:
+        release = candidate.get("release", {})
+        if release.get("schemaDigest") not in LEGACY_PROCESSING_SCHEMAS:
+            return False
+        candidate["processingContracts"] = deepcopy(PROCESSING_CONTRACTS)
     if candidate == current:
         return True
     previous_release = candidate.get("release")
     current_release = current.get("release")
     if isinstance(previous_release, dict) and isinstance(current_release, dict):
+        if artifact_schema_compatible(previous_release.get("schemaDigest"), current_release.get("schemaDigest")):
+            previous_release["schemaDigest"] = current_release.get("schemaDigest")
         if previous_release.get("artifactDigest") != current_release.get("artifactDigest"):
             # Package identity is provenance; schema, recipe and source bytes fence reuse.
             previous_release["artifactDigest"] = current_release.get("artifactDigest")
@@ -86,6 +107,7 @@ class SnapshotCheckpoint:
         baseline = request.base_snapshot.model_dump(mode="json", by_alias=True, exclude={"snapshot_path"}) if request.base_snapshot else None
         inputs = {"protocol": "semantica.project-checkpoint.v1", "projectId": request.project_id,
             "inputRevision": request.input_revision, "baseSnapshot": baseline,
+            "processingContracts": deepcopy(PROCESSING_CONTRACTS),
             "sources": sorted(sources, key=lambda item: item["sourceId"]),
             "recipe": request.recipe.model_dump(mode="json", by_alias=True),
             "documentProcessing": request.document_processing.model_dump(mode="json", by_alias=True),

@@ -16,18 +16,18 @@ def digest_file(path: Path) -> str:
 
 
 _PARSER_MODULES = {
-    "__init__.py",
-    "project_checkpoint.py",
     "project_document_quality.py",
     "project_office.py",
     "project_remote_docling.py",
-    "semantic_artifact_schema.py",
-    "semantic_worker.py",
     "source.py",
+    "utils/exceptions.py",
+    "utils/helpers.py",
+    "utils/logging.py",
+    "utils/progress_tracker.py",
 }
 
 
-def document_parser_digest(files: list[dict]) -> str:
+def document_parser_digest(files: list[dict], dependency_files: set[str] | None = None) -> str:
     """Hash the parser runtime without coupling it to knowledge extraction code."""
     selected = []
     for item in files:
@@ -39,11 +39,41 @@ def document_parser_digest(files: list[dict]) -> str:
             relative = path.split(marker, 1)[1]
             if relative not in _PARSER_MODULES and not relative.startswith("parse/"):
                 continue
+        elif "/site-packages/" in path and dependency_files is not None and path not in dependency_files:
+            continue
         selected.append([path, item["size"], item["sha256"]])
     if not selected:
         raise ValueError("bundle has no document parser inputs")
     payload = json.dumps(sorted(selected), ensure_ascii=False, separators=(",", ":")).encode()
     return "sha256:" + hashlib.sha256(payload).hexdigest()
+
+
+def parser_dependency_files(root: Path) -> set[str]:
+    """Installed parser dependency closure, including native libraries and metadata."""
+    from importlib import metadata
+    from packaging.requirements import Requirement
+    from packaging.utils import canonicalize_name
+    installed = {canonicalize_name(d.metadata["Name"]): d for d in metadata.distributions()}
+    pending = ["docling", "rapidocr", "blake3", "pandas"]
+    seen, files = set(), set()
+    while pending:
+        name = canonicalize_name(pending.pop())
+        if name in seen:
+            continue
+        seen.add(name)
+        distribution = installed.get(name)
+        if distribution is None:
+            raise ValueError(f"parser dependency is absent: {name}")
+        for file in distribution.files or []:
+            absolute = Path(distribution.locate_file(file)).resolve()
+            if absolute.is_relative_to(root):
+                files.add(absolute.relative_to(root).as_posix())
+        # Keep installed optional dependencies as a conservative closure.
+        for raw in distribution.requires or []:
+            dependency = canonicalize_name(Requirement(raw).name)
+            if dependency in installed:
+                pending.append(dependency)
+    return files
 
 
 def remove_generated_bytecode(root: Path) -> None:
@@ -186,7 +216,10 @@ def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, output: P
     for item in sorted(output.rglob("*"), key=lambda path: path.relative_to(output).as_posix()):
         if item.is_file():
             manifest["files"].append({"path": item.relative_to(output).as_posix(), "size": item.stat().st_size, "sha256": digest_file(item)})
-    manifest["documentParserDigest"] = document_parser_digest(manifest["files"])
+    closure = subprocess.run([str(python), "-I", "-B", "-c",
+        "import json,sys; from pathlib import Path; from semantica.bundle import parser_dependency_files; print(json.dumps(sorted(parser_dependency_files(Path(sys.argv[1]).resolve()))))", str(output)],
+        capture_output=True, text=True, check=True)
+    manifest["documentParserDigest"] = document_parser_digest(manifest["files"], set(json.loads(closure.stdout)))
     descriptor = [manifest["protocol"], schema_digest, manifest["documentParserDigest"], manifest["pythonPath"],
                   [manifest["worker"]["path"], manifest["worker"]["args"]],
                   [manifest["queryWorker"]["path"], manifest["queryWorker"]["args"]],
