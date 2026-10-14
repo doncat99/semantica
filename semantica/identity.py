@@ -23,7 +23,7 @@ def _normalized(value: str) -> str:
 def resolve_project_identities(*, project_id: str, mentions: list[KnowledgeEntity], judgments: list[dict[str, Any]],
                                base_snapshot: SemanticArtifact | None, receipt_id: str | None
                                ) -> tuple[list[KnowledgeEntity], dict[str, str], list[IdentityDecision], list[IdentityRegistryEntry]]:
-    """Resolve current mentions while retaining durable identity history."""
+    """Admit identity constraints, then persist native resolution with durable IDs."""
     by_id = {mention.id: mention for mention in mentions}
     if len(by_id) != len(mentions):
         raise ValueError("identity mentions must have unique ids")
@@ -184,6 +184,16 @@ def resolve_project_identities(*, project_id: str, mentions: list[KnowledgeEntit
         resolver.entity_merger.merge_strategy_manager.add_property_rule(
             name, "merge_all", conflict_resolution=lambda left, right: {**left, **right})
 
+    group_keys = {mention_id: tuple(sorted(group)) for group in groups for mention_id in group}
+    resolver.config["exact_key"] = lambda item: group_keys[item["id"]]
+    resolved = resolver.resolve_entities(list(merge_mentions.values()))
+    resolved_by_group = {
+        tuple(sorted(item.get("merged_from") or [item["id"]])): item
+        for item in resolved
+    }
+    if set(resolved_by_group) != set(group_keys.values()):
+        raise ValueError("native identity resolution changed admitted partitions")
+
     assigned_entity_ids: set[str] = set()
     canonical: list[KnowledgeEntity] = []
     remap: dict[str, str] = {}
@@ -202,8 +212,7 @@ def resolve_project_identities(*, project_id: str, mentions: list[KnowledgeEntit
         assigned_entity_ids.add(entity_id)
 
         members = [by_id[item] for item in ids]
-        merged = (resolver.entity_merger.merge_entity_group([merge_mentions[item] for item in ids]).merged_entity
-                  if len(ids) > 1 else merge_mentions[ids[0]])
+        merged = resolved_by_group[tuple(ids)]
         names = sorted({member.canonical_name for member in members} | {alias for member in members for alias in member.aliases})
         previous_name = previous_entities.get(entity_id).canonical_name if entity_id in previous_entities else None
         if previous_name is None:

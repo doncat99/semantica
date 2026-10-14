@@ -189,7 +189,8 @@ def test_project_identity_delegates_matching_grouping_and_merging_to_native_owne
     from semantica.deduplication.entity_merger import EntityMerger
     from semantica.deduplication.duplicate_detector import DuplicateDetector
     calls = []
-    for cls, method in [(EntityResolver, 'detect_duplicate_groups'),
+    for cls, method in [(EntityResolver, 'resolve_entities'),
+                        (EntityResolver, 'detect_duplicate_groups'),
                         (DuplicateDetector, 'detect_duplicate_groups'),
                         (EntityMerger, 'merge_entity_group')]:
         original = getattr(cls, method, None)
@@ -200,7 +201,9 @@ def test_project_identity_delegates_matching_grouping_and_merging_to_native_owne
     entities, mapping, _ = resolve([mention('mention:first'), mention('mention:second')], [])
     assert len(entities) == 1
     assert mapping['mention:first'] == mapping['mention:second']
-    assert set(calls) == {('EntityResolver', 'detect_duplicate_groups'),
+    assert calls.count(('EntityResolver', 'resolve_entities')) == 1
+    assert set(calls) == {('EntityResolver', 'resolve_entities'),
+                          ('EntityResolver', 'detect_duplicate_groups'),
                           ('DuplicateDetector', 'detect_duplicate_groups'),
                           ('EntityMerger', 'merge_entity_group')}
 
