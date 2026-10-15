@@ -411,11 +411,97 @@ def _native_parallel_map(items: list[Any], handler: Any, parallelism: int, on_co
     return ordered
 
 
+def _extraction_context_batches(window, context, max_bytes=None):
+    """Keep complete table rows with headers and notes within the request budget.
+
+    The original context is retained verbatim when it fits, preserving existing
+    checkpoint keys. Oversized contexts visit every record; canonical coordinates
+    stay unchanged and are never truncated to make a request fit.
+    """
+    limit = MODEL_CONTEXT_BYTES if max_bytes is None else max_bytes
+
+    def size(records):
+        return _context_size({"text": window, "structure": records})
+
+    if size(context) <= limit:
+        return [context]
+    by_ref = {record["ref"]: record for record in context}
+    tables = {}
+    units = []
+    for record in context:
+        if record.get("cell") and record.get("table_id"):
+            tables.setdefault(record["table_id"], []).append(record)
+        else:
+            units.append([record])
+    for cells in tables.values():
+        shared = [cell for cell in cells if cell.get("structure", {}).get("column_header")
+                  or cell.get("structure", {}).get("row_section")]
+        note_refs = {note.get("$ref") for cell in cells
+                     for key in ("captions", "footnotes")
+                     for note in cell.get("structure", {}).get(key, []) if isinstance(note, dict)}
+        shared += [by_ref[ref] for ref in sorted(note_refs - {None}) if ref in by_ref]
+        # Repeat a spanning label in every row it covers. Its original ref and
+        # offsets remain intact, so a large merged section need not be sent as
+        # one indivisible request.
+        data_cells = [cell for cell in cells if cell not in shared]
+        rows = sorted({cell["structure"]["start_row_offset_idx"] for cell in data_cells})
+        for row in rows:
+            row_cells = [cell for cell in data_cells
+                         if cell["structure"]["start_row_offset_idx"] <= row
+                         < max(cell["structure"]["start_row_offset_idx"] + 1,
+                               cell["structure"].get("end_row_offset_idx", row + 1))]
+            units.append(shared + row_cells)
+        if not rows:
+            units.append(shared)
+
+    def union(left, right):
+        refs = {record["ref"] for record in [*left, *right]}
+        return [record for record in context if record["ref"] in refs]
+
+    batches, current = [], []
+    for unit in units or [[]]:
+        candidate = union(current, unit)
+        if size(candidate) > limit:
+            if current:
+                batches.append(current)
+            current = union([], unit)
+            if size(current) > limit:
+                raise SemanticArtifactError(
+                    "an indivisible evidence group exceeds the extraction context budget",
+                    code="EXTRACTION_CONTEXT_BUDGET_EXCEEDED", retryable=False,
+                    diagnostic={"contextBytes": size(current), "limitBytes": limit,
+                                "upstreamRequestSent": False},
+                )
+        else:
+            current = candidate
+    if current or not batches:
+        batches.append(current)
+    return batches
+
+
 def _extract_window(text, model_relay, extraction_spec, locations, item):
     start, end, window = item
     context = _window_grounding_context(locations, start, end)
-    if context and _context_size({"text": window, "structure": context}) > MODEL_CONTEXT_BYTES:
-        raise SemanticArtifactError("located extraction context exceeds the production budget; narrow the source scope")
+    batches = _extraction_context_batches(window, context)
+    if len(batches) == 1:
+        return _extract_window_context(text, model_relay, extraction_spec, item, batches[0])
+    entities, relations, receipts, restored = [], [], [], True
+    for index, batch in enumerate(batches):
+        extracted, batch_receipts, batch_restored = _extract_window_context(
+            text, model_relay, extraction_spec, item, batch)
+        # IDs are local to each native extraction call. Namespace them without
+        # making identity decisions; native resolution owns entity equivalence.
+        ids = {entity["id"]: f"batch{index}:{entity['id']}" for entity in extracted["entities"]}
+        entities.extend({**entity, "id": ids[entity["id"]]} for entity in extracted["entities"])
+        relations.extend({**relation, "subject": ids[relation["subject"]],
+                          "object": ids[relation["object"]]} for relation in extracted["relations"])
+        receipts.extend(batch_receipts)
+        restored = restored and batch_restored
+    return {"entities": entities, "relations": relations}, receipts, restored
+
+
+def _extract_window_context(text, model_relay, extraction_spec, item, context):
+    start, end, window = item
     checkpoint = active_checkpoint.get()
     checkpoint_key = {
         "promptVersion": "located-spans-v2",
