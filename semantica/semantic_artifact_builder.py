@@ -13,12 +13,14 @@ import os
 import re
 import tempfile
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
 from bisect import bisect_left
-from contextvars import copy_context
+from contextlib import contextmanager
+from contextvars import ContextVar, copy_context
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -82,6 +84,53 @@ class SemanticArtifactError(RuntimeError):
         self.upstream_request_id = upstream_request_id
         self.diagnostic = diagnostic
         self.gateway = gateway
+
+
+class _RelayCooldown:
+    """Share Retry-After across workers, allowing one probe after a failure."""
+
+    def __init__(self):
+        self.condition = threading.Condition()
+        self.blocked_until = 0.0
+        self.recovering = False
+        self.probing = False
+        self.generation = 0
+
+    @contextmanager
+    def admit(self):
+        with self.condition:
+            while self.recovering and (self.probing or time.monotonic() < self.blocked_until):
+                self.condition.wait(None if self.probing else max(0, self.blocked_until - time.monotonic()))
+            probe = self.recovering
+            generation = self.generation
+            if probe:
+                self.probing = True
+        try:
+            yield
+        except Exception as error:
+            with self.condition:
+                if getattr(error, "retryable", False):
+                    delay = getattr(error, "retry_after_ms", None)
+                    delay = delay if isinstance(delay, int) and not isinstance(delay, bool) and delay >= 0 else 1000
+                    self.blocked_until = max(self.blocked_until, time.monotonic() + delay / 1000)
+                    self.recovering = True
+                    self.generation += 1
+                if probe:
+                    self.probing = False
+                    if not getattr(error, "retryable", False) and generation == self.generation:
+                        self.recovering = False
+                self.condition.notify_all()
+            raise
+        else:
+            with self.condition:
+                if probe:
+                    self.probing = False
+                    if generation == self.generation:
+                        self.recovering = False
+                self.condition.notify_all()
+
+
+_active_relay_gates: ContextVar[Any] = ContextVar("active_relay_gates", default=None)
 
 
 class DocumentQualityError(SemanticArtifactError):
@@ -328,6 +377,7 @@ def _native_parallel_map(items: list[Any], handler: Any, parallelism: int, on_co
     results = ParallelismManager(max_workers=max(1, parallelism)).execute_parallel(
         tasks,
         fail_fast_permanent=True,
+        fail_fast=True,
     )
     ordered = [None] * len(items)
     for result in results:
@@ -338,7 +388,12 @@ def _native_parallel_map(items: list[Any], handler: Any, parallelism: int, on_co
             )
             if hasattr(cause, "retryable"):
                 failure.retryable = cause.retryable
-            if isinstance((item := items[int(result.task_id)]), tuple) and len(item) >= 2 \
+            item = items[int(result.task_id)]
+            # Flattened project jobs carry source/window indices before the window.
+            source_index = None
+            if isinstance(item, tuple) and len(item) == 3 and isinstance(item[2], tuple):
+                source_index, _, item = item
+            if isinstance(item, tuple) and len(item) >= 2 \
                     and isinstance(item[0], int) and isinstance(item[1], int):
                 failure.parallel_context = {
                     "taskId": result.task_id,
@@ -347,6 +402,8 @@ def _native_parallel_map(items: list[Any], handler: Any, parallelism: int, on_co
                 }
             else:
                 failure.parallel_context = {"taskId": result.task_id}
+            if source_index is not None:
+                failure.parallel_context["sourceIndex"] = source_index
             failure.parallel_context["errorType"] = type(cause).__name__
             failure.parallel_context["errorMessage"] = str(cause)[:500]
             raise failure from cause
@@ -354,101 +411,156 @@ def _native_parallel_map(items: list[Any], handler: Any, parallelism: int, on_co
     return ordered
 
 
-def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extraction_spec=None, progress=None, progress_base: int = 0, progress_total: int = 1, parallelism: int = 1, document=None):
+def _extract_window(text, model_relay, extraction_spec, locations, item):
+    start, end, window = item
+    context = _window_grounding_context(locations, start, end)
+    if context and _context_size({"text": window, "structure": context}) > MODEL_CONTEXT_BYTES:
+        raise SemanticArtifactError("located extraction context exceeds the production budget; narrow the source scope")
+    checkpoint = active_checkpoint.get()
+    checkpoint_key = {
+        "sourceText": _digest_bytes(text.encode("utf-8")),
+        "window": {"start": start, "end": end, "digest": _digest_bytes(window.encode("utf-8"))},
+        "model": getattr(model_relay, "model_id", None),
+        "bindingId": getattr(model_relay, "binding_id", None),
+        "contextWindowTokens": getattr(model_relay, "context_window_tokens", None),
+        "maxOutputTokens": getattr(model_relay, "max_output_tokens", None),
+        "spec": getattr(extraction_spec, "digest", None),
+        "groundingContext": stable_digest(context),
+    }
+    if checkpoint:
+        cached = checkpoint.read("chunk-extraction", checkpoint_key)
+        if cached is not None:
+            receipts = [ModelReceipt.model_validate(item) for item in cached.get("receipts", [])]
+            for receipt in receipts:
+                object.__setattr__(receipt, "_checkpoint_restored", True)
+            extracted = cached["extracted"]
+            mentions = []
+            for entity in extracted["entities"]:
+                begin, finish = _find_occurrence(window, entity["name"], entity.get("occurrence"))
+                mentions.append(Entity(entity["name"], entity["type"], begin, finish,
+                    entity.get("confidence", 0.9), {"mention_id": entity["id"]}))
+            names = {entity.metadata["mention_id"]: entity.text for entity in mentions}
+            candidates = {"relations": [{**relation, "subject_id": relation["subject"],
+                "object_id": relation["object"],
+                "subject": names.get(relation["subject"], ""),
+                "object": names.get(relation["object"], ""),
+            } for relation in extracted["relations"]]}
+            rejections = []
+            accepted = _parse_grounded_relation_result(candidates, mentions, window,
+                "bifrost", model_relay.model_id, reject_invalid=True, rejections=rejections,
+                grounding_context=context)
+            if rejections:
+                if not receipts:
+                    raise SemanticArtifactError("restored extraction has no model receipt", code="CHECKPOINT_RECEIPT_MISSING")
+                extracted = {**extracted, "relations": [{
+                    "subject": relation.metadata["subject_id"], "predicate": relation.predicate,
+                    "object": relation.metadata["object_id"], "evidence": relation.context,
+                    "evidence_occurrence": relation.metadata["evidence_occurrence"],
+                    "qualifiers": relation.metadata["qualifiers"], "confidence": relation.confidence,
+                    "supporting_refs": relation.metadata.get("supporting_refs", []),
+                } for relation in accepted]}
+                receipts[-1].metadata.setdefault("rejected_candidates", []).extend(rejections)
+                checkpoint.write("chunk-extraction", checkpoint_key, {"extracted": extracted,
+                    "receipts": [receipt.model_dump(mode="json", by_alias=True) for receipt in receipts]})
+            return extracted, receipts, True
+    window = item[2]
+    entities, relations, provider = extract_grounded_window(
+        window, model=model_relay.model_id,
+        provider_instance=_project_model_provider(model_relay),
+        provider_factory=lambda: _project_model_provider(model_relay),
+        extraction_spec=extraction_spec, retries=1,
+        grounding_context=context,
+    )
+    extracted = {
+        "entities": [{
+            "id": entity.metadata["mention_id"],
+            "name": entity.text,
+            "type": entity.label,
+            "occurrence": entity.metadata["span_occurrence"],
+            "confidence": entity.confidence,
+            "attributes": entity.attributes,
+        } for entity in entities],
+        "relations": [{
+            "subject": relation.metadata["subject_id"],
+            "predicate": relation.predicate,
+            "object": relation.metadata["object_id"],
+            "evidence": relation.context,
+            "evidence_occurrence": relation.metadata["evidence_occurrence"],
+            "qualifiers": relation.metadata["qualifiers"],
+            "supporting_refs": relation.metadata.get("supporting_refs", []),
+            "confidence": relation.confidence,
+        } for relation in relations],
+    }
+    restored = bool(provider.receipts) and all(
+        getattr(receipt, "_checkpoint_restored", False) is True for receipt in provider.receipts
+    )
+    if checkpoint:
+        checkpoint.write("chunk-extraction", checkpoint_key, {
+            "extracted": extracted,
+            "receipts": [receipt.model_dump(mode="json", by_alias=True) for receipt in provider.receipts],
+        })
+    return extracted, provider.receipts, restored
+
+
+def _extract_project_sources(parsed_sources, request, progress):
+    windows = [list(_text_windows(parsed[0])) for _, _, parsed in parsed_sources]
+    locations = [_docling_locations(parsed[1] or {}, parsed[0]) for _, _, parsed in parsed_sources]
+    total = sum(map(len, windows))
+    extracted = [[None] * len(items) for items in windows]
+    embedded = [[None] * ((len(items) + 7) // 8) for items in windows]
+    lock = threading.Lock()
+
+    def phase(stage, jobs, handler, destination, base, span):
+        completed = restored = 0
+        def done(_index, value):
+            nonlocal completed, restored
+            source_index, item_index, item = jobs[_index]
+            count = len(item) if stage == "embedding" else 1
+            reused = getattr(value[1], "_checkpoint_restored", False) if stage == "embedding" else value[2]
+            with lock:
+                destination[source_index][item_index] = value
+                completed += count
+                restored += count if reused else 0
+                if progress:
+                    progress({"stage": stage, "percent": base + round(completed / max(1, total) * span),
+                              "detail": f"{stage.capitalize()} {completed} / {total} chunks",
+                              "metadata": {"completedChunks": completed, "restoredChunks": restored, "totalChunks": total}})
+        if progress:
+            progress({"stage": stage, "percent": base, "detail": f"{stage.capitalize()} 0 / {total} chunks",
+                      "metadata": {"completedChunks": 0, "totalChunks": total}})
+        _native_parallel_map(jobs, handler, request.parallelism, done)
+
+    jobs = [(source_index, index, items[index])
+            for index in range(max(map(len, windows), default=0))
+            for source_index, items in enumerate(windows) if index < len(items)]
+    try:
+        phase("extracting", jobs,
+              lambda job: _extract_window(parsed_sources[job[0]][2][0], request.relays["model"],
+                                          request.recipe.extraction_spec, locations[job[0]], job[2]),
+              extracted, 20, 40)
+    except ProcessingError as exc:
+        raise _typed_extraction_error(exc) from exc
+    batches = [[items[offset:offset + 8] for offset in range(0, len(items), 8)] for items in windows]
+    jobs = [(source_index, index, items[index])
+            for index in range(max(map(len, batches), default=0))
+            for source_index, items in enumerate(batches) if index < len(items)]
+    phase("embedding", jobs,
+          lambda job: _embed_batch_checkpointed(job[2], parsed_sources[job[0]][2][0], request.relays["embedding"]),
+          embedded, 60, 30)
+    return [_extract_and_embed(parsed[0], request.relays["model"], request.relays["embedding"],
+                               extraction_spec=request.recipe.extraction_spec, document=parsed[1],
+                               extracted_windows=extracted[index], embedded_batches=embedded[index])
+            for index, (_, _, parsed) in enumerate(parsed_sources)]
+
+
+def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extraction_spec=None, progress=None, progress_base: int = 0, progress_total: int = 1, parallelism: int = 1, document=None, extracted_windows=None, embedded_batches=None):
     result: dict[str, list] = {"entities": [], "relations": []}
     receipts, embeddings = [], []
     seen_entities, seen_relations = set(), set()
     windows = list(_text_windows(text))
     locations = _docling_locations(document or {}, text)
     def extract(item):
-        start, end, window = item
-        context = _window_grounding_context(locations, start, end)
-        if context and _context_size({"text": window, "structure": context}) > MODEL_CONTEXT_BYTES:
-            raise SemanticArtifactError("located extraction context exceeds the production budget; narrow the source scope")
-        checkpoint = active_checkpoint.get()
-        checkpoint_key = {
-            "sourceText": _digest_bytes(text.encode("utf-8")),
-            "window": {"start": start, "end": end, "digest": _digest_bytes(window.encode("utf-8"))},
-            "model": getattr(model_relay, "model_id", None),
-            "bindingId": getattr(model_relay, "binding_id", None),
-            "contextWindowTokens": getattr(model_relay, "context_window_tokens", None),
-            "maxOutputTokens": getattr(model_relay, "max_output_tokens", None),
-            "spec": getattr(extraction_spec, "digest", None),
-            "groundingContext": stable_digest(context),
-        }
-        if checkpoint:
-            cached = checkpoint.read("chunk-extraction", checkpoint_key)
-            if cached is not None:
-                receipts = [ModelReceipt.model_validate(item) for item in cached.get("receipts", [])]
-                for receipt in receipts:
-                    object.__setattr__(receipt, "_checkpoint_restored", True)
-                extracted = cached["extracted"]
-                mentions = []
-                for entity in extracted["entities"]:
-                    begin, finish = _find_occurrence(window, entity["name"], entity.get("occurrence"))
-                    mentions.append(Entity(entity["name"], entity["type"], begin, finish,
-                        entity.get("confidence", 0.9), {"mention_id": entity["id"]}))
-                names = {entity.metadata["mention_id"]: entity.text for entity in mentions}
-                candidates = {"relations": [{**relation, "subject_id": relation["subject"],
-                    "object_id": relation["object"],
-                    "subject": names.get(relation["subject"], ""),
-                    "object": names.get(relation["object"], ""),
-                } for relation in extracted["relations"]]}
-                rejections = []
-                accepted = _parse_grounded_relation_result(candidates, mentions, window,
-                    "bifrost", model_relay.model_id, reject_invalid=True, rejections=rejections,
-                    grounding_context=context)
-                if rejections:
-                    if not receipts:
-                        raise SemanticArtifactError("restored extraction has no model receipt", code="CHECKPOINT_RECEIPT_MISSING")
-                    extracted = {**extracted, "relations": [{
-                        "subject": relation.metadata["subject_id"], "predicate": relation.predicate,
-                        "object": relation.metadata["object_id"], "evidence": relation.context,
-                        "evidence_occurrence": relation.metadata["evidence_occurrence"],
-                        "qualifiers": relation.metadata["qualifiers"], "confidence": relation.confidence,
-                        "supporting_refs": relation.metadata.get("supporting_refs", []),
-                    } for relation in accepted]}
-                    receipts[-1].metadata.setdefault("rejected_candidates", []).extend(rejections)
-                    checkpoint.write("chunk-extraction", checkpoint_key, {"extracted": extracted,
-                        "receipts": [receipt.model_dump(mode="json", by_alias=True) for receipt in receipts]})
-                return extracted, receipts, True
-        window = item[2]
-        entities, relations, provider = extract_grounded_window(
-            window, model=model_relay.model_id,
-            provider_instance=_project_model_provider(model_relay),
-            provider_factory=lambda: _project_model_provider(model_relay),
-            extraction_spec=extraction_spec, retries=1,
-            grounding_context=context,
-        )
-        extracted = {
-            "entities": [{
-                "id": entity.metadata["mention_id"],
-                "name": entity.text,
-                "type": entity.label,
-                "occurrence": entity.metadata["span_occurrence"],
-                "confidence": entity.confidence,
-                "attributes": entity.attributes,
-            } for entity in entities],
-            "relations": [{
-                "subject": relation.metadata["subject_id"],
-                "predicate": relation.predicate,
-                "object": relation.metadata["object_id"],
-                "evidence": relation.context,
-                "evidence_occurrence": relation.metadata["evidence_occurrence"],
-                "qualifiers": relation.metadata["qualifiers"],
-                "supporting_refs": relation.metadata.get("supporting_refs", []),
-                "confidence": relation.confidence,
-            } for relation in relations],
-        }
-        restored = bool(provider.receipts) and all(
-            getattr(receipt, "_checkpoint_restored", False) is True for receipt in provider.receipts
-        )
-        if checkpoint:
-            checkpoint.write("chunk-extraction", checkpoint_key, {
-                "extracted": extracted,
-                "receipts": [receipt.model_dump(mode="json", by_alias=True) for receipt in provider.receipts],
-            })
-        return extracted, provider.receipts, restored
+        return _extract_window(text, model_relay, extraction_spec, locations, item)
 
     if progress:
         progress({
@@ -457,7 +569,9 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
             "detail": f"Extracting knowledge {progress_base} / {progress_total} chunks",
             "metadata": {"completedChunks": progress_base, "totalChunks": progress_total},
         })
-    extracted_windows = [None] * len(windows)
+    supplied_extraction = extracted_windows is not None
+    if not supplied_extraction:
+        extracted_windows = [None] * len(windows)
     completed = progress_base
     restored = 0
     progress_lock = threading.Lock()
@@ -476,7 +590,8 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
                     "metadata": {"completedChunks": completed, "restoredChunks": restored, "totalChunks": progress_total},
                 })
     try:
-        _native_parallel_map(windows, extract, parallelism, extraction_complete)
+        if not supplied_extraction:
+            _native_parallel_map(windows, extract, parallelism, extraction_complete)
     except ProcessingError as exc:
         raise _typed_extraction_error(exc) from exc
     for index, ((start, end, window), (extracted, extraction_receipts, _)) in enumerate(zip(windows, extracted_windows), start=1):
@@ -514,7 +629,9 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
             "detail": f"Embedding {progress_base} / {progress_total} chunks",
             "metadata": {"completedChunks": progress_base, "totalChunks": progress_total},
         })
-    embedded_batches = [None] * len(batches)
+    supplied_embeddings = embedded_batches is not None
+    if not supplied_embeddings:
+        embedded_batches = [None] * len(batches)
     completed = 0
     restored = 0
     def embedding_complete(index: int, value: Any):
@@ -532,7 +649,8 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
                     "detail": f"Embedding {count} / {progress_total} chunks",
                     "metadata": {"completedChunks": count, "restoredChunks": restored, "totalChunks": progress_total},
                 })
-    _native_parallel_map(batches, lambda batch: _embed_batch_checkpointed(batch, text, embedding_relay), parallelism, embedding_complete)
+    if not supplied_embeddings:
+        _native_parallel_map(batches, lambda batch: _embed_batch_checkpointed(batch, text, embedding_relay), parallelism, embedding_complete)
     for batch, (vectors, receipt) in zip(batches, embedded_batches):
         receipts.append(receipt)
         embeddings.extend({"start_char": start, "end_char": end, "vector": vector}
@@ -555,6 +673,17 @@ def _relay_json(relay: Any, payload: dict[str, Any], operation: str) -> tuple[di
         receipt = ModelReceipt.model_validate(cached["receipt"])
         object.__setattr__(receipt, "_checkpoint_restored", True)
         return cached["response"], receipt
+    gates = _active_relay_gates.get()
+    if gates is None:
+        return _relay_uncached(relay, payload, operation, checkpoint, cache_key)
+    key = (relay.base_url, getattr(relay, "binding_id", None), relay.model_id)
+    with gates[0]:
+        gate = gates[1].setdefault(key, _RelayCooldown())
+    with gate.admit():
+        return _relay_uncached(relay, payload, operation, checkpoint, cache_key)
+
+
+def _relay_uncached(relay, payload, operation, checkpoint, cache_key):
     token = os.environ.get(relay.authorization_env)
     if not token:
         raise SemanticArtifactError(f"missing relay authorization environment: {relay.authorization_env}")
@@ -638,6 +767,10 @@ def _safe_diagnostic(value: Any) -> dict[str, Any] | None:
                 diagnostic["endpoint"] = urllib.parse.urlunsplit((parsed.scheme, parsed.netloc, parsed.path, "", ""))[:500]
         except ValueError:
             pass
+    if value.get("syscall") in {"connect", "read", "write", "getaddrinfo"}:
+        diagnostic["syscall"] = value["syscall"]
+    if value.get("phase") in {"connect_or_headers", "response_body"}:
+        diagnostic["phase"] = value["phase"]
     for key in ("status", "retryAfterMs"):
         item = value.get(key)
         if isinstance(item, int) and not isinstance(item, bool) and item >= 0:
@@ -2292,9 +2425,11 @@ def _change_delta(
 def build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=None, *, persist_snapshot: bool = True) -> dict[str, Any]:
     """Build, validate, and materialize Semantica's generic semantic artifacts."""
     token = active_checkpoint.set(SnapshotCheckpoint(request))
+    gate_token = _active_relay_gates.set((threading.Lock(), {}))
     try:
         return _build_semantic_artifacts(request, progress=progress, persist_snapshot=persist_snapshot)
     finally:
+        _active_relay_gates.reset(gate_token)
         active_checkpoint.reset(token)
 
 
@@ -2349,18 +2484,10 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
         force_ocr = source.source_id in request.recipe.force_ocr_source_ids
         parsed = _load_parsed_source(source, parsed_refs[source.source_id], force_ocr, request.document_processing.model_dump(mode="json", by_alias=True))
         parsed_sources.append((source, force_ocr, parsed))
-    total_chunks = sum(len(list(_text_windows(parsed[0]))) for _, _, parsed in parsed_sources) if request.recipe.id == "model" else 0
-    completed_chunks = 0
-    for source, force_ocr, parsed in parsed_sources:
+    model_results = _extract_project_sources(parsed_sources, request, progress) if request.recipe.id == "model" else []
+    for source_index, (source, force_ocr, parsed) in enumerate(parsed_sources):
         if request.recipe.id == "model":
-            model_result, embeddings, source_receipts = _extract_and_embed(
-                parsed[0], request.relays["model"], request.relays["embedding"],
-                extraction_spec=request.recipe.extraction_spec,
-                progress=progress, progress_base=completed_chunks, progress_total=total_chunks,
-                parallelism=request.parallelism,
-                document=parsed[1],
-            )
-            completed_chunks += len(embeddings)
+            model_result, embeddings, source_receipts = model_results[source_index]
             built_source = _build_source(source, force_ocr, model_result, parsed)
             built_source["embeddings"] = embeddings
             model_receipts.extend(source_receipts)
