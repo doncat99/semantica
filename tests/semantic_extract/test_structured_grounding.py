@@ -25,6 +25,17 @@ def test_prompt_context_keeps_ambiguous_repeated_quotes():
     assert _prompt_grounding_context('mass mass', [{'ref': 'a', 'quote': 'mass'}])[0]['quote'] == 'mass'
 
 
+def test_prompt_context_omits_storage_aliases_and_empty_fields_without_losing_layout():
+    from semantica.semantic_extract.methods import _prompt_grounding_context
+    record = {'ref': '#/texts/1', 'source_ref': '#/texts/1', 'start': 40, 'end': 44,
+              'quote': 'mass', 'page': 1, 'bbox': [1.25, 2, 3, 4], 'source_kind': 'text',
+              'table_id': None, 'cell': None, 'structure': {}, 'section_path': []}
+    projected = _prompt_grounding_context('mass', [record])[0]
+    assert set(projected) == {'ref', 'window_span', 'page', 'bbox', 'source_kind'}
+    assert projected['bbox'] == record['bbox']
+    assert record['source_ref'] == '#/texts/1' and record['quote'] == 'mass'
+
+
 @pytest.mark.parametrize('stage', ['entities', 'relations'])
 def test_output_limit_cannot_drop_caller_owned_structure(monkeypatch, stage):
     from semantica.semantic_extract import methods

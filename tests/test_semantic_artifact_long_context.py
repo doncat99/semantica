@@ -382,6 +382,24 @@ def test_relationship_discovery_skips_single_source_without_model_call(monkeypat
     ) == ([], [], [])
 
 
+def test_relationship_prompt_sends_shared_evidence_once_and_retains_candidate_membership(monkeypatch):
+    builds, entities, evidence = _relationship_fixture(include_third=True)
+    candidates = pipeline._relationship_candidates(builds, entities, [], [], evidence)
+    def generate(_relay, _operation, _instruction, context, _schema):
+        rows = context['evidence']
+        assert len(rows) == len({row['id'] for row in rows})
+        for original, projected in zip(candidates, context['candidates']):
+            assert 'evidence' not in projected
+            assert projected['evidence_ids'] == [row['id'] for row in original['evidence']]
+            assert projected['endpoint_evidence'] == {
+                endpoint: [row['id'] for row in original['evidence'] if endpoint in row['endpoint_ids']]
+                for endpoint in (original['source_entity']['id'], original['target_entity']['id'])}
+        assert pipeline._context_size(context) <= pipeline.MODEL_CONTEXT_BYTES
+        return {'relations': []}, []
+    monkeypatch.setattr(pipeline, '_product_json', generate)
+    assert pipeline._relationship_batch(candidates, None) == ([], [])
+
+
 def test_relationship_candidates_keep_all_cross_source_pairs():
     builds, entities, evidence = _relationship_fixture(include_third=True)
     candidates = pipeline._relationship_candidates(builds, entities, [], [], evidence)
@@ -391,6 +409,52 @@ def test_relationship_candidates_keep_all_cross_source_pairs():
         frozenset(("entity-1", "entity-3")),
         frozenset(("entity-2", "entity-3")),
     }
+
+
+def test_relationship_batches_budget_the_final_prompt_and_reject_indivisible_context():
+    builds, entities, evidence = _relationship_fixture(include_third=True)
+    candidates = pipeline._relationship_candidates(builds, entities, [], [], evidence)
+    size = max(pipeline._context_size(pipeline._relationship_context({'candidates': [item]}))
+               for item in candidates)
+    batches = pipeline._context_batches({}, [('candidates', item) for item in candidates],
+                                        max_bytes=size, project=pipeline._relationship_context)
+    assert [item for batch in batches for item in batch['candidates']] == candidates
+    assert all(pipeline._context_size(pipeline._relationship_context(batch)) <= size for batch in batches)
+    with pytest.raises(pipeline.SemanticArtifactError, match='indivisible'):
+        pipeline._context_batches({}, [('candidates', candidates[0])], max_bytes=50,
+                                  project=pipeline._relationship_context)
+
+
+def test_relationship_schema_keeps_candidate_specific_support():
+    builds, entities, evidence = _relationship_fixture(include_third=True)
+    candidates = pipeline._relationship_candidates(builds, entities, [], [], evidence)
+    context = pipeline._relationship_context({'candidates': candidates})
+    candidate = candidates[0]
+    relation = {
+        'candidate_id': candidate['candidate_id'],
+        'source_entity_id': candidate['source_entity']['id'],
+        'target_entity_id': candidate['target_entity']['id'],
+        'predicate': 'related', 'qualifiers': {'polarity': 'positive'}, 'reason': 'Supported',
+        'citations': [{'evidence_id': row['id'], 'quote': row['quote']} for row in candidate['evidence']],
+    }
+    pipeline._RelationshipOutput.model_validate({'relations': [relation]}, context=context)
+    foreign = next(row for row in context['evidence'] if row['id'] not in context['candidates'][0]['evidence_ids'])
+    relation['citations'].append({'evidence_id': foreign['id'], 'quote': foreign['quote']})
+    with pytest.raises(ValueError, match='both endpoints and sources'):
+        pipeline._RelationshipOutput.model_validate({'relations': [relation]}, context=context)
+    relation['citations'] = [{'evidence_id': 'unknown', 'quote': 'unknown'}]
+    with pytest.raises(ValueError, match='supplied evidence_id'):
+        pipeline._RelationshipOutput.model_validate({'relations': [relation]}, context=context)
+
+
+def test_relationship_context_rejects_conflicting_evidence_ids():
+    builds, entities, evidence = _relationship_fixture(include_third=True)
+    candidates = pipeline._relationship_candidates(builds, entities, [], [], evidence)
+    shared = next(row for row in candidates[1]['evidence']
+                  if row['id'] in {item['id'] for item in candidates[0]['evidence']})
+    shared['quote'] = 'conflicting content'
+    with pytest.raises(pipeline.SemanticArtifactError, match='conflicting source content'):
+        pipeline._relationship_context({'candidates': candidates})
 
 
 def test_relationship_discovery_rejects_evidence_from_one_source(monkeypatch):

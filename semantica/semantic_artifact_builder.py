@@ -186,11 +186,13 @@ class _RelationshipOutput(_ProductOutput):
             if ({relation.source_entity_id, relation.target_entity_id} != endpoints
                     or relation.source_entity_id == relation.target_entity_id):
                 raise ValueError("relationship must use the supplied distinct endpoints")
-            rows = {item["id"]: item for item in candidate["evidence"]}
+            rows = {item["id"]: item for item in context.get("evidence", [])
+                    if item["id"] in candidate["evidence_ids"]}
             refs = {citation.evidence_id for citation in relation.citations}
             if (not refs.issubset(rows)
                     or len({rows[ref]["source_id"] for ref in refs}) < 2
-                    or any(not any(endpoint in rows[ref]["endpoint_ids"] for ref in refs) for endpoint in endpoints)):
+                    or any(not refs.intersection(candidate["endpoint_evidence"].get(endpoint, []))
+                           for endpoint in endpoints)):
                 raise ValueError("relationship requires exact evidence from both endpoints and sources")
         return self
 
@@ -310,18 +312,21 @@ def _context_size(value: Any) -> int:
     return len(json.dumps(value, ensure_ascii=False).encode("utf-8"))
 
 
-def _context_batches(base: dict[str, Any], records: list[tuple[str, Any]], max_bytes: int = MODEL_CONTEXT_BYTES) -> list[dict[str, Any]]:
+def _context_batches(base: dict[str, Any], records: list[tuple[str, Any]], max_bytes: int = MODEL_CONTEXT_BYTES,
+                     *, project: Any = None) -> list[dict[str, Any]]:
     """Visit every input record; an indivisible oversize record is an explicit error."""
-    if _context_size(base) > max_bytes:
+    def size(value):
+        return _context_size(project(value) if project else value)
+    if size(base) > max_bytes:
         raise SemanticArtifactError("fixed model context exceeds the production budget")
     batches, current = [], dict(base)
     for key, record in records:
         candidate = {**current, key: [*current.get(key, []), record]}
-        if _context_size(candidate) > max_bytes:
+        if size(candidate) > max_bytes:
             if current != base:
                 batches.append(current)
             current = {**base, key: [record]}
-            if _context_size(current) > max_bytes:
+            if size(current) > max_bytes:
                 raise SemanticArtifactError(f"indivisible {key} record exceeds the production budget")
         else:
             current = candidate
@@ -1652,8 +1657,28 @@ def _relationship_candidates(source_builds: list[dict[str, Any]], entities: list
     return sorted(candidates, key=lambda item: item["candidate_id"])
 
 
+def _relationship_context(batch: dict[str, Any]) -> dict[str, Any]:
+    """Share quote text while keeping evidence membership specific to each candidate."""
+    evidence, candidates = {}, []
+    for candidate in batch.get("candidates", []):
+        for row in candidate["evidence"]:
+            shared = {key: row[key] for key in ("id", "quote", "source_id")}
+            if row["id"] in evidence and evidence[row["id"]] != shared:
+                raise SemanticArtifactError("relationship evidence ID has conflicting source content")
+            evidence[row["id"]] = shared
+        candidates.append({
+            **{key: value for key, value in candidate.items() if key != "evidence"},
+            "evidence_ids": [row["id"] for row in candidate["evidence"]],
+            "endpoint_evidence": {
+                endpoint: [row["id"] for row in candidate["evidence"] if endpoint in row["endpoint_ids"]]
+                for endpoint in (candidate["source_entity"]["id"], candidate["target_entity"]["id"])
+            },
+        })
+    return {"candidates": candidates, "evidence": list(evidence.values())}
+
+
 def _relationship_batch(candidates: list[dict[str, Any]], relay: Any):
-    context = {"candidates": candidates, "evidence": [row for item in candidates for row in item["evidence"]]}
+    context = _relationship_context({"candidates": candidates})
     result, receipts = _product_json(relay, "relationship_discovery",
         "Discover only non-obvious semantic relationships between the supplied candidate entities. "
         "Use supplied IDs and exact complete citations from both endpoints and at least two sources. "
@@ -1670,7 +1695,7 @@ def _discover_cross_source_relationships(project_id: str, source_builds: list[di
     if not candidates:
         return [], [], []
     admitted_assertions, admitted_relations, receipts = [], [], []
-    for batch in _context_batches({"project_id": project_id}, [("candidates", item) for item in candidates]):
+    for batch in _context_batches({}, [("candidates", item) for item in candidates], project=_relationship_context):
         results, batch_receipts = _relationship_batch(batch["candidates"], relay)
         receipts.extend(batch_receipts)
         candidates_by_id = {item["candidate_id"]: item for item in batch["candidates"]}

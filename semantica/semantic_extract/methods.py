@@ -159,7 +159,10 @@ def _prompt_grounding_context(text: str, context: list[dict]) -> list[dict]:
     """Reference unique in-window quotes without changing canonical evidence."""
     result = []
     for record in context:
-        item = dict(record)
+        item = {key: value for key, value in record.items()
+                if key not in {"start", "end"} and value is not None and value != [] and value != {}}
+        if item.get("source_ref") == item.get("ref"):
+            item.pop("source_ref", None)
         quote = item.get("quote")
         if isinstance(quote, str) and quote and not item.get("cell"):
             start = text.find(quote)
