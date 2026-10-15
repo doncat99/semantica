@@ -26,6 +26,12 @@ def _digest(value: bytes) -> str:
 
 # These identify processing semantics, independently of package/build identity.
 PROCESSING_CONTRACTS = {
+    "chunkExtraction": "structural-grounded-v2",
+    "embedding": "gateway-batch-space-v1",
+    "sourceDocument": "located-document-v2",
+}
+# Legacy packages predate structural context and multi-span fact support.
+LEGACY_PROCESSING_CONTRACTS = {
     "chunkExtraction": "structural-grounded-v1",
     "embedding": "gateway-batch-space-v1",
     "sourceDocument": "located-document-v1",
@@ -46,7 +52,7 @@ def _resume_compatible(previous: Any, current: dict[str, Any]) -> bool:
         release = candidate.get("release", {})
         if release.get("schemaDigest") not in LEGACY_PROCESSING_SCHEMAS:
             return False
-        candidate["processingContracts"] = deepcopy(PROCESSING_CONTRACTS)
+        candidate["processingContracts"] = deepcopy(LEGACY_PROCESSING_CONTRACTS)
     if candidate == current:
         return True
     previous_release = candidate.get("release")

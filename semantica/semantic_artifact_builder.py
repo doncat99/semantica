@@ -25,7 +25,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, ValidationError, ValidationInfo, model_validator
 
-from .source import UnsupportedSourceFormatError, parse_source, source_content_revision
+from .source import SourceQualityError, UnsupportedSourceFormatError, parse_source, source_content_revision
 from .project_checkpoint import SnapshotCheckpoint, active_checkpoint
 from .identity import admit_identity_judgments, resolve_project_identities
 from .deduplication.similarity_calculator import SimilarityCalculator
@@ -59,7 +59,7 @@ from .semantic_artifact_schema import (
 )
 from .semantic_extract import NamedEntityRecognizer, extract_grounded_window
 from .semantic_extract.providers import BaseProvider
-from .semantic_extract.methods import _parse_grounded_relation_result
+from .semantic_extract.methods import _parse_grounded_relation_result, _grounded_qualifiers
 from .semantic_extract.types import Entity
 from .split.structural_chunker import StructuralChunker
 from .split.sliding_window_chunker import SlidingWindowChunker
@@ -354,13 +354,17 @@ def _native_parallel_map(items: list[Any], handler: Any, parallelism: int, on_co
     return ordered
 
 
-def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extraction_spec=None, progress=None, progress_base: int = 0, progress_total: int = 1, parallelism: int = 1):
+def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extraction_spec=None, progress=None, progress_base: int = 0, progress_total: int = 1, parallelism: int = 1, document=None):
     result: dict[str, list] = {"entities": [], "relations": []}
     receipts, embeddings = [], []
     seen_entities, seen_relations = set(), set()
     windows = list(_text_windows(text))
+    locations = _docling_locations(document or {}, text)
     def extract(item):
         start, end, window = item
+        context = _window_grounding_context(locations, start, end)
+        if context and _context_size({"text": window, "structure": context}) > MODEL_CONTEXT_BYTES:
+            raise SemanticArtifactError("located extraction context exceeds the production budget; narrow the source scope")
         checkpoint = active_checkpoint.get()
         checkpoint_key = {
             "sourceText": _digest_bytes(text.encode("utf-8")),
@@ -370,6 +374,7 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
             "contextWindowTokens": getattr(model_relay, "context_window_tokens", None),
             "maxOutputTokens": getattr(model_relay, "max_output_tokens", None),
             "spec": getattr(extraction_spec, "digest", None),
+            "groundingContext": stable_digest(context),
         }
         if checkpoint:
             cached = checkpoint.read("chunk-extraction", checkpoint_key)
@@ -391,7 +396,8 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
                 } for relation in extracted["relations"]]}
                 rejections = []
                 accepted = _parse_grounded_relation_result(candidates, mentions, window,
-                    "bifrost", model_relay.model_id, reject_invalid=True, rejections=rejections)
+                    "bifrost", model_relay.model_id, reject_invalid=True, rejections=rejections,
+                    grounding_context=context)
                 if rejections:
                     if not receipts:
                         raise SemanticArtifactError("restored extraction has no model receipt", code="CHECKPOINT_RECEIPT_MISSING")
@@ -400,6 +406,7 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
                         "object": relation.metadata["object_id"], "evidence": relation.context,
                         "evidence_occurrence": relation.metadata["evidence_occurrence"],
                         "qualifiers": relation.metadata["qualifiers"], "confidence": relation.confidence,
+                        "supporting_refs": relation.metadata.get("supporting_refs", []),
                     } for relation in accepted]}
                     receipts[-1].metadata.setdefault("rejected_candidates", []).extend(rejections)
                     checkpoint.write("chunk-extraction", checkpoint_key, {"extracted": extracted,
@@ -411,6 +418,7 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
             provider_instance=_project_model_provider(model_relay),
             provider_factory=lambda: _project_model_provider(model_relay),
             extraction_spec=extraction_spec, retries=1,
+            grounding_context=context,
         )
         extracted = {
             "entities": [{
@@ -428,6 +436,7 @@ def _extract_and_embed(text: str, model_relay: Any, embedding_relay: Any, extrac
                 "evidence": relation.context,
                 "evidence_occurrence": relation.metadata["evidence_occurrence"],
                 "qualifiers": relation.metadata["qualifiers"],
+                "supporting_refs": relation.metadata.get("supporting_refs", []),
                 "confidence": relation.confidence,
             } for relation in relations],
         }
@@ -879,7 +888,7 @@ def _docling_locations(document: dict[str, Any], text: str) -> list[dict[str, An
     }
 
     def add(quote: Any, item: dict[str, Any], *, table_id: str | None = None,
-            cell: str | None = None, cell_bbox: Any = None, locate_text: bool = True) -> None:
+            cell: str | None = None, cell_bbox: Any = None, locate_text: bool = True, structure=None) -> None:
         nonlocal cursor
         if not isinstance(quote, str) or not quote.strip():
             return
@@ -929,6 +938,8 @@ def _docling_locations(document: dict[str, Any], text: str) -> list[dict[str, An
             "source_kind": item.get("label"),
             "table_id": table_id,
             "cell": cell,
+            "ref": item.get("self_ref") + ("/" + cell if cell else ""),
+            "structure": structure or {},
         })
 
     def visit(ref: str) -> None:
@@ -956,7 +967,14 @@ def _docling_locations(document: dict[str, Any], text: str) -> list[dict[str, An
                 row, col = value.get("start_row_offset_idx"), value.get("start_col_offset_idx")
                 if isinstance(row, int) and isinstance(col, int):
                     add(value.get("text"), item, table_id=f"table:{stable_digest(ref).split(':')[1][:24]}",
-                        cell=f"r{row}:c{col}", cell_bbox=value.get("bbox"), locate_text=False)
+                        cell=f"r{row}:c{col}", cell_bbox=value.get("bbox"), locate_text=False,
+                        structure={**{key: value[key] for key in (
+                            "start_row_offset_idx", "end_row_offset_idx", "start_col_offset_idx", "end_col_offset_idx",
+                            "row_span", "col_span", "column_header", "row_header", "row_section") if key in value},
+                            "captions": item.get("captions", []), "footnotes": item.get("footnotes", [])})
+            for note in [*item.get("captions", []), *item.get("footnotes", [])]:
+                if isinstance(note, dict) and isinstance(note.get("$ref"), str):
+                    visit(note["$ref"])
             return
         add(item.get("text"), item)
 
@@ -968,6 +986,31 @@ def _docling_locations(document: dict[str, Any], text: str) -> list[dict[str, An
     return locations
 
 
+def _window_grounding_context(locations: list[dict[str, Any]], start: int, end: int) -> list[dict[str, Any]]:
+    """Supply located blocks and adjacent pages; never locate cells by matching short values."""
+    overlapping = [item for item in locations if item["start"] is not None
+                   and item["start"] < end and item["end"] > start]
+    pages = {item["page"] for item in overlapping if item.get("page") is not None}
+    return [dict(item) for item in locations if item in overlapping or (
+        item.get("page") is not None and any(abs(item["page"] - page) <= 1 for page in pages))]
+
+
+def _structural_evidence(item: dict[str, Any], representation_id: str, origin: str) -> EvidenceSpan:
+    fields = {key: item[key] for key in ("page", "bbox", "table_id", "cell", "section_path") if item.get(key) is not None}
+    if item["start"] is not None:
+        fields.update(start_char=item["start"], end_char=item["end"])
+    if not any(fields.get(key) is not None for key in ("start_char", "page", "table_id")):
+        raise SemanticArtifactError("structural supporting evidence has no source coordinates")
+    evidence_id = (_evidence_id(["cell", representation_id, item["table_id"], item["cell"]]) if item.get("cell")
+                   else _evidence_id(["structure", representation_id, item["ref"]]))
+    return EvidenceSpan(id=evidence_id, representation_id=representation_id, quote=item["quote"],
+        locator=DocumentLocator(representation_id=representation_id, origin=origin,
+            quote=item["quote"], quality="precise", **fields),
+        metadata={"role": "source-passage", "source_ref": item["source_ref"],
+                  "source_kind": item["source_kind"], "structural_ref": item["ref"],
+                  "structure": item.get("structure", {})})
+
+
 def _located_document_fields(locations: list[dict[str, Any]], start: int, end: int) -> tuple[dict[str, Any], dict[str, Any]]:
     matches = [item for item in locations if item["start"] is not None and item["start"] <= start and end <= item["end"]]
     if not matches:
@@ -977,6 +1020,7 @@ def _located_document_fields(locations: list[dict[str, Any]], start: int, end: i
     if item["section_path"]:
         locator["section_path"] = item["section_path"]
     metadata = {key: item[key] for key in ("source_ref", "source_kind") if item.get(key) is not None}
+    metadata["structural_ref"] = item["ref"]
     return locator, metadata
 
 
@@ -1005,19 +1049,7 @@ def _docling_cell_evidence(built: dict[str, Any]) -> list[EvidenceSpan]:
     for item in built.get("source_locations", []):
         if not item.get("cell"):
             continue
-        locator = {key: item[key] for key in ("page", "bbox", "table_id", "cell") if item.get(key) is not None}
-        if item["section_path"]:
-            locator["section_path"] = item["section_path"]
-        if item["start"] is not None:
-            locator.update(start_char=item["start"], end_char=item["end"])
-        evidence.append(EvidenceSpan(
-            id=_evidence_id(["cell", representation.id, item["table_id"], item["cell"]]),
-            representation_id=representation.id,
-            locator=DocumentLocator(representation_id=representation.id, origin=representation.origin,
-                                    quote=item["quote"], quality="precise", **locator),
-            metadata={"role": "source-passage", "source_ref": item["source_ref"], "source_kind": item["source_kind"]},
-            quote=item["quote"],
-        ))
+        evidence.append(_structural_evidence(item, representation.id, representation.origin))
     return evidence
 
 
@@ -1233,12 +1265,15 @@ def _identity_judgments(source_builds: list[dict[str, Any]], relay: Any, base_sn
                 "separate_from": sorted({other for partition in split_partitions for group in partition if entity.id in group
                                          for other_group in partition if other_group != group for other in other_group}),
                 "evidence": [{"id": span_id, "quote": spans[span_id].quote,
+                    "locator": {key: getattr(spans[span_id].locator, key, None) for key in
+                        ("start_char", "end_char", "page", "section_path", "table_id", "cell")},
                     "context": source["text"][max(0, (spans[span_id].locator.start_char or 0) - 250):(spans[span_id].locator.end_char or 0) + 250]}
                     for span_id in entity.evidence_ids]})
     representatives = {}
     for candidate in candidates:
         key = (candidate["source_id"], candidate["type"].casefold(), " ".join(candidate["name"].casefold().split()),
-               stable_digest(candidate.get("attributes", {})))
+               stable_digest(candidate.get("attributes", {})),
+               stable_digest([item["locator"] for item in candidate["evidence"]]))
         representatives.setdefault(key, candidate)
     candidates = list(representatives.values())
     if len({candidate["type"].casefold() for candidate in candidates}) == len(candidates):
@@ -1532,6 +1567,8 @@ def _parse_source(source: Any, force_ocr: bool, document_processing: dict | None
             force_ocr=force_ocr,
             document_processing=document_processing,
         )
+    except SourceQualityError as exc:
+        raise DocumentQualityError(str(exc), code="DOCUMENT_QUALITY_ERROR") from exc
     except UnsupportedSourceFormatError as exc:
         raise SemanticArtifactError(str(exc)) from exc
     document = {**parsed.document, "text": parsed.text, "content_hash": content_hash, "mime_type": source.mime_type}
@@ -1748,6 +1785,7 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
     representation_id = f"representation:{_safe_id(source.source_id)}:{representation_revision[7:]}"
     representation_artifact_id = f"artifact:{representation_id}"
     source_locations = _docling_locations(document, text)
+    locations_by_ref = {record["ref"]: record for record in source_locations}
     entities: dict[str, KnowledgeEntity] = {}
     entities_by_ref: dict[str, KnowledgeEntity] = {}
     evidence: dict[str, EvidenceSpan] = {}
@@ -1841,12 +1879,21 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
                 quote=canonical_quote,
                 metadata=source_metadata,
             )
-            qualifiers = item.get("qualifiers")
+            supporting_ids = [evidence_id]
+            supporting_quotes = []
+            for ref in dict.fromkeys(item.get("supporting_refs", [])):
+                if ref not in locations_by_ref:
+                    raise SemanticArtifactError("relation supporting reference is absent from source document")
+                span = _structural_evidence(locations_by_ref[ref], representation_id, origin)
+                evidence[span.id] = span
+                supporting_ids.append(span.id)
+                supporting_quotes.append(span.quote)
+            qualifiers = _grounded_qualifiers(item.get("qualifiers"), canonical_quote, tuple(supporting_quotes))
             predicate = " ".join(predicate.split()).casefold()
             key = stable_digest([source.source_id, subject_entity.id, predicate, object_entity.id, qualifiers]).split(":")[1][:32]
             relation_id, assertion_id = "relation:" + key, "assertion:" + key
-            relations.append(KnowledgeRelation(id=relation_id, source_entity_id=subject_entity.id, target_entity_id=object_entity.id, type=predicate, qualifiers=qualifiers, evidence_ids=[evidence_id], support_ids=[evidence_id], status="candidate"))
-            assertions.append(KnowledgeAssertion(id=assertion_id, subject_id=subject_entity.id, predicate=predicate, object=object_entity.canonical_name, object_entity_id=object_entity.id, qualifiers=qualifiers, evidence_ids=[evidence_id], support_ids=[evidence_id], status="candidate"))
+            relations.append(KnowledgeRelation(id=relation_id, source_entity_id=subject_entity.id, target_entity_id=object_entity.id, type=predicate, qualifiers=qualifiers, evidence_ids=supporting_ids, support_ids=supporting_ids, status="candidate"))
+            assertions.append(KnowledgeAssertion(id=assertion_id, subject_id=subject_entity.id, predicate=predicate, object=object_entity.canonical_name, object_entity_id=object_entity.id, qualifiers=qualifiers, evidence_ids=supporting_ids, support_ids=supporting_ids, status="candidate"))
     representation = DocumentRepresentation(
         id=representation_id,
         source_id=source.source_id,
@@ -2311,6 +2358,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                 extraction_spec=request.recipe.extraction_spec,
                 progress=progress, progress_base=completed_chunks, progress_total=total_chunks,
                 parallelism=request.parallelism,
+                document=parsed[1],
             )
             completed_chunks += len(embeddings)
             built_source = _build_source(source, force_ocr, model_result, parsed)

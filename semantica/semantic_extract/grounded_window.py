@@ -24,6 +24,7 @@ def extract_grounded_window(
     provider: str = "bifrost",
     retries: int = 1,
     provider_factory: Callable[[], Any] | None = None,
+    grounding_context: list[dict[str, Any]] | None = None,
 ) -> tuple[list[Entity], list[Relation], Any]:
     """Run Semantica's native strict entity and relation extractors.
 
@@ -51,6 +52,7 @@ def extract_grounded_window(
                 provider_instance=current_provider, grounding="strict",
                 max_retries=1, grounding_retries=1, extraction_spec=specification,
                 rejection_receipts=getattr(current_provider, "rejections", None),
+                grounding_context=grounding_context,
             )
             if not entities:
                 if getattr(current_provider, "rejections", None) and getattr(current_provider, "receipts", None):
@@ -61,6 +63,7 @@ def extract_grounded_window(
                 provider_instance=current_provider, grounding="strict",
                 max_retries=1, grounding_retries=1, extraction_spec=specification,
                 confidence_threshold=0,
+                grounding_context=grounding_context,
                 rejection_receipts=getattr(current_provider, "rejections", None),
             )
             if getattr(current_provider, "rejections", None) and getattr(current_provider, "receipts", None):

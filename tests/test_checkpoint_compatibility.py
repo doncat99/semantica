@@ -77,16 +77,30 @@ def test_reflexivity_schema_migration_has_exact_direction_and_shape():
 
 
 def test_explicit_processing_contract_admits_only_known_legacy_and_rejects_semantic_changes():
-    from semantica.project_checkpoint import PROCESSING_CONTRACTS
+    from semantica.project_checkpoint import LEGACY_PROCESSING_CONTRACTS
     previous = inputs()
     previous["release"]["schemaDigest"] = LEGACY_SCHEMA
     current = deepcopy(previous)
     current["release"].update(artifactDigest="new-package", schemaDigest=REFLEXIVITY_SCHEMA)
     current["inputRevision"] = "new-input"
-    current["processingContracts"] = deepcopy(PROCESSING_CONTRACTS)
+    current["processingContracts"] = deepcopy(LEGACY_PROCESSING_CONTRACTS)
     assert _resume_compatible(previous, current)
     current["processingContracts"]["chunkExtraction"] = "changed-prompt-v2"
     assert not _resume_compatible(previous, current)
-    current["processingContracts"] = deepcopy(PROCESSING_CONTRACTS)
+    current["processingContracts"] = deepcopy(LEGACY_PROCESSING_CONTRACTS)
     previous["release"]["schemaDigest"] = "unknown-schema"
+    assert not _resume_compatible(previous, current)
+
+
+@pytest.mark.parametrize('explicit', [False, True])
+def test_text_only_checkpoints_cannot_resume_structured_binding(explicit):
+    from semantica.project_checkpoint import PROCESSING_CONTRACTS, LEGACY_PROCESSING_CONTRACTS
+    previous = inputs()
+    previous['release']['schemaDigest'] = LEGACY_SCHEMA
+    if explicit:
+        previous['processingContracts'] = deepcopy(LEGACY_PROCESSING_CONTRACTS)
+    current = deepcopy(previous)
+    current['release'].update(artifactDigest='new-package', schemaDigest=REFLEXIVITY_SCHEMA)
+    current['inputRevision'] = 'new-input'
+    current['processingContracts'] = deepcopy(PROCESSING_CONTRACTS)
     assert not _resume_compatible(previous, current)

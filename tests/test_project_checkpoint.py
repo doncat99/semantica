@@ -174,7 +174,9 @@ def test_quota_failure_new_run_reuses_completed_extraction_windows(tmp_path, mon
         if quota_exhausted:
             raise urllib.error.HTTPError(request.full_url, 503, "Quota exhausted", {}, io.BytesIO(
                 b'{"error":{"code":"MODEL_GATEWAY_COOLDOWN","retryable":true}}'))
-        if "Explain the supplied knowledge" in prompt:
+        if "Resolve project entity identity" in prompt:
+            content = {"merges": [], "splits": []}
+        elif "Explain the supplied knowledge" in prompt:
             context = _typed_prompt_context(payload)
             content = {"sections": [{"title": "Knowledge production", "text": context["evidence"][0]["quote"],
                 "citations": [{"evidence_id": item["id"], "quote": item["quote"]} for item in context["evidence"]]}]}

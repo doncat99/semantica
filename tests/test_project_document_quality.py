@@ -81,3 +81,25 @@ def test_failed_quality_is_durable_and_never_enters_knowledge_extraction(tmp_pat
         active_checkpoint.reset(token)
     assert calls == [False]
     assert next(iter(cache.values()))[1]["quality"]["status"] == "needs_review"
+
+
+def test_empty_docling_source_enters_quality_repair_path(tmp_path, monkeypatch):
+    import semantica.semantic_artifact_builder as pipeline
+    from semantica.source import SourceQualityError
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"fixture")
+    request = _request(source, tmp_path / "build", prepare=False)
+    request["params"]["sources"][0]["mimeType"] = "application/pdf"
+    parse_request = ParseSourceRequest.model_validate({
+        "source": request["params"]["sources"][0],
+        "outputDir": str(tmp_path / "parsed"),
+        "forceOcr": False,
+        "documentProcessing": {"mode": "local"},
+    })
+
+    def parse(*_args, **_kwargs):
+        raise SourceQualityError("Docling conversion produced no usable text")
+
+    monkeypatch.setattr(pipeline, "parse_source", parse)
+    with pytest.raises(DocumentQualityError, match="no usable text"):
+        parse_source_artifact(parse_request)

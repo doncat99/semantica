@@ -17,6 +17,10 @@ class UnsupportedSourceFormatError(ValueError):
     """A source has no admitted adapter in the canonical document chain."""
 
 
+class SourceQualityError(ValueError):
+    """A supported source converted without usable text and needs repair."""
+
+
 def source_content_revision(path: Path) -> str:
     """Hash immutable material bytes using the shared source identity contract."""
     from blake3 import blake3
@@ -216,6 +220,10 @@ def parse_source(path: Path, *, name: str, mime_type: str, force_ocr: bool, docu
             export_format="doctags",
             include_document=True,
         )
+        if not result.get("plain_text", "").strip():
+            raise SourceQualityError(
+                "Docling conversion produced no usable text; explicit OCR repair or source correction required"
+            )
         origin = result.get("origin")
         if origin not in {"native", "ocr", "mixed"}:
             raise UnsupportedSourceFormatError("Docling conversion did not retain text-cell provenance")

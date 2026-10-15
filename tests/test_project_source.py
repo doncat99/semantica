@@ -3,7 +3,7 @@ from zipfile import ZipFile
 
 import pytest
 
-from semantica.source import UnsupportedSourceFormatError, parse_source, source_content_revision
+from semantica.source import SourceQualityError, UnsupportedSourceFormatError, parse_source, source_content_revision
 
 
 def test_material_revision_matches_shared_blake3_known_vector(tmp_path):
@@ -103,6 +103,50 @@ def test_docling_enables_ocr_only_for_explicit_repair(tmp_path: Path, monkeypatc
 
     assert options["enable_ocr"] is force_ocr
     assert options["force_full_page_ocr"] is force_ocr
+
+
+def test_docling_accepts_exported_text_with_adapter_origin(tmp_path: Path, monkeypatch):
+    from semantica.parse import docling_parser
+
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"%PDF fixture")
+
+    class FakeDoclingParser:
+        def __init__(self, **kwargs):
+            pass
+
+        def parse(self, *_args, **_kwargs):
+            return {
+                "conversion_status": "success",
+                "document": {},
+                "metadata": {},
+                "origin": "native",
+                "pages": [],
+                "plain_text": "Native text retained by the assembled document.",
+            }
+
+    monkeypatch.setattr(docling_parser, "DoclingParser", FakeDoclingParser)
+    parsed = parse_source(source, name=source.name, mime_type="application/pdf", force_ocr=False)
+    assert parsed.text.startswith("Native text")
+    assert parsed.origin == "native"
+
+
+def test_empty_docling_text_is_classified_as_quality_repair(tmp_path: Path, monkeypatch):
+    from semantica.parse import docling_parser
+
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"%PDF fixture")
+
+    class FakeDoclingParser:
+        def __init__(self, **kwargs):
+            pass
+
+        def parse(self, *_args, **_kwargs):
+            return {"conversion_status": "success", "document": {}, "metadata": {}, "pages": [], "plain_text": ""}
+
+    monkeypatch.setattr(docling_parser, "DoclingParser", FakeDoclingParser)
+    with pytest.raises(SourceQualityError, match="no usable text"):
+        parse_source(source, name=source.name, mime_type="application/pdf", force_ocr=False)
 
 
 def test_epub_adapter_reads_spine_without_a_second_parser(tmp_path: Path):

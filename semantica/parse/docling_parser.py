@@ -270,8 +270,13 @@ class DoclingParser:
                 for cell in getattr(page, "cells", [])
                 if getattr(cell, "text", "").strip() and isinstance(getattr(cell, "from_ocr", None), bool)
             }
+            plain_text = result.document.export_to_text() if options.get("include_document", False) else full_text
+            # With OCR disabled, surviving document text can only be native.
+            # OCR-enabled conversion requires actual cell origins, never a guess.
+            native_only = not (self.enable_ocr or self.force_full_page_ocr)
             origin = ("mixed" if len(cell_origins) == 2 else "ocr" if True in cell_origins else "native"
-                      if False in cell_origins or file_path.suffix.lower() not in {".pdf", ".png", ".jpg", ".jpeg"} else None)
+                      if False in cell_origins or (native_only and plain_text.strip())
+                      or file_path.suffix.lower() not in {".pdf", ".png", ".jpg", ".jpeg"} else None)
 
             # Stage 8: Image extraction (98-100%)
             images = []
@@ -330,7 +335,7 @@ class DoclingParser:
                 **({
                     "document": result.document.export_to_dict(),
                     "doctags": result.document.export_to_doctags(),
-                    "plain_text": result.document.export_to_text(),
+                    "plain_text": plain_text,
                     "conversion_status": str(getattr(result, "status", "unknown")),
                 } if options.get("include_document", False) else {}),
             }

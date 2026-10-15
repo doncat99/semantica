@@ -63,6 +63,30 @@ class TestDoclingParser(unittest.TestCase):
             result = DoclingParser(enable_ocr=True).parse("fixture.pdf", include_document=True)
         self.assertEqual(result["origin"], "mixed")
 
+    def test_missing_cells_do_not_mislabel_ocr_output_as_native(self):
+        document = MagicMock()
+        document.tables = []
+        document.pages = []
+        document.export_to_text.return_value = "Recovered text"
+        self.mock_converter.convert.return_value = SimpleNamespace(
+            document=document, status="success", pages=[]
+        )
+        with patch.object(Path, 'exists', return_value=True):
+            result = DoclingParser(enable_ocr=True).parse("fixture.pdf", include_document=True)
+        self.assertIsNone(result["origin"])
+
+    def test_native_only_conversion_can_use_assembled_text_without_cells(self):
+        document = MagicMock()
+        document.tables = []
+        document.pages = []
+        document.export_to_text.return_value = "Native text"
+        self.mock_converter.convert.return_value = SimpleNamespace(
+            document=document, status="success", pages=[]
+        )
+        with patch.object(Path, 'exists', return_value=True):
+            result = DoclingParser(enable_ocr=False).parse("fixture.pdf", include_document=True)
+        self.assertEqual(result["origin"], "native")
+
     def test_complete_document_uses_one_conversion_and_survives_reload(self):
         from docling_core.types.doc import DoclingDocument, DocItemLabel
         document = DoclingDocument(name="one-conversion")

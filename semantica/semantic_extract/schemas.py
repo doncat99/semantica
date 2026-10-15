@@ -156,6 +156,7 @@ class GroundedRelationOut(BaseModel):
     evidence: str = Field(..., description="Exact supporting source quote")
     evidence_occurrence: int = Field(..., ge=0, description="Zero-based evidence quote occurrence")
     qualifiers: dict = Field(..., description="Grounded relation qualifiers")
+    supporting_refs: List[str] = Field(default_factory=list, description="Exact supplied structural source references supporting this relation")
 
     @field_validator("qualifiers", mode="before")
     @classmethod
