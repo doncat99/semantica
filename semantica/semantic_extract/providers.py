@@ -837,7 +837,10 @@ class BaseProvider:
                 if getattr(e, "retryable", None) is False:
                     break
                 if attempt < max_retries - 1:
-                    time.sleep(1)
+                    retry_after_ms = getattr(e, "retry_after_ms", None)
+                    if not isinstance(retry_after_ms, int) or isinstance(retry_after_ms, bool) or retry_after_ms < 0:
+                        retry_after_ms = 1_000
+                    time.sleep(retry_after_ms / 1_000)
                 else:
                     self.logger.error(f"Typed generation failed: {e}")
 

@@ -174,7 +174,7 @@ class ParallelismManager:
 
     def _execute_with_threads(self, tasks: List[Task], **options) -> List[ParallelExecutionResult]:
         """Execute tasks using the same timed task primitive as process execution."""
-        if options.get("fail_fast_permanent", False):
+        if options.get("fail_fast", False) or options.get("fail_fast_permanent", False):
             return self._execute_with_threads_fail_fast(tasks, options)
         with ThreadPoolExecutor(max_workers=options.get("max_workers", self.max_workers)) as executor:
             futures = [executor.submit(_execute_task, task) for task in tasks]
@@ -186,7 +186,7 @@ class ParallelismManager:
         return BaseProvider._is_permanent_failure(error)
 
     def _execute_with_threads_fail_fast(self, tasks: List[Task], options: Dict[str, Any]) -> List[ParallelExecutionResult]:
-        """Keep a bounded submission window and stop feeding it on permanent failure."""
+        """Keep a bounded submission window and stop feeding it on the configured failure boundary."""
         results: List[ParallelExecutionResult] = []
         max_workers = max(1, options.get("max_workers", self.max_workers))
         executor = ThreadPoolExecutor(max_workers=max_workers)
@@ -208,7 +208,7 @@ class ParallelismManager:
                     pending.remove(future)
                     result = future.result()
                     results.append(result)
-                    if result.error and self._is_permanent_failure(result.error):
+                    if result.error and (options.get("fail_fast", False) or self._is_permanent_failure(result.error)):
                         stop_dispatch = True
                         for queued in pending:
                             queued.cancel()
