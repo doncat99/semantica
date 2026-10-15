@@ -656,14 +656,18 @@ class BaseProvider:
         last_error = None
         current_prompt = prompt
 
+        typed_kwargs = dict(kwargs)
+        if hasattr(schema, "model_json_schema"):
+            typed_kwargs["response_schema"] = schema.model_json_schema()
         for attempt in range(max_retries):
+            json_result = None
             try:
                 # 1. Generate JSON – try structured mode first, then fall back to
                 # plain generate() + parse.  Custom gateways that reject
                 # response_format=json_object would otherwise loop forever here.
                 try:
                     json_result = self.generate_structured(
-                        current_prompt, max_retries=1, **kwargs
+                        current_prompt, max_retries=1, **typed_kwargs
                     )
                 except Exception as struct_err:
                     if self._is_permanent_failure(struct_err):
@@ -678,7 +682,7 @@ class BaseProvider:
                         struct_err,
                         exc_info=True,
                     )
-                    raw_content = self.generate(current_prompt, **kwargs)
+                    raw_content = self.generate(current_prompt, **typed_kwargs)
                     json_result = self._parse_json(raw_content)
 
                 # 2. Validate with Schema
