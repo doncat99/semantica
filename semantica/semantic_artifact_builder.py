@@ -418,6 +418,7 @@ def _extract_window(text, model_relay, extraction_spec, locations, item):
         raise SemanticArtifactError("located extraction context exceeds the production budget; narrow the source scope")
     checkpoint = active_checkpoint.get()
     checkpoint_key = {
+        "promptVersion": "located-spans-v2",
         "sourceText": _digest_bytes(text.encode("utf-8")),
         "window": {"start": start, "end": end, "digest": _digest_bytes(window.encode("utf-8"))},
         "model": getattr(model_relay, "model_id", None),
@@ -1109,7 +1110,14 @@ def _docling_locations(document: dict[str, Any], text: str) -> list[dict[str, An
                 if isinstance(note, dict) and isinstance(note.get("$ref"), str):
                     visit(note["$ref"])
             return
-        add(item.get("text"), item)
+        structure = {}
+        if label in ("formula", "code"):
+            if isinstance(item.get("orig"), str) and item["orig"] != item.get("text"):
+                structure["original_text"] = item["orig"]
+            for key in ("code_language", "captions", "footnotes", "references"):
+                if item.get(key):
+                    structure[key] = item[key]
+        add(item.get("text"), item, structure=structure)
 
     body = raw.get("body")
     for child in body.get("children", []) if isinstance(body, dict) else []:
@@ -1154,6 +1162,8 @@ def _located_document_fields(locations: list[dict[str, Any]], start: int, end: i
         locator["section_path"] = item["section_path"]
     metadata = {key: item[key] for key in ("source_ref", "source_kind") if item.get(key) is not None}
     metadata["structural_ref"] = item["ref"]
+    if item.get("structure"):
+        metadata["structure"] = item["structure"]
     return locator, metadata
 
 

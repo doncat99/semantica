@@ -5,6 +5,14 @@ from pathlib import Path
 from semantica.parse.docling_parser import DoclingParser, DoclingMetadata
 
 class TestDoclingParser(unittest.TestCase):
+    def test_explicit_formula_enrichment_reaches_docling_pipeline(self):
+        with patch.object(Path, 'exists', return_value=True):
+            DoclingParser(do_formula_enrichment=True, do_code_enrichment=True).parse('fixture.pdf')
+        from docling.datamodel.base_models import InputFormat
+        options = self.mock_converter_cls.call_args.kwargs['format_options'][InputFormat.PDF].pipeline_options
+        self.assertTrue(options.do_formula_enrichment)
+        self.assertTrue(options.do_code_enrichment)
+
     def test_native_pdf_keeps_words_across_font_fragments_without_ocr(self):
         from docling.datamodel.backend_options import PdfBackendOptions
         if "enforce_same_font" not in PdfBackendOptions.model_fields:

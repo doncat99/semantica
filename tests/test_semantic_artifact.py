@@ -526,7 +526,7 @@ def test_docling_evidence_preserves_reading_order_and_physical_locators(tmp_path
             {"self_ref": "#/texts/0", "label": "section_header", "level": 1, "text": "Chapter", "prov": [{"page_no": 1, "bbox": bbox(10)}]},
             {"self_ref": "#/texts/1", "label": "text", "text": "Repeated", "prov": [{"page_no": 1, "bbox": bbox(30)}]},
             {"self_ref": "#/texts/2", "label": "text", "text": "Repeated", "prov": [{"page_no": 2, "bbox": bbox(10)}]},
-            {"self_ref": "#/texts/3", "label": "formula", "text": "x = y", "prov": [{"page_no": 2, "bbox": bbox(30)}]},
+            {"self_ref": "#/texts/3", "label": "formula", "text": "x = y", "orig": "x equals y", "prov": [{"page_no": 2, "bbox": bbox(30)}]},
         ],
         "tables": [{"self_ref": "#/tables/0", "label": "table", "prov": [{"page_no": 3, "bbox": bbox(10)}],
                     "data": {"table_cells": [
@@ -551,6 +551,7 @@ def test_docling_evidence_preserves_reading_order_and_physical_locators(tmp_path
     assert entity_span.locator.page == 2
     formula = next(span for span in passages if span.quote == "x = y")
     assert formula.metadata["source_kind"] == "formula"
+    assert formula.metadata["structure"]["original_text"] == "x equals y"
     cell = next(span for span in _docling_cell_evidence(built) if span.quote == "12%")
     assert len(cell.id) <= 128
     assert cell.locator.table_id.startswith("table:")
