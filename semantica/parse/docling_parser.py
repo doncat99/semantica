@@ -93,6 +93,8 @@ class DoclingParser:
                 - enable_ocr: Enable OCR for scanned documents (default: False)
                 - force_full_page_ocr: Replace native PDF text with full-page OCR.
                 - artifacts_path: Directory containing packaged Docling models.
+                - do_formula_enrichment / do_code_enrichment: Explicitly enable
+                  Docling enrichment; the configured model artifacts are required.
         """
         self.logger = get_logger("docling_parser")
         self.config = config
@@ -167,6 +169,8 @@ class DoclingParser:
                 pipeline_options.ocr_options = RapidOcrOptions(backend="onnxruntime", force_full_page_ocr=self.force_full_page_ocr)
                 # Keep cell provenance from this conversion; no second parse is needed.
                 pipeline_options.generate_parsed_pages = True
+                pipeline_options.do_formula_enrichment = self.config.get("do_formula_enrichment", False)
+                pipeline_options.do_code_enrichment = self.config.get("do_code_enrichment", False)
                 if self.config.get("artifacts_path"):
                     pipeline_options.artifacts_path = Path(self.config["artifacts_path"])
                 # A word can span font subsets (e.g. a ligature and its suffix).
