@@ -53,17 +53,17 @@ dill==0.4.1
     # via multiprocess
 doclang==0.7.3
     # via docling-core
-docling==2.129.0
+docling==2.135.0
     # via semantica (pyproject.toml)
-docling-core==2.97.2
+docling-core==2.100.0
     # via
     #   docling-parse
     #   docling-slim
 docling-ibm-models==4.0.3
     # via docling-slim
-docling-parse==7.20.0
+docling-parse==7.22.3
     # via docling-slim
-docling-slim==2.129.0
+docling-slim==2.135.0
     # via docling
 et-xmlfile==2.0.0
     # via openpyxl
