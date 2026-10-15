@@ -12,6 +12,8 @@ class TestDoclingParser(unittest.TestCase):
         options = self.mock_converter_cls.call_args.kwargs['format_options'][InputFormat.PDF].pipeline_options
         self.assertTrue(options.do_formula_enrichment)
         self.assertTrue(options.do_code_enrichment)
+        self.assertTrue(options.layout_options.recover_formula_regions)
+        self.assertTrue(options.do_native_formula_enrichment)
 
     def test_native_pdf_keeps_words_across_font_fragments_without_ocr(self):
         from docling.datamodel.backend_options import PdfBackendOptions

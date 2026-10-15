@@ -31,6 +31,23 @@ def test_encoding_loss_is_reported():
     assert quality["issues"][0]["code"] == "unmapped_characters"
 
 
+@pytest.mark.parametrize("value", ["", r"& \quad \quad", r"\frac{}{}", r"\begin{aligned} & \quad \end{aligned}"])
+def test_missing_formula_transcription_requires_review(value):
+    document = {"document": {"texts": [{"label": "formula", "text": value,
+        "orig": "Native fraction", "self_ref": "#/texts/3", "prov": [{"page_no": 7}]}]}}
+    quality = assess_document_quality("Readable surrounding paragraph", document)
+    assert quality["status"] == "needs_review"
+    assert quality["issues"][0]["code"] == "formula_transcription_missing"
+    assert quality["issues"][0]["itemRef"] == "#/texts/3"
+    assert quality["issues"][0]["pageNumber"] == 7
+
+
+@pytest.mark.parametrize("value", [r"\frac{x}{y}", r"\alpha", "θ"])
+def test_populated_formula_is_retained_without_claiming_semantic_validation(value):
+    document = {"document": {"texts": [{"label": "formula", "text": value}]}}
+    assert assess_document_quality("Readable paragraph", document)["status"] == "passed"
+
+
 def test_ocr_recipe_and_text_revision_have_distinct_evidence_identity(tmp_path: Path):
     source = tmp_path / "source.txt"
     source.write_text("Ada Lovelace designed the Analytical Engine.")

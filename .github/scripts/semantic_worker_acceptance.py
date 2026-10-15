@@ -6,6 +6,7 @@ import subprocess
 import sys
 import tempfile
 from zipfile import ZipFile
+from importlib.metadata import version
 
 from docx import Document
 from PIL import Image, ImageDraw, ImageFont
@@ -24,6 +25,23 @@ assert document_parser_digest(manifest["files"], parser_files) == manifest["docu
 assert Path(sys.executable).is_relative_to(root)
 assert "semantica" in str(parse_source.__code__.co_filename)
 assert Path(parse_source.__code__.co_filename).is_relative_to(root)
+assert version("docling-slim") == "2.139.0+ontoscience.1"
+from docling.datamodel.pipeline_options import PdfPipelineOptions
+from docling.models.stages.code_formula.native_formula import transcribe_native_fraction
+assert "do_native_formula_enrichment" in PdfPipelineOptions.model_fields
+assert transcribe_native_fraction([]) is None
+from docling_core.types.doc import BoundingBox
+from docling_core.types.doc.page import BoundingRectangle, TextCell
+formula_cells = [TextCell(index=index, text=text, orig=text, from_ocr=False,
+    rect=BoundingRectangle.from_bounding_box(BoundingBox(l=left, t=top, r=right, b=bottom)))
+    for index, (text, left, top, right, bottom) in enumerate([
+        ("Exposure", 43, 4, 78, 11), ("USD", 81, 4, 104, 11),
+        ("________________", 40, 7, 110, 14),
+        ("PPP", 43, 16, 57, 23), ("GDP", 60, 16, 78, 23)])]
+assert transcribe_native_fraction(formula_cells) == r"\frac{\text{Exposure USD}}{\text{PPP GDP}}"
+formula_cells[0].from_ocr = True
+assert transcribe_native_fraction(formula_cells) is None
+assert assess_document_quality("", {"document": {"texts": [{"label": "formula", "text": r"& \quad"}]}})["status"] == "needs_review"
 os.environ.update(DOCLING_ARTIFACTS_PATH=str(root / "models"), HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", DOCLING_DEVICE="cpu", ORT_DISABLE_TELEMETRY="1")
 
 

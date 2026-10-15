@@ -170,6 +170,8 @@ class DoclingParser:
                 # Keep cell provenance from this conversion; no second parse is needed.
                 pipeline_options.generate_parsed_pages = True
                 pipeline_options.do_formula_enrichment = self.config.get("do_formula_enrichment", False)
+                pipeline_options.layout_options.recover_formula_regions = self.config.get("recover_formula_regions", True)
+                pipeline_options.do_native_formula_enrichment = self.config.get("do_native_formula_enrichment", True)
                 pipeline_options.do_code_enrichment = self.config.get("do_code_enrichment", False)
                 if self.config.get("artifacts_path"):
                     pipeline_options.artifacts_path = Path(self.config["artifacts_path"])

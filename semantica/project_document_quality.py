@@ -7,6 +7,19 @@ import unicodedata
 
 def assess_document_quality(text: str, document: dict) -> dict:
     issues = []
+    # A missing formula cannot be repaired by guessing from surrounding prose.
+    # This checks transcription presence, not mathematical correctness.
+    for item in (document.get("document") or {}).get("texts", []):
+        if item.get("label") != "formula":
+            continue
+        value = item.get("text") or ""
+        content = re.sub(r"\\(?:begin|end)\{[^}]*\}", "", value)
+        content = re.sub(r"\\(?:alpha|beta|gamma|delta|epsilon|varepsilon|zeta|eta|theta|vartheta|iota|kappa|lambda|mu|nu|xi|omicron|pi|varpi|rho|varrho|sigma|varsigma|tau|upsilon|phi|varphi|chi|psi|omega|infty)\b", "symbol", content, flags=re.I)
+        content = re.sub(r"\\[A-Za-z]+", "", content)
+        if not re.search(r"[\w\u0370-\u03ff]", content):
+            prov = item.get("prov") or []
+            issues.append({"code": "formula_transcription_missing", "itemRef": item.get("self_ref"),
+                "quote": item.get("orig") or "", **({"pageNumber": prov[0]["page_no"]} if prov and "page_no" in prov[0] else {})})
     for line in re.finditer(r"[^\n]+", text):
         value = line.group()
         visible = [character for character in value if not character.isspace()]

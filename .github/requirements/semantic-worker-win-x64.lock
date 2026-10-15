@@ -69,7 +69,7 @@ docling-ibm-models==4.0.3
     # via docling-slim
 docling-parse==7.22.3
     # via docling-slim
-docling-slim==2.139.0
+docling-slim @ https://github.com/doncat99/docling/releases/download/ontoscience-docling-2.139.0.1/docling_slim-2.139.0+ontoscience.1-py3-none-any.whl#sha256=5b1b54a83771991a2f7c48c50df99e83a89f200b25bfe3995a5d9867cf8b6d58
     # via docling
 et-xmlfile==2.0.0
     # via openpyxl
