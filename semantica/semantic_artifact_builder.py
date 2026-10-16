@@ -1008,6 +1008,8 @@ class _ProjectModelProvider(BaseProvider):
         self.last_checkpoint_entry = None
 
     def generate(self, prompt: str, **kwargs) -> str:
+        # A failed request must never reject a previous successful response.
+        self.last_checkpoint_entry = None
         extraction_stage = kwargs.pop("extraction_stage", None)
         payload = {
             "model": self.relay.model_id,

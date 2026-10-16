@@ -2,6 +2,21 @@ from semantica.semantic_extract import grounded_window
 import pytest
 
 
+def test_relation_transport_failure_keeps_successful_entity_checkpoint(monkeypatch):
+    from types import SimpleNamespace
+    rejected = []
+    provider = SimpleNamespace(reject_last=lambda: rejected.append('entity'))
+    monkeypatch.setattr(grounded_window, 'extract_entities_llm', lambda *args, **kwargs: ['entity'])
+    def relations(*args, **kwargs):
+        error = grounded_window.ProcessingError('relay unavailable')
+        error.retryable = True
+        raise error
+    monkeypatch.setattr(grounded_window, 'extract_relations_llm', relations)
+    with pytest.raises(grounded_window.ProcessingError):
+        grounded_window.extract_grounded_window('source', model='test', provider_instance=provider, retries=0)
+    assert rejected == []
+
+
 @pytest.mark.parametrize("wrapped", [False, True])
 def test_explicit_permanent_failure_overrides_retry_status_and_delay(wrapped):
     error = grounded_window.ProcessingError("permanent")

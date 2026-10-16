@@ -72,7 +72,7 @@ def extract_grounded_window(
         except ProcessingError as exc:
             last_error = exc
             reject = getattr(current_provider, "reject_last", None)
-            if callable(reject):
+            if callable(reject) and not _retryable_failure(exc):
                 reject()
             if attempt >= max(0, retries) or not _retryable_failure(exc):
                 raise
