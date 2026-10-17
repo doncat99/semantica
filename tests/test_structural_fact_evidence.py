@@ -65,10 +65,15 @@ def test_window_context_uses_page_and_not_repeated_short_cell_text():
     locations = pipeline._docling_locations(document(), text)
     context = pipeline._window_grounding_context(locations, 0, 6)
     assert {item['ref'] for item in context} == {
-        '#/texts/0', '#/texts/1', '#/tables/0/r0:c0', '#/tables/0/r1:c0', '#/tables/0/r1:c1'}
+        '#/texts/0', '#/tables/0/r0:c0', '#/tables/0/r1:c0', '#/tables/0/r1:c1'}
     assert all(item['start'] is None for item in context if item['cell'])
     distant = {**locations[1], 'ref': 'distant', 'page': 99}
+    assert distant in pipeline._window_grounding_context([*locations, distant], 0, 6)
+    distant = {**distant, 'table_id': 'unrelated-table'}
     assert distant not in pipeline._window_grounding_context([*locations, distant], 0, 6)
+    formula = next(item for item in locations if item['ref'] == '#/texts/0')
+    formula['structure']['references'] = [{'$ref': '#/texts/1'}]
+    assert '#/texts/1' in {item['ref'] for item in pipeline._window_grounding_context(locations, 0, 6)}
 
 
 def test_chunk_checkpoint_fences_structure_and_restores_support_refs(monkeypatch):
