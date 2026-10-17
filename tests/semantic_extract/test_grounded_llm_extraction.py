@@ -33,7 +33,12 @@ class TypedProvider:
         return self.responses.pop(0)
 
 
-def test_native_grounded_extractors_apply_typed_spec_and_examples():
+def test_native_grounded_extractors_apply_typed_spec_and_examples(monkeypatch):
+    from semantica.semantic_extract import methods
+    def forbidden_cache(*args, **kwargs):
+        pytest.fail("provider-instance extraction must use its owner's checkpoint, not global cache")
+    monkeypatch.setattr(methods._result_cache, "get", forbidden_cache)
+    monkeypatch.setattr(methods._result_cache, "set", forbidden_cache)
     text = "Casting uses steel with density 7.85."
     specification = ExtractionSpecification.model_validate({
         "id": "manufacturing", "version": "1",

@@ -139,7 +139,7 @@ class EntityResolver:
             self.logger.debug(
                 f"Detecting duplicate groups with threshold {self.similarity_threshold}"
             )
-            duplicate_groups = self.detect_duplicate_groups(entities)
+            duplicate_groups = self._detect_duplicate_groups(entities)
 
             self.logger.debug(f"Found {len(duplicate_groups)} duplicate group(s)")
 
@@ -216,10 +216,10 @@ class EntityResolver:
             )
             raise
 
-    def detect_duplicate_groups(
+    def _detect_duplicate_groups(
         self, entities: List[Dict[str, Any]]
     ) -> List[DuplicateGroup]:
-        """Detect groups without merging; exact_key can scope exact matching."""
+        """Detect duplicate groups according to the configured strategy."""
         if self.resolution_strategy != "exact":
             return self.duplicate_detector.detect_duplicate_groups(
                 entities, threshold=self.similarity_threshold
@@ -230,8 +230,7 @@ class EntityResolver:
             name = self._get_entity_name(entity)
             normalized = str(name).strip() if name is not None else ""
             if normalized:
-                key = self.config["exact_key"](entity) if self.config.get("exact_key") else normalized.casefold()
-                groups.setdefault(key, []).append(entity)
+                groups.setdefault(normalized.casefold(), []).append(entity)
 
         return [
             DuplicateGroup(entities=group, confidence=1.0)

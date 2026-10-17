@@ -71,21 +71,6 @@ def test_window_context_uses_page_and_not_repeated_short_cell_text():
     assert distant not in pipeline._window_grounding_context([*locations, distant], 0, 6)
 
 
-def test_repeated_variable_names_keep_distinct_scope_candidates(monkeypatch):
-    from semantica.semantic_artifact_schema import EvidenceSpan, DocumentLocator
-    spans = [EvidenceSpan(id=f'evidence:{i}', representation_id='representation:1', quote='m',
-        locator=DocumentLocator(representation_id='representation:1', origin='native', quote='m',
-            quality='precise', start_char=i * 10, end_char=i * 10 + 1, page=i + 1)) for i in range(2)]
-    entities = [SimpleNamespace(id=f'mention:{i}', canonical_name='m', type='variable', attributes={},
-        evidence_ids=[span.id]) for i, span in enumerate(spans)]
-    seen = []
-    monkeypatch.setattr(pipeline, '_identity_batch', lambda candidates, _relay: (seen.extend(candidates) or [], []))
-    pipeline._identity_judgments([{'source': SimpleNamespace(source_id='source:1'), 'text': 'm         m',
-        'entities': entities, 'evidence': spans}], None)
-    assert len(seen) == 2
-    assert [item['evidence'][0]['locator']['page'] for item in seen] == [1, 2]
-
-
 def test_chunk_checkpoint_fences_structure_and_restores_support_refs(monkeypatch):
     from copy import deepcopy
     from semantica.project_checkpoint import active_checkpoint
@@ -112,7 +97,7 @@ def test_chunk_checkpoint_fences_structure_and_restores_support_refs(monkeypatch
         return entities, [relation], SimpleNamespace(receipts=[receipt])
     monkeypatch.setattr(pipeline, '_project_model_provider', lambda _: None)
     monkeypatch.setattr(pipeline, 'extract_grounded_window', extract)
-    monkeypatch.setattr(pipeline, '_embed_batch_checkpointed', lambda *_: ([[0.1]], receipt))
+    monkeypatch.setattr(pipeline, '_embed_texts', lambda *_: ([[0.1]], receipt))
     token = active_checkpoint.set(Checkpoint())
     try:
         args = (text, SimpleNamespace(model_id='test'), None)

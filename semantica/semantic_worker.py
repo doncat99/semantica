@@ -34,7 +34,8 @@ from .semantic_artifact_schema import BindParsedSourceRequest, RelayRef
 PROTOCOL = "semantica.semantic-worker.v1"
 METHOD = "build_semantic_artifacts"
 MODEL_RECEIPT_OPERATIONS = {
-    "structured_extraction", "identity_resolution", "relationship_discovery",
+    "structured_extraction",
+    "identity_resolution", "relationship_discovery",  # Historical receipts only; new builds do not run these stages.
     "knowledge_explanation", "knowledge_synthesis", "source_classification",
 }
 

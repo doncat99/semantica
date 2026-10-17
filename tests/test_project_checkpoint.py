@@ -16,12 +16,75 @@ from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest
 from tests.test_semantic_artifact import _request, _typed_prompt_context
 
 
+def test_embedding_restart_uses_one_verified_payload_and_original_receipt(tmp_path, monkeypatch):
+    from semantica.project_checkpoint import active_checkpoint
+    from semantica.semantic_artifact_builder import _embed_texts
+
+    source = tmp_path / "source.txt"
+    source.write_text("A source")
+    request = SemanticArtifactBuildRequest.model_validate(_request(source, tmp_path / "first")["params"])
+    checkpoint = SnapshotCheckpoint(request)
+    relay = request.relays["embedding"]
+    calls = []
+
+    class Response:
+        status = 200
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            pass
+        def read(self):
+            return json.dumps({"model": relay.model_id, "usage": {"total_tokens": 2},
+                "data": [{"index": 0, "embedding": [1.0, 0.5]}]}).encode()
+
+    def send(request, timeout):
+        calls.append(request.data)
+        return Response()
+
+    monkeypatch.setenv(relay.authorization_env, "fixture")
+    monkeypatch.setattr("urllib.request.urlopen", send)
+    token = active_checkpoint.set(checkpoint)
+    try:
+        vectors, receipt = _embed_texts(["A source"], relay)
+    finally:
+        active_checkpoint.reset(token)
+    second = _request(source, tmp_path / "second")
+    second["params"]["resumeCheckpointDirs"] = [str(checkpoint.root)]
+    restored = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(second["params"]))
+    token = active_checkpoint.set(restored)
+    try:
+        resumed_vectors, resumed_receipt = _embed_texts(["A source"], relay)
+    finally:
+        active_checkpoint.reset(token)
+    assert resumed_vectors == vectors == [[1.0, 0.5]]
+    assert resumed_receipt.model_dump() == receipt.model_dump()
+    assert resumed_receipt._checkpoint_restored is True
+    assert len(calls) == 1
+    assert len(list(checkpoint.root.glob("relay-*.json"))) == 1
+    assert len(list(restored.root.glob("relay-*.json"))) == 1
+    assert not list(checkpoint.root.glob("embedding-batch-*.json"))
+    assert not list(restored.root.glob("embedding-batch-*.json"))
+    key = {"operation": "embedding", "bindingId": relay.binding_id,
+           "modelId": relay.model_id, "payload": json.loads(calls[0])}
+    cached = restored.read("relay", key)
+    cached["response"]["data"][0]["index"] = 1
+    restored.write("relay", key, cached)
+    token = active_checkpoint.set(restored)
+    try:
+        with pytest.raises(Exception, match="index does not match input order"):
+            _embed_texts(["A source"], relay)
+    finally:
+        active_checkpoint.reset(token)
+    assert len(calls) == 1
+
+
 def test_worker_process_restart_reuses_durable_parse_and_model_calls(tmp_path):
     source = tmp_path / "source.txt"
     source.write_text("A source explains durable knowledge production.", encoding="utf-8")
     request = _request(source, tmp_path / "output", recipe="model")
     parsed_artifact = Path(request["params"]["parsedSources"][0]["artifactPath"])
     parsed_bytes = parsed_artifact.read_bytes()
+    first_call = threading.Event()
     second_call = threading.Event()
     release_call = threading.Event()
     calls = []
@@ -33,6 +96,7 @@ def test_worker_process_restart_reuses_durable_parse_and_model_calls(tmp_path):
         def do_POST(self):
             payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             calls.append(payload)
+            first_call.set()
             if len(calls) == 2:
                 second_call.set()
                 release_call.wait(30)
@@ -81,6 +145,11 @@ def test_worker_process_restart_reuses_durable_parse_and_model_calls(tmp_path):
     try:
         child.stdin.write(json.dumps(request) + "\n")
         child.stdin.flush()
+        # Separate cold imports from progress; restarted workers already get 30s.
+        if not first_call.wait(30):
+            child.kill()
+            stdout, stderr = child.communicate(timeout=10)
+            pytest.fail(f"worker did not reach its first model request: {stdout} {stderr}")
         if not second_call.wait(15):
             child.kill()
             stdout, stderr = child.communicate(timeout=10)
@@ -209,7 +278,11 @@ def test_quota_failure_new_run_reuses_completed_extraction_windows(tmp_path, mon
     assert all(calls.count(prompt) == 1 for prompt in first_window_prompts)
     second_checkpoint = tmp_path / "second" / "checkpoint"
     assert len(list(second_checkpoint.glob("chunk-extraction-*.json"))) >= 2
-    assert len(list(second_checkpoint.glob("embedding-batch-*.json"))) >= 1
+    assert not list(second_checkpoint.glob("embedding-batch-*.json"))
+    embedding_entries = [json.loads(path.read_bytes())["payload"]
+                         for path in second_checkpoint.glob("relay-*.json")
+                         if json.loads(path.read_bytes())["payload"]["receipt"]["operation"] == "embedding"]
+    assert embedding_entries
 
 
 def test_checkpoint_rejects_corrupt_payload_and_changed_recipe(tmp_path):

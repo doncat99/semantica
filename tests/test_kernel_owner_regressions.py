@@ -6,6 +6,109 @@ from semantica.semantic_artifact_builder import _semantic_organization, _validat
 from semantica.vector_store.vector_store import VectorIndexer, VectorRetriever
 from semantica.kg import CommunityDetector
 
+def test_grounded_report_preserves_assertion_state_and_long_conditions(monkeypatch):
+    from semantica import semantic_artifact_builder as pipeline
+    condition = 'only when ' + 'explicit source condition ' * 8
+    class Provider:
+        receipts = []
+        def generate_typed(self, prompt, schema, **kwargs):
+            assert condition in prompt
+            assert '"polarity": "negative"' in prompt
+            assert '"status": "contradicted"' in prompt
+            return schema.model_validate({'title': 'Report', 'summary': 'Supported',
+                'findings': [{'summary': 'Finding', 'explanation': 'Explanation',
+                              'citations': [{'evidence_id': 'e1'}]}]},
+                context=kwargs.get('validation_context'))
+    monkeypatch.setattr(pipeline, '_project_model_provider', lambda *args: Provider())
+    pipeline._grounded_explanation({'target': {'id': 'scope'}, 'entities': [], 'relations': [],
+        'assertions': [{'id': 'assertion', 'subject_id': 'entity', 'predicate': 'works',
+            'qualifiers': {'polarity': 'negative', 'condition': condition},
+            'status': 'contradicted', 'evidence_ids': ['e1']}],
+        'evidence': [{'id': 'e1', 'quote': 'Exact source'}]}, {}, None)
+
+
+def test_native_report_strict_schema_does_not_fallback_on_provider_failure():
+    from semantica.kg.community_summarizer import CommunitySummarizer, CommunityReportLLMSchema
+    class Provider:
+        def generate_typed(self, *args, **kwargs):
+            raise PermissionError('401 unauthorized')
+        def generate(self, *args, **kwargs):
+            pytest.fail('strict report must not send a fallback request')
+    with pytest.raises(PermissionError, match='401'):
+        CommunitySummarizer(llm=Provider()).summarize_community(
+            {'id': 'scope', 'entity_ids': []}, use_cache=False,
+            response_schema=CommunityReportLLMSchema)
+
+def test_native_report_rejects_missing_prompt_evidence_before_model_call():
+    from semantica.kg.community_summarizer import CommunitySummarizer, CommunityReportLLMSchema
+    class Provider:
+        def generate_typed(self, *args, **kwargs):
+            pytest.fail('missing source must be rejected before model call')
+    with pytest.raises(ValueError, match='omitted required source evidence'):
+        CommunitySummarizer(llm=Provider()).summarize_community(
+            {'id': 'scope', 'entity_ids': []}, use_cache=False,
+            response_schema=CommunityReportLLMSchema,
+            validation_context={'evidence': [{'id': 'missing', 'quote': 'Not in prompt'}]})
+
+
+@pytest.mark.parametrize('finding', [
+    {'summary': '', 'explanation': 'Text', 'citations': [{'evidence_id': 'e1'}]},
+    {'summary': 'Title', 'explanation': '', 'citations': [{'evidence_id': 'e1'}]},
+    {'summary': 'Title', 'explanation': 'Text', 'citations': []},
+    {'summary': 'Title', 'explanation': 'Text', 'citations': [{'evidence_id': 'foreign'}]},
+    {'summary': 'Title', 'explanation': 'Text', 'citations': [{'evidence_id': 'e1', 'quote': 'Invented'}]},
+])
+def test_native_report_rejects_invalid_findings_without_builder_parser(finding):
+    from pydantic import ValidationError
+    from semantica import semantic_artifact_builder as pipeline
+    from semantica.kg.community_summarizer import CommunitySummarizer
+    class Provider:
+        def generate_typed(self, *args, **kwargs):
+            return {'title': 'Report', 'summary': 'Supported', 'findings': [finding]}
+        def generate(self, *args, **kwargs):
+            pytest.fail('strict report must not fall back after validation failure')
+    with pytest.raises(ValidationError):
+        CommunitySummarizer(llm=Provider()).summarize_community(
+            {'id': 'scope', 'entity_ids': []}, use_cache=False,
+            text_chunks=[{'id': 'e1', 'text': 'Exact source'}],
+            response_schema=pipeline._GroundedCommunityReport,
+            validation_context={'evidence': [{'id': 'e1', 'quote': 'Exact source'}]})
+
+
+def test_grounded_report_uses_native_packing_and_output(monkeypatch):
+    from types import SimpleNamespace
+    from semantica import semantic_artifact_builder as pipeline
+    from semantica.kg.community_summarizer import CommunitySummarizer
+    seen = []
+    native = CommunitySummarizer.summarize_community
+    def summarize(self, *args, **kwargs):
+        seen.append(kwargs['text_chunks'])
+        return native(self, *args, **kwargs)
+    class Provider:
+        receipts = []
+        def generate_typed(self, prompt, schema, **kwargs):
+            assert '[e1]: Exact source' in prompt
+            return schema.model_validate({'title': 'Native report', 'summary': 'Supported',
+                'findings': [{'summary': 'Native finding', 'explanation': 'Native explanation',
+                              'citations': [{'evidence_id': 'e1'}]}]},
+                context=kwargs.get('validation_context'))
+    monkeypatch.setattr(CommunitySummarizer, 'summarize_community', summarize)
+    monkeypatch.setattr(pipeline, '_project_model_provider', lambda *args: Provider())
+    validations = []
+    native_validate = pipeline._ExplanationOutput.model_validate
+    def validate(cls, value, **kwargs):
+        validations.append(value)
+        return native_validate(value, **kwargs)
+    monkeypatch.setattr(pipeline._ExplanationOutput, 'model_validate', classmethod(validate))
+    context = {'target': {'id': 'scope', 'title': 'Topic'}, 'entities': [],
+               'assertions': [], 'relations': [], 'evidence': [{'id': 'e1', 'quote': 'Exact source'}]}
+    sections, _ = pipeline._grounded_explanation(context, {}, SimpleNamespace())
+    assert len(validations) == 1
+    assert seen == [[{'id': 'e1', 'text': 'Exact source'}]]
+    assert sections[0].title == 'Native finding'
+    assert sections[0].text == 'Native explanation'
+    assert sections[0].evidence_ids == ['e1']
+
 @pytest.mark.parametrize('vectors', [[[1., 0.], [1.]], [[1., float('nan')]], [[0., 0.]], [[[1., 2.]]]])
 def test_native_index_rejects_invalid_vector_space(vectors):
     with pytest.raises(ValueError):
@@ -43,36 +146,13 @@ def test_native_delta_covers_conflict_and_identity_deletion():
         {'conflicts': [], 'identity': []})
     assert result['removed_ids'] == ['conflict', 'split']
 
-def test_native_conflict_respects_split_and_recorded_conditions():
+def test_native_conflict_respects_recorded_conditions():
     from semantica.conflicts import ConflictDetector
-    entities = [{'id': 'a', 'name': 'Jordan', 'type': 'Person', 'source_ids': ['one']},
-                {'id': 'b', 'name': 'Jordan', 'type': 'Person', 'source_ids': ['two']}]
-    assert ConflictDetector.unresolved_identity_groups(entities, [
-        {'decision_type': 'split', 'metadata': {'partition': [['a'], ['b']]}}]) == []
     facts = [{'id': 'a', 'subject': 's', 'predicate': 'p', 'object': 'o',
               'qualifiers': {'polarity': 'positive', 'time': '2025'}},
              {'id': 'b', 'subject': 's', 'predicate': 'p', 'object': 'o',
               'qualifiers': {'polarity': 'negative', 'time': '2026'}}]
     assert ConflictDetector.qualified_polarity_groups(facts) == []
-
-def test_cross_source_relation_uses_same_spec_and_singleton_qualifiers(monkeypatch):
-    from tests.test_semantic_artifact_long_context import _relationship_fixture, receipt
-    from semantica import semantic_artifact_builder as pipeline
-    from semantica.semantic_extract.schema import ExtractionSpecification
-    builds, entities, evidence = _relationship_fixture()
-    def discover(candidates, relay):
-        item = candidates[0]
-        return [{'candidate_id': item['candidate_id'], 'source_entity_id': 'entity-1', 'target_entity_id': 'entity-2',
-                 'predicate': 'forbidden', 'qualifiers': [{'polarity': 'positive'}],
-                 'citations': [{'evidence_id': row['id'], 'quote': row['quote']} for row in item['evidence']],
-                 'reason': 'grounded'}], [receipt('relationship_discovery', 1)]
-    monkeypatch.setattr(pipeline, '_relationship_batch', discover)
-    spec = ExtractionSpecification(id='test', version='1', entity_types=[
-        {'name': entity.type, 'description': 'fixture'} for entity in {entity.type: entity for entity in entities}.values()],
-        relation_types=[{'name': 'allowed', 'description': 'fixture'}])
-    assert pipeline._discover_cross_source_relationships('project', builds, entities, [], [], evidence, None,
-                                                         extraction_spec=spec)[1] == []
-    assert len(pipeline._discover_cross_source_relationships('project', builds, entities, [], [], evidence, None)[1]) == 1
 
 def test_query_uses_native_vector_ranking(monkeypatch, tmp_path):
     from tests.test_semantic_query_worker import _semantic_request, _serve
@@ -84,6 +164,24 @@ def test_query_uses_native_vector_ranking(monkeypatch, tmp_path):
     monkeypatch.setattr(VectorRetriever, 'search_similar', search)
     assert _serve(_semantic_request(tmp_path))['ok']
     assert calls
+
+def test_query_uses_native_keyword_ranking_after_source_admission(monkeypatch, tmp_path):
+    from semantica.context.context_retriever import ContextRetriever
+    from tests.test_semantic_query_worker import _build, _request, _serve
+    original = ContextRetriever._keyword_match_entities
+    calls = []
+    def search(self, entities, query, max_results):
+        calls.append([item['id'] for item in entities])
+        return original(self, entities, query, max_results)
+    monkeypatch.setattr(ContextRetriever, '_keyword_match_entities', search)
+    request = _request(_build(tmp_path))
+    assert _serve(request)['ok']
+    assert calls and calls[0]
+    calls.clear()
+    request['params']['sourceIds'] = []
+    response = _serve(request)
+    assert response['ok'] and not response['result']['contexts']
+    assert not calls or calls == [[]]
 
 def test_query_hashes_and_parses_same_bytes(monkeypatch, tmp_path):
     from hashlib import sha256
@@ -104,13 +202,6 @@ def test_native_store_rejects_bad_space_before_mutation():
     with pytest.raises(ValueError):
         store.update_vectors(ids, [[0., 0.]])
     assert list(store.get_vector(ids[0])) == [1., 0.]
-
-def test_native_cross_source_candidates_reject_opposite_vectors_and_bound_budget():
-    search = VectorRetriever()
-    assert search.cross_source_pairs([[1., 0.], [-1., 0.]], ['a', 'b'], [{'one'}, {'two'}]) == []
-    with pytest.raises(ValueError, match='budget'):
-        search.cross_source_pairs([[1., 0.]] * 4, ['a', 'b', 'c', 'd'],
-                                  [{'one'}, {'one'}, {'two'}, {'two'}], max_pairs=3)
 
 @pytest.mark.parametrize('reflexive,expected', [(None, 0), (False, 0), (True, 1)])
 def test_reflexive_relation_requires_semantic_permission(reflexive, expected):

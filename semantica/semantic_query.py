@@ -234,20 +234,29 @@ def query_semantic_artifact(request: SemanticQueryRequest) -> SemanticQueryResul
 
     allowed_sources = set(request.source_ids) if request.source_ids is not None else None
     evidence_scores = _semantic_evidence_scores(request, retrieval_payload, evidence_by_id, representation_by_id) if request.mode == "semantic" else None
-    hits = []
+    admitted = []
     for item_id, kind, text, evidence, status, polarity in candidates:
         sources = _source_ids(evidence, evidence_by_id, representation_by_id)
         if not evidence or not sources:
             continue
         if allowed_sources is not None and not set(sources).issubset(allowed_sources):
             continue
+        admitted.append((item_id, kind, text, evidence, status, polarity, sources))
+    lexical_scores = {}
+    if evidence_scores is None:
+        ranked = ContextRetriever()._keyword_match_entities(
+            [{"id": item[0], "name": item[2]} for item in admitted],
+            request.query or "", len(admitted))
+        lexical_scores = {item["id"]: score for item, score in ranked}
+    hits = []
+    for item_id, kind, text, evidence, status, polarity, sources in admitted:
         if evidence_scores is not None:
             matches = [evidence_scores[item] for item in evidence if item in evidence_scores]
             if not matches:
                 continue
             score = max(matches)
         else:
-            score = ContextRetriever.lexical_score(request.query or "", text)
+            score = lexical_scores.get(item_id, 0.0)
             if score <= 0:
                 continue
         hits.append(QueryHit(

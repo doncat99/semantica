@@ -364,7 +364,7 @@ def test_restored_chunk_uses_native_grounding_without_repeating_model_calls(monk
         def write(self, kind, key, value):
             writes.append(value)
     monkeypatch.setattr(semantic_artifact_builder, "_text_windows", lambda _: [(0, len(text), text)])
-    monkeypatch.setattr(semantic_artifact_builder, "_embed_batch_checkpointed", lambda *_: ([[0.1]], receipt))
+    monkeypatch.setattr(semantic_artifact_builder, "_embed_texts", lambda *_: ([[0.1]], receipt))
     monkeypatch.setattr(semantic_artifact_builder, "extract_grounded_window", lambda *_a, **_k: pytest.fail("restored chunks must not call model"))
     token = active_checkpoint.set(Checkpoint())
     try:

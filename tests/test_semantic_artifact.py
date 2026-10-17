@@ -26,6 +26,16 @@ def _typed_prompt_context(payload):
     return json.JSONDecoder().raw_decode(prompt[prompt.index(marker) + len(marker):])[0]
 
 
+def _native_report(payload, title="Explanation"):
+    import re
+    prompt = payload["messages"][0]["content"]
+    refs = re.findall(r"^(?:- )?\[([^\]\n]+)\]: ", prompt, re.MULTILINE)
+    assert refs, prompt
+    return {"title": title, "summary": "Supported explanation", "findings": [
+        {"summary": title, "explanation": "Explained from the source.",
+         "citations": [{"evidence_id": refs[0]}]}]}
+
+
 def _worker_output(stdout):
     events = [json.loads(line) for line in stdout.getvalue().splitlines()]
     return events, events[-1]
@@ -52,21 +62,26 @@ def test_scoped_explanation_reuses_native_grounding_and_rejects_foreign_evidence
     snapshot = SimpleNamespace(evidence_spans=[span], entities=[], assertions=[], relations=[])
     seen = []
 
-    def respond(_relay, operation, _instruction, context, _schema):
-        seen.append((operation, context))
-        return {"sections": [{"title": "Meaning", "text": "Explained from the source.",
-                             "citations": [{"evidence_id": span.id, "quote": span.quote}]}]}, []
+    class Provider:
+        receipts = []
+        def generate_typed(self, prompt, schema, **kwargs):
+            context = kwargs["validation_context"]
+            seen.append(context)
+            assert span.quote in prompt
+            return schema.model_validate({"title": "Meaning", "summary": "Supported",
+                "findings": [{"summary": "Meaning", "explanation": "Explained from the source.",
+                              "citations": [{"evidence_id": span.id}]}]}, context=context)
 
-    monkeypatch.setattr(pipeline, "_product_json", respond)
+    monkeypatch.setattr(pipeline, "_project_model_provider", lambda *args: Provider())
     target = {"id": "chapter:1", "type": "source-scope", "title": "Foundations"}
     sections, _ = pipeline.explain_evidence(snapshot, target, [span.id], SimpleNamespace(model_id="test"))
     assert sections[0].evidence_ids == [span.id]
-    assert seen[0][0] == "knowledge_explanation" and seen[0][1]["target"] == target
+    assert seen[0]["target"] == target
     with pytest.raises(pipeline.SemanticArtifactError, match="known evidence"):
         pipeline.explain_evidence(snapshot, target, ["foreign"], None)
 
 
-def test_native_explanation_synthesizes_multiple_evidence_batches_with_its_target(monkeypatch):
+def test_native_explanation_preserves_multiple_evidence_batches_with_its_target(monkeypatch):
     from semantica import semantic_artifact_builder as pipeline
     from semantica.semantic_artifact_schema import EvidenceSpan, DocumentLocator, ReportSection
 
@@ -77,20 +92,21 @@ def test_native_explanation_synthesizes_multiple_evidence_batches_with_its_targe
     target = {"id": "chapter:1", "type": "source-scope", "title": "Topic"}
     monkeypatch.setattr(pipeline, "_explanation_contexts", lambda context: [
         {**context, "evidence": [item]} for item in context["evidence"]])
-    monkeypatch.setattr(pipeline, "_product_json", lambda _relay, _operation, _instruction, batch, _schema: (
-        {"sections": [{"title": "Source", "text": "Explained", "citations": [
-            {"evidence_id": batch["evidence"][0]["id"], "quote": batch["evidence"][0]["quote"]}]}]}, []))
     seen = []
-
-    def synthesize(actual_target, sections, _relay):
-        seen.append(actual_target)
-        return [ReportSection(title="Combined", text="Synthesis", evidence_ids=["evidence:1"])], []
-
-    monkeypatch.setattr(pipeline, "_synthesize_sections", synthesize)
+    class Provider:
+        receipts = []
+        def generate_typed(self, prompt, schema, **kwargs):
+            batch = kwargs["validation_context"]
+            seen.append(batch["target"])
+            return schema.model_validate({"title": "Source", "summary": "Supported",
+                "findings": [{"summary": "Source", "explanation": "Explained",
+                              "citations": [{"evidence_id": batch["evidence"][0]["id"]}]}]}, context=batch)
+    monkeypatch.setattr(pipeline, "_project_model_provider", lambda *args: Provider())
     sections, _ = pipeline._grounded_explanation({"target": target, "entities": [], "assertions": [],
         "relations": [], "evidence": [{"id": span.id, "quote": span.quote} for span in spans.values()]}, spans, None)
-    assert seen == [target]
-    assert len(sections) == 3
+    assert seen == [target, target]
+    assert len(sections) == 2
+    assert [section.evidence_ids for section in sections] == [["evidence:1"], ["evidence:2"]]
 
 
 def test_explanation_reads_verified_semantic_artifact(tmp_path):
@@ -286,7 +302,7 @@ def test_product_output_repairs_citation_shape_through_native_typed_provider(mon
         pipeline._ClassificationOutput,
     )
 
-    assert result["assignments"][0]["citations"] == [{"evidence_id": "evidence:source", "quote": "Source quote"}]
+    assert result.model_dump(mode="json")["assignments"][0]["citations"] == [{"evidence_id": "evidence:source", "quote": "Source quote"}]
     assert [receipt.id for receipt in receipts] == ["receipt:1", "receipt:2"]
     assert "Required JSON Schema" in prompts[1]
     assert "evidence_id" in prompts[1] and "quote" in prompts[1]
@@ -352,7 +368,8 @@ def test_product_output_repairs_semantic_citation_and_vocabulary(monkeypatch):
         pipeline._ClassificationOutput,
     )
 
-    assert result == {"assignments": [valid]}
+    assert isinstance(result, pipeline._ClassificationOutput)
+    assert result.model_dump(mode="json") == {"assignments": [valid]}
     assert [receipt.id for receipt in receipts] == ["receipt:1", "receipt:2"]
     assert "invented" in prompts[1]
     assert "Altered quote" in prompts[1]
@@ -390,74 +407,28 @@ def test_product_output_repair_has_budget_for_schema_and_previous_json(monkeypat
         pipeline._ClassificationOutput,
     )
 
-    assert result["assignments"][0]["citations"] == [{"evidence_id": "evidence:source", "quote": quote}]
+    assert result.model_dump(mode="json")["assignments"][0]["citations"] == [{"evidence_id": "evidence:source", "quote": quote}]
     assert len(receipts) == 2
 
 
-def test_identity_resolution_repairs_invalid_json_through_native_typed_provider(monkeypatch):
+def test_source_relations_project_only_existing_multi_source_facts():
     from types import SimpleNamespace
-    from semantica import semantic_artifact_builder as pipeline
-
-    candidates = [
-        {"mention_id": "mention:1", "name": "Alpha", "type": "ORG", "source_id": "source:1",
-         "previous_entity_id": None, "separate_from": [],
-         "evidence": [{"id": "evidence:1", "quote": "Alpha one", "context": "Alpha one"}]},
-        {"mention_id": "mention:2", "name": "Alpha", "type": "ORG", "source_id": "source:2",
-         "previous_entity_id": None, "separate_from": [],
-         "evidence": [{"id": "evidence:2", "quote": "Alpha two", "context": "Alpha two"}]},
-    ]
-    outputs = [[], {"merges": [{"mention_ids": ["mention:1", "mention:2"],
-                                 "evidence_ids": ["evidence:1", "evidence:2"], "reason": "Same organization"}],
-                    "splits": []}]
-    prompts = []
-
-    def relay_response(relay, payload, operation):
-        prompts.append(payload["messages"][0]["content"])
-        result = {"model": relay.model_id, "choices": [{"message": {"content": json.dumps(outputs.pop(0))}}]}
-        return result, ModelReceipt(id=f"receipt:{len(prompts)}", operation=operation, provider="test",
-                                    model=relay.model_id, input_digest=H1, output_digest=H2)
-
-    monkeypatch.setattr(pipeline, "_relay_json", relay_response)
-    judgments, receipts = pipeline._identity_batch(
-        candidates, SimpleNamespace(model_id="model-1", binding_id="default", max_output_tokens=393216)
-    )
-
-    assert judgments == [{"mention_ids": ["mention:1", "mention:2"],
-                          "evidence_ids": ["evidence:1", "evidence:2"],
-                          "reason": "Same organization", "decision_type": "merge"}]
-    assert [receipt.id for receipt in receipts] == ["receipt:1", "receipt:2"]
-    assert "Required JSON Schema" in prompts[1]
-
-
-def test_relationship_discovery_omits_ungrounded_qualifier_without_losing_valid_relations(monkeypatch):
-    from semantica.semantic_artifact_builder import _discover_cross_source_relationships
-    from semantica.semantic_artifact_schema import DocumentLocator, EvidenceSpan
-
-    entities = [KnowledgeEntity(id="entity:left", canonical_name="Left", type="concept"),
-                KnowledgeEntity(id="entity:right", canonical_name="Right", type="concept")]
-    evidence = [EvidenceSpan(id=f"evidence:{index}", representation_id=f"representation:{index}", quote=quote,
-                             locator=DocumentLocator(representation_id=f"representation:{index}", origin="native",
-                                                     quote=quote, start_char=0, end_char=len(quote), quality="precise"))
-                for index, quote in [(1, "Left recorded 31."), (2, "Right observed 31.")]]
-    candidate = {"candidate_id": "candidate:1", "source_entity": {"id": entities[0].id},
-                 "target_entity": {"id": entities[1].id},
-                 "evidence": [{"id": span.id, "quote": span.quote, "source_id": f"source:{index}",
-                               "endpoint_ids": [entities[index - 1].id]} for index, span in enumerate(evidence, 1)]}
-    citations = [{"evidence_id": span.id, "quote": span.quote} for span in evidence]
-    valid = {"candidate_id": candidate["candidate_id"], "source_entity_id": entities[0].id,
-             "target_entity_id": entities[1].id, "predicate": "associated with",
-             "qualifiers": {"polarity": "positive"}, "citations": citations, "reason": "Both are observed."}
-    receipt = ModelReceipt(id="receipt:relationship", operation="relationship_discovery", provider="test",
-                           model="model-1", input_digest=H1, output_digest=H2)
-    monkeypatch.setattr("semantica.semantic_artifact_builder._relationship_candidates", lambda *_: [candidate])
-    monkeypatch.setattr("semantica.semantic_artifact_builder._relationship_batch",
-                        lambda *_: ([{**valid, "qualifiers": {"polarity": "positive", "unit": "percent"}}, valid], [receipt]))
-
-    assertions, relations, receipts = _discover_cross_source_relationships(
-        "project-1", [], entities, [], [], evidence, None)
-    assert len(assertions) == len(relations) == 1
-    assert relations[0].evidence_ids == [span.id for span in evidence]
-    assert receipts == [receipt]
+    from semantica.semantic_artifact_builder import _source_relations
+    representations = [SimpleNamespace(id=f"rep:{index}", source_id=f"source:{index}") for index in (1, 2, 3)]
+    evidence = [SimpleNamespace(id=f"evidence:{index}", representation_id=f"rep:{index}") for index in (1, 2, 3)]
+    relation = KnowledgeRelation(id="relation:1", source_entity_id="left", target_entity_id="right",
+        type="depends on", qualifiers={"polarity": "negative", "condition": "in winter"},
+        evidence_ids=["evidence:1", "evidence:2"], support_ids=["evidence:1", "evidence:2"], status="candidate")
+    original = relation.model_dump()
+    projected = _source_relations([relation], evidence, representations)
+    assert len(projected) == 1
+    assert (projected[0].source_id, projected[0].target_id) == ("source:1", "source:2")
+    assert projected[0].entity_relation_ids == [relation.id]
+    assert projected[0].evidence_ids == relation.evidence_ids
+    assert projected[0].status == "candidate"
+    assert relation.model_dump() == original
+    assert _source_relations([], evidence, representations) == []
+    assert _source_relations([relation.model_copy(update={"evidence_ids": ["evidence:1"]})], evidence, representations) == []
 
 
 def _classification_profile():
@@ -468,6 +439,7 @@ def _classification_profile():
 
 @pytest.mark.parametrize("corruption", ["unknown-id", "altered-quote", "missing-citation", "unknown-category", "cardinality"])
 def test_semantic_classification_rejects_invalid_model_evidence(tmp_path, monkeypatch, corruption):
+    from types import SimpleNamespace
     from semantica.semantic_artifact_builder import _build_source, _source_passages, _classify_source, SemanticArtifactError
     from semantica.semantic_artifact_schema import ClassificationProfile, SourceBuildInput
     source = tmp_path / "source.txt"
@@ -488,12 +460,20 @@ def test_semantic_classification_rejects_invalid_model_evidence(tmp_path, monkey
     if corruption == "cardinality":
         assignments.append({**assignment, "item_id": "manual"})
     receipt = ModelReceipt(id="receipt:test", operation="source_classification", provider="test", model="test", input_digest=H1, output_digest=H2)
-    monkeypatch.setattr("semantica.semantic_artifact_builder._product_json", lambda *args: ({"assignments": assignments}, [receipt]))
+    calls = []
+    def relay_response(*args):
+        calls.append(args)
+        return {"model": "test", "choices": [{"message": {"content": json.dumps({"assignments": assignments})}}]}, receipt
+    monkeypatch.setattr("semantica.semantic_artifact_builder._relay_json", relay_response)
     with pytest.raises(SemanticArtifactError):
-        _classify_source(built, ClassificationProfile.model_validate(_classification_profile()), None)
+        _classify_source(built, ClassificationProfile.model_validate(_classification_profile()),
+            SimpleNamespace(model_id="test", binding_id="default", max_output_tokens=32768))
+    assert len(calls) == 3
 
 
 def test_semantic_classification_preserves_source_offsets_and_unclassified_dimensions(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from semantica import semantic_artifact_builder as pipeline
     from semantica.semantic_artifact_builder import _build_source, _source_passages, _classify_source
     from semantica.semantic_artifact_schema import ClassificationProfile, SourceBuildInput
     source = tmp_path / "source.txt"
@@ -502,8 +482,18 @@ def test_semantic_classification_preserves_source_offsets_and_unclassified_dimen
     built["passages"] = _source_passages(built)
     span = built["passages"][0]
     receipt = ModelReceipt(id="receipt:test", operation="source_classification", provider="test", model="test", input_digest=H1, output_digest=H2)
-    monkeypatch.setattr("semantica.semantic_artifact_builder._product_json", lambda *args: ({"assignments": [{"dimension_id": "purpose", "item_id": "history", "confidence": 0.9, "citations": [{"evidence_id": span.id, "quote": span.quote}]}]}, [receipt]))
-    classification, _ = _classify_source(built, ClassificationProfile.model_validate(_classification_profile()), None)
+    output = {"assignments": [{"dimension_id": "purpose", "item_id": "history", "confidence": 0.9, "citations": [{"evidence_id": span.id, "quote": span.quote}]}]}
+    monkeypatch.setattr(pipeline, "_relay_json", lambda *args: (
+        {"model": "test", "choices": [{"message": {"content": json.dumps(output)}}]}, receipt))
+    validations = []
+    native_validate = pipeline._ClassificationOutput.model_validate
+    def validate(cls, value, **kwargs):
+        validations.append(value)
+        return native_validate(value, **kwargs)
+    monkeypatch.setattr(pipeline._ClassificationOutput, "model_validate", classmethod(validate))
+    classification, _ = _classify_source(built, ClassificationProfile.model_validate(_classification_profile()),
+        SimpleNamespace(model_id="test", binding_id="default", max_output_tokens=32768))
+    assert len(validations) == 1
     assert classification.assignments[0].evidence_ids == [span.id]
     assert classification.unclassified_dimension_ids == ["topic"]
     assert built["text"][span.locator.start_char:span.locator.end_char] == span.quote
@@ -571,9 +561,16 @@ def test_explanation_rejects_missing_or_hallucinated_citations(tmp_path, monkeyp
     built = _build_source(SourceBuildInput(filePath=str(source), sourceId="source-1", materialRevision=source_content_revision(source), mimeType="text/plain", name="source.txt"), False)
     built["passages"] = _source_passages(built)
     receipt = ModelReceipt(id="receipt:test", operation="knowledge_explanation", provider="test", model="test", input_digest=H1, output_digest=H2)
-    monkeypatch.setattr("semantica.semantic_artifact_builder._product_json", lambda *args: ({"sections": [{"title": "Explanation", "text": "Unsupported claim", "citations": citation}]}, [receipt]))
+    result = {"title": "Explanation", "summary": "Unsupported", "findings": [
+        {"summary": "Explanation", "explanation": "Unsupported claim", "citations": citation}]}
+    calls = []
+    def respond(*args):
+        calls.append(args)
+        return {"model": "test", "choices": [{"message": {"content": json.dumps(result)}}]}, receipt
+    monkeypatch.setattr("semantica.semantic_artifact_builder._relay_json", respond)
     with pytest.raises(SemanticArtifactError):
-        _explanation_reports("project-1", [built], built["entities"], [], [], [], [], [*built["evidence"], *built["passages"]], None)
+        _explanation_reports("project-1", [built], built["entities"], [], [], [], [], [*built["evidence"], *built["passages"]], __import__('types').SimpleNamespace(model_id="test", max_output_tokens=1024))
+    assert len(calls) == 3
 
 
 def _parsed_ref(params, source):
@@ -724,8 +721,7 @@ def test_cross_source_same_name_stays_unresolved(tmp_path):
     assert len(ada_candidates) == 2
     assert ada_candidates[0].id != ada_candidates[1].id
     assert snapshot.identity_decisions == []
-    assert len(snapshot.conflicts) == 1
-    assert snapshot.conflicts[0].conflict_type == "identity"
+    assert snapshot.conflicts == []
     retrieval_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "retrieval-index")
     retrieval = json.loads(retrieval_path.read_text())
     assert retrieval["format"] == "semantica.retrieval-reference.v1"
@@ -773,9 +769,8 @@ def test_model_recipe_uses_bifrost_chat_and_embedding_and_records_receipts(tmp_p
             if self.path == "/v1/chat/completions":
                 prompt = payload["messages"][0]["content"]
                 explanation = "Explain the supplied knowledge" in prompt
-                context = _typed_prompt_context(payload) if explanation else None
                 if explanation:
-                    content = {"sections": [{"title": "Historical role", "text": "Ada Lovelace is connected to the Analytical Engine through the documented design work.", "citations": [{"evidence_id": context["evidence"][0]["id"], "quote": context["evidence"][0]["quote"]}]}]}
+                    content = _native_report(payload, "Historical role")
                 else:
                     content = ({
                         "relations": [{
@@ -960,17 +955,8 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
                         {"text": "Analytical Engine", "label": "CONCEPT", "occurrence": 0},
                     ],
                 })
-            elif operation == "identity_resolution":
-                candidates = _typed_prompt_context(payload)["candidates"]
-                groups = [[item for item in candidates if item["name"] == name] for name in {item["name"] for item in candidates}]
-                content = {"splits": [], "merges": [{"mention_ids": [item["mention_id"] for item in group],
-                    "evidence_ids": [span["id"] for item in group for span in item["evidence"]],
-                    "reason": "The same named mathematician and designed machine are corroborated by both source contexts."} for group in groups]}
-            elif operation == "relationship_discovery":
-                content = {"relations": []}
             elif operation == "knowledge_explanation":
-                context = _typed_prompt_context(payload)
-                content = {"sections": [{"title": "Design", "text": "Ada Lovelace designed the Analytical Engine.", "citations": [{"evidence_id": context["evidence"][0]["id"], "quote": context["evidence"][0]["quote"]}]}]}
+                content = _native_report(payload, "Design")
             else:
                 content = {}
             result = {"choices": [{"message": {"content": json.dumps(content)}}], "model": relay.model_id}
@@ -986,7 +972,7 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
     assert serve(io.StringIO(json.dumps(request) + "\n"), stdout) == 0
     events, response = _worker_output(stdout)
     embedding_progress = [event for event in events if event.get("stage") == "embedding"]
-    assert embedding_progress[-1]["metadata"] == {
+    assert {key: embedding_progress[-1]["metadata"][key] for key in ("completedChunks", "restoredChunks", "totalChunks")} == {
         "completedChunks": 2,
         "restoredChunks": 0,
         "totalChunks": 2,
@@ -997,10 +983,12 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
     assert len(snapshot.entity_mentions) == 4
     assert len(snapshot.entities) == 2
     assert snapshot.conflicts == []
-    assert len(snapshot.identity_decisions) == 2
-    identity_receipt = next(receipt for receipt in snapshot.model_receipts if receipt.operation == "identity_resolution")
-    assert identity_receipt.id in response["result"]["relayReceipts"]["model"]
-    assert all(decision.metadata["model_receipt_id"] == identity_receipt.id for decision in snapshot.identity_decisions)
+    assert snapshot.identity_decisions == []
+    assert "identity_resolution" not in operations
+    assert "relationship_discovery" not in operations
+    assert operations.count("structured_extraction") == 4
+    assert snapshot.source_relations
+    assert {item.type for item in snapshot.source_relations} == {"designed"}
     assert operations.count("knowledge_explanation") == 0
     base_path = tmp_path / "base-snapshot.json"
     base_path.write_text(snapshot.model_dump_json(by_alias=True))

@@ -1857,6 +1857,16 @@ class CommunitySummarizer:
         ):
             prompt, community = community, prompt
         llm = kwargs.get("llm") or self.llm
+        response_schema = kwargs.pop("response_schema", None)
+        if response_schema is not None:
+            context = kwargs.get("validation_context") or {}
+            if any(f"[{item['id']}]: {item['quote']}" not in prompt for item in context.get("evidence", [])):
+                raise ValueError("native report context omitted required source evidence")
+            if llm is None or not hasattr(llm, "generate_typed"):
+                raise TypeError("a strict report schema requires a typed provider")
+            result = llm.generate_typed(prompt, schema=response_schema, **kwargs)
+            return result if isinstance(result, response_schema) else response_schema.model_validate(
+                result, context=kwargs.get("validation_context"))
         if llm is None:
             return self._extractive_fallback(community)
 

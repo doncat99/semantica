@@ -1,219 +1,64 @@
-from types import SimpleNamespace
-
-import pytest
-
-from semantica.identity import resolve_project_identities
-from semantica.semantic_artifact_schema import KnowledgeEntity
+from semantica.kg.entity_resolver import EntityResolver
+from semantica.semantic_artifact_builder import _resolve_native_entities, _remap_identity_facts
+from semantica.semantic_artifact_schema import KnowledgeEntity, KnowledgeAssertion, KnowledgeRelation
 
 
-def mention(identifier, name="Ada Lovelace", source="source:one", kind="PERSON"):
-    return KnowledgeEntity(id=identifier, canonical_name=name, type=kind, evidence_ids=["evidence:" + identifier.split(":")[-1]], metadata={"source_ids": [source]})
+def test_artifact_uses_native_resolution_ids_and_membership_without_model_calls(monkeypatch):
+    def unexpected(*args, **kwargs):
+        raise AssertionError("native identity resolution must not call a model")
+    monkeypatch.setattr("semantica.semantic_artifact_builder._relay_json", unexpected)
+    monkeypatch.setattr("semantica.semantic_artifact_builder._product_json", unexpected)
+    mentions = [KnowledgeEntity(id=f"mention:{index}", canonical_name=name, type="PERSON",
+        evidence_ids=[f"evidence:{index}"], metadata={"source_ids": [f"source:{index}"]})
+        for index, name in enumerate(["Ada Lovelace", "Ada Lovelace", "Charles Babbage"])]
+    native = EntityResolver().resolve_entities([
+        {"id": item.id, "name": item.canonical_name, "type": item.type,
+         "properties": item.attributes, "metadata": item.metadata} for item in mentions])
+    entities, remap, registry = _resolve_native_entities(mentions)
+    assert [item.id for item in entities] == [item["id"] for item in native]
+    for entity, row in zip(entities, native):
+        members = row.get("merged_from") or [row["id"]]
+        assert entity.metadata["mention_ids"] == members
+        assert all(remap[member] == row["id"] for member in members)
+        assert set(entity.evidence_ids) == {ref for item in mentions if item.id in members for ref in item.evidence_ids}
+    assert {item.mention_id: item.entity_id for item in registry} == remap
+    assertions = [KnowledgeAssertion(id="assertion:1", subject_id=mentions[1].id,
+        predicate="knows", object="Charles Babbage", qualifiers={"polarity": "positive"},
+        object_entity_id=mentions[2].id, evidence_ids=["evidence:1"])]
+    relations = [KnowledgeRelation(id="relation:1", source_entity_id=mentions[1].id,
+        target_entity_id=mentions[2].id, type="knows", qualifiers={"polarity": "positive"},
+        evidence_ids=["evidence:1"])]
+    assertions, relations = _remap_identity_facts(assertions, relations, remap, entities)
+    assert assertions[0].subject_id == relations[0].source_entity_id == remap[mentions[1].id]
+    assert assertions[0].object_entity_id == relations[0].target_entity_id == remap[mentions[2].id]
+    assert assertions[0].evidence_ids == relations[0].evidence_ids == ["evidence:1"]
 
 
-def resolve(mentions, judgments, base=None):
-    return resolve_project_identities(project_id="project:one", mentions=mentions, judgments=judgments, base_snapshot=base, receipt_id="receipt:identity")[:3]
+def test_native_projection_handles_empty_input():
+    assert _resolve_native_entities([]) == ([], {}, [])
 
 
-def resolve_with_registry(mentions, judgments, base=None):
-    return resolve_project_identities(project_id="project:one", mentions=mentions, judgments=judgments, base_snapshot=base, receipt_id="receipt:identity")
-
-
-def test_shared_identity_preserves_mentions_evidence_and_id_after_original_source_removal():
-    first = mention("mention:first")
-    second = mention("mention:second", "Augusta Ada King", "source:two")
-    entities, mapping, decisions = resolve([first, second], [{"mention_ids": [first.id, second.id], "evidence_ids": [*first.evidence_ids, *second.evidence_ids], "reason": "Both source contexts identify the same mathematician by the explicit Ada Lovelace / Augusta Ada King alias."}])
-    assert len(entities) == 1
-    assert mapping[first.id] == mapping[second.id] == entities[0].id
-    assert entities[0].evidence_ids == [*first.evidence_ids, *second.evidence_ids]
-    assert decisions[0].from_entity_ids == [first.id, second.id]
-    assert decisions[0].metadata["model_receipt_id"] == "receipt:identity"
-    later, _, _ = resolve([second], [], SimpleNamespace(entities=entities))
-    assert later[0].id == entities[0].id
-    assert later[0].evidence_ids == second.evidence_ids
-
-
-def test_homonyms_are_not_merged_without_a_judgment():
-    entities, mapping, decisions = resolve([mention("mention:first"), mention("mention:second", source="source:two")], [])
-    assert len(entities) == 2
-    assert len(set(mapping.values())) == 2
-    assert decisions == []
-
-
-@pytest.mark.parametrize("judgment", [
-    None,
-    {"mention_ids": ["mention:first", "mention:unknown"], "evidence_ids": ["evidence:first", "evidence:second"], "reason": "invalid member"},
-    {"mention_ids": ["mention:first", "mention:second"], "evidence_ids": ["evidence:first"], "reason": "missing second source evidence"},
-    {"mention_ids": ["mention:first", "mention:second"], "evidence_ids": ["evidence:first", "evidence:second", "evidence:invented"], "reason": "invented citation"},
-])
-def test_unproven_identity_merge_is_rejected(judgment):
-    with pytest.raises(ValueError, match="identity judgment"):
-        resolve([mention("mention:first"), mention("mention:second", source="source:two")], [judgment])
-
-
-def test_missing_merge_judgment_preserves_previous_identity():
-    first, second = mention("mention:first"), mention("mention:second", source="source:two")
-    original, _, _ = resolve([first, second], [{"mention_ids": [first.id, second.id], "evidence_ids": [*first.evidence_ids, *second.evidence_ids], "reason": "corroborated alias"}])
-    retained, _, _ = resolve([first, second], [], SimpleNamespace(entities=original, identity_decisions=[]))
-    assert len(retained) == 1
-    assert retained[0].id == original[0].id
-
-
-def test_exact_occurrences_in_one_source_share_identity_without_model_judgment():
-    first = mention("mention:first")
-    second = mention("mention:second")
-
-    entities, mapping, decisions = resolve([first, second], [])
-
-    assert len(entities) == 1
-    assert mapping[first.id] == mapping[second.id]
-    assert entities[0].evidence_ids == [*first.evidence_ids, *second.evidence_ids]
-    assert decisions == []
-
-
-def test_explicit_split_survives_rebuild_and_rejects_unacknowledged_remerge():
-    first, second = mention("mention:first"), mention("mention:second", source="source:two")
-    merge = {"mention_ids": [first.id, second.id], "evidence_ids": [*first.evidence_ids, *second.evidence_ids], "reason": "corroborated alias"}
-    original, _, _ = resolve([first, second], [merge])
-    split = {**merge, "decision_type": "split", "groups": [[first.id], [second.id]], "reason": "Evidence identifies two different people"}
-    separated, _, decisions = resolve([first, second], [split], SimpleNamespace(entities=original, identity_decisions=[]))
-    assert len({item.id for item in separated}) == 2
-    assert original[0].id in {item.id for item in separated}
-    assert any(item.decision_type == "split" for item in decisions)
-    base = SimpleNamespace(entities=separated, identity_decisions=decisions)
-    repeated, _, next_decisions = resolve([first, second], [], base)
-    assert {item.id for item in repeated} == {item.id for item in separated}
-    assert any(item.decision_type == "split" for item in next_decisions)
-    with pytest.raises(ValueError, match="split"):
-        resolve([first, second], [merge], base)
-
-
-def test_identity_registry_preserves_entity_across_sentence_edit_and_full_withdrawal():
-    original = mention("mention:before", name="Alex")
-    entities, _, decisions, registry = resolve_with_registry([original], [])
-    base = SimpleNamespace(entities=entities, identity_decisions=decisions, identity_registry=registry)
-
-    edited = mention("mention:after", name="Alex")
-    rebuilt, mapping, _, registry = resolve_with_registry([edited], [], base)
-    assert rebuilt[0].id == entities[0].id
-    assert mapping[edited.id] == entities[0].id
-
-    withdrawn, _, _, registry = resolve_with_registry(
-        [], [], SimpleNamespace(entities=rebuilt, identity_decisions=[], identity_registry=registry)
-    )
-    assert withdrawn == []
-    readded, mapping, _, _ = resolve_with_registry(
-        [edited], [], SimpleNamespace(entities=[], identity_decisions=[], identity_registry=registry)
-    )
-    assert readded[0].id == entities[0].id
-    assert mapping[edited.id] == entities[0].id
-
-
-def test_split_does_not_break_later_merge_with_an_outsider():
-    first = mention("mention:a", name="Alex")
-    second = mention("mention:b", name="Alex", source="source:two")
-    outsider = mention("mention:c", name="A. Example", source="source:three")
-    merge_ab = {"mention_ids": [first.id, second.id], "evidence_ids": [*first.evidence_ids, *second.evidence_ids], "reason": "same person"}
-    merged, _, merge_decisions, registry = resolve_with_registry([first, second], [merge_ab])
-    split_ab = {**merge_ab, "decision_type": "split", "groups": [[first.id], [second.id]], "reason": "different people"}
-    separated, _, split_decisions, registry = resolve_with_registry(
-        [first, second], [split_ab],
-        SimpleNamespace(entities=merged, identity_decisions=merge_decisions, identity_registry=registry),
-    )
-    second_entity_id = next(item.id for item in separated if second.id in item.metadata["mention_ids"])
-
-    merge_bc = {"mention_ids": [second.id, outsider.id], "evidence_ids": [*second.evidence_ids, *outsider.evidence_ids], "reason": "explicit alias"}
-    merged_bc, _, decisions, registry = resolve_with_registry(
-        [second, outsider], [merge_bc],
-        SimpleNamespace(entities=separated, identity_decisions=split_decisions, identity_registry=registry),
-    )
-    assert len(merged_bc) == 1
-    assert merged_bc[0].id == second_entity_id
-
-    final, _, _, _ = resolve_with_registry(
-        [first, second, outsider], [],
-        SimpleNamespace(entities=merged_bc, identity_decisions=decisions, identity_registry=registry),
-    )
-    assert sorted(sorted(item.metadata["mention_ids"]) for item in final) == [
-        [first.id], [second.id, outsider.id],
-    ]
-
-
-def test_persisted_split_keeps_unadjudicated_outsider_independent():
-    first = mention("mention:a", name="Alex")
-    second = mention("mention:b", name="Alex", source="source:two")
-    outsider = mention("mention:c", name="Alex", source="source:three")
-    merge = {"mention_ids": [first.id, second.id, outsider.id],
-             "evidence_ids": [*first.evidence_ids, *second.evidence_ids, *outsider.evidence_ids],
-             "reason": "initially treated as one person"}
-    merged, _, decisions, registry = resolve_with_registry([first, second, outsider], [merge])
-    split = {"mention_ids": [first.id, second.id], "decision_type": "split",
-             "groups": [[first.id], [second.id]],
-             "evidence_ids": [*first.evidence_ids, *second.evidence_ids],
-             "reason": "evidence separates the first two mentions"}
-    _, _, decisions, _ = resolve_with_registry(
-        [first, second], [split],
-        SimpleNamespace(entities=merged, identity_decisions=decisions, identity_registry=registry),
-    )
-
-    rebuilt, _, _, _ = resolve_with_registry(
-        [first, second, outsider], [],
-        SimpleNamespace(entities=merged, identity_decisions=decisions, identity_registry=registry),
-    )
-    assert sorted(item.metadata["mention_ids"] for item in rebuilt) == [
-        [first.id], [second.id], [outsider.id],
-    ]
-
-
-def test_identity_decisions_are_immutable_and_split_has_no_single_target():
-    first, second = mention("mention:first"), mention("mention:second", source="source:two")
-    merge = {"mention_ids": [first.id, second.id], "evidence_ids": [*first.evidence_ids, *second.evidence_ids], "reason": "same person"}
-    original, _, merge_decisions, registry = resolve_with_registry([first, second], [merge])
-    split = {**merge, "decision_type": "split", "groups": [[first.id], [second.id]], "reason": "different people"}
-    separated, _, decisions, registry = resolve_with_registry(
-        [first, second], [split],
-        SimpleNamespace(entities=original, identity_decisions=merge_decisions, identity_registry=registry),
-    )
-    split_decision = next(item for item in decisions if item.decision_type == "split")
-    assert split_decision.to_entity_id is None
-    frozen = [item.model_dump(mode="json") for item in decisions]
-
-    _, _, next_decisions, _ = resolve_with_registry(
-        [second], [],
-        SimpleNamespace(entities=separated, identity_decisions=decisions, identity_registry=registry),
-    )
-    assert [item.model_dump(mode="json") for item in next_decisions] == frozen
-
-
-def test_project_identity_delegates_matching_grouping_and_merging_to_native_owners(monkeypatch):
-    from semantica.kg.entity_resolver import EntityResolver
-    from semantica.deduplication.entity_merger import EntityMerger
+def test_identity_cannot_bypass_native_detection_and_merging(monkeypatch):
+    import socket
     from semantica.deduplication.duplicate_detector import DuplicateDetector
-    calls = []
-    for cls, method in [(EntityResolver, 'resolve_entities'),
-                        (EntityResolver, 'detect_duplicate_groups'),
-                        (DuplicateDetector, 'detect_duplicate_groups'),
-                        (EntityMerger, 'merge_entity_group')]:
-        original = getattr(cls, method, None)
-        def spy(self, *args, _original=original, _owner=cls.__name__, _method=method, **kwargs):
-            calls.append((_owner, _method))
+    from semantica.deduplication.entity_merger import EntityMerger
+    calls = {}
+    for owner, method in [(EntityResolver, 'resolve_entities'),
+                          (DuplicateDetector, 'detect_duplicate_groups'),
+                          (EntityMerger, 'merge_duplicates')]:
+        original = getattr(owner, method)
+        def tracked(self, *args, _original=original, _method=method, **kwargs):
+            calls[_method] = calls.get(_method, 0) + 1
             return _original(self, *args, **kwargs)
-        monkeypatch.setattr(cls, method, spy, raising=False)
-    entities, mapping, _ = resolve([mention('mention:first'), mention('mention:second')], [])
+        monkeypatch.setattr(owner, method, tracked)
+    def network_forbidden(*args, **kwargs):
+        raise AssertionError('identity must not send network requests')
+    monkeypatch.setattr(socket.socket, 'connect', network_forbidden)
+    monkeypatch.setattr(socket, 'create_connection', network_forbidden)
+    entities, remap, _ = _resolve_native_entities([
+        KnowledgeEntity(id=f'mention:{index}', canonical_name='Ada Lovelace', type='PERSON')
+        for index in range(2)])
     assert len(entities) == 1
-    assert mapping['mention:first'] == mapping['mention:second']
-    assert calls.count(('EntityResolver', 'resolve_entities')) == 1
-    assert set(calls) == {('EntityResolver', 'resolve_entities'),
-                          ('EntityResolver', 'detect_duplicate_groups'),
-                          ('DuplicateDetector', 'detect_duplicate_groups'),
-                          ('EntityMerger', 'merge_entity_group')}
-
-
-def test_native_merge_preserves_attribute_values_and_conflicts():
-    first, second = mention('mention:first'), mention('mention:second')
-    first.attributes = {'period': [2025], 'kind': 'fund'}
-    second.attributes = {'period': [2026], 'region': 'global'}
-    entities, _, _ = resolve([first, second], [{'mention_ids': [first.id, second.id],
-        'evidence_ids': [*first.evidence_ids, *second.evidence_ids], 'reason': 'same evidenced identity'}])
-    assert entities[0].attributes == {'kind': 'fund', 'region': 'global'}
-    assert entities[0].metadata['attribute_conflicts'] == {'period': [[2025], [2026]]}
-    assert first.attributes['period'] == [2025]
+    assert len(set(remap.values())) == 1
+    assert calls['resolve_entities'] == calls['merge_duplicates'] == 1
+    assert calls['detect_duplicate_groups'] >= 1

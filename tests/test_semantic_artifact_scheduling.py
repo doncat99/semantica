@@ -56,7 +56,7 @@ def test_global_queue_interleaves_sources_preserves_order_and_budget(monkeypatch
             active -= 1
         return ({'entities': [], 'relations': []}, [], False)
     monkeypatch.setattr(builder, '_extract_window', extract)
-    monkeypatch.setattr(builder, '_embed_batch_checkpointed', lambda batch, text, relay: ([[1.] for _ in batch], SimpleNamespace()))
+    monkeypatch.setattr(builder, '_embed_texts', lambda texts, relay: ([[1.] for _ in texts], SimpleNamespace()))
     monkeypatch.setattr(builder, '_extract_and_embed', lambda text, *args, **kwargs: (text, kwargs['extracted_windows'], kwargs['embedded_batches']))
     request = SimpleNamespace(parallelism=2, relays={'model': None, 'embedding': None}, recipe=SimpleNamespace(extraction_spec=None))
     events = []
