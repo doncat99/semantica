@@ -198,14 +198,12 @@ class _ClassificationOutput(_ProductOutput):
         return self
 
 
-class _ExplanationOutputItem(_ProductOutput):
-    title: str = Field(min_length=1)
-    text: str = Field(min_length=1)
+class _GroundedFinding(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    summary: str = Field(min_length=1)
+    explanation: str = Field(min_length=1)
     citations: list[_SemanticCitation] = Field(min_length=1)
-
-
-class _ExplanationOutput(_ProductOutput):
-    sections: list[_ExplanationOutputItem] = Field(min_length=1)
 
 
 class _GroundedCommunityReport(CommunityReportLLMSchema):
@@ -213,9 +211,8 @@ class _GroundedCommunityReport(CommunityReportLLMSchema):
 
     @model_validator(mode="after")
     def grounded_findings(self, info: ValidationInfo):
-        _ExplanationOutput.model_validate({"sections": [
-            {"title": item.get("summary"), "text": item.get("explanation"),
-             "citations": item.get("citations")} for item in self.findings]}, context=info.context)
+        for finding in self.findings:
+            _GroundedFinding.model_validate(finding, context=info.context)
         return self
 
 

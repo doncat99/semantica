@@ -316,8 +316,8 @@ def test_product_output_uses_host_admitted_output_limit(monkeypatch):
 
     def relay_response(relay, payload, operation):
         payloads.append(payload)
-        result = {"model": relay.model_id, "choices": [{"message": {"content": json.dumps({"sections": [{
-            "title": "Explanation", "text": "Grounded explanation", "citations": [
+        result = {"model": relay.model_id, "choices": [{"message": {"content": json.dumps({"assignments": [{
+            "dimension_id": "purpose", "item_id": "history", "confidence": 0.9, "citations": [
                 {"evidence_id": "evidence:source", "quote": "Source quote"},
             ],
         }]})}}]}
@@ -327,10 +327,10 @@ def test_product_output_uses_host_admitted_output_limit(monkeypatch):
     monkeypatch.setattr(pipeline, "_relay_json", relay_response)
     pipeline._product_json(
         SimpleNamespace(model_id="model-1", binding_id="default", max_output_tokens=393216),
-        "knowledge_explanation",
-        "Explain the source.",
+        "source_classification",
+        "Classify the source.",
         {"evidence": [{"id": "evidence:source", "quote": "Source quote"}]},
-        pipeline._ExplanationOutput,
+        pipeline._ClassificationOutput,
     )
 
     assert payloads[0]["max_tokens"] == 393216

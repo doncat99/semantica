@@ -17,7 +17,7 @@ def test_grounded_report_preserves_assertion_state_and_long_conditions(monkeypat
             assert '"status": "contradicted"' in prompt
             return schema.model_validate({'title': 'Report', 'summary': 'Supported',
                 'findings': [{'summary': 'Finding', 'explanation': 'Explanation',
-                              'citations': [{'evidence_id': 'e1'}]}]},
+                              'citations': [{'evidence_id': 'e1'}], 'native_metadata': {'rank': 1}}]},
                 context=kwargs.get('validation_context'))
     monkeypatch.setattr(pipeline, '_project_model_provider', lambda *args: Provider())
     pipeline._grounded_explanation({'target': {'id': 'scope'}, 'entities': [], 'relations': [],
@@ -95,11 +95,11 @@ def test_grounded_report_uses_native_packing_and_output(monkeypatch):
     monkeypatch.setattr(CommunitySummarizer, 'summarize_community', summarize)
     monkeypatch.setattr(pipeline, '_project_model_provider', lambda *args: Provider())
     validations = []
-    native_validate = pipeline._ExplanationOutput.model_validate
+    native_validate = pipeline._GroundedFinding.model_validate
     def validate(cls, value, **kwargs):
         validations.append(value)
         return native_validate(value, **kwargs)
-    monkeypatch.setattr(pipeline._ExplanationOutput, 'model_validate', classmethod(validate))
+    monkeypatch.setattr(pipeline._GroundedFinding, 'model_validate', classmethod(validate))
     context = {'target': {'id': 'scope', 'title': 'Topic'}, 'entities': [],
                'assertions': [], 'relations': [], 'evidence': [{'id': 'e1', 'quote': 'Exact source'}]}
     sections, _ = pipeline._grounded_explanation(context, {}, SimpleNamespace())
@@ -282,7 +282,16 @@ def test_retrieval_index_references_canonical_snapshot_without_copying_records(t
     assert _serve(_request(built))['ok']
 
 
-def test_topic_projection_reuses_community_report_without_another_model_call(monkeypatch):
+@pytest.mark.parametrize('target_ids, expected_calls, expected_reports', [
+    (None, ['overview', 'concept', 'community'], 4),
+    (['project'], ['overview'], 1),
+    (['entity'], ['concept'], 1),
+    (['community'], ['community'], 1),
+    (['topic'], ['topic'], 1),
+    (['community', 'topic'], ['community'], 2),
+])
+def test_report_targets_bound_calls_and_reuse_community_report(
+        monkeypatch, target_ids, expected_calls, expected_reports):
     from types import SimpleNamespace
     from semantica import semantic_artifact_builder as pipeline
     from semantica.semantic_artifact_schema import KnowledgeCommunity, KnowledgeTopic, EvidenceSpan, DocumentLocator, ReportSection
@@ -297,11 +306,12 @@ def test_topic_projection_reuses_community_report_without_another_model_call(mon
         return [ReportSection(title='Meaning', text='Supported explanation.', evidence_ids=['ev'])], []
     monkeypatch.setattr(pipeline, '_grounded_explanation', explain)
     reports, receipts = pipeline._explanation_reports('project', [{'passages': [span]}], [entity], [], [],
-        [community], [topic], [span], SimpleNamespace(model_id='model'))
-    assert calls == ['overview', 'concept', 'community']
-    assert len(reports) == 4
-    assert reports[-1].sections == reports[-2].sections
-    assert reports[-1].metadata['derived_from_report_id'] == reports[-2].id
+        [community], [topic], [span], SimpleNamespace(model_id='model'), target_ids=target_ids)
+    assert calls == expected_calls
+    assert len(reports) == expected_reports
+    if target_ids is None or target_ids == ['community', 'topic']:
+        assert reports[-1].sections == reports[-2].sections
+        assert reports[-1].metadata['derived_from_report_id'] == reports[-2].id
 
 
 def test_query_process_cache_reuses_admitted_bytes_and_rejects_file_changes(tmp_path, monkeypatch):
