@@ -1,5 +1,20 @@
 # Contributing to Semantica
 
+## Fork requirement: native first, no duplicate implementations
+
+All development in `doncat99/semantica` must follow [AGENTS.md](AGENTS.md).
+Before designing or implementing a change, inspect and identify the existing
+native capability and its callers/tests. If it exists, reuse or repair its native
+owner; a second implementation is prohibited, even inside this fork or behind
+an adapter or native LLM provider. New capability requires evidence that it is
+absent. Include the native-capability assessment and regression evidence in your
+change description; missing evidence or duplicate ownership blocks review.
+
+Every change must also maintain a [fork change record](docs/fork-changes/README.md)
+covering its rationale, approach, verification and future upstream merge impact.
+Include the record with the change and link it in the PR; this applies to
+documentation and merge resolutions too.
+
 Thank you for your interest in contributing! Every contribution, no matter how small, is valuable. 🎉
 
 ⭐ **Give us a Star** • 🍴 **[Fork Semantica](https://github.com/semantica-agi/semantica/fork)** • 💬 **Join our [Discord](https://discord.gg/sV34vps5hH)**

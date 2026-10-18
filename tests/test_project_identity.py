@@ -38,6 +38,18 @@ def test_native_projection_handles_empty_input():
     assert _resolve_native_entities([]) == ([], {}, [])
 
 
+def test_native_projection_preserves_native_alias_resolution():
+    entities, remap, _ = _resolve_native_entities([
+        KnowledgeEntity(id='long', canonical_name='International Business Machines',
+                        type='ORGANIZATION', aliases=['IBM']),
+        KnowledgeEntity(id='short', canonical_name='IBM', type='ORGANIZATION')])
+    assert len(entities) == 1
+    assert remap['long'] == remap['short']
+    assert {entities[0].canonical_name, *entities[0].aliases} == {
+        'IBM', 'International Business Machines'}
+    assert 'identity_status' not in entities[0].metadata
+
+
 def test_identity_cannot_bypass_native_detection_and_merging(monkeypatch):
     import socket
     from semantica.deduplication.duplicate_detector import DuplicateDetector
@@ -56,9 +68,41 @@ def test_identity_cannot_bypass_native_detection_and_merging(monkeypatch):
     monkeypatch.setattr(socket.socket, 'connect', network_forbidden)
     monkeypatch.setattr(socket, 'create_connection', network_forbidden)
     entities, remap, _ = _resolve_native_entities([
-        KnowledgeEntity(id=f'mention:{index}', canonical_name='Ada Lovelace', type='PERSON')
-        for index in range(2)])
+        KnowledgeEntity(id=f'mention:{index}', canonical_name='Ada Lovelace', type='PERSON',
+                        attributes={'external_key': '1'})
+        for index in range(2)], property_schema={'external_key': {'identity': True}})
     assert len(entities) == 1
     assert len(set(remap.values())) == 1
     assert calls['resolve_entities'] == calls['merge_duplicates'] == 1
     assert calls['detect_duplicate_groups'] >= 1
+
+
+def test_projection_scoped_conflict_veto_preserves_native_mapping_and_endpoints():
+    mentions = [KnowledgeEntity(id=f'entity:{key}', canonical_name='ZZZZZZZ' if key == 'd' else 'Same company', type='ORGANIZATION',
+                               attributes=props, evidence_ids=[f'proof:{key}'])
+                for key, props in [('a', {'key': '1', 'scope': 'X'}),
+                                   ('b', {'key': '1', 'scope': 'X'}),
+                                   ('c', {'key': '2', 'scope': 'X'}),
+                                   ('d', {})]]
+    # Without conflict semantics, native positive resolution is unchanged.
+    assert len(_resolve_native_entities(mentions)[0]) == 2
+    entities, remap, registry = _resolve_native_entities(
+        mentions, property_schema={'key': {'identity': True, 'scope': ['scope']}})
+    assert len(entities) == 3
+    assert remap['entity:a'] == remap['entity:b']
+    assert len({remap['entity:a'], remap['entity:c'], remap['entity:d']}) == 3
+    merged = next(item for item in entities if item.id == remap['entity:a'])
+    assert set(merged.evidence_ids) == {'proof:a', 'proof:b'}
+    assert {item.entity_id for item in registry if item.mention_id in ('entity:a', 'entity:b')} == {merged.id}
+    relations = [KnowledgeRelation(id='relation:1', source_entity_id='entity:a', target_entity_id='entity:d',
+                                   type='mentions', qualifiers={'polarity': 'positive'})]
+    _, relations = _remap_identity_facts([], relations, remap, entities)
+    assert relations[0].source_entity_id == remap['entity:a']
+    assert relations[0].target_entity_id == 'entity:d'
+
+
+def test_artifact_delegates_to_supplied_native_threshold():
+    mentions = [KnowledgeEntity(id=key, canonical_name=name, type='ORG')
+                for key, name in [('mention:a', 'Acme Holdings'), ('mention:b', 'Acne Holding')]]
+    assert len(_resolve_native_entities(mentions)[0]) == 1
+    assert len(_resolve_native_entities(mentions, resolver=EntityResolver(similarity_threshold=0.99))[0]) == 2

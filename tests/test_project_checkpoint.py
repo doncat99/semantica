@@ -303,6 +303,30 @@ def test_checkpoint_rejects_corrupt_payload_and_changed_recipe(tmp_path):
         SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(request["params"]))
 
 
+def test_checkpoint_fences_identity_policy_changes(tmp_path):
+    source = tmp_path / "source.txt"
+    source.write_text("A source")
+    request = _request(source, tmp_path / "output")
+    SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(request["params"]))
+    request["params"]["identityPropertySchema"] = {"external_key": {"identity": True}}
+    with pytest.raises(SnapshotCheckpointError, match="inputs changed"):
+        SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(request["params"]))
+
+
+def test_checkpoint_fences_native_resolution_contract_changes(tmp_path, monkeypatch):
+    from semantica.project_checkpoint import PROCESSING_CONTRACTS
+
+    source = tmp_path / "source.txt"
+    source.write_text("A source")
+    request = SemanticArtifactBuildRequest.model_validate(_request(source, tmp_path / "output")["params"])
+    checkpoint = SnapshotCheckpoint(request)
+    manifest = (checkpoint.root / "manifest.json").read_bytes()
+    monkeypatch.setitem(PROCESSING_CONTRACTS, "identityResolution", "different-policy")
+    with pytest.raises(SnapshotCheckpointError, match="inputs changed"):
+        SnapshotCheckpoint(request)
+    assert (checkpoint.root / "manifest.json").read_bytes() == manifest
+
+
 def test_new_run_reuses_only_matching_verified_relay_entries(tmp_path):
     source = tmp_path / "source.txt"
     source.write_text("A source")

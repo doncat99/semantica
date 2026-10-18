@@ -51,6 +51,19 @@ def _host_snapshot(graph_path, project_id="project-1"):
         "snapshot_id": snapshot_id, "project_id": project_id, "base_snapshot_id": None})
 
 
+def test_build_validates_native_identity_policy_before_model_calls(tmp_path, monkeypatch):
+    source = tmp_path / "identity.txt"
+    source.write_text("Same company")
+    raw = _request(source, tmp_path / "output", recipe="model")["params"]
+    raw['identityPropertySchema'] = {'key': {'identity': 'yes'}}
+    request = SemanticArtifactBuildRequest.model_validate(raw)
+    def forbidden(*args, **kwargs):
+        pytest.fail('invalid identity policy must fail before paid extraction')
+    monkeypatch.setattr('semantica.semantic_artifact_builder._relay_json', forbidden)
+    with pytest.raises(ValueError, match='invalid identity property'):
+        build_semantic_artifacts(request)
+
+
 def test_scoped_explanation_reuses_native_grounding_and_rejects_foreign_evidence(monkeypatch):
     from types import SimpleNamespace
     from semantica import semantic_artifact_builder as pipeline
@@ -928,7 +941,8 @@ def test_community_and_topic_deltas_update_knowledge_without_embedded_reports(tm
     assert not any(value.startswith("report:") for value in [*delta.added_ids, *delta.updated_ids, *delta.retracted_ids])
 
 
-def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, monkeypatch):
+@pytest.mark.parametrize("declared_identity", [False, True])
+def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, monkeypatch, declared_identity):
     first, second = tmp_path / "first.txt", tmp_path / "second.txt"
     text = "Ada Lovelace designed the Analytical Engine."
     first.write_text(text, encoding="utf-8")
@@ -953,8 +967,10 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
                     "qualifiers": {"polarity": "positive"},
                 }]} if "Extract source-grounded relations" in prompt else {
                     "entities": [
-                        {"text": "Ada Lovelace", "label": "PERSON", "occurrence": 0},
-                        {"text": "Analytical Engine", "label": "CONCEPT", "occurrence": 0},
+                        {"text": "Ada Lovelace", "label": "PERSON", "occurrence": 0,
+                         "attributes": {"fixture_key": "person-1"}},
+                        {"text": "Analytical Engine", "label": "CONCEPT", "occurrence": 0,
+                         "attributes": {"fixture_key": "concept-1"}},
                     ],
                 })
             elif operation == "knowledge_explanation":
@@ -968,6 +984,8 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
 
     monkeypatch.setattr("semantica.semantic_artifact_builder._relay_json", relay_response)
     request = _request(first, tmp_path / "build", recipe="model")
+    if declared_identity:
+        request["params"]["identityPropertySchema"] = {"fixture_key": {"identity": True}}
     request["params"]["sources"].append({"filePath": str(second), "materialRevision": source_content_revision(second), "mimeType": "text/plain", "name": second.name, "sourceId": "source-2"})
     request["params"]["parsedSources"].append(_parsed_ref(request["params"], request["params"]["sources"][-1]))
     stdout = io.StringIO()
@@ -983,14 +1001,16 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
     snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "semantic-graph")
     snapshot = _host_snapshot(snapshot_path)
     assert len(snapshot.entity_mentions) == 4
+    # Declaring nonconflicting fields must not change native positive resolution.
     assert len(snapshot.entities) == 2
+    assert all('status' not in item.model_dump() for item in snapshot.identity_registry)
     assert snapshot.conflicts == []
     assert "identity_decisions" not in snapshot.model_dump()
     assert "identity_resolution" not in operations
     assert "relationship_discovery" not in operations
     assert operations.count("structured_extraction") == 4
-    assert snapshot.source_relations
-    assert {item.type for item in snapshot.source_relations} == {"designed"}
+    assert [item.type for item in snapshot.source_relations] == ["designed"]
+    assert len(snapshot.relations) == 1
     assert operations.count("knowledge_explanation") == 0
     base_path = tmp_path / "base-snapshot.json"
     base_path.write_text(snapshot.model_dump_json(by_alias=True))
@@ -1008,4 +1028,5 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
     assert retrieval["format"] == "semantica.retrieval-reference.v1"
     assert "identity_decisions" not in retrieval and "conflicts" not in retrieval
     for entity in snapshot.entities:
-        assert set(retrieval["provenance"]["entities"][entity.id]["source_documents"]) == {"source-1", "source-2"}
+        assert set(retrieval["provenance"]["entities"][entity.id]["source_documents"]) == set(entity.metadata["source_ids"])
+        assert len(entity.metadata["source_ids"]) == 2

@@ -29,6 +29,7 @@ PROCESSING_CONTRACTS = {
     "chunkExtraction": "structural-grounded-v2",
     "embedding": "gateway-batch-space-v1",
     "sourceDocument": "located-document-v2",
+    "identityResolution": "native-conflict-veto-v1",
 }
 
 
@@ -68,6 +69,7 @@ class SnapshotCheckpoint:
             "sources": sorted(sources, key=lambda item: item["sourceId"]),
             "recipe": request.recipe.model_dump(mode="json", by_alias=True),
             "documentProcessing": request.document_processing.model_dump(mode="json", by_alias=True),
+            "identityPropertySchema": request.identity_property_schema,
             "release": request.release.model_dump(mode="json", by_alias=True),
             "relays": {name: {
                 "modelId": relay.model_id,
