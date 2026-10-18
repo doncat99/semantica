@@ -1,3 +1,4 @@
+from tests.artifact_helpers import extract_source
 from types import SimpleNamespace
 from threading import Lock
 from time import sleep
@@ -30,7 +31,7 @@ def _stub_canonical_extraction(monkeypatch, extract):
         provider.receipts.append(model_receipt)
         entities = []
         for item in provider.result["entities"]:
-            start, end = pipeline._find_occurrence(text, item["name"], item.get("occurrence"))
+            start, end = pipeline._exact_occurrence(text, item["name"], item.get("occurrence"))[:2]
             entities.append(Entity(
                 item["name"], item["type"], start, end, item.get("confidence", 0.9),
                 {"mention_id": item["id"], "span_occurrence": item.get("occurrence", 0)},
@@ -38,12 +39,13 @@ def _stub_canonical_extraction(monkeypatch, extract):
         by_id = {entity.metadata["mention_id"]: entity for entity in entities}
         relations = []
         for item in provider.result["relations"]:
-            start, end = pipeline._find_occurrence(text, item["evidence"], item.get("evidence_occurrence"))
+            start, end = pipeline._exact_occurrence(text, item["evidence"], item.get("evidence_occurrence"))[:2]
             relations.append(Relation(
                 by_id[item["subject"]], item["predicate"], by_id[item["object"]],
                 item.get("confidence", 0.9), text[start:end], {
                     "subject_id": item["subject"], "object_id": item["object"],
                     "evidence_occurrence": item.get("evidence_occurrence", 0),
+                    "evidence_start": start, "evidence_end": end,
                     "qualifiers": item.get("qualifiers", {}),
                 },
             ))
@@ -64,7 +66,7 @@ def test_long_extraction_visits_tail_and_preserves_absolute_repeated_mentions(tm
 
     _stub_canonical_extraction(monkeypatch, extract)
     monkeypatch.setattr(pipeline, "_embed_texts", lambda texts, relay: ([[1.0, 0.0] for _ in texts], receipt("embedding", len(calls))))
-    extracted, embeddings, receipts = pipeline._extract_and_embed(text, SimpleNamespace(model_id="test"), None)
+    extracted, embeddings, receipts = extract_source(text, SimpleNamespace(model_id="test"), None)
     assert len(calls) >= 5 and all(len(item) <= pipeline.TEXT_WINDOW_CHARS for item in calls)
     assert len(receipts) == len(calls) + (len(calls) + 7) // 8
     assert embeddings[-1]["end_char"] == len(text)
@@ -86,8 +88,8 @@ def test_long_extraction_visits_tail_and_preserves_absolute_repeated_mentions(tm
 def test_extraction_rejects_unlocated_quote(monkeypatch):
     _stub_canonical_extraction(monkeypatch, lambda *args: ({"entities": [{"id": "missing", "name": "NotPresent", "type": "CONCEPT", "occurrence": 0}], "relations": []}, receipt("structured_extraction", 1)))
     monkeypatch.setattr(pipeline, "_embed_texts", lambda texts, relay: ([[1.0] for _ in texts], receipt("embedding", 1)))
-    with pytest.raises(pipeline.SemanticArtifactError, match="source window"):
-        pipeline._extract_and_embed("x" * 10_000 + "Tail", SimpleNamespace(model_id="test"), None)
+    with pytest.raises(pipeline.SemanticArtifactError, match="outside source text"):
+        extract_source("x" * 10_000 + "Tail", SimpleNamespace(model_id="test"), None)
 
 
 def test_extraction_reports_active_stage_and_preserves_exact_evidence(monkeypatch):
@@ -107,11 +109,12 @@ def test_extraction_reports_active_stage_and_preserves_exact_evidence(monkeypatc
     }, receipt("structured_extraction", 1)))
     monkeypatch.setattr(pipeline, "_embed_texts", lambda texts, relay: ([[1.0] for _ in texts], receipt("embedding", 1)))
 
-    extracted, _, _ = pipeline._extract_and_embed(text, SimpleNamespace(model_id="test"), None, progress=events.append)
+    extracted, _, _ = extract_source(text, SimpleNamespace(model_id="test"), None, progress=events.append)
 
-    assert [event["stage"] for event in events] == ["extracting", "extracting", "embedding", "embedding"]
-    assert events[0]["metadata"] == {"completedChunks": 0, "totalChunks": 1}
-    assert events[1]["metadata"] == {"completedChunks": 1, "restoredChunks": 0, "totalChunks": 1}
+    assert [event["stage"] for event in events] == ["extracting"] * 2 + ["embedding"] * 2
+    assert events[0]["metadata"]["completedChunks"] == 0
+    assert events[1]["metadata"]["completedChunks"] == 1
+    assert events[1]["metadata"]["restoredChunks"] == 0
     evidence = extracted["relations"][0]["evidence"]
     assert evidence == text
 
@@ -125,10 +128,10 @@ def test_extraction_reports_restored_checkpoint_chunks(monkeypatch):
     object.__setattr__(embedding, "_checkpoint_restored", True)
     monkeypatch.setattr(pipeline, "_embed_texts", lambda texts, relay: ([[1.0] for _ in texts], embedding))
 
-    pipeline._extract_and_embed("source", SimpleNamespace(model_id="test"), None, progress=events.append)
+    extract_source("source", SimpleNamespace(model_id="test"), None, progress=events.append)
 
-    assert events[1]["metadata"] == {"completedChunks": 1, "restoredChunks": 1, "totalChunks": 1}
-    assert events[-1]["metadata"] == {"completedChunks": 1, "restoredChunks": 1, "totalChunks": 1}
+    assert events[1]["metadata"]["completedChunks"] == events[-1]["metadata"]["completedChunks"] == 1
+    assert events[1]["metadata"]["restoredChunks"] == events[-1]["metadata"]["restoredChunks"] == 1
 
 
 def test_stage_progress_precedes_relay_calls(monkeypatch):
@@ -136,17 +139,19 @@ def test_stage_progress_precedes_relay_calls(monkeypatch):
 
     def extract(*args):
         assert events[-1]["stage"] == "extracting"
-        assert events[-1]["metadata"] == {"completedChunks": 0, "totalChunks": 1}
+        assert events[-1]["metadata"]["completedChunks"] == 0
+        assert events[-1]["metadata"]["totalChunks"] == 1
         return {"entities": [], "relations": []}, receipt("structured_extraction", 1)
 
     def embed(texts, relay):
         assert events[-1]["stage"] == "embedding"
-        assert events[-1]["metadata"] == {"completedChunks": 0, "totalChunks": 1}
+        assert events[-1]["metadata"]["completedChunks"] == 0
+        assert events[-1]["metadata"]["totalChunks"] == 1
         return [[1.0] for _ in texts], receipt("embedding", 1)
 
     _stub_canonical_extraction(monkeypatch, extract)
     monkeypatch.setattr(pipeline, "_embed_texts", embed)
-    pipeline._extract_and_embed("source", SimpleNamespace(model_id="test"), None, progress=events.append)
+    extract_source("source", SimpleNamespace(model_id="test"), None, progress=events.append)
 
 
 def test_parallel_extraction_is_bounded_and_preserves_window_order(monkeypatch):
@@ -167,7 +172,7 @@ def test_parallel_extraction_is_bounded_and_preserves_window_order(monkeypatch):
 
     _stub_canonical_extraction(monkeypatch, extract)
     monkeypatch.setattr(pipeline, "_embed_texts", lambda texts, relay: ([[1.0, 0.0] for _ in texts], receipt("embedding", 1)))
-    result, embeddings, receipts = pipeline._extract_and_embed("unused", SimpleNamespace(model_id="test"), None, parallelism=2)
+    result, embeddings, receipts = extract_source("unused", SimpleNamespace(model_id="test"), None, parallelism=2)
     assert peak == 2
     assert [entity["name"] for entity in result["entities"]] == [item[2] for item in windows]
     assert [item["start_char"] for item in embeddings] == [item[0] for item in windows]
@@ -192,7 +197,7 @@ def test_parallel_embedding_batches_are_bounded_and_ordered(monkeypatch):
         return [[float(int(text[4:]))] for text in texts], receipt("embedding", int(texts[0][4:]))
 
     monkeypatch.setattr(pipeline, "_embed_texts", embed)
-    _, embeddings, receipts = pipeline._extract_and_embed("unused", SimpleNamespace(model_id="test"), None, parallelism=2)
+    _, embeddings, receipts = extract_source("unused", SimpleNamespace(model_id="test"), None, parallelism=2)
     assert peak == 2
     assert [chunk["vector"] for chunk in embeddings] == [[float(index)] for index in range(24)]
     assert [item.id for item in receipts[-3:]] == [f"receipt:embedding:{index}" for index in (0, 8, 16)]
@@ -271,7 +276,7 @@ def test_native_report_cannot_introduce_evidence_from_another_batch(monkeypatch)
     monkeypatch.setattr(pipeline, "_relay_json", respond)
     with pytest.raises(pipeline.SemanticArtifactError):
         pipeline._grounded_explanation({"target": {"id": "overview"}, "entities": [],
-            "assertions": [], "relations": [], "evidence": [{"id": "source-evidence", "quote": "Supported"}]}, {}, SimpleNamespace(model_id="test", max_output_tokens=1024))
+            "assertions": [], "relations": [], "evidence": [{"id": "source-evidence", "quote": "Supported"}]}, SimpleNamespace(model_id="test", max_output_tokens=1024))
     assert len(calls) == 3
 
 

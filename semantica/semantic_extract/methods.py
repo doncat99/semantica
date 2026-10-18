@@ -138,6 +138,7 @@ from .types import (
 try:
     from .schemas import (
         EntitiesResponse,
+        validate_fact_qualifiers,
         GroundedEntityOut,
         GroundedEntitiesResponse,
         GroundedRelationOut,
@@ -151,8 +152,6 @@ except ImportError:
     SCHEMAS_AVAILABLE = False
 
 logger = get_logger("methods")
-
-_FACT_QUALIFIERS = frozenset({"polarity", "condition", "time", "unit", "value"})
 
 
 def _prompt_grounding_context(text: str, context: list[dict]) -> list[dict]:
@@ -198,19 +197,14 @@ def _exact_occurrence(text: str, quote: str, occurrence: Optional[int]) -> tuple
 def _grounded_qualifiers(value: Any, evidence: str, supporting_quotes: tuple[str, ...] = ()) -> dict:
     if isinstance(value, list) and len(value) == 1 and isinstance(value[0], dict):
         value = value[0]
-    if not isinstance(value, dict):
-        raise ProcessingError("grounded relation qualifiers must be an object")
-    unsupported = set(value) - _FACT_QUALIFIERS
-    if unsupported:
-        raise ProcessingError(f"grounded relation has unsupported qualifier: {sorted(unsupported)[0]}")
-    if value.get("polarity") not in {"positive", "negative"}:
-        raise ProcessingError("grounded relation qualifier polarity must be positive or negative")
+    try:
+        value = validate_fact_qualifiers(value)
+    except ValueError as exc:
+        raise ProcessingError(str(exc)) from exc
     grounded = dict(value)
     for key, item in value.items():
         if key == "polarity":
             continue
-        if not isinstance(item, str) or not item.strip():
-            raise ProcessingError(f"grounded relation qualifier {key} is not an exact evidence substring")
         located = next(((quote, match) for quote in (evidence, *supporting_quotes)
                         if (match := re.search(r"\s+".join(re.escape(part) for part in item.split()), quote))), None)
         if located is None:
@@ -1346,7 +1340,9 @@ def extract_entities_llm(
         "extraction_spec_digest": extraction_spec.digest if extraction_spec else None,
         **_generation_cache_params(kwargs),
     }
-    cached_result = None if provider_instance is not None else _result_cache.get("entities", text, **cache_params)
+    cache = getattr(provider_instance, "extraction_cache", None) if provider_instance is not None else _result_cache
+    cache_params["provider_scope"] = getattr(provider_instance, "cache_scope", None)
+    cached_result = cache.get("entities", text, **cache_params) if cache is not None else None
     if cached_result is not None:
         logger.debug(f"Cache hit for entity extraction ({len(cached_result)} entities)")
         return cached_result
@@ -1565,8 +1561,8 @@ Grounding requirements:
                 )
         
         logger.info(f"Successfully extracted {len(entities)} entities using {provider}/{model} (typed)")
-        if provider_instance is None:
-            _result_cache.set("entities", text, entities, **cache_params)
+        if cache is not None:
+            cache.set("entities", text, entities, **cache_params)
         return entities
         
     except Exception as e:
@@ -2186,15 +2182,19 @@ def extract_relations_llm(
         "grounding": grounding,
         "extraction_spec_digest": extraction_spec.digest if extraction_spec else None,
         "extract_temporal_bounds": extract_temporal_bounds,
-        # Deterministic fingerprint over the entity inputs (text + label) that
+        # Deterministic fingerprint over the located entity inputs that
         # affect the prompt. Stable across processes so the persistent cache
         # rehits after a restart (unlike the process-randomized built-in hash()).
         "entities_hash": _stable_fingerprint(
-            [f"{e.text}\x01{e.label}" for e in entities]
+            [json.dumps({"text": e.text, "label": e.label, "start": e.start_char,
+                         "end": e.end_char, "metadata": e.metadata, "attributes": e.attributes},
+                        sort_keys=True, ensure_ascii=False) for e in entities]
         ) if entities else "",
         **_generation_cache_params(kwargs),
     }
-    cached_result = None if provider_instance is not None else _result_cache.get("relations", text, **cache_params)
+    cache = getattr(provider_instance, "extraction_cache", None) if provider_instance is not None else _result_cache
+    cache_params["provider_scope"] = getattr(provider_instance, "cache_scope", None)
+    cached_result = cache.get("relations", text, **cache_params) if cache is not None else None
     if cached_result is not None:
         logger.debug(f"Cache hit for relation extraction ({len(cached_result)} relations)")
         return cached_result
@@ -2564,8 +2564,8 @@ Omit unsupported bindings rather than supplying conventional scientific assumpti
                 pass
 
         logger.info(f"Successfully extracted {len(relations)} relations using {provider}/{model} (typed)")
-        if provider_instance is None:
-            _result_cache.set("relations", text, relations, **cache_params)
+        if cache is not None:
+            cache.set("relations", text, relations, **cache_params)
         return relations
 
     except Exception as e:

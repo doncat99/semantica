@@ -1,106 +1,42 @@
-"""Package upgrades preserve results when the processing contract is unchanged."""
+"""Only identical current processing inputs may resume a checkpoint."""
 from copy import deepcopy
 
 import pytest
+from pydantic import ValidationError
 
-from semantica.project_checkpoint import _resume_compatible
-
-
-def inputs():
-    return {"protocol": "semantica.project-checkpoint.v1", "projectId": "project-1",
-            "inputRevision": "old-input", "sources": [{"actualDigest": "source-digest"}],
-            "baseSnapshot": None, "documentProcessing": {"mode": "local"},
-            "recipe": {"id": "model", "version": "1"},
-            "release": {"artifactDigest": "old-package", "schemaDigest": "schema",
-                        "mediaTypes": {"semantic-graph": "graph"}},
-            "relays": {"model": {"modelId": "model", "bindingId": "default", "maxOutputTokens": 32768}}}
+from semantica.project_checkpoint import SnapshotCheckpoint, SnapshotCheckpointError
+from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest
+from tests.test_semantic_artifact import _request
 
 
-def test_package_upgrade_preserves_results_and_original_manifest():
-    previous = inputs()
-    original = deepcopy(previous)
-    current = deepcopy(previous)
-    current["release"]["artifactDigest"] = "new-package"
-    current["inputRevision"] = "new-input"
-    assert _resume_compatible(previous, current)
-    assert previous == original
+@pytest.mark.parametrize("change", ["artifact", "schema", "revision", "tokens", "recipe", "processing"])
+def test_changed_checkpoint_inputs_are_rejected(tmp_path, monkeypatch, change):
+    source = tmp_path / "source.txt"
+    source.write_text("A source")
+    params = _request(source, tmp_path / "first", recipe="model")["params"]
+    params["relays"]["model"]["maxOutputTokens"] = 32768
+    checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(params))
+    current = deepcopy(params)
+    current["outputDir"] = str(tmp_path / "second")
+    current["resumeCheckpointDirs"] = [str(checkpoint.root)]
+    if change in ("artifact", "schema"):
+        current["release"][change + "Digest"] = "sha256:" + "f" * 64
+    elif change == "revision":
+        current["inputRevision"] = "sha256:" + "f" * 64
+    elif change == "tokens":
+        current["relays"]["model"]["maxOutputTokens"] = 16384
+    elif change == "processing":
+        monkeypatch.setattr("semantica.project_checkpoint.PROCESSING_CONTRACTS", {})
+    else:
+        current["recipe"]["forceOcrSourceIds"] = ["source-1"]
+    with pytest.raises(SnapshotCheckpointError, match="inputs changed"):
+        SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(current))
 
 
-@pytest.mark.parametrize("field,value", [
-    ("sources", [{"actualDigest": "different-source"}]),
-    ("recipe", {"id": "model", "version": "2"}),
-    ("projectId", "different-project"),
-    ("documentProcessing", {"mode": "remote"}),
-    ("baseSnapshot", {"artifactDigest": "new-snapshot"}),
-    ("relays", {"model": {"modelId": "other", "bindingId": "default", "maxOutputTokens": 32768}}),
-])
-def test_package_upgrade_does_not_admit_changed_processing_inputs(field, value):
-    previous = inputs()
-    current = deepcopy(previous)
-    current["release"]["artifactDigest"] = "new-package"
-    current["inputRevision"] = "new-input"
-    current[field] = value
-    assert not _resume_compatible(previous, current)
-
-
-def test_package_upgrade_rejects_changed_schema():
-    previous = inputs()
-    current = deepcopy(previous)
-    current["release"] = {**current["release"], "artifactDigest": "new-package", "schemaDigest": "new-schema"}
-    assert not _resume_compatible(previous, current)
-
-
-def test_unchanged_package_rejects_changed_input_revision():
-    previous = inputs()
-    current = {**previous, "inputRevision": "unknown-change"}
-    assert not _resume_compatible(previous, current)
-
-LEGACY_SCHEMA = 'sha256:8a854744a4d9c27c911509b010fd5c1330ae49b63d64313f21ca405c3311e93b'
-REFLEXIVITY_SCHEMA = 'sha256:300ace367257438ced05c790042721db3da818f5f94c0ed3dab5a5290e90801a'
-
-def test_additive_reflexivity_schema_preserves_completed_stages():
-    previous = inputs()
-    previous['release']['schemaDigest'] = LEGACY_SCHEMA
-    current = deepcopy(previous)
-    current['release'].update(artifactDigest='new-package', schemaDigest=REFLEXIVITY_SCHEMA)
-    current['inputRevision'] = 'new-input'
-    assert _resume_compatible(previous, current)
-    current['recipe']['version'] = '2'
-    assert not _resume_compatible(previous, current)
-
-def test_reflexivity_schema_migration_has_exact_direction_and_shape():
-    from semantica.semantic_artifact_schema import artifact_schema_compatible, semantic_artifact_json_schema, stable_digest
-    assert stable_digest(semantic_artifact_json_schema()) == REFLEXIVITY_SCHEMA
-    assert artifact_schema_compatible(LEGACY_SCHEMA, REFLEXIVITY_SCHEMA)
-    assert not artifact_schema_compatible(REFLEXIVITY_SCHEMA, LEGACY_SCHEMA)
-    assert not artifact_schema_compatible(LEGACY_SCHEMA, 'future-schema')
-
-
-def test_explicit_processing_contract_admits_only_known_legacy_and_rejects_semantic_changes():
-    from semantica.project_checkpoint import LEGACY_PROCESSING_CONTRACTS
-    previous = inputs()
-    previous["release"]["schemaDigest"] = LEGACY_SCHEMA
-    current = deepcopy(previous)
-    current["release"].update(artifactDigest="new-package", schemaDigest=REFLEXIVITY_SCHEMA)
-    current["inputRevision"] = "new-input"
-    current["processingContracts"] = deepcopy(LEGACY_PROCESSING_CONTRACTS)
-    assert _resume_compatible(previous, current)
-    current["processingContracts"]["chunkExtraction"] = "changed-prompt-v2"
-    assert not _resume_compatible(previous, current)
-    current["processingContracts"] = deepcopy(LEGACY_PROCESSING_CONTRACTS)
-    previous["release"]["schemaDigest"] = "unknown-schema"
-    assert not _resume_compatible(previous, current)
-
-
-@pytest.mark.parametrize('explicit', [False, True])
-def test_text_only_checkpoints_cannot_resume_structured_binding(explicit):
-    from semantica.project_checkpoint import PROCESSING_CONTRACTS, LEGACY_PROCESSING_CONTRACTS
-    previous = inputs()
-    previous['release']['schemaDigest'] = LEGACY_SCHEMA
-    if explicit:
-        previous['processingContracts'] = deepcopy(LEGACY_PROCESSING_CONTRACTS)
-    current = deepcopy(previous)
-    current['release'].update(artifactDigest='new-package', schemaDigest=REFLEXIVITY_SCHEMA)
-    current['inputRevision'] = 'new-input'
-    current['processingContracts'] = deepcopy(PROCESSING_CONTRACTS)
-    assert not _resume_compatible(previous, current)
+def test_removed_model_limit_migration_option_is_rejected(tmp_path):
+    source = tmp_path / "source.txt"
+    source.write_text("A source")
+    params = _request(source, tmp_path / "output")["params"]
+    params["resumeCheckpointModelTokenLimits"] = {}
+    with pytest.raises(ValidationError, match="Extra inputs"):
+        SemanticArtifactBuildRequest.model_validate(params)

@@ -24,7 +24,7 @@ def test_grounded_report_preserves_assertion_state_and_long_conditions(monkeypat
         'assertions': [{'id': 'assertion', 'subject_id': 'entity', 'predicate': 'works',
             'qualifiers': {'polarity': 'negative', 'condition': condition},
             'status': 'contradicted', 'evidence_ids': ['e1']}],
-        'evidence': [{'id': 'e1', 'quote': 'Exact source'}]}, {}, None)
+        'evidence': [{'id': 'e1', 'quote': 'Exact source'}]}, None)
 
 
 def test_native_report_strict_schema_does_not_fallback_on_provider_failure():
@@ -102,7 +102,7 @@ def test_grounded_report_uses_native_packing_and_output(monkeypatch):
     monkeypatch.setattr(pipeline._GroundedFinding, 'model_validate', classmethod(validate))
     context = {'target': {'id': 'scope', 'title': 'Topic'}, 'entities': [],
                'assertions': [], 'relations': [], 'evidence': [{'id': 'e1', 'quote': 'Exact source'}]}
-    sections, _ = pipeline._grounded_explanation(context, {}, SimpleNamespace())
+    sections, _ = pipeline._grounded_explanation(context, SimpleNamespace())
     assert len(validations) == 1
     assert seen == [[{'id': 'e1', 'text': 'Exact source'}]]
     assert sections[0].title == 'Native finding'
@@ -129,7 +129,8 @@ def test_embedding_admission_does_not_search_every_stored_vector(monkeypatch):
 def test_organization_does_not_reinterpret_admitted_identity():
     entities = [KnowledgeEntity(id='person', canonical_name='Jordan', type='Person', metadata={'source_ids': ['one']}),
                 KnowledgeEntity(id='country', canonical_name='Jordan', type='Country', metadata={'source_ids': ['two']})]
-    assert _semantic_organization(entities, [], [], [], [])[3] == []
+    communities, topics = _semantic_organization(entities, [], [], [])
+    assert {entity for community in communities for entity in community.entity_ids} == {"person", "country"}
 
 def test_native_community_algorithm_and_isolates_are_explicit():
     import networkx as nx
@@ -283,7 +284,7 @@ def test_retrieval_index_references_canonical_snapshot_without_copying_records(t
 
 
 @pytest.mark.parametrize('target_ids, expected_calls, expected_reports', [
-    (None, ['overview', 'concept', 'community'], 4),
+    (None, ['overview'], 1),
     (['project'], ['overview'], 1),
     (['entity'], ['concept'], 1),
     (['community'], ['community'], 1),
@@ -301,7 +302,7 @@ def test_report_targets_bound_calls_and_reuse_community_report(
     community = KnowledgeCommunity(id='community', level=0, title='Concept', entity_ids=['entity'])
     topic = KnowledgeTopic(id='topic', title='Concept', entity_ids=['entity'], community_ids=['community'], evidence_ids=['ev'])
     calls = []
-    def explain(context, spans, relay):
+    def explain(context, relay):
         calls.append(context['target']['type'])
         return [ReportSection(title='Meaning', text='Supported explanation.', evidence_ids=['ev'])], []
     monkeypatch.setattr(pipeline, '_grounded_explanation', explain)
@@ -309,7 +310,7 @@ def test_report_targets_bound_calls_and_reuse_community_report(
         [community], [topic], [span], SimpleNamespace(model_id='model'), target_ids=target_ids)
     assert calls == expected_calls
     assert len(reports) == expected_reports
-    if target_ids is None or target_ids == ['community', 'topic']:
+    if target_ids == ['community', 'topic']:
         assert reports[-1].sections == reports[-2].sections
         assert reports[-1].metadata['derived_from_report_id'] == reports[-2].id
 

@@ -31,6 +31,20 @@ from .community_hierarchy import (
 
 logger = get_logger("community_summarizer")
 
+class EvidenceBudgetError(ValueError):
+    """Complete evidence cannot fit before any report requests are dispatched."""
+
+
+DEFAULT_SYSTEM_PROMPT = (
+    "You are an AI intelligence assistant summarizing knowledge "
+    "graph communities into structured GraphRAG reports. Produce "
+    "a JSON object with 'title', 'summary', 'findings' "
+    "(list of {summary, explanation}), "
+    "'impact_rating' (float 1.0 to 10.0), and "
+    "'rating_explanation'."
+)
+
+
 SUPPORTED_CENTRALITY_METRICS: Dict[str, str] = {
     "degree": "calculate_degree_centrality",
     "betweenness": "calculate_betweenness_centrality",
@@ -1391,26 +1405,7 @@ class CommunitySummarizer:
             if chunks_budget > sec_tokens:
                 sub_budget = chunks_budget - sec_tokens
                 for chunk in text_chunks:
-                    if isinstance(chunk, dict):
-                        cid = (
-                            chunk.get("id")
-                            or chunk.get("chunk_id")
-                            or chunk.get("source")
-                            or ""
-                        )
-                        ctext = (
-                            chunk.get("text")
-                            or chunk.get("content")
-                            or chunk.get("excerpt")
-                            or str(chunk)
-                        )
-                        cline = (
-                            f"- [{cid}]: {ctext}\n"
-                            if cid
-                            else f"- {ctext}\n"
-                        )
-                    else:
-                        cline = f"- {str(chunk)}\n"
+                    cline = self._evidence_line(chunk)
                     t_count = estimate_tokens(cline, self.token_counter)
                     if tokens_used_chunks + t_count <= sub_budget:
                         packed_chunks.append(cline)
@@ -1963,6 +1958,50 @@ class CommunitySummarizer:
         )
         return self._extractive_fallback(community)
 
+    @staticmethod
+    def _evidence_line(chunk):
+        if not isinstance(chunk, dict):
+            return f"- {chunk}\n"
+        cid = chunk.get("id") or chunk.get("chunk_id") or chunk.get("source") or ""
+        text = chunk.get("text") or chunk.get("content") or chunk.get("excerpt") or str(chunk)
+        metadata = chunk.get("metadata")
+        facts = "\n" + json.dumps(metadata, ensure_ascii=False) if metadata else ""
+        return (f"- [{cid}]: {text}" if cid else f"- {text}") + facts + "\n"
+
+    def summarize_evidence(self, community, *, graph=None, text_chunks,
+                           validation_context=None, **kwargs):
+        """Cover every evidence chunk using the same packer as report generation."""
+        comm = (HierarchicalCommunity.from_dict({"level": 0, "index": 0, **community})
+                if isinstance(community, dict) else community)
+        subgraph = self._extract_subgraph(comm, graph)
+        overhead = estimate_tokens(
+            f"{self.system_prompt or DEFAULT_SYSTEM_PROMPT}\n\nContext Information:\n\n\nReturn ONLY the structured JSON report.",
+            self.token_counter)
+        budget = (kwargs.get("max_tokens") or self.max_tokens) - overhead
+        batches, batch = [], []
+        for chunk in text_chunks:
+            candidate = [*batch, chunk]
+            packed = self._pack_context(comm, subgraph, max_tokens=budget, text_chunks=candidate)
+            if all(self._evidence_line(item).rstrip() in packed for item in candidate):
+                batch = candidate
+                continue
+            if batch:
+                batches.append(batch)
+            packed = self._pack_context(comm, subgraph, max_tokens=budget, text_chunks=[chunk])
+            if self._evidence_line(chunk).rstrip() not in packed:
+                raise EvidenceBudgetError("one evidence chunk exceeds the native report context budget")
+            batch = [chunk]
+        if batch:
+            batches.append(batch)
+        reports = []
+        context = validation_context or {}
+        for batch in batches:
+            refs = {item["id"] for item in batch}
+            scoped = {**context, "evidence": [item for item in context.get("evidence", []) if item["id"] in refs]}
+            reports.append(self.summarize_community(comm, graph=graph, text_chunks=batch,
+                validation_context=scoped, **kwargs))
+        return reports
+
     def summarize_community(
         self,
         community: Union[HierarchicalCommunity, Dict[str, Any]],
@@ -2073,14 +2112,7 @@ class CommunitySummarizer:
         if total_budget <= 0:
             schema = self._extractive_fallback(comm)
         else:
-            system_instruction = self.system_prompt or (
-                "You are an AI intelligence assistant summarizing knowledge "
-                "graph communities into structured GraphRAG reports. Produce "
-                "a JSON object with 'title', 'summary', 'findings' "
-                "(list of {summary, explanation}), "
-                "'impact_rating' (float 1.0 to 10.0), and "
-                "'rating_explanation'."
-            )
+            system_instruction = self.system_prompt or DEFAULT_SYSTEM_PROMPT
 
             prompt_template_empty = (
                 f"{system_instruction}\n\n"

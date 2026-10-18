@@ -103,9 +103,6 @@ def _snapshot_payload():
         "relations": [
             {"id": "relation-1", "source_entity_id": "entity-ada", "target_entity_id": "entity-engine", "type": "designed", "qualifiers": {"polarity": "positive"}, "evidence_ids": ["ev-1"], "status": "accepted"}
         ],
-        "identity_decisions": [
-            {"id": "decision-1", "decision_type": "accept", "to_entity_id": "entity-ada", "reason": "single mention accepted", "evidence_ids": ["ev-1"]}
-        ],
         "communities": [
             {"id": "community-1", "level": 0, "title": "Design", "entity_ids": ["entity-ada", "entity-engine"], "relation_ids": ["relation-1"]}
         ],
@@ -144,7 +141,7 @@ def _build_request_payload():
 
 def test_semantic_artifact_contract_covers_kernel_sections():
     props = semantic_artifact_json_schema()["properties"]
-    for key in ["lineage", "artifact_manifest", "document_representations", "evidence_spans", "entities", "assertions", "relations", "identity_decisions", "communities", "topics", "conflicts", "retrieval_manifests", "change_delta", "model_receipts"]:
+    for key in ["lineage", "artifact_manifest", "document_representations", "evidence_spans", "entities", "assertions", "relations", "communities", "topics", "conflicts", "retrieval_manifests", "change_delta", "model_receipts"]:
         assert key in props
     assert "reports" not in props
 
@@ -359,3 +356,10 @@ def test_jsonl_worker_schema_method_returns_semantic_graph_and_build_request_sch
 def test_worker_request_rejects_unknown_method():
     with pytest.raises(ValidationError):
         WorkerRequest.model_validate({"id": "bad", "method": "fallback"})
+
+
+def test_snapshot_rejects_removed_identity_decisions():
+    payload = _snapshot_payload()
+    payload["identity_decisions"] = []
+    with pytest.raises(ValidationError):
+        SemanticArtifact.model_validate(payload)

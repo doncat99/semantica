@@ -46,28 +46,19 @@ def test_product_typed_output_sends_schema_on_first_request(monkeypatch):
     assert fmt['json_schema']['strict'] is False  # open qualifier dictionaries are validated locally
 
 
-@pytest.mark.parametrize('restored', [[0], [0, 1]])
-def test_legacy_completed_passes_reused_and_only_missing_passes_narrowed(monkeypatch, restored):
-    rows = [block('a', 2, 100), block('b', 1), block('c', 2)]
-    narrow, legacy = [rows[0], rows[2]], [[rows[0], rows[1]], [rows[2]]]
+def test_extraction_uses_only_current_context(monkeypatch):
+    rows = [block('a', 2, 100), block('unrelated', 1), block('c', 2)]
+    narrow = [rows[0], rows[2]]
     monkeypatch.setattr(b, '_window_grounding_context', lambda *args: narrow)
-    monkeypatch.setattr(b, '_legacy_window_grounding_context', lambda *args: rows)
-    monkeypatch.setattr(b, '_extraction_context_batches', lambda window, context: legacy if context is rows else [context])
+    monkeypatch.setattr(b, '_extraction_context_batches', lambda window, context: [context])
     calls = []
-    def extract(text, relay, spec, item, context, cache_only=False):
-        index = next((i for i, batch in enumerate(legacy) if context == batch), -1)
-        if cache_only:
-            return ({'entities': [], 'relations': []}, [], True) if index in restored else None
+    def extract(text, relay, spec, item, context):
         calls.append(context)
         return {'entities': [], 'relations': []}, [], False
     monkeypatch.setattr(b, '_extract_window_context', extract)
-    token = b.active_checkpoint.set(object())
-    try:
-        result = b._extract_window('body', None, None, rows, (100, 110, 'body'))
-    finally:
-        b.active_checkpoint.reset(token)
-    assert calls == ([] if len(restored) == 2 else [[rows[2]]])
-    assert result[2] == (len(restored) == 2)
+    result = b._extract_window('body', None, None, rows, (100, 110, 'body'))
+    assert calls == [narrow]
+    assert result[2] is False
 
 
 def test_report_unknown_targets_fail_before_any_model_call():

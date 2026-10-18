@@ -1,4 +1,4 @@
-"""Bound located context without dropping table evidence or invalidating old chunks."""
+"""Bound located context while preserving complete structural evidence."""
 from types import SimpleNamespace
 
 import pytest
@@ -51,20 +51,23 @@ def test_indivisible_row_has_typed_nonretryable_local_failure():
 
 
 def test_batched_window_keeps_local_entity_ids_and_relation_endpoints_disjoint(monkeypatch):
+    from semantica.semantic_extract.types import Entity, Relation
     context = contexts()
     monkeypatch.setattr(pipeline, "_window_grounding_context", lambda *_: context)
     monkeypatch.setattr(pipeline, "MODEL_CONTEXT_BYTES", 6_000)
     calls = []
     def extract(*args):
         calls.append(args[-1])
-        return {"entities": [{"id": "a", "name": "AEP"}, {"id": "b", "name": "report"}],
-                "relations": [{"subject": "a", "object": "b", "supporting_refs": [args[-1][-1]["ref"]]}]}, [len(calls)], len(calls) == 1
+        a = Entity("AEP", "ORG", 0, 3, metadata={"mention_id": "a"})
+        b = Entity("report", "CONCEPT", 4, 10, metadata={"mention_id": "b"})
+        return {"entities": [a, b], "relations": [Relation(a, "describes", b, metadata={
+            "subject_id": "a", "object_id": "b", "supporting_refs": [args[-1][-1]["ref"]]})]}, [len(calls)], len(calls) == 1
     monkeypatch.setattr(pipeline, "_extract_window_context", extract)
     extracted, receipts, restored = pipeline._extract_window("AEP report", SimpleNamespace(), None, [], (0, 10, "AEP report"))
     assert len(calls) > 1 and len(receipts) == len(calls)
-    ids = [entity["id"] for entity in extracted["entities"]]
+    ids = [entity.metadata["mention_id"] for entity in extracted["entities"]]
     assert len(ids) == len(set(ids))
-    assert all(r["subject"] in ids and r["object"] in ids for r in extracted["relations"])
+    assert all(r.subject.metadata["mention_id"] in ids and r.object.metadata["mention_id"] in ids for r in extracted["relations"])
     assert not restored
 
 
@@ -79,40 +82,34 @@ def test_spanning_row_label_is_repeated_without_joining_the_whole_table():
             assert label in batch
 
 
-def test_interrupted_evidence_batches_restore_completed_passes(monkeypatch):
-    from semantica.project_checkpoint import active_checkpoint
-    from semantica.semantic_artifact_schema import ModelReceipt
+def test_interrupted_evidence_batches_restore_completed_passes(tmp_path, monkeypatch):
+    from tests.artifact_helpers import stub_native_provider
+    from tests.test_semantic_artifact import _request
+    from semantica.project_checkpoint import SnapshotCheckpoint, active_checkpoint
+    from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest
     context = contexts()
     monkeypatch.setattr(pipeline, '_window_grounding_context', lambda *_: context)
     monkeypatch.setattr(pipeline, 'MODEL_CONTEXT_BYTES', 6_000)
-    stored, calls = {}, []
-    class Checkpoint:
-        created_at = "2026-10-15T00:00:00Z"
-        def read(self, kind, key):
-            return stored.get(pipeline.stable_digest(key))
-        def write(self, kind, key, value):
-            stored[pipeline.stable_digest(key)] = value
-    class Provider:
-        def __init__(self): self.receipts = []
-    def extract(_window, **kwargs):
-        calls.append(kwargs['grounding_context'])
+    source = tmp_path / "source.txt"
+    source.write_text("AEP report")
+    checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(
+        _request(source, tmp_path / "output")["params"]))
+    calls = []
+    def respond(stage, prompt):
+        calls.append(prompt)
         if len(calls) == 2:
             raise RuntimeError('interrupted')
-        provider = kwargs['provider_instance']
-        provider.receipts.append(ModelReceipt(id=f'receipt:{len(calls)}', operation='structured_extraction',
-            provider='test', model='test', input_digest='sha256:' + '1'*64, output_digest='sha256:' + '2'*64))
-        return [], [], provider
-    monkeypatch.setattr(pipeline, '_project_model_provider', lambda _: Provider())
-    monkeypatch.setattr(pipeline, 'extract_grounded_window', extract)
-    token = active_checkpoint.set(Checkpoint())
+        return {"entities": []}
+    stub_native_provider(monkeypatch, respond)
+    token = active_checkpoint.set(checkpoint)
     args = ('AEP report', SimpleNamespace(model_id='test'), None, [], (0, 10, 'AEP report'))
     try:
-        with pytest.raises(RuntimeError, match='interrupted'):
+        with pytest.raises(Exception, match='interrupted'):
             pipeline._extract_window(*args)
-        assert len(stored) == 1
+        assert len(list(checkpoint.root.glob("extraction-entities-*.json"))) == 1
         pipeline._extract_window(*args)
         expected = len(pipeline._extraction_context_batches('AEP report', context))
-        assert len(calls) == expected + 1  # one failed call; saved first pass was restored
+        assert len(calls) == expected + 1
         before = len(calls)
         assert pipeline._extract_window(*args)[2] is True
         assert len(calls) == before

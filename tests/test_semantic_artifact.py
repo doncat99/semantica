@@ -90,8 +90,9 @@ def test_native_explanation_preserves_multiple_evidence_batches_with_its_target(
                                 quote=f"Source {ref}", quality="precise", start_char=index * 20,
                                 end_char=index * 20 + len(f"Source {ref}"))) for index, ref in enumerate(("evidence:1", "evidence:2"))}
     target = {"id": "chapter:1", "type": "source-scope", "title": "Topic"}
-    monkeypatch.setattr(pipeline, "_explanation_contexts", lambda context: [
-        {**context, "evidence": [item]} for item in context["evidence"]])
+    monkeypatch.setattr(pipeline, "MODEL_REQUEST_BYTES", 3_000)
+    for span in spans.values():
+        span.quote = span.locator.quote = span.quote * 35
     seen = []
     class Provider:
         receipts = []
@@ -103,7 +104,7 @@ def test_native_explanation_preserves_multiple_evidence_batches_with_its_target(
                               "citations": [{"evidence_id": batch["evidence"][0]["id"]}]}]}, context=batch)
     monkeypatch.setattr(pipeline, "_project_model_provider", lambda *args: Provider())
     sections, _ = pipeline._grounded_explanation({"target": target, "entities": [], "assertions": [],
-        "relations": [], "evidence": [{"id": span.id, "quote": span.quote} for span in spans.values()]}, spans, None)
+        "relations": [], "evidence": [{"id": span.id, "quote": span.quote} for span in spans.values()]}, None)
     assert seen == [target, target]
     assert len(sections) == 2
     assert [section.evidence_ids for section in sections] == [["evidence:1"], ["evidence:2"]]
@@ -178,12 +179,13 @@ def test_semantic_worker_explains_verified_graph_and_returns_digest_and_receipt(
 
 
 def test_unique_quote_ignores_model_position_but_duplicate_requires_occurrence():
-    from semantica.semantic_artifact_builder import _find_occurrence, SemanticArtifactError
+    from semantica.semantic_extract.methods import _exact_occurrence
+    from semantica.utils.exceptions import ProcessingError
 
     text = "Green Bonds and Private Equity. Green Bonds"
-    assert _find_occurrence(text, "Private Equity", 590) == (16, 30)
-    with pytest.raises(SemanticArtifactError, match="outside its source window"):
-        _find_occurrence(text, "Green Bonds", 590)
+    assert _exact_occurrence(text, "Private Equity", 590) == (16, 30, 0)
+    with pytest.raises(ProcessingError, match="occurrence"):
+        _exact_occurrence(text, "Green Bonds", 590)
 
 
 def test_relay_http_failure_preserves_safe_structured_error(monkeypatch):
@@ -626,7 +628,7 @@ def test_worker_builds_complete_snapshot_from_real_text_file(tmp_path):
     assert snapshot.entities
     assert snapshot.relations == []
     assert snapshot.assertions == []
-    assert snapshot.identity_decisions == []
+    assert "identity_decisions" not in snapshot.model_dump()
     assert len(snapshot.communities) == len(snapshot.entities)
     assert len(snapshot.topics) == len(snapshot.communities)
     assert "reports" not in json.loads(snapshot_path.read_text())
@@ -720,7 +722,7 @@ def test_cross_source_same_name_stays_unresolved(tmp_path):
     ada_candidates = [entity for entity in snapshot.entities if entity.canonical_name == "Ada Lovelace"]
     assert len(ada_candidates) == 2
     assert ada_candidates[0].id != ada_candidates[1].id
-    assert snapshot.identity_decisions == []
+    assert "identity_decisions" not in snapshot.model_dump()
     assert snapshot.conflicts == []
     retrieval_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "retrieval-index")
     retrieval = json.loads(retrieval_path.read_text())
@@ -983,7 +985,7 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
     assert len(snapshot.entity_mentions) == 4
     assert len(snapshot.entities) == 2
     assert snapshot.conflicts == []
-    assert snapshot.identity_decisions == []
+    assert "identity_decisions" not in snapshot.model_dump()
     assert "identity_resolution" not in operations
     assert "relationship_discovery" not in operations
     assert operations.count("structured_extraction") == 4

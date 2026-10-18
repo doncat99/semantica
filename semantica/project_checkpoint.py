@@ -30,55 +30,6 @@ PROCESSING_CONTRACTS = {
     "embedding": "gateway-batch-space-v1",
     "sourceDocument": "located-document-v2",
 }
-# Legacy packages predate structural context and multi-span fact support.
-LEGACY_PROCESSING_CONTRACTS = {
-    "chunkExtraction": "structural-grounded-v1",
-    "embedding": "gateway-batch-space-v1",
-    "sourceDocument": "located-document-v1",
-}
-LEGACY_PROCESSING_SCHEMAS = {
-    "sha256:8a854744a4d9c27c911509b010fd5c1330ae49b63d64313f21ca405c3311e93b",
-    "sha256:300ace367257438ced05c790042721db3da818f5f94c0ed3dab5a5290e90801a",
-}
-
-
-def _resume_compatible(previous: Any, current: dict[str, Any]) -> bool:
-    if not isinstance(previous, dict):
-        return False
-    from .semantic_artifact_schema import artifact_schema_compatible
-
-    candidate = deepcopy(previous)
-    if "processingContracts" not in candidate and "processingContracts" in current:
-        release = candidate.get("release", {})
-        if release.get("schemaDigest") not in LEGACY_PROCESSING_SCHEMAS:
-            return False
-        candidate["processingContracts"] = deepcopy(LEGACY_PROCESSING_CONTRACTS)
-    if candidate == current:
-        return True
-    previous_release = candidate.get("release")
-    current_release = current.get("release")
-    if isinstance(previous_release, dict) and isinstance(current_release, dict):
-        if artifact_schema_compatible(previous_release.get("schemaDigest"), current_release.get("schemaDigest")):
-            previous_release["schemaDigest"] = current_release.get("schemaDigest")
-        if previous_release.get("artifactDigest") != current_release.get("artifactDigest"):
-            # Package identity is provenance; schema, recipe and source bytes fence reuse.
-            previous_release["artifactDigest"] = current_release.get("artifactDigest")
-            candidate["inputRevision"] = current.get("inputRevision")
-            if candidate == current:
-                return True
-    previous_relays = candidate.get("relays")
-    current_relays = current.get("relays")
-    previous_model = previous_relays.get("model") if isinstance(previous_relays, dict) else None
-    current_model = current_relays.get("model") if isinstance(current_relays, dict) else None
-    if not isinstance(previous_model, dict) or not isinstance(current_model, dict):
-        return False
-    previous_limit = previous_model.get("maxOutputTokens")
-    current_limit = current_model.get("maxOutputTokens")
-    if not isinstance(previous_limit, int) or not isinstance(current_limit, int) or previous_limit <= current_limit:
-        return False
-    previous_model["maxOutputTokens"] = current_limit
-    candidate["inputRevision"] = current["inputRevision"]
-    return candidate == current
 
 
 def _atomic_json(path: Path, value: Any) -> None:
@@ -128,7 +79,6 @@ class SnapshotCheckpoint:
                    if relay.max_output_tokens is not None else {}),
             } for name, relay in request.relays.items()}}
         self.fence = _digest(_bytes(inputs))
-        self.resume_root_fences = {}
         self.resume_roots = []
         for root in resume_roots:
             try:
@@ -139,13 +89,9 @@ class SnapshotCheckpoint:
             previous_fence = previous.get("fence") if isinstance(previous, dict) else None
             if not isinstance(previous_fence, str) or previous_fence != _digest(_bytes(previous_inputs)):
                 raise SnapshotCheckpointError(f"resume checkpoint manifest failed verification: {root}")
-            if _resume_compatible(previous_inputs, inputs):
-                self.resume_roots.append(root)
-                self.resume_root_fences[root] = previous_fence
-        self.resume_model_token_limits = {
-            Path(path).resolve(): limit for path, limit in request.resume_checkpoint_model_token_limits.items()
-            if Path(path).resolve() in self.resume_root_fences
-        }
+            if previous_inputs != inputs:
+                raise SnapshotCheckpointError(f"resume checkpoint inputs changed; start a new build: {root}")
+            self.resume_roots.append(root)
         manifest = self.root / "manifest.json"
         if manifest.exists():
             try:
@@ -187,12 +133,7 @@ class SnapshotCheckpoint:
     def read(self, kind: str, key: Any) -> Any | None:
         local_path = self._path(kind, key)
         paths = [local_path]
-        # Every completed production artifact is resumable.  Restricting
-        # resume roots to relay responses forced a restarted build to issue
-        # no new model calls yet still rebuild all extracted chunks and
-        # embeddings in memory.  The input fence and payload digest protect
-        # each copied artifact, so document, chunk and embedding entries can
-        # safely be reused across process boundaries.
+        # Exact input fences and payload digests admit current-format entries only.
         paths.extend(root / local_path.name for root in self.resume_roots)
         for path in paths:
             if not path.is_file():
@@ -201,8 +142,7 @@ class SnapshotCheckpoint:
                 entry = json.loads(path.read_bytes())
                 payload = entry["payload"]
                 local = path.parent == self.root
-                expected_fence = self.fence if local else self.resume_root_fences[path.parent]
-                if entry["fence"] != expected_fence or entry["digest"] != _digest(_bytes(payload)):
+                if entry["fence"] != self.fence or entry["digest"] != _digest(_bytes(payload)):
                     raise ValueError("digest mismatch")
                 if self._is_rejected(kind, key, entry["digest"]):
                     continue
@@ -211,40 +151,6 @@ class SnapshotCheckpoint:
                 return payload
             except (ValueError, KeyError, TypeError, OSError) as exc:
                 raise SnapshotCheckpointError(f"snapshot checkpoint entry failed verification: {path.name}") from exc
-        return None
-
-    def read_with_lower_model_limit(self, key: dict[str, Any]) -> Any | None:
-        payload = key.get("payload")
-        if not isinstance(payload, dict) or not isinstance(payload.get("max_tokens"), int):
-            return None
-        current_limit = payload["max_tokens"]
-        for root in self.resume_roots:
-            prior_limit = self.resume_model_token_limits.get(root)
-            if prior_limit is None or prior_limit <= current_limit:
-                continue
-            old_key = {**key, "payload": {**payload, "max_tokens": prior_limit}}
-            candidate = self._path("relay", old_key).name
-            path = root / candidate
-            if not path.is_file():
-                continue
-            try:
-                entry = json.loads(path.read_bytes())
-                stored = entry["payload"]
-                if entry["fence"] != self.resume_root_fences[root] or entry["digest"] != _digest(_bytes(stored)):
-                    raise ValueError("digest mismatch")
-                response = stored["response"]
-                choices = response["choices"]
-                usage = response["usage"]
-                if (len(choices) != 1 or choices[0].get("finish_reason") != "stop"
-                        or not isinstance(usage.get("completion_tokens"), int)
-                        or usage["completion_tokens"] > current_limit):
-                    continue
-                if self._is_rejected("relay", old_key, entry["digest"]) or self._is_rejected("relay", key, entry["digest"]):
-                    continue
-                self.write("relay", key, stored)
-                return stored
-            except (ValueError, KeyError, TypeError, OSError) as exc:
-                raise SnapshotCheckpointError(f"snapshot checkpoint entry failed verification: {candidate}") from exc
         return None
 
     def write(self, kind: str, key: Any, payload: Any) -> None:

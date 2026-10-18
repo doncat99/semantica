@@ -1,3 +1,4 @@
+from tests.artifact_helpers import extract_source
 import inspect
 from types import SimpleNamespace
 
@@ -75,7 +76,7 @@ def test_parallel_extraction_failure_retains_task_and_window_context(monkeypatch
     monkeypatch.setattr(semantic_artifact_builder, "extract_grounded_window", grounded)
 
     with pytest.raises(SemanticArtifactError) as failure:
-        semantic_artifact_builder._extract_and_embed(
+        extract_source(
             "source", SimpleNamespace(model_id="model-1"), object(), parallelism=1
         )
 
@@ -83,6 +84,7 @@ def test_parallel_extraction_failure_retains_task_and_window_context(monkeypatch
     assert failure.value.code == "UPSTREAM_NOT_FOUND"
     assert failure.value.diagnostic["parallelTask"] == {
         "taskId": "0",
+        "sourceIndex": 0,
         "windowStart": 12,
         "windowEnd": 34,
         "errorType": "ProcessingError",
@@ -146,7 +148,7 @@ def test_semantic_artifact_extraction_uses_canonical_semantica_extractors(monkey
         relations = [Relation(
             entities[0], "shades", entities[1], 0.9,
             "Reflective roofs do not shade pedestrians.",
-            {"qualifiers": {"polarity": "negative"}, "evidence_start": 0, "evidence_end": 43,
+            {"qualifiers": {"polarity": "negative"}, "evidence_start": 0, "evidence_end": 42,
              "evidence_occurrence": 0, "subject_id": "mention:0", "object_id": "mention:1"},
         )]
         return entities, relations, Provider()
@@ -166,7 +168,7 @@ def test_semantic_artifact_extraction_uses_canonical_semantica_extractors(monkey
         )),
     )
 
-    result, embeddings, receipts = semantic_artifact_builder._extract_and_embed(
+    result, embeddings, receipts = extract_source(
         "Reflective roofs do not shade pedestrians.", SimpleNamespace(model_id="model-1"), object()
     )
 
@@ -226,7 +228,7 @@ def test_native_extraction_preserves_retryable_relay_failure(monkeypatch):
     monkeypatch.setattr(semantic_artifact_builder, "extract_grounded_window", grounded)
 
     with pytest.raises(SemanticArtifactError) as failure:
-        semantic_artifact_builder._extract_and_embed(
+        extract_source(
             "Retryable source text", SimpleNamespace(model_id="model-1"), object()
         )
 
@@ -349,32 +351,35 @@ def test_typed_provider_keeps_relay_failure_as_its_cause(monkeypatch):
     assert failure.value.__cause__ is relay_failure
 
 
-def test_restored_chunk_uses_native_grounding_without_repeating_model_calls(monkeypatch):
-    from semantica.project_checkpoint import active_checkpoint
+def test_native_empty_result_cache_restores_rejections_and_receipts(tmp_path, monkeypatch):
+    from tests.artifact_helpers import stub_native_provider
+    from tests.test_semantic_artifact import _request
+    from semantica.project_checkpoint import SnapshotCheckpoint, active_checkpoint
+    from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest
+
     text = "The committee supervises reporting."
-    receipt = ModelReceipt(id="receipt:restored", operation="structured_extraction", provider="test", model="model-1",
-        input_digest="sha256:" + "1" * 64, output_digest="sha256:" + "2" * 64)
-    extracted = {"entities": [{"id": f"mention:{i}", "name": "committee", "type": "organization", "occurrence": 0} for i in range(2)],
-        "relations": [{"subject": "mention:0", "predicate": "related_to", "object": "mention:1",
-            "evidence": text, "evidence_occurrence": 0, "qualifiers": {"polarity": "positive"}, "confidence": 0.9}]}
-    writes = []
-    class Checkpoint:
-        def read(self, kind, key):
-            return {"extracted": extracted, "receipts": [receipt.model_dump(mode="json")]} if kind == "chunk-extraction" else None
-        def write(self, kind, key, value):
-            writes.append(value)
-    monkeypatch.setattr(semantic_artifact_builder, "_text_windows", lambda _: [(0, len(text), text)])
-    monkeypatch.setattr(semantic_artifact_builder, "_embed_texts", lambda *_: ([[0.1]], receipt))
-    monkeypatch.setattr(semantic_artifact_builder, "extract_grounded_window", lambda *_a, **_k: pytest.fail("restored chunks must not call model"))
-    token = active_checkpoint.set(Checkpoint())
+    path = tmp_path / "source.txt"
+    path.write_text(text)
+    checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(
+        _request(path, tmp_path / "output")["params"]))
+    calls = []
+    def respond(stage, prompt):
+        calls.append(stage)
+        return {"entities": [{"text": "committee", "label": "ORG", "occurrence": "invalid"}]}
+    stub_native_provider(monkeypatch, respond)
+    token = active_checkpoint.set(checkpoint)
     try:
-        result, _, receipts = semantic_artifact_builder._extract_and_embed(text, SimpleNamespace(model_id="model-1"), object())
+        args = (text, SimpleNamespace(model_id="test"), None, (0, len(text), text), [])
+        first, first_receipts, reused = semantic_artifact_builder._extract_window_context(*args)
+        second, receipts, restored = semantic_artifact_builder._extract_window_context(*args)
     finally:
         active_checkpoint.reset(token)
-    assert result["relations"] == []
-    assert len(result["entities"]) == 2
-    assert len(writes) == 1
-    assert "itself" in receipts[0].metadata["rejected_candidates"][0]["reason"]
+    assert first == second == {"entities": [], "relations": []}
+    assert calls == ["entities"] and not reused and restored
+    assert receipts[0].id == first_receipts[0].id
+    assert receipts[0].metadata["rejected_candidates"]
+    assert len(list(checkpoint.root.glob("extraction-entities-*.json"))) == 1
+    assert not list(checkpoint.root.glob("relay-*.json"))
 
 
 def test_source_assembly_preserves_relations_when_distinct_refs_share_identity(tmp_path):

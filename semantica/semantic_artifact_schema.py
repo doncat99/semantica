@@ -12,6 +12,7 @@ from urllib.parse import urlsplit
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from .semantic_extract.schema import ExtractionSpecification
+from .semantic_extract.schemas import validate_fact_qualifiers
 
 ARTIFACT_PROTOCOL = "semantica.semantic-artifact.v1"
 WORKER_PROTOCOL = "semantica.semantic-worker.v1"
@@ -183,17 +184,6 @@ class KnowledgeEntity(KernelModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
-def _validated_fact_qualifiers(value: Dict[str, Any]) -> Dict[str, Any]:
-    allowed = {"polarity", "condition", "time", "unit", "value"}
-    if set(value) - allowed:
-        raise ValueError("fact qualifiers contain unsupported keys")
-    if value.get("polarity") not in {"positive", "negative"}:
-        raise ValueError("fact qualifiers require positive or negative polarity")
-    if any(not isinstance(item, str) or not item.strip() for key, item in value.items() if key != "polarity"):
-        raise ValueError("fact qualifier values must be non-empty strings")
-    return value
-
-
 class KnowledgeAssertion(KernelModel):
     id: str
     subject_id: str
@@ -209,7 +199,7 @@ class KnowledgeAssertion(KernelModel):
     @field_validator("qualifiers")
     @classmethod
     def validate_qualifiers(cls, value: Dict[str, Any]) -> Dict[str, Any]:
-        return _validated_fact_qualifiers(value)
+        return validate_fact_qualifiers(value)
 
 
 class KnowledgeRelation(KernelModel):
@@ -226,7 +216,7 @@ class KnowledgeRelation(KernelModel):
     @field_validator("qualifiers")
     @classmethod
     def validate_qualifiers(cls, value: Dict[str, Any]) -> Dict[str, Any]:
-        return _validated_fact_qualifiers(value)
+        return validate_fact_qualifiers(value)
 
 
 class SourceRelation(KernelModel):
@@ -245,18 +235,6 @@ class SourceRelation(KernelModel):
     entity_relation_ids: List[str] = Field(default_factory=list)
     status: Literal["candidate", "accepted", "rejected", "retracted"] = "candidate"
     unresolved_reason: Optional[str] = None
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-
-
-class IdentityDecision(KernelModel):
-    id: str
-    decision_type: Literal["accept", "merge", "split", "reject", "retract"]
-    from_entity_ids: List[str] = Field(default_factory=list)
-    to_entity_id: Optional[str] = None
-    evidence_ids: List[str] = Field(default_factory=list)
-    reason: str
-    decided_by: Literal["semantica", "human", "import"] = "semantica"
-    decided_at: str = Field(default_factory=utc_now_iso)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
@@ -406,7 +384,6 @@ class SemanticArtifact(KernelModel):
     entities: List[KnowledgeEntity] = Field(default_factory=list)
     assertions: List[KnowledgeAssertion] = Field(default_factory=list)
     relations: List[KnowledgeRelation] = Field(default_factory=list)
-    identity_decisions: List[IdentityDecision] = Field(default_factory=list)
     identity_registry: List[IdentityRegistryEntry] = Field(default_factory=list)
     communities: List[KnowledgeCommunity] = Field(default_factory=list)
     topics: List[KnowledgeTopic] = Field(default_factory=list)
@@ -435,7 +412,6 @@ class SemanticArtifact(KernelModel):
             "assertion": self.assertions,
             "relation": self.relations,
             "source_relation": self.source_relations,
-            "identity_decision": self.identity_decisions,
             "community": self.communities,
             "topic": self.topics,
             "conflict": self.conflicts,
@@ -802,7 +778,6 @@ class SemanticArtifactBuildRequest(DigestModel):
     parallelism: int = Field(default=1, ge=1, le=16)
     output_dir: str = Field(alias="outputDir")
     resume_checkpoint_dirs: List[str] = Field(default_factory=list, alias="resumeCheckpointDirs")
-    resume_checkpoint_model_token_limits: Dict[str, int] = Field(default_factory=dict, alias="resumeCheckpointModelTokenLimits")
     recipe: RecipeRef
     relays: Dict[str, RelayRef]
     release: ReleaseRef
@@ -818,9 +793,6 @@ class SemanticArtifactBuildRequest(DigestModel):
             raise ValueError("outputDir must be absolute")
         if any(not isabs(item) for item in self.resume_checkpoint_dirs):
             raise ValueError("resumeCheckpointDirs must contain absolute paths")
-        if any(path not in self.resume_checkpoint_dirs or limit < 1
-               for path, limit in self.resume_checkpoint_model_token_limits.items()):
-            raise ValueError("resumeCheckpointModelTokenLimits must reference checkpoint paths with positive limits")
         source_ids = {source.source_id for source in self.sources}
         if len(source_ids) != len(self.sources):
             raise ValueError("source ids must be unique")
@@ -902,11 +874,3 @@ def semantic_artifact_json_schema() -> Dict[str, Any]:
 
 def build_request_json_schema() -> Dict[str, Any]:
     return SemanticArtifactBuildRequest.model_json_schema()
-
-
-def artifact_schema_compatible(previous: str, current: str) -> bool:
-    """Admit only the known additive, optional reflexivity contract extension."""
-    return previous == current or (previous, current) == (
-        "sha256:8a854744a4d9c27c911509b010fd5c1330ae49b63d64313f21ca405c3311e93b",
-        "sha256:300ace367257438ced05c790042721db3da818f5f94c0ed3dab5a5290e90801a",
-    )

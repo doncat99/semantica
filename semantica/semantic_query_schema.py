@@ -75,7 +75,7 @@ class SemanticQueryRequest(StrictModel):
 
 class QueryHit(StrictModel):
     id: str
-    kind: Literal["entity", "assertion", "relation", "identity_decision", "conflict", "topic", "report", "evidence"]
+    kind: Literal["entity", "assertion", "relation", "conflict", "topic", "report", "evidence"]
     title: str
     text: str
     score: float = Field(ge=0)
