@@ -730,11 +730,9 @@ class OpenAIProvider(BaseProvider):
         Args:
             api_key: OpenAI API key (or OPENAI_API_KEY env var).
             model: Default model name.
-            base_url: Optional custom base URL for OpenAI-compatible endpoints
-                (e.g. local gateways, Qwen, LLaMA proxies).  When set,
-                ``instructor`` will use ``Mode.JSON`` instead of
-                ``Mode.TOOLS`` because most OpenAI-compatible servers do not
-                implement the full function-calling protocol.
+            base_url: Optional custom base URL for OpenAI-compatible endpoints.
+                Typed generation requires native strict JSON Schema support,
+                including when using a custom endpoint.
         """
         super().__init__(**kwargs)
         self.api_key = api_key or config.get_api_key("openai")
@@ -803,6 +801,36 @@ class OpenAIProvider(BaseProvider):
 
         response = self.client.chat.completions.create(**create_kwargs)
         return response.choices[0].message.content
+
+    def generate_typed(
+        self, prompt: str, schema: Type[BaseModel], max_retries: int = 3, **kwargs
+    ) -> BaseModel:
+        """Use native strict JSON Schema; never downgrade after a schema failure.
+
+        Transport retries belong to the configured client. ``max_retries`` is
+        retained for the BaseProvider interface; no semantic repair is attempted.
+        """
+        if not self.client:
+            raise ProcessingError("OpenAI client not initialized.")
+        if not isinstance(schema, type) or not issubclass(schema, BaseModel):
+            raise TypeError("schema must be a Pydantic BaseModel type")
+        request = {
+            "model": kwargs.get("model", self.model),
+            "messages": [{"role": "user", "content": prompt}],
+            "response_format": schema,
+        }
+        self._add_if_set(
+            request, kwargs, "temperature", "max_completion_tokens", "max_tokens",
+            "top_p", "frequency_penalty", "presence_penalty", "seed", "stop",
+            "logit_bias", "user",
+        )
+        response = self.client.chat.completions.parse(**request)
+        if len(response.choices) != 1:
+            raise ProcessingError("Expected one structured output choice")
+        choice = response.choices[0]
+        if choice.finish_reason != "stop" or choice.message.refusal or choice.message.parsed is None:
+            raise ProcessingError("Structured output refused or incomplete")
+        return choice.message.parsed
 
     def generate_structured(self, prompt: str, **kwargs) -> Union[dict, list]:
         """Generate structured JSON output."""
