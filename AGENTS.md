@@ -44,6 +44,26 @@ On unsupported inputs or dependency failure, expose the limitation through the
 existing error/unknown mechanism; do not silently switch to a parallel algorithm
 or fabricate a successful result.
 
+## PDF parsing ownership
+
+- Direct PDF reader imports/calls (PyMuPDF/fitz, pdfplumber, pypdf, PDFium,
+  pdfminer, Poppler and equivalent tools) belong only in
+  `semantica/parse/pdf_parser.py::PDFParser`. Metadata and page counting are
+  parsing too; workers, builders, ingestion, examples and integrations must
+  delegate to this owner, never open PDFs with another reader or subprocess.
+- Structured document conversion/OCR retains the existing
+  `semantica/parse/docling_parser.py::DoclingParser` owner. Only this adapter may
+  construct Docling converters or select their PDF backends; callers use the
+  adapter, not Docling's reader APIs. Docling manages its own internal reader.
+  Do not add a preliminary PDFParser extraction, reimplement Docling internals,
+  or claim that changing PDFParser changes Docling's backend.
+- Tests may create fixtures and exercise backend contracts directly. This does
+  not authorize production reader use outside its owner. New dependencies,
+  reader commands, dynamic loading and upstream merges require the same review.
+- Run `pytest -q tests/test_pdf_reader_ownership.py` when changing these paths.
+  Its static gate supplements review; constructed runtime imports still require
+  inspection. Do not extend exceptions to accommodate a bypass.
+
 ## Regression and review requirements
 
 - Reproduce defects with a regression test against the existing owner before

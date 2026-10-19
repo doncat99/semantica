@@ -120,6 +120,7 @@ jobs:
           print('semantica', semantica.__version__, 'core installed and importable')
           "
           pytest -q tests/test_issue_1513_slim_core.py
+          pytest -q tests/test_pdf_reader_ownership.py
           pytest -q tests/test_docs_check.py
           # semantica/reasoning imports nothing outside the standard library,
           # so its suite runs against base dependencies without the extras

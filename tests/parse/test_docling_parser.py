@@ -27,6 +27,7 @@ class TestDoclingParser(unittest.TestCase):
         self.assertFalse(option.pipeline_options.do_ocr)
         from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
         self.assertIsNot(option.backend, PyPdfiumDocumentBackend)
+        self.assertEqual(option.backend.__module__, "docling.backend.docling_parse_backend")
 
     def test_page_projection_uses_all_docling_provenance_entries(self):
         first = SimpleNamespace(text="First page", prov=[SimpleNamespace(page_no=1)])
@@ -104,7 +105,7 @@ class TestDoclingParser(unittest.TestCase):
         converter = MagicMock()
         converter.convert.return_value = SimpleNamespace(document=document, status="success")
         parser = DoclingParser(converter=converter)
-        with patch.object(Path, 'exists', return_value=True):
+        with patch.dict('sys.modules', {'pymupdf': None, 'fitz': None}), patch.object(Path, 'exists', return_value=True):
             result = parser.parse("fixture.pdf", include_document=True, export_format="doctags")
         converter.convert.assert_called_once_with("fixture.pdf")
         restored = DoclingDocument.model_validate(result["document"])

@@ -180,8 +180,8 @@ class AttachmentProcessor:
 
         This method attempts to extract text content from various document
         types. Currently supports plain text files. PDF and Word document
-        extraction would require additional libraries (pdfplumber for
-        PDF, python-docx for Word).
+        extraction is not implemented here; any future support must delegate
+        to the existing native parsers instead of adding a reader.
 
         Args:
             attachment_path: Path to attachment file
@@ -193,9 +193,9 @@ class AttachmentProcessor:
         """
         try:
             if file_type == "application/pdf":
-                # PDF text extraction would require pdfplumber
+                # PDF extraction must delegate to the native PDFParser when implemented.
                 self.logger.debug(
-                    "PDF text extraction not implemented (requires pdfplumber)"
+                    "PDF attachment text extraction not implemented"
                 )
                 return None
             elif file_type in [
