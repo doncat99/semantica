@@ -93,6 +93,7 @@ class PDFParser:
                 - extract_tables: Whether to extract tables (default: True)
                 - extract_images: Whether to extract images (default: False)
                 - pages: Specific page numbers to parse (None = all pages)
+                - use_text_flow: Forward to pdfplumber text extraction when supplied
 
         Returns:
             dict: Parsed PDF data
@@ -138,9 +139,12 @@ class PDFParser:
 
                     for page_num in page_numbers:
                         if page_num < len(pdf.pages):
-                            page_data = self._parse_page(
-                                pdf.pages[page_num], page_num + 1, options
-                            )
+                            page = pdf.pages[page_num]
+                            try:
+                                page_data = self._parse_page(page, page_num + 1, options)
+                            finally:
+                                # PDF retains pages; release layout/object caches before advancing.
+                                page.close()
                             pages.append(page_data)
 
                     full_text = "\n\n".join(page.text for page in pages)
@@ -268,7 +272,8 @@ class PDFParser:
 
         # Extract text
         if options.get("extract_text", True):
-            page_data.text = page.extract_text() or ""
+            text_options = {key: options[key] for key in ("use_text_flow",) if key in options}
+            page_data.text = page.extract_text(**text_options) or ""
 
         # Extract tables
         if options.get("extract_tables", True):
