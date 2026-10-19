@@ -4,6 +4,12 @@ These requirements apply to all contributors and coding agents across this fork,
 including library code, workers, adapters, scripts, examples and tests. Local
 instructions may add requirements but must not weaken these rules.
 
+## Main-only development
+
+Develop and commit on `main`; the fork's remote default and sole development
+branch is `main`. Before removing old branches, verify their history is included
+and preserve uncommitted drafts recoverably. Publication is not deployment.
+
 ## Mandatory: native first, no duplicate implementations
 
 Before proposing a design or writing implementation code:
