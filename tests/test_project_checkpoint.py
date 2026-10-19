@@ -117,8 +117,9 @@ def test_worker_process_restart_reuses_durable_parse_and_model_calls(tmp_path):
                         "evidence_ids": [context["sections"][0]["evidence_ids"][0]]}]}
                 else:
                     content = {"relations": []} if "Extract source-grounded relations" in prompt else {
-                        "entities": [{"text": "A source", "label": "CONCEPT", "occurrence": 0}]}
-                response = {"model": payload["model"], "choices": [{"message": {"content": json.dumps(content)}}]}
+                        "entities": [{"text": "A source", "label": "CONCEPT", "occurrence": 0,
+                                      "attributes": {}, "confidence": 0.9}]}
+                response = {"model": payload["model"], "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(content)}}]}
             encoded = json.dumps(response).encode()
             self.send_response(200)
             self.send_header("Content-Length", str(len(encoded)))
@@ -256,7 +257,8 @@ def test_quota_failure_new_run_reuses_completed_extraction_windows(tmp_path, mon
                 "evidence_ids": [context["sections"][0]["evidence_ids"][0]]}]}
         else:
             content = {"relations": []} if "Extract source-grounded relations" in prompt else {
-                "entities": [{"text": "A source", "label": "CONCEPT", "occurrence": 0}]}
+                "entities": [{"text": "A source", "label": "CONCEPT", "occurrence": 0,
+                              "attributes": {}, "confidence": 0.9}]}
         return Response({"model": payload["model"], "choices": [{"finish_reason": "stop",
             "message": {"content": json.dumps(content)}}], "usage": {"completion_tokens": 100}})
 

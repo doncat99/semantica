@@ -18,7 +18,7 @@ import urllib.error
 import urllib.parse
 import urllib.request
 from collections import defaultdict
-from dataclasses import replace
+from dataclasses import asdict, replace
 from bisect import bisect_left
 from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
@@ -53,6 +53,7 @@ from .semantic_artifact_schema import (
     ModelReceipt,
     SemanticArtifact,
     SemanticArtifactBuildRequest,
+    SourceBuildInput,
     ParseSourceRequest,
     BindParsedSourceRequest,
     ParsedSourceRef,
@@ -549,9 +550,9 @@ def _extract_project_sources(parsed_sources, request, progress):
             for index, (_, _, parsed) in enumerate(parsed_sources)]
 
 
-def _assemble_source_results(windows, extracted_windows, embedded_batches):
+def _assemble_grounded_windows(windows, extracted_windows):
     result: dict[str, list] = {"entities": [], "relations": []}
-    receipts, embeddings = [], []
+    receipts = []
     seen_entities, seen_relations = set(), set()
     for (start, end, window), (extracted, extraction_receipts, _) in zip(windows, extracted_windows, strict=True):
         receipts.extend(extraction_receipts)
@@ -592,6 +593,12 @@ def _assemble_source_results(windows, extracted_windows, embedded_batches):
             if key not in seen_relations:
                 seen_relations.add(key)
                 result["relations"].append(item)
+    return result, receipts
+
+
+def _assemble_source_results(windows, extracted_windows, embedded_batches):
+    result, receipts = _assemble_grounded_windows(windows, extracted_windows)
+    embeddings = []
     batches = [windows[offset:offset + 8] for offset in range(0, len(windows), 8)]
     for batch, (vectors, receipt) in zip(batches, embedded_batches, strict=True):
         receipts.append(receipt)
@@ -603,6 +610,68 @@ def _assemble_source_results(windows, extracted_windows, embedded_batches):
     if any(len(item["vector"]) != dimension for item in embeddings):
         raise SemanticArtifactError("embedding chunks have inconsistent dimensions")
     return result, embeddings, receipts
+
+
+def build_grounded_source_snapshot(source: SourceBuildInput, *, scope_id: str, model: str,
+                                   provider_instance, artifact_ref: str, created_at: str,
+                                   document_processing: dict | None = None,
+                                   checkpoint_dir: str | None = None) -> SemanticArtifact:
+    """Produce located facts through the same native owners, without retrieval indexing.
+
+    The caller grants immutable local bytes and retains the returned snapshot before
+    publication. Embedding/community work remains an explicit separate capability.
+    """
+    source = SourceBuildInput.model_validate(source)
+    recipe = stable_digest({"pipeline": "grounded-source", "model": model,
+        "provider": type(provider_instance).__name__,
+        "implementation": {name: _digest_file(Path(__file__).parent / name) for name in (
+            'semantic_artifact_builder.py', 'semantic_extract/methods.py', 'semantic_extract/schemas.py',
+            'semantic_extract/grounded_window.py', 'semantic_extract/providers.py')},
+        "document_processing": document_processing})
+    if checkpoint_dir is not None:
+        from .project_checkpoint import SnapshotCheckpoint
+        checkpoint = SnapshotCheckpoint.for_source(source, output_dir=checkpoint_dir,
+            scope_id=scope_id, recipe=recipe, created_at=created_at)
+        if not hasattr(provider_instance, 'receipts'):
+            provider_instance.receipts = []
+        if not hasattr(provider_instance, 'rejections'):
+            provider_instance.rejections = []
+        provider_instance.extraction_cache = ExtractionCache(ttl=None,
+            backend=_ExtractionCheckpointBackend(checkpoint, provider_instance))
+        provider_instance.cache_scope = {'scope': scope_id, 'recipe': recipe}
+    parsed = _parse_source(source, False, document_processing)
+    windows = list(_text_windows(parsed[0]))
+    extracted = []
+    for start, end, text in windows:
+        entities, relations, _ = extract_grounded_window(text, model=model,
+            provider_instance=provider_instance, retries=1)
+        output = {"entities": [asdict(item) for item in entities],
+                  "relations": [asdict(item) for item in relations]}
+        receipt = ModelReceipt(id="receipt:" + stable_digest([scope_id, created_at, model, start, end, text, output]).split(":")[1],
+            operation="structured_extraction", provider=type(provider_instance).__name__, model=model,
+            input_digest=stable_digest(text), output_digest=stable_digest(output), created_at=created_at)
+        extracted.append(({"entities": entities, "relations": relations}, [receipt], False))
+    result, receipts = _assemble_grounded_windows(windows, extracted)
+    built = _build_source(source, False, result, parsed)
+    built['representation'].created_at = created_at
+    mentions = built["entities"]
+    entities, remap, registry = _resolve_native_entities(mentions)
+    assertions, relations = _remap_identity_facts(built["assertions"], built["relations"], remap, entities)
+    assertions, relations, conflicts = reconcile_qualified_facts(scope_id, assertions, relations)
+    receipt_ids = [item.id for item in receipts]
+    return SemanticArtifact(snapshot_id="snapshot:" + stable_digest([
+        scope_id, source.source_id, source.material_revision, created_at, recipe, result]).split(":")[1],
+        project_id=scope_id, created_at=created_at, lineage=KernelLineage(
+            schema_digest=stable_digest(SemanticArtifact.model_json_schema()),
+            recipe_id="grounded-source", recipe_digest=recipe, rule_version="semantica-native",
+            rule_digest=recipe, ontology_version="semantica-default",
+            ontology_digest=stable_digest({"ontology": "default"}), model_receipt_ids=receipt_ids),
+        artifact_manifest=[ArtifactManifest(id=built["artifact_id"], artifact_type="representation",
+            artifact_ref=artifact_ref, artifact_hash=stable_digest(built['document']))],
+        document_representations=[built["representation"]], evidence_spans=built["evidence"],
+        entity_mentions=mentions, entities=entities, identity_registry=registry,
+        assertions=assertions, relations=relations, conflicts=conflicts, model_receipts=receipts,
+        metadata={"pipeline": "semantica", "recipe": "grounded-source", "publication_status": "not_published"})
 
 
 def _relay_json(relay: Any, payload: dict[str, Any], operation: str) -> tuple[dict[str, Any], ModelReceipt]:
@@ -799,13 +868,16 @@ class _ExtractionCheckpointBackend(CacheBackend):
         entry = self.checkpoint.read("extraction-" + namespace, key)
         if entry is None:
             return None
-        receipts = [ModelReceipt.model_validate(item) for item in entry["receipts"]]
-        known = {receipt.id for receipt in self.provider.receipts}
+        receipts = [ModelReceipt.model_validate(item) if 'id' in item else item for item in entry["receipts"]]
+        def identity(receipt):
+            return receipt.get('call_id') if isinstance(receipt, dict) else receipt.id
+        known = {identity(receipt) for receipt in self.provider.receipts}
         for receipt in receipts:
-            if receipt.id not in known:
-                object.__setattr__(receipt, "_checkpoint_restored", True)
+            if identity(receipt) not in known:
+                if not isinstance(receipt, dict):
+                    object.__setattr__(receipt, "_checkpoint_restored", True)
                 self.provider.receipts.append(receipt)
-                known.add(receipt.id)
+                known.add(identity(receipt))
         for rejection in entry["rejections"]:
             if rejection not in self.provider.rejections:
                 self.provider.rejections.append(rejection)
@@ -814,7 +886,7 @@ class _ExtractionCheckpointBackend(CacheBackend):
     def set(self, namespace, key, value, ttl=None):
         self.checkpoint.write("extraction-" + namespace, key, {
             "result": _encode_value(value),
-            "receipts": [item.model_dump(mode="json", by_alias=True)
+            "receipts": [item if isinstance(item, dict) else item.model_dump(mode="json", by_alias=True)
                          for item in self.provider.receipts[self.receipt_offset:]],
             "rejections": self.provider.rejections[self.rejection_offset:],
         })
@@ -838,6 +910,18 @@ class _ProjectModelProvider(BaseProvider):
         self.rejections: list[dict[str, Any]] = []
         self.last_checkpoint_entry = None
 
+    def generate_typed(self, prompt, schema, max_retries=3, validation_context=None, **kwargs):
+        from openai.lib._pydantic import to_strict_json_schema
+        from pydantic import ValidationError
+        try:
+            content = self.generate(prompt, response_schema=to_strict_json_schema(schema), **kwargs)
+        except SemanticArtifactError as error:
+            raise ProcessingError(str(error)) from error
+        try:
+            return schema.model_validate_json(content, context=validation_context)
+        except ValidationError as error:
+            raise ProcessingError('Typed relay response failed schema validation') from error
+
     def generate(self, prompt: str, **kwargs) -> str:
         # A failed request must never reject a previous successful response.
         self.last_checkpoint_entry = None
@@ -856,7 +940,7 @@ class _ProjectModelProvider(BaseProvider):
         response_schema = kwargs.get('response_schema')
         if response_schema is not None:
             payload['response_format'] = {'type': 'json_schema', 'json_schema': {
-                'name': 'semantic_output', 'schema': response_schema, 'strict': False}}
+                'name': 'semantic_output', 'schema': response_schema, 'strict': True}}
         response, receipt = _relay_json(self.relay, payload, self.operation)
         cache_key = {"operation": self.operation, "bindingId": getattr(self.relay, "binding_id", None),
                      "modelId": self.relay.model_id, "payload": payload}
@@ -870,14 +954,16 @@ class _ProjectModelProvider(BaseProvider):
             receipt.metadata["usage"] = response["usage"]
         if self.operation == "structured_extraction":
             receipt.metadata["extraction_stage"] = extraction_stage
+        self.receipts.append(receipt)
         choices = response.get("choices")
         if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
             raise SemanticArtifactError(f"{self.operation} response has invalid choices")
         message = choices[0].get("message")
+        if choices[0].get('finish_reason') != 'stop' or not isinstance(message, dict) or message.get('refusal'):
+            raise SemanticArtifactError(f"{self.operation} response incomplete or refused")
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str) or not content.strip():
             raise SemanticArtifactError(f"{self.operation} response has no JSON content")
-        self.receipts.append(receipt)
         return content
 
     def reject_last(self) -> None:
@@ -1745,7 +1831,8 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
     return {"source": source, "text": text, "representation": representation, "evidence": list(evidence.values()), "entities": list(entities.values()), "assertions": assertions, "relations": relations, "artifact_id": representation_artifact_id, "document": document, "source_locations": source_locations}
 
 
-def _shared_facts(project_id: str, assertions: list[KnowledgeAssertion], relations: list[KnowledgeRelation]):
+def reconcile_qualified_facts(project_id: str, assertions: list[KnowledgeAssertion],
+                              relations: list[KnowledgeRelation], *, functional_predicates=()):
     """One qualified fact identity; each located evidence span is an independent support."""
     from .deduplication.entity_merger import EntityMerger
     from .conflicts import ConflictDetector
@@ -1759,10 +1846,11 @@ def _shared_facts(project_id: str, assertions: list[KnowledgeAssertion], relatio
     canonical_relations = [KnowledgeRelation.model_validate(item) for item in EntityMerger.merge_qualified_facts(
         [item.model_dump() for item in relations], identity=lambda item: identity(item, "relation"))]
     assertion_by_id = {item.id: item for item in canonical_assertions}
-    polarity_groups = ConflictDetector.qualified_polarity_groups([
+    facts = [
         {"id": item.id, "subject": item.subject_id, "predicate": item.predicate,
          "object": item.object_entity_id or item.object, "qualifiers": item.qualifiers}
-        for item in canonical_assertions])
+        for item in canonical_assertions if item.status != "retracted"]
+    polarity_groups = ConflictDetector.qualified_polarity_groups(facts)
     conflicts = []
     for group in polarity_groups:
         members = [assertion_by_id[item["id"]] for item in group]
@@ -1780,7 +1868,107 @@ def _shared_facts(project_id: str, assertions: list[KnowledgeAssertion], relatio
             entity_ids=sorted({ref for item in members for ref in [item.subject_id, item.object_entity_id] if ref}),
             evidence_ids=sorted({ref for item in members for ref in item.evidence_ids}),
             reason="Opposite explicit polarities for the same proposition under identical recorded conditions; neither support is discarded."))
+    for group in ConflictDetector.qualified_value_groups(facts, functional_predicates):
+        members = [assertion_by_id[item["id"]] for item in group]
+        for item in members:
+            item.status = "contradicted"
+        key = stable_digest([project_id, sorted(item.id for item in members)])
+        conflicts.append(KnowledgeConflict(id="conflict:value:" + key.split(":")[1][:32],
+            conflict_type="assertion", assertion_ids=sorted(item.id for item in members),
+            entity_ids=sorted({item.subject_id for item in members}),
+            evidence_ids=sorted({ref for item in members for ref in item.evidence_ids}),
+            reason="Different positive values for a declared functional predicate under identical recorded qualifiers; all supports retained."))
     return canonical_assertions, canonical_relations, sorted(conflicts, key=lambda item: item.id)
+
+
+def extend_semantic_snapshot(base: Optional[SemanticArtifact], incoming: SemanticArtifact, *,
+                             functional_predicates=(), retract_evidence_ids=()) -> SemanticArtifact:
+    """Append validated observations through native fact and change owners.
+
+    Located records are immutable. Explicitly withdrawing support retains its
+    evidence and original observation. Entity IDs retain their type; incoming
+    entity projections may change across revisions, never across identities.
+    Storage still checks the base revision atomically when committing the result.
+    """
+    incoming = SemanticArtifact.model_validate(incoming.model_dump(mode="json"))
+    withdrawn = set(retract_evidence_ids)
+    operation_digest = stable_digest([incoming.model_dump(mode="json"), sorted(withdrawn),
+                                      sorted(functional_predicates)])
+    if base is None:
+        if withdrawn:
+            raise ValueError("withdrawn_evidence_not_found")
+        incoming.metadata = {**incoming.metadata, "applied_observations": {incoming.id: {
+            "digest": operation_digest, "retract_evidence_ids": [],
+            "functional_predicates": sorted(functional_predicates)}}, "withdrawn_evidence_ids": []}
+        return incoming
+    base = SemanticArtifact.model_validate(base.model_dump(mode="json"))
+    if base.project_id != incoming.project_id:
+        raise ValueError("semantic_snapshot_scope_mismatch")
+    if (base.classification_profile != incoming.classification_profile or
+            base.extraction_spec != incoming.extraction_spec):
+        raise ValueError("semantic_snapshot_contract_mismatch")
+    applied = dict(base.metadata.get("applied_observations", {}))
+    if incoming.id in applied:
+        if applied[incoming.id]["digest"] != operation_digest:
+            raise ValueError("immutable_observation_id_reused")
+        return base
+    if not withdrawn <= {item.id for item in base.evidence_spans}:
+        raise ValueError("withdrawn_evidence_not_found")
+    all_withdrawn = set(base.metadata.get("withdrawn_evidence_ids", [])) | withdrawn
+    if all_withdrawn.intersection(item.id for item in incoming.evidence_spans):
+        raise ValueError("withdrawn_evidence_reintroduced")
+    data = base.model_dump(mode="json")
+    for field in ("artifact_manifest", "document_representations", "evidence_spans", "entity_mentions",
+                  "entities", "identity_registry", "communities", "topics",
+                  "source_relations", "source_classifications", "retrieval_manifests", "model_receipts"):
+        key = "mention_id" if field == "identity_registry" else "source_id" if field == "source_classifications" else "id"
+        records = {getattr(item, key): item for item in getattr(base, field)}
+        for item in getattr(incoming, field):
+            identifier = getattr(item, key)
+            if field == "entities" and identifier in records:
+                if records[identifier].type != item.type:
+                    raise ValueError("semantic_entity_type_changed:" + identifier)
+            elif identifier in records and records[identifier] != item:
+                raise ValueError("immutable_semantic_record_reused:" + field + ":" + identifier)
+            records[identifier] = item
+        data[field] = [records[key].model_dump(mode="json") for key in sorted(records)]
+    def observations(items):
+        for item in items:
+            for original in item.metadata.get("support_observations", [item.model_dump(mode="json")]):
+                original = dict(original)
+                if withdrawn.intersection(original.get("evidence_ids", [])):
+                    original["status"] = "retracted"
+                yield type(item).model_validate(original)
+    assertions, relations, conflicts = reconcile_qualified_facts(base.project_id,
+        list(observations(base.assertions)) + incoming.assertions,
+        list(observations(base.relations)) + incoming.relations,
+        functional_predicates=functional_predicates)
+    # Preserve externally supplied conflicts; native derived conflicts are recomputed.
+    retained_conflicts = {item.id: item for item in [*base.conflicts, *incoming.conflicts]
+                          if not item.id.startswith(("conflict:assertion:", "conflict:value:"))}
+    retained_conflicts.update({item.id: item for item in conflicts})
+    data.update(assertions=[item.model_dump(mode="json") for item in assertions],
+                relations=[item.model_dump(mode="json") for item in relations],
+                conflicts=[retained_conflicts[key].model_dump(mode="json") for key in sorted(retained_conflicts)])
+    lineage = incoming.lineage.model_dump(mode="json")
+    lineage["model_receipt_ids"] = sorted(set(base.lineage.model_receipt_ids + incoming.lineage.model_receipt_ids))
+    data.update(snapshot_id="snapshot:" + stable_digest([base.id, operation_digest]).split(":")[1],
+                base_snapshot_id=base.id, snapshot_version=base.snapshot_version + 1,
+                created_at=incoming.created_at, lineage=lineage,
+                metadata={**base.metadata, "applied_observations": {**applied, incoming.id: {
+                    "digest": operation_digest, "retract_evidence_ids": sorted(withdrawn),
+                    "functional_predicates": sorted(functional_predicates)}},
+                          "withdrawn_evidence_ids": sorted(all_withdrawn),
+                          "last_observation_metadata": incoming.metadata})
+    data["change_delta"] = {}
+    result = SemanticArtifact.model_validate(data)
+    result.change_delta = _change_delta(base, result.id, result.document_representations,
+        result.entities, result.assertions, result.relations, result.communities, result.topics,
+        [item.id for item in result.retrieval_manifests], result.evidence_spans,
+        result.source_classifications, conflicts=result.conflicts, identity_registry=result.identity_registry,
+        source_relations=result.source_relations, entity_mentions=result.entity_mentions,
+        classification_profile=result.classification_profile, extraction_spec=result.extraction_spec)
+    return SemanticArtifact.model_validate(result.model_dump(mode="json"))
 
 
 def _canonical_graph_projection(
@@ -2202,7 +2390,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
     if request.recipe.id == "model":
         entities, remap, identity_registry = _resolve_native_entities(mentions, resolver=identity_resolver)
         assertions, relations = _remap_identity_facts(assertions, relations, remap, entities)
-        assertions, relations, fact_conflicts = _shared_facts(request.project_id, assertions, relations)
+        assertions, relations, fact_conflicts = reconcile_qualified_facts(request.project_id, assertions, relations)
     else:
         fact_conflicts = []
     source_relations = _source_relations(relations, evidence, representations)

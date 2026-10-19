@@ -143,6 +143,8 @@ try:
         GroundedEntitiesResponse,
         GroundedRelationOut,
         GroundedRelationsResponse,
+        GroundedRelationsWire,
+        grounded_entities_wire,
         RelationsResponse,
         RelationsWithTemporalResponse,
         TripletsResponse,
@@ -1488,7 +1490,7 @@ Grounding requirements:
         if grounding == "strict":
             kwargs["max_retries"] = 1
         for attempt in range(grounding_retries + 1):
-            active_schema = GroundedEntitiesResponse if grounding == "strict" else EntitiesResponse
+            active_schema = grounded_entities_wire(extraction_spec) if grounding == "strict" else EntitiesResponse
             result_obj = None
             try:
                 result_obj = llm.generate_typed(prompt, schema=active_schema, extraction_stage="entities", **kwargs)
@@ -1503,6 +1505,10 @@ Grounding requirements:
                                 or raw["text"] != raw["text"].strip()
                             ):
                                 raise ValueError("text must be copied exactly as a string")
+                            if not isinstance(raw.get('attributes', {}), dict):
+                                raise ValueError('attributes must be an object')
+                            raw['attributes'] = {key: value for key, value in raw.get('attributes', {}).items()
+                                                 if value is not None}
                             e_out = GroundedEntityOut.model_validate(raw)
                         except (ValidationError, ValueError) as exc:
                             fields = (
@@ -2458,7 +2464,7 @@ Omit unsupported bindings rather than supplying conventional scientific assumpti
         call_kwargs["max_retries"] = 1 if grounding == "strict" else max_retries
 
         # Select schema based on whether temporal extraction is requested
-        active_schema = GroundedRelationsResponse if grounding == "strict" else (
+        active_schema = GroundedRelationsWire if grounding == "strict" else (
             RelationsWithTemporalResponse if extract_temporal_bounds else RelationsResponse
         )
         result_obj = None
@@ -2721,7 +2727,7 @@ def _parse_grounded_relation_result(
     malformed = 0
     for index, raw in enumerate(items):
         try:
-            item = raw.model_dump() if hasattr(raw, "model_dump") else raw
+            item = raw.model_dump(exclude_none=True) if hasattr(raw, "model_dump") else raw
             if not isinstance(item, dict):
                 malformed += 1
                 if rejections is not None:

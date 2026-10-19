@@ -33,6 +33,7 @@ Author: Semantica Contributors
 License: MIT
 """
 
+import json
 from typing import Any, Dict, List, Optional, Union
 
 from ..utils.exceptions import ProcessingError, ValidationError
@@ -279,6 +280,103 @@ class Neo4jStore:
     • Performance optimization
     • Error handling and recovery
     """
+
+    def initialize_snapshot_storage(self) -> None:
+        for name, label, keys in (
+            ("semantic_head_scope", "SemanticHead", "n.scope_id"),
+            ("semantic_snapshot_identity", "SemanticSnapshot", "n.scope_id, n.snapshot_id"),
+            ("semantic_record_identity", "SemanticRecord", "n.scope_id, n.snapshot_id, n.kind, n.record_id"),
+        ):
+            self.execute_query(
+                f"CREATE CONSTRAINT {name} IF NOT EXISTS FOR (n:{label}) REQUIRE ({keys}) IS UNIQUE"
+            )
+
+    def commit_snapshot(self, snapshot: Dict[str, Any]) -> Dict[str, Any]:
+        """Persist one native artifact and advance its head in a managed transaction."""
+        from ..semantic_artifact_schema import stable_digest
+
+        scope_id, snapshot_id = snapshot["project_id"], snapshot["snapshot_id"]
+        digest = stable_digest(snapshot)
+        payload = json.dumps(snapshot, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        records = [
+            {"kind": kind, "record_id": item["id"],
+             "payload": json.dumps(item, ensure_ascii=False, sort_keys=True, separators=(",", ":"))}
+            for kind, items in snapshot.items() if isinstance(items, list)
+            for item in items if isinstance(item, dict) and "id" in item
+        ]
+
+        def stage(tx):
+            row = tx.run("""MERGE (s:SemanticSnapshot {scope_id:$scope,snapshot_id:$id})
+                ON CREATE SET s.digest=$digest,s.payload=$payload,s.base_snapshot_id=$base,
+                    s.sealed=false
+                RETURN s.digest AS digest,coalesce(s.sealed,true) AS sealed""",
+                scope=scope_id, id=snapshot_id, digest=digest, payload=payload,
+                base=snapshot.get("base_snapshot_id")).single()
+            if row["digest"] != digest:
+                raise ValueError("immutable_snapshot_id_reused")
+            return row["sealed"]
+
+        def stage_records(tx, batch):
+            tx.run("""MATCH (s:SemanticSnapshot {scope_id:$scope,snapshot_id:$id})
+                UNWIND $records AS row
+                MERGE (r:SemanticRecord {scope_id:$scope,snapshot_id:$id,
+                    kind:row.kind,record_id:row.record_id})
+                ON CREATE SET r.payload=row.payload
+                MERGE (s)-[:CONTAINS]->(r)""", scope=scope_id, id=snapshot_id,
+                records=batch).consume()
+
+        def commit(tx):
+            # The dependent property update locks this scope across processes.
+            head = tx.run("""MERGE (h:SemanticHead {scope_id:$scope})
+                ON CREATE SET h.lock=0
+                SET h.lock=h.lock+1
+                RETURN h.snapshot_id AS snapshot_id""", scope=scope_id).single()
+            current = head["snapshot_id"]
+            existing = tx.run("""MATCH (s:SemanticSnapshot {scope_id:$scope,snapshot_id:$id})
+                RETURN s.digest AS digest,coalesce(s.sealed,true) AS sealed""",
+                scope=scope_id, id=snapshot_id).single()
+            if existing["digest"] != digest:
+                raise ValueError("immutable_snapshot_id_reused")
+            if existing["sealed"]:
+                return {"snapshot_id": snapshot_id, "head_snapshot_id": current,
+                        "digest": digest, "replayed": True}
+            if current != snapshot.get("base_snapshot_id"):
+                raise ValueError("stale_snapshot_head")
+            count = tx.run("""MATCH (s:SemanticSnapshot {scope_id:$scope,snapshot_id:$id})
+                OPTIONAL MATCH (s)-[:CONTAINS]->(r:SemanticRecord)
+                RETURN count(r) AS count""", scope=scope_id, id=snapshot_id).single()["count"]
+            if count != len(records):
+                raise ValueError("incomplete_snapshot_records")
+            tx.run("""MATCH (s:SemanticSnapshot {scope_id:$scope,snapshot_id:$id})
+                SET s.sealed=true""", scope=scope_id, id=snapshot_id).consume()
+            tx.run("""MATCH (h:SemanticHead {scope_id:$scope})
+                SET h.snapshot_id=$id,h.digest=$digest""",
+                scope=scope_id, id=snapshot_id, digest=digest).consume()
+            return {"snapshot_id": snapshot_id, "head_snapshot_id": snapshot_id,
+                    "digest": digest, "replayed": False}
+
+        with self.get_session() as session:
+            if not session.write_transaction(stage):
+                # Staging is bounded; only a sealed revision can become readable.
+                for offset in range(0, len(records), 256):
+                    batch = records[offset:offset + 256]
+                    session.write_transaction(lambda tx: stage_records(tx, batch))
+            return session.write_transaction(commit)
+
+    def read_snapshot(self, scope_id: str, snapshot_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        from ..semantic_artifact_schema import stable_digest
+
+        result = self.execute_query("""MATCH (h:SemanticHead {scope_id:$scope})
+            MATCH (s:SemanticSnapshot {scope_id:$scope})
+            WHERE s.snapshot_id=coalesce($id,h.snapshot_id) AND coalesce(s.sealed,true)
+            RETURN s.payload AS payload,s.digest AS digest""", {"scope":scope_id,"id":snapshot_id})
+        records = result["records"]
+        if not records:
+            return None
+        value = json.loads(records[0]["payload"])
+        if stable_digest(value) != records[0]["digest"]:
+            raise ValidationError("semantic_snapshot_digest_mismatch")
+        return value
 
     def __init__(
         self,
@@ -1111,4 +1209,3 @@ class Neo4jStore:
         except Exception as e:
             self.logger.warning(f"Failed to get stats: {str(e)}")
             return {"status": "error", "message": str(e)}
-

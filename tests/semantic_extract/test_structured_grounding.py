@@ -116,14 +116,14 @@ def test_document_context_reaches_both_native_prompts_without_leaking_provider_k
         def generate_typed(self, prompt, schema, **kwargs):
             assert 'grounding_context' not in kwargs
             self.prompts.append(prompt)
-            if schema is GroundedEntitiesResponse:
+            if schema.__name__ == 'GroundedEntitiesWire':
                 return schema.model_validate({'entities': [
-                    {'text': 'F', 'label': 'formula', 'occurrence': 0},
-                    {'text': 'm', 'label': 'variable', 'occurrence': 0}]})
-            assert schema is GroundedRelationsResponse
+                    {'text': 'F', 'label': 'formula', 'occurrence': 0, 'attributes': {}, 'confidence': .9},
+                    {'text': 'm', 'label': 'variable', 'occurrence': 0, 'attributes': {}, 'confidence': .9}]})
+            assert schema.__name__ == 'GroundedRelationsWire'
             return schema.model_validate({'relations': [{
                 'subject_id': 'mention:0', 'object_id': 'mention:1', 'predicate': 'uses_variable',
-                'evidence': 'F = ma', 'evidence_occurrence': 0,
+                'evidence': 'F = ma', 'evidence_occurrence': 0, 'confidence': .9,
                 'qualifiers': {'polarity': 'positive', 'unit': 'kg'}, 'supporting_refs': ['definition']}]})
 
     provider = Provider()

@@ -111,10 +111,10 @@ def test_extraction_reports_active_stage_and_preserves_exact_evidence(monkeypatc
 
     extracted, _, _ = extract_source(text, SimpleNamespace(model_id="test"), None, progress=events.append)
 
-    assert [event["stage"] for event in events] == ["extracting"] * 2 + ["embedding"] * 2
+    assert [event["stage"] for event in events] == ["extracting"] * 3 + ["embedding"] * 3
     assert events[0]["metadata"]["completedChunks"] == 0
-    assert events[1]["metadata"]["completedChunks"] == 1
-    assert events[1]["metadata"]["restoredChunks"] == 0
+    assert events[2]["metadata"]["completedChunks"] == 1
+    assert events[2]["metadata"]["restoredChunks"] == 0
     evidence = extracted["relations"][0]["evidence"]
     assert evidence == text
 
@@ -130,8 +130,8 @@ def test_extraction_reports_restored_checkpoint_chunks(monkeypatch):
 
     extract_source("source", SimpleNamespace(model_id="test"), None, progress=events.append)
 
-    assert events[1]["metadata"]["completedChunks"] == events[-1]["metadata"]["completedChunks"] == 1
-    assert events[1]["metadata"]["restoredChunks"] == events[-1]["metadata"]["restoredChunks"] == 1
+    assert events[2]["metadata"]["completedChunks"] == events[-1]["metadata"]["completedChunks"] == 1
+    assert events[2]["metadata"]["restoredChunks"] == events[-1]["metadata"]["restoredChunks"] == 1
 
 
 def test_stage_progress_precedes_relay_calls(monkeypatch):
@@ -272,12 +272,12 @@ def test_native_report_cannot_introduce_evidence_from_another_batch(monkeypatch)
     calls = []
     def respond(*args):
         calls.append(args)
-        return {"model": "test", "choices": [{"message": {"content": __import__('json').dumps(result)}}]}, receipt("knowledge_explanation", 1)
+        return {"model": "test", "choices": [{"finish_reason": "stop", "message": {"content": __import__('json').dumps(result)}}]}, receipt("knowledge_explanation", 1)
     monkeypatch.setattr(pipeline, "_relay_json", respond)
     with pytest.raises(pipeline.SemanticArtifactError):
         pipeline._grounded_explanation({"target": {"id": "overview"}, "entities": [],
             "assertions": [], "relations": [], "evidence": [{"id": "source-evidence", "quote": "Supported"}]}, SimpleNamespace(model_id="test", max_output_tokens=1024))
-    assert len(calls) == 3
+    assert len(calls) == 1
 
 
 def test_worker_receipt_manifest_preserves_legacy_model_receipts():

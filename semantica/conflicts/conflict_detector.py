@@ -104,6 +104,26 @@ class ConflictDetector:
     """
 
     @staticmethod
+    def qualified_value_groups(facts, functional_predicates):
+        """Conflicting positive values for declared single-valued, identically qualified facts.
+
+        Distinct recorded times or conditions are not interchangeable. Callers
+        must supply the domain's functional predicates rather than infer them.
+        """
+        import json
+        from collections import defaultdict
+        groups = defaultdict(list)
+        for fact in facts:
+            if fact["predicate"] not in functional_predicates or fact["qualifiers"].get("polarity") != "positive":
+                continue
+            key = json.dumps([fact["subject"], fact["predicate"], fact["qualifiers"]],
+                             ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            groups[key].append(fact)
+        return [members for members in groups.values() if len({json.dumps(
+            item["object"], ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+            for item in members}) > 1]
+
+    @staticmethod
     def qualified_polarity_groups(facts):
         """Find opposing polarities only under identical recorded qualifiers."""
         import json

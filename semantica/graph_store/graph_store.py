@@ -779,6 +779,27 @@ class GraphStore:
         self._manager.query_engine.clear_cache()
         return result
 
+    def append_snapshot(self, snapshot: Any, *, functional_predicates=(), retract_evidence_ids=()) -> Dict[str, Any]:
+        """Apply one observation with bounded CAS retry; no application-side merge."""
+        from ..semantic_artifact_builder import extend_semantic_snapshot
+        from ..semantic_artifact_schema import SemanticArtifact
+
+        incoming = SemanticArtifact.model_validate(
+            snapshot.model_dump(mode="json") if isinstance(snapshot, SemanticArtifact) else snapshot)
+        for attempt in range(3):
+            base = self.read_snapshot(incoming.project_id)
+            if base is not None and base.id == incoming.id and incoming.id not in base.metadata.get("applied_observations", {}):
+                if base != incoming:
+                    raise ValueError("immutable_observation_id_reused")
+                return self.commit_snapshot(base)
+            combined = extend_semantic_snapshot(base, incoming,
+                functional_predicates=functional_predicates, retract_evidence_ids=retract_evidence_ids)
+            try:
+                return self.commit_snapshot(combined)
+            except ValueError as error:
+                if str(error) != "stale_snapshot_head" or attempt == 2:
+                    raise
+
     def read_snapshot(self, scope_id: str, snapshot_id: Optional[str] = None) -> Any:
         """Read one authorized scope/revision; return the native validated model."""
         from ..semantic_artifact_schema import SemanticArtifact

@@ -59,13 +59,13 @@ def facts(source, negated=False, year="2025"):
 
 def test_shared_fact_survives_reorder_and_support_withdrawal():
     first, second = facts("one"), facts("two")
-    assertions, relations, conflicts = pipeline._shared_facts("project:one", [first[0], second[0]], [first[1], second[1]])
+    assertions, relations, conflicts = pipeline.reconcile_qualified_facts("project:one", [first[0], second[0]], [first[1], second[1]])
     assert len(assertions) == len(relations) == 1 and not conflicts
     assert assertions[0].support_ids == ["evidence:one", "evidence:two"]
     assert relations[0].support_ids == assertions[0].support_ids
-    repeated = pipeline._shared_facts("project:one", [second[0], first[0]], [second[1], first[1]])
+    repeated = pipeline.reconcile_qualified_facts("project:one", [second[0], first[0]], [second[1], first[1]])
     assert repeated == (assertions, relations, conflicts)
-    withdrawn = pipeline._shared_facts("project:one", [second[0]], [second[1]])
+    withdrawn = pipeline.reconcile_qualified_facts("project:one", [second[0]], [second[1]])
     assert withdrawn[0][0].id == assertions[0].id
     assert withdrawn[1][0].id == relations[0].id
     assert withdrawn[0][0].support_ids == ["evidence:two"]
@@ -74,7 +74,7 @@ def test_shared_fact_survives_reorder_and_support_withdrawal():
 
 def test_only_opposite_polarity_under_identical_conditions_is_explicit_conflict():
     positive, negative, another_time = facts("one"), facts("two", True), facts("three", True, "2026")
-    assertions, relations, conflicts = pipeline._shared_facts("project:one", [positive[0], negative[0], another_time[0]], [positive[1], negative[1], another_time[1]])
+    assertions, relations, conflicts = pipeline.reconcile_qualified_facts("project:one", [positive[0], negative[0], another_time[0]], [positive[1], negative[1], another_time[1]])
     assert len(assertions) == 3 and len(conflicts) == 1
     conflict = conflicts[0]
     assert set(conflict.evidence_ids) == {"evidence:one", "evidence:two"}

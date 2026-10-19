@@ -134,8 +134,8 @@ def test_grounded_native_extractors_preserve_mentions_evidence_and_qualifiers():
     assert "entity-list" in provider.prompts[0]
     assert "table-of-contents" in provider.prompts[0]
     assert "navigation labels" in provider.prompts[0]
-    assert provider.schemas[0].__name__ == "GroundedEntitiesResponse"
-    assert provider.schemas[1].__name__ == "GroundedRelationsResponse"
+    assert provider.schemas[0].__name__ == "GroundedEntitiesWire"
+    assert provider.schemas[1].__name__ == "GroundedRelationsWire"
 
 
 def test_grounded_native_relation_extraction_rejects_ungrounded_qualifier():
@@ -332,7 +332,8 @@ def test_grounded_relation_isolates_candidate_missing_required_field_after_typed
 
     class ValidatingProvider(TypedProvider):
         def generate_typed(self, prompt, schema, **kwargs):
-            return schema.model_validate(self.responses.pop(0))
+            # Decoder regression for retained responses; wire protocol validation is tested separately.
+            return GroundedRelationsResponse.model_validate(self.responses.pop(0))
 
     candidate = {"subject": "Reflective roofs", "subject_id": "mention:0", "predicate": "shades",
                  "object": "pedestrians", "object_id": "mention:1", "evidence": text,

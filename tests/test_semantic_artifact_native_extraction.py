@@ -194,7 +194,7 @@ def test_project_model_provider_uses_host_admitted_output_limit(monkeypatch):
     def relay_json(_relay, payload, operation):
         request.update(payload)
         return {
-            "choices": [{"message": {"content": '{"entities": []}'}}],
+            "choices": [{"finish_reason": "stop", "message": {"content": '{"entities": []}'}}],
             "model": "model-1",
         }, ModelReceipt(
             id="receipt:extraction",
@@ -365,7 +365,8 @@ def test_native_empty_result_cache_restores_rejections_and_receipts(tmp_path, mo
     calls = []
     def respond(stage, prompt):
         calls.append(stage)
-        return {"entities": [{"text": "committee", "label": "ORG", "occurrence": "invalid"}]}
+        return {"entities": [{"text": " committee ", "label": "ORG", "occurrence": 0,
+                              "confidence": 0.9, "attributes": {}}]}
     stub_native_provider(monkeypatch, respond)
     token = active_checkpoint.set(checkpoint)
     try:

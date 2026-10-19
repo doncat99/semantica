@@ -291,7 +291,7 @@ def test_relay_waits_for_complete_gateway_response(monkeypatch):
     assert receipt.operation == "structured_extraction"
 
 
-def test_product_output_repairs_citation_shape_through_native_typed_provider(monkeypatch):
+def test_product_output_rejects_citation_shape_through_native_typed_provider(monkeypatch):
     from types import SimpleNamespace
     from semantica import semantic_artifact_builder as pipeline
 
@@ -304,23 +304,20 @@ def test_product_output_repairs_citation_shape_through_native_typed_provider(mon
 
     def relay_response(relay, payload, operation):
         prompts.append(payload["messages"][0]["content"])
-        result = {"model": relay.model_id, "choices": [{"message": {"content": json.dumps(outputs.pop(0))}}]}
+        result = {"model": relay.model_id, "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(outputs.pop(0))}}]}
         return result, ModelReceipt(id=f"receipt:{len(prompts)}", operation=operation, provider="test",
                                     model=relay.model_id, input_digest=H1, output_digest=H2)
 
     monkeypatch.setattr(pipeline, "_relay_json", relay_response)
-    result, receipts = pipeline._product_json(
-        SimpleNamespace(model_id="model-1", binding_id="default", max_output_tokens=393216),
-        "source_classification",
-        "Classify the source.",
-        {"evidence": [{"id": "evidence:source", "quote": "Source quote"}]},
-        pipeline._ClassificationOutput,
-    )
-
-    assert result.model_dump(mode="json")["assignments"][0]["citations"] == [{"evidence_id": "evidence:source", "quote": "Source quote"}]
-    assert [receipt.id for receipt in receipts] == ["receipt:1", "receipt:2"]
-    assert "Required JSON Schema" in prompts[1]
-    assert "evidence_id" in prompts[1] and "quote" in prompts[1]
+    with pytest.raises(pipeline.SemanticArtifactError):
+        pipeline._product_json(
+            SimpleNamespace(model_id="model-1", binding_id="default", max_output_tokens=393216),
+            "source_classification",
+            "Classify the source.",
+            {"evidence": [{"id": "evidence:source", "quote": "Source quote"}]},
+            pipeline._ClassificationOutput,
+        )
+    assert len(outputs) == 1
 
 
 def test_product_output_uses_host_admitted_output_limit(monkeypatch):
@@ -331,7 +328,7 @@ def test_product_output_uses_host_admitted_output_limit(monkeypatch):
 
     def relay_response(relay, payload, operation):
         payloads.append(payload)
-        result = {"model": relay.model_id, "choices": [{"message": {"content": json.dumps({"assignments": [{
+        result = {"model": relay.model_id, "choices": [{"finish_reason": "stop", "message": {"content": json.dumps({"assignments": [{
             "dimension_id": "purpose", "item_id": "history", "confidence": 0.9, "citations": [
                 {"evidence_id": "evidence:source", "quote": "Source quote"},
             ],
@@ -351,7 +348,7 @@ def test_product_output_uses_host_admitted_output_limit(monkeypatch):
     assert payloads[0]["max_tokens"] == 393216
 
 
-def test_product_output_repairs_semantic_citation_and_vocabulary(monkeypatch):
+def test_product_output_rejects_semantic_citation_and_vocabulary(monkeypatch):
     from types import SimpleNamespace
     from semantica import semantic_artifact_builder as pipeline
 
@@ -366,7 +363,7 @@ def test_product_output_repairs_semantic_citation_and_vocabulary(monkeypatch):
 
     def relay_response(relay, payload, operation):
         prompts.append(payload["messages"][0]["content"])
-        result = {"model": relay.model_id, "choices": [{"message": {"content": json.dumps(outputs.pop(0))}}]}
+        result = {"model": relay.model_id, "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(outputs.pop(0))}}]}
         return result, ModelReceipt(id=f"receipt:{len(prompts)}", operation=operation, provider="test",
                                     model=relay.model_id, input_digest=H1, output_digest=H2)
 
@@ -375,24 +372,18 @@ def test_product_output_repairs_semantic_citation_and_vocabulary(monkeypatch):
         "profile": _classification_profile(),
         "evidence": [{"id": "evidence:source", "quote": "Source quote"}],
     }
-    result, receipts = pipeline._product_json(
-        SimpleNamespace(model_id="model-1", binding_id="default", max_output_tokens=393216),
-        "source_classification",
-        "Classify the source.",
-        context,
-        pipeline._ClassificationOutput,
-    )
-
-    assert isinstance(result, pipeline._ClassificationOutput)
-    assert result.model_dump(mode="json") == {"assignments": [valid]}
-    assert [receipt.id for receipt in receipts] == ["receipt:1", "receipt:2"]
-    assert "invented" in prompts[1]
-    assert "Altered quote" in prompts[1]
-    assert '"evidence_id":"evidence:source","quote":"Source quote"' in prompts[1]
-    assert ']\nPrevious JSON response:' in prompts[1]
+    with pytest.raises(pipeline.SemanticArtifactError):
+        pipeline._product_json(
+            SimpleNamespace(model_id="model-1", binding_id="default", max_output_tokens=393216),
+            "source_classification",
+            "Classify the source.",
+            context,
+            pipeline._ClassificationOutput,
+        )
+    assert len(outputs) == 1
 
 
-def test_product_output_repair_has_budget_for_schema_and_previous_json(monkeypatch):
+def test_product_output_rejects_large_invalid_payload_without_repair(monkeypatch):
     from types import SimpleNamespace
     from semantica import semantic_artifact_builder as pipeline
 
@@ -409,21 +400,20 @@ def test_product_output_repair_has_budget_for_schema_and_previous_json(monkeypat
         def __enter__(self): return self
         def __exit__(self, *_args): return None
         def read(self):
-            return json.dumps({"model": "model-1", "choices": [{"message": {"content": json.dumps(outputs.pop(0))}}]}).encode()
+            return json.dumps({"model": "model-1", "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(outputs.pop(0))}}]}).encode()
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-token")
     monkeypatch.setattr("urllib.request.urlopen", lambda _request, timeout: Response())
-    result, receipts = pipeline._product_json(
-        SimpleNamespace(model_id="model-1", binding_id="default", authorization_env="OPENAI_API_KEY",
-                        base_url="http://127.0.0.1/v1/chat/completions", max_output_tokens=393216),
-        "source_classification",
-        "Classify the source.",
-        {"evidence": [{"id": "evidence:source", "quote": quote}]},
-        pipeline._ClassificationOutput,
-    )
-
-    assert result.model_dump(mode="json")["assignments"][0]["citations"] == [{"evidence_id": "evidence:source", "quote": quote}]
-    assert len(receipts) == 2
+    with pytest.raises(pipeline.SemanticArtifactError):
+        pipeline._product_json(
+            SimpleNamespace(model_id="model-1", binding_id="default", authorization_env="OPENAI_API_KEY",
+                            base_url="http://127.0.0.1/v1/chat/completions", max_output_tokens=393216),
+            "source_classification",
+            "Classify the source.",
+            {"evidence": [{"id": "evidence:source", "quote": quote}]},
+            pipeline._ClassificationOutput,
+        )
+    assert len(outputs) == 1
 
 
 def test_source_relations_project_only_existing_multi_source_facts():
@@ -478,12 +468,12 @@ def test_semantic_classification_rejects_invalid_model_evidence(tmp_path, monkey
     calls = []
     def relay_response(*args):
         calls.append(args)
-        return {"model": "test", "choices": [{"message": {"content": json.dumps({"assignments": assignments})}}]}, receipt
+        return {"model": "test", "choices": [{"finish_reason": "stop", "message": {"content": json.dumps({"assignments": assignments})}}]}, receipt
     monkeypatch.setattr("semantica.semantic_artifact_builder._relay_json", relay_response)
     with pytest.raises(SemanticArtifactError):
         _classify_source(built, ClassificationProfile.model_validate(_classification_profile()),
             SimpleNamespace(model_id="test", binding_id="default", max_output_tokens=32768))
-    assert len(calls) == 3
+    assert len(calls) == 1
 
 
 def test_semantic_classification_preserves_source_offsets_and_unclassified_dimensions(tmp_path, monkeypatch):
@@ -499,13 +489,13 @@ def test_semantic_classification_preserves_source_offsets_and_unclassified_dimen
     receipt = ModelReceipt(id="receipt:test", operation="source_classification", provider="test", model="test", input_digest=H1, output_digest=H2)
     output = {"assignments": [{"dimension_id": "purpose", "item_id": "history", "confidence": 0.9, "citations": [{"evidence_id": span.id, "quote": span.quote}]}]}
     monkeypatch.setattr(pipeline, "_relay_json", lambda *args: (
-        {"model": "test", "choices": [{"message": {"content": json.dumps(output)}}]}, receipt))
+        {"model": "test", "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(output)}}]}, receipt))
     validations = []
-    native_validate = pipeline._ClassificationOutput.model_validate
+    native_validate = pipeline._ClassificationOutput.model_validate_json
     def validate(cls, value, **kwargs):
         validations.append(value)
         return native_validate(value, **kwargs)
-    monkeypatch.setattr(pipeline._ClassificationOutput, "model_validate", classmethod(validate))
+    monkeypatch.setattr(pipeline._ClassificationOutput, "model_validate_json", classmethod(validate))
     classification, _ = _classify_source(built, ClassificationProfile.model_validate(_classification_profile()),
         SimpleNamespace(model_id="test", binding_id="default", max_output_tokens=32768))
     assert len(validations) == 1
@@ -581,11 +571,11 @@ def test_explanation_rejects_missing_or_hallucinated_citations(tmp_path, monkeyp
     calls = []
     def respond(*args):
         calls.append(args)
-        return {"model": "test", "choices": [{"message": {"content": json.dumps(result)}}]}, receipt
+        return {"model": "test", "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(result)}}]}, receipt
     monkeypatch.setattr("semantica.semantic_artifact_builder._relay_json", respond)
     with pytest.raises(SemanticArtifactError):
         _explanation_reports("project-1", [built], built["entities"], [], [], [], [], [*built["evidence"], *built["passages"]], __import__('types').SimpleNamespace(model_id="test", max_output_tokens=1024))
-    assert len(calls) == 3
+    assert len(calls) == 1
 
 
 def _parsed_ref(params, source):
@@ -789,21 +779,21 @@ def test_model_recipe_uses_bifrost_chat_and_embedding_and_records_receipts(tmp_p
                 else:
                     content = ({
                         "relations": [{
-                            "subject": "Ada Lovelace", "subject_id": "mention:0",
-                            "predicate": "designed", "object": "Analytical Engine",
+                            "subject_id": "mention:0", "confidence": 0.9,
+                            "predicate": "designed",
                             "object_id": "mention:1",
                             "evidence": "Ada Lovelace designed the Analytical Engine.",
                             "evidence_occurrence": 0,
-                            "qualifiers": {"polarity": "positive"},
+                            "qualifiers": {"polarity": "positive"}, "supporting_refs": [],
                         }],
                     } if "Extract source-grounded relations" in prompt else {
                         "entities": [
-                            {"text": "Ada Lovelace", "label": "PERSON", "occurrence": 0},
-                            {"text": "Analytical Engine", "label": "CONCEPT", "occurrence": 0},
+                            {"text": "Ada Lovelace", "label": "PERSON", "occurrence": 0, "attributes": {}, "confidence": 0.9},
+                            {"text": "Analytical Engine", "label": "CONCEPT", "occurrence": 0, "attributes": {}, "confidence": 0.9},
                         ],
                     })
                 response = {
-                    "choices": [{"message": {"content": json.dumps(content), "role": "assistant"}}],
+                    "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(content), "role": "assistant"}}],
                     "model": payload["model"],
                     "usage": {"prompt_tokens": 10, "completion_tokens": 8},
                 }
@@ -960,30 +950,38 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
             if operation == "structured_extraction":
                 prompt = payload["messages"][0]["content"]
                 content = ({"relations": [{
-                    "subject": "Ada Lovelace", "subject_id": "mention:0",
-                    "predicate": "designed", "object": "Analytical Engine",
+                    "subject_id": "mention:0", "confidence": 0.9,
+                    "predicate": "designed",
                     "object_id": "mention:1", "evidence": text,
                     "evidence_occurrence": 0,
-                    "qualifiers": {"polarity": "positive"},
+                    "qualifiers": {"polarity": "positive"}, "supporting_refs": [],
                 }]} if "Extract source-grounded relations" in prompt else {
                     "entities": [
                         {"text": "Ada Lovelace", "label": "PERSON", "occurrence": 0,
-                         "attributes": {"fixture_key": "person-1"}},
+                         "attributes": {"fixture_key": "person-1"}, "confidence": 0.9},
                         {"text": "Analytical Engine", "label": "CONCEPT", "occurrence": 0,
-                         "attributes": {"fixture_key": "concept-1"}},
+                         "attributes": {"fixture_key": "concept-1"}, "confidence": 0.9},
                     ],
                 })
             elif operation == "knowledge_explanation":
                 content = _native_report(payload, "Design")
             else:
                 content = {}
-            result = {"choices": [{"message": {"content": json.dumps(content)}}], "model": relay.model_id}
+            result = {"choices": [{"finish_reason": "stop", "message": {"content": json.dumps(content)}}], "model": relay.model_id}
         receipt = ModelReceipt(id="receipt:" + stable_digest([operation, payload]).split(":")[1], operation=operation,
             provider="fixture", model=relay.model_id, input_digest=stable_digest(payload), output_digest=stable_digest(result))
         return result, receipt
 
     monkeypatch.setattr("semantica.semantic_artifact_builder._relay_json", relay_response)
     request = _request(first, tmp_path / "build", recipe="model")
+    request["params"]["recipe"]["extractionSpec"] = {
+        "id": "fixture", "version": "1", "entity_types": [
+            {"name": kind, "description": kind, "attributes": {
+                "fixture_key": {"type": "string", "description": "Fixture identity"}}}
+            for kind in ("PERSON", "CONCEPT")],
+        "relation_types": [{"name": "designed", "description": "Designed",
+                            "domain": ["PERSON"], "range": ["CONCEPT"]}],
+    }
     if declared_identity:
         request["params"]["identityPropertySchema"] = {"fixture_key": {"identity": True}}
     request["params"]["sources"].append({"filePath": str(second), "materialRevision": source_content_revision(second), "mimeType": "text/plain", "name": second.name, "sourceId": "source-2"})

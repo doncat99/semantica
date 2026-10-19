@@ -15,6 +15,13 @@ def _retryable_failure(error: BaseException) -> bool:
     return BaseProvider._is_transport_failure(error)
 
 
+def _record_rejections(provider):
+    if getattr(provider, "rejections", None) and getattr(provider, "receipts", None):
+        receipt = provider.receipts[-1]
+        metadata = receipt.setdefault("metadata", {}) if isinstance(receipt, dict) else receipt.metadata
+        metadata["rejected_candidates"] = list(provider.rejections)
+
+
 def extract_grounded_window(
     text: str,
     *,
@@ -55,8 +62,7 @@ def extract_grounded_window(
                 grounding_context=grounding_context,
             )
             if not entities:
-                if getattr(current_provider, "rejections", None) and getattr(current_provider, "receipts", None):
-                    current_provider.receipts[-1].metadata["rejected_candidates"] = current_provider.rejections
+                _record_rejections(current_provider)
                 return entities, [], current_provider
             relations = extract_relations_llm(
                 text, entities, provider=provider_name, model=model,
@@ -66,8 +72,7 @@ def extract_grounded_window(
                 grounding_context=grounding_context,
                 rejection_receipts=getattr(current_provider, "rejections", None),
             )
-            if getattr(current_provider, "rejections", None) and getattr(current_provider, "receipts", None):
-                current_provider.receipts[-1].metadata["rejected_candidates"] = current_provider.rejections
+            _record_rejections(current_provider)
             return entities, relations, current_provider
         except ProcessingError as exc:
             last_error = exc

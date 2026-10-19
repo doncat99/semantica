@@ -1,5 +1,5 @@
-from typing import Any, List, Optional
-from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
+from typing import Any, List, Literal, Optional, Union
+from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict, create_model
 
 def validate_fact_qualifiers(value: dict) -> dict:
     if not isinstance(value, dict):
@@ -198,6 +198,53 @@ class GroundedRelationsResponse(BaseModel):
     relations: List[dict[str, Any] | GroundedRelationOut | Any] = Field(
         ..., description="Relation candidates validated independently by the grounded parser"
     )
+
+
+class GroundedQualifiersWire(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    polarity: Literal["positive", "negative"]
+    condition: Optional[str] = None
+    time: Optional[str] = None
+    unit: Optional[str] = None
+    value: Optional[str] = None
+
+
+class GroundedRelationWire(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    predicate: str
+    confidence: float = Field(ge=0, le=1)
+    subject_id: str
+    object_id: str
+    evidence: str
+    evidence_occurrence: int = Field(ge=0)
+    qualifiers: GroundedQualifiersWire
+    supporting_refs: List[str]
+
+
+class GroundedRelationsWire(BaseModel):
+    """Closed transport contract; native grounding still validates each candidate."""
+    model_config = ConfigDict(extra="forbid")
+    relations: List[GroundedRelationWire]
+
+
+def grounded_entities_wire(specification=None):
+    """Derive the closed wire schema from the existing extraction specification."""
+    types = {"string": str, "number": float, "integer": int, "boolean": bool,
+             "string_list": List[str], "number_list": List[float]}
+    entities = []
+    for index, entity_type in enumerate(specification.entity_types if specification else [None]):
+        fields = {}
+        for name, attribute in (entity_type.attributes.items() if entity_type else []):
+            value_type = types[attribute.type]
+            fields[name] = (value_type if attribute.required else Optional[value_type],
+                            Field(... if attribute.required else None, description=attribute.description))
+        attributes = create_model(f"GroundedAttributes{index}", __config__=ConfigDict(extra="forbid"), **fields)
+        entities.append(create_model(f"GroundedEntityWire{index}", __config__=ConfigDict(extra="forbid"),
+            text=(str, ...), label=(Literal[entity_type.name] if entity_type else str, ...),
+            occurrence=(int, Field(ge=0)), confidence=(float, Field(ge=0, le=1)),
+            attributes=(attributes, ...)))
+    item = entities[0] if len(entities) == 1 else Union[tuple(entities)]
+    return create_model("GroundedEntitiesWire", __config__=ConfigDict(extra="forbid"), entities=(List[item], ...))
 
 
 class TripletsResponse(BaseModel):

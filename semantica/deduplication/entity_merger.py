@@ -89,17 +89,40 @@ class EntityMerger:
     def merge_qualified_facts(facts, *, identity):
         """Merge equal qualified facts, preserving every independent support."""
         from copy import deepcopy
+        import json
         grouped = {}
         for fact in facts:
             identifier = identity(fact)
-            if identifier not in grouped:
-                grouped[identifier] = deepcopy({**fact, "id": identifier})
-            target = grouped[identifier]
-            target["evidence_ids"] = sorted(set(target.get("evidence_ids", [])).union(fact.get("evidence_ids", [])))
+            grouped.setdefault(identifier, []).append(fact)
+        result = []
+        encoded = lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        for identifier, members in sorted(grouped.items()):
+            target = deepcopy(min(members, key=encoded))
+            target["id"] = identifier
+            observations = {}
+            for member in members:
+                metadata = member.get("metadata", {})
+                previous = metadata.get("support_observations")
+                for observation in previous if previous is not None else [member]:
+                    observations[encoded(observation)] = deepcopy(observation)
+            originals = [observations[key] for key in sorted(observations)]
+            active = [item for item in originals if item.get("status", "candidate") != "retracted"]
+            statuses = {item.get("status", "candidate") for item in active}
+            if not active:
+                target["status"] = "retracted"
+            elif "contradicted" in statuses:
+                target["status"] = "contradicted"
+            elif "rejected" in statuses:
+                target["status"] = "rejected" if statuses == {"rejected"} else "candidate"
+            else:
+                target["status"] = "accepted" if "accepted" in statuses else "candidate"
+            # A withdrawn observation remains auditable, but cannot support a live fact.
+            target["evidence_ids"] = sorted({ref for item in active or originals for ref in item.get("evidence_ids", [])})
             target["support_ids"] = list(target["evidence_ids"])
-            if isinstance(target.get("object"), str) and isinstance(fact.get("object"), str):
-                target["object"] = min(target["object"], fact["object"])
-        return [grouped[key] for key in sorted(grouped)]
+            # Keep even a single original status before derived conflict marking.
+            target["metadata"] = {**target.get("metadata", {}), "support_observations": originals}
+            result.append(target)
+        return result
 
     def __init__(
         self,

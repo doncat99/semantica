@@ -54,9 +54,6 @@ def _atomic_json(path: Path, value: Any) -> None:
 
 class SnapshotCheckpoint:
     def __init__(self, request: Any):
-        self.root = Path(request.output_dir).resolve() / "checkpoint"
-        self.root.mkdir(parents=True, exist_ok=True)
-        resume_roots = [Path(item).resolve() for item in request.resume_checkpoint_dirs]
         sources = []
         for source in request.sources:
             with Path(source.file_path).open("rb") as stream:
@@ -80,6 +77,25 @@ class SnapshotCheckpoint:
                 **({"maxOutputTokens": relay.max_output_tokens}
                    if relay.max_output_tokens is not None else {}),
             } for name, relay in request.relays.items()}}
+        self._initialize(request.output_dir, request.resume_checkpoint_dirs, inputs)
+
+    @classmethod
+    def for_source(cls, source, *, output_dir, scope_id, recipe, created_at):
+        """Use the same verified persistence for a single grounded-source build."""
+        with Path(source.file_path).open("rb") as stream:
+            digest = "sha256:" + file_digest(stream, "sha256").hexdigest()
+        instance = cls.__new__(cls)
+        instance._initialize(output_dir, [], {"protocol": "semantica.source-checkpoint.v1",
+            "scopeId": scope_id, "createdAt": created_at, "recipe": recipe,
+            "processingContracts": deepcopy(PROCESSING_CONTRACTS),
+            "source": {**source.model_dump(mode="json", by_alias=True, exclude={"file_path"}),
+                       "actualDigest": digest}})
+        return instance
+
+    def _initialize(self, output_dir, resume_dirs, inputs):
+        self.root = Path(output_dir).resolve() / "checkpoint"
+        self.root.mkdir(parents=True, exist_ok=True)
+        resume_roots = [Path(item).resolve() for item in resume_dirs]
         self.fence = _digest(_bytes(inputs))
         self.resume_roots = []
         for root in resume_roots:

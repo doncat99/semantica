@@ -68,6 +68,7 @@ Production Use Cases:
 """
 
 from datetime import datetime
+import json
 from typing import Any, Dict, List, Optional, Tuple
 import uuid
 
@@ -110,9 +111,9 @@ class PolicyEngine:
             if self._supports_cypher:
                 # Check for duplicate policy ID
                 if policy.policy_id:
-                    check_query = "MATCH (p:Policy {policy_id: $policy_id}) RETURN p.policy_id LIMIT 1"
-                    existing = self.graph_store.execute_query(check_query, {"policy_id": policy.policy_id})
-                    if existing:
+                    check_query = "MATCH (p:Policy {policy_id: $policy_id, version: $version}) RETURN p.policy_id LIMIT 1"
+                    existing = self.graph_store.execute_query(check_query, {"policy_id": policy.policy_id, "version": policy.version})
+                    if self._extract_records(existing):
                         raise ValueError("Policy with this ID already exists")
                 query = """
                 CREATE (p:Policy {
@@ -131,12 +132,12 @@ class PolicyEngine:
                     "policy_id": policy.policy_id,
                     "name": policy.name,
                     "description": policy.description,
-                    "rules": policy.rules,
+                    "rules": json.dumps(policy.rules, ensure_ascii=False),
                     "category": policy.category,
                     "version": policy.version,
-                    "created_at": policy.created_at,
-                    "updated_at": policy.updated_at,
-                    "metadata": policy.metadata
+                    "created_at": policy.created_at.isoformat(),
+                    "updated_at": policy.updated_at.isoformat(),
+                    "metadata": json.dumps(policy.metadata, ensure_ascii=False)
                 })
                 self.logger.info(f"Added policy: {policy.policy_id} version {policy.version}")
                 return policy.policy_id
@@ -332,9 +333,11 @@ class PolicyEngine:
     def _extract_records(self, results: Any) -> List[Dict[str, Any]]:
         """Normalize execute_query result shapes to record lists."""
         if isinstance(results, dict):
+            if results.get("success") is False:
+                raise ProcessingError("Policy query failed")
             records = results.get("records", [])
             if not isinstance(records, list):
-                return []
+                raise ProcessingError("Policy query records must be a list")
 
             # FalkorDB shape: {"records": [[...], ...], "header": ["col1", ...]}
             header = results.get("header")
@@ -565,7 +568,7 @@ class PolicyEngine:
                 RETURN DISTINCT version
                 ORDER BY version.updated_at
                 """
-                results = self.graph_store.execute_query(query, {"policy_id": policy_id})
+                results = self._extract_records(self.graph_store.execute_query(query, {"policy_id": policy_id}))
             
                 policies = []
                 for record in results:
@@ -755,7 +758,7 @@ class PolicyEngine:
                 RETURN d.decision_id as decision_id, d.confidence as confidence,
                        d.outcome as outcome, d.category as category
                 """
-                results = self.graph_store.execute_query(query, {"policy_id": policy_id})
+                results = self._extract_records(self.graph_store.execute_query(query, {"policy_id": policy_id}))
             else:
                 if hasattr(self.graph_store, "find_edges") and hasattr(self.graph_store, "nodes"):
                     for edge in self.graph_store.find_edges(edge_type="APPLIED_POLICY"):
@@ -825,7 +828,7 @@ class PolicyEngine:
                     """
                     params = {"policy_id": policy_id}
 
-                results = self.graph_store.execute_query(query, params)
+                results = self._extract_records(self.graph_store.execute_query(query, params))
 
                 if results:
                     record = results[0]
@@ -953,9 +956,7 @@ class PolicyEngine:
                 if not self._check_compliance_with_rules(decision_data, {rule_key: rule_value}):
                     return False
             else:
-                # Unknown rule key — check if field is present in metadata
-                if rule_key not in metadata:
-                    return False
+                raise ValueError(f"Unsupported policy rule: {rule_key}")
         return True
 
     def _calculate_impact_metrics(
@@ -1050,6 +1051,10 @@ class PolicyEngine:
     
     def _dict_to_policy(self, data: Dict[str, Any]) -> Policy:
         """Convert dictionary to Policy object."""
+        data = dict(data)
+        for field in ("rules", "metadata"):
+            if isinstance(data.get(field), str):
+                data[field] = json.loads(data[field])
         # Handle timestamp conversion
         for field in ["created_at", "updated_at"]:
             if isinstance(data.get(field), str):
