@@ -77,6 +77,24 @@ def test_invalid_reference_rejected_before_commit(store, scope):
     assert store.read_snapshot(scope) is None
 
 
+def test_archival_export_preserves_unsupported_contract_without_weakening_reads(store, scope):
+    from semantica.semantic_artifact_schema import stable_digest
+
+    original = snapshot(scope)
+    original["experimental_section"] = [{"id": "archived-only", "value": 7}]
+    # Simulate an artifact committed by a different schema version.
+    store._store_backend.commit_snapshot(original)
+    assert store.export_snapshot(scope) == original
+    assert store.export_snapshot(scope, original['snapshot_id']) == original
+    assert store.export_snapshot(scope + ':other') is None
+    with pytest.raises(ValueError, match="experimental_section"):
+        store.read_snapshot(scope)
+    store.execute_query('MATCH (s:SemanticSnapshot {scope_id:$scope}) SET s.digest=$digest',
+                        {'scope': scope, 'digest': stable_digest({})})
+    with pytest.raises(Exception, match="semantic_snapshot_digest_mismatch"):
+        store.export_snapshot(scope)
+
+
 def test_two_writers_only_one_can_advance_base(store, scope):
     store.commit_snapshot(snapshot(scope))
 

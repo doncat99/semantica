@@ -804,11 +804,19 @@ class GraphStore:
         """Read one authorized scope/revision; return the native validated model."""
         from ..semantic_artifact_schema import SemanticArtifact
 
+        value = self.export_snapshot(scope_id, snapshot_id)
+        return SemanticArtifact.model_validate(value) if value is not None else None
+
+    def export_snapshot(self, scope_id: str, snapshot_id: Optional[str] = None) -> Any:
+        """Export a sealed, digest-checked payload for backup or explicit migration.
+
+        The caller authorizes scope. This is archival data, not validated current
+        semantic state; decision consumers must use ``read_snapshot``.
+        """
         read = getattr(self._store_backend, "read_snapshot", None)
         if not callable(read):
             raise NotImplementedError(f"Atomic semantic snapshots unsupported by {self.backend}")
-        value = read(scope_id, snapshot_id)
-        return SemanticArtifact.model_validate(value) if value is not None else None
+        return read(scope_id, snapshot_id)
 
     def initialize_snapshot_storage(self) -> None:
         """Install native uniqueness constraints before enabling concurrent writers."""
