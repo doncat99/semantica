@@ -67,6 +67,11 @@ deployment, sustained throughput, OCR or real browser multi-hop delivery.
 
 No new OCR path, parser switch, timeout increase or PDF-specific shortcut.
 
+2026-10-19 follow-up: after a same-original reader comparison, the owner authorized
+replacing the native PDFParser reader with PyMuPDF. This record remains historical;
+the new implementation and verification are in
+[PyMuPDF switch](2026-10-19-pymupdf-native-parser.md).
+
 ## Upstream merge assessment
 
 - Disposition: pending; incoming upstream revision not reviewed.

@@ -2339,9 +2339,8 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
         total_pages = None
         if source_path.suffix.lower() == ".pdf":
             try:
-                import pdfplumber
-                with pdfplumber.open(source_path) as pdf:
-                    total_pages = len(pdf.pages)
+                from .parse.pdf_parser import PDFParser
+                total_pages = PDFParser().extract_metadata(source_path)["page_count"]
             except Exception:
                 pass
         if progress:

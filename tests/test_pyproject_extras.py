@@ -1,7 +1,7 @@
 """Guard for the aggregate ``all`` extras in pyproject.toml.
 
 Review of #1508 caught ``parse-pdf`` missing from every ``all`` bundle:
-``semantica[all]`` installed the package without pdfplumber, so the default
+``semantica[all]`` installed the package without its PDF reader, so the default
 PDFParser raised ProcessingError on first use. tomllib is stdlib only from
 Python 3.11, so the bundle block is parsed textually — the repo still
 supports 3.9/3.10.
@@ -29,6 +29,14 @@ def _extras_in_all_bundles():
 def test_all_bundles_include_parse_pdf():
     """An all-features install must include built-in PDF parsing support."""
     assert "parse-pdf" in _extras_in_all_bundles()
+
+
+def test_native_pdf_extras_use_one_reader():
+    text = PYPROJECT.read_text(encoding="utf-8")
+    for extra in ("parse-pdf", "semantic-worker"):
+        match = re.search(r"^" + extra + r" = \[(.*?)^\]", text, re.MULTILINE | re.DOTALL)
+        assert match and "pymupdf" in match.group(1)
+        assert "pdfplumber" not in match.group(1)
 
 
 def test_all_bundle_extraction_finds_known_extra():

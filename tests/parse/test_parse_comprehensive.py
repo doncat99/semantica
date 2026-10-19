@@ -140,21 +140,24 @@ class TestParseComprehensive(unittest.TestCase):
     
     def test_pdf_parser(self):
         parser = PDFParser()
-        # pdfplumber is imported inside PDFParser.parse, so inject a fake
+        # PyMuPDF is imported inside PDFParser.parse, so inject a fake
         # module into sys.modules instead of patching a module attribute
-        mock_pdfplumber = MagicMock()
+        mock_pymupdf = MagicMock()
         mock_pdf = MagicMock()
         mock_page = MagicMock()
-        mock_page.extract_text.return_value = "Page text"
-        mock_pdf.pages = [mock_page]
+        mock_page.get_text.return_value = "Page text"
+        mock_page.find_tables.return_value.tables = []
+        mock_pdf.__len__.return_value = 1
+        mock_pdf.load_page.return_value = mock_page
+        mock_pdf.needs_pass = False
         # Ensure metadata is a dict, not a property object if that's an issue
-        mock_pdf.metadata = {"Title": "Test PDF"}
+        mock_pdf.metadata = {"title": "Test PDF"}
 
         # Setup the context manager
         mock_context_manager = MagicMock()
         mock_context_manager.__enter__.return_value = mock_pdf
         mock_context_manager.__exit__.return_value = None
-        mock_pdfplumber.open.return_value = mock_context_manager
+        mock_pymupdf.open.return_value = mock_context_manager
 
         # We don't need a real file if we mock open, but the parser likely checks file existence
         with tempfile.NamedTemporaryFile(mode='wb', delete=False, suffix='.pdf') as tmp:
@@ -162,7 +165,7 @@ class TestParseComprehensive(unittest.TestCase):
             tmp_path = tmp.name
 
         try:
-            with patch.dict(sys.modules, {"pdfplumber": mock_pdfplumber}):
+            with patch.dict(sys.modules, {"pymupdf": mock_pymupdf}):
                 result = parser.parse(tmp_path)
             # Returns dict with full_text
             self.assertIn("Page text", result["full_text"])

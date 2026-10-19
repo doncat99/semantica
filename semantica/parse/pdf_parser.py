@@ -1,7 +1,7 @@
 """
 PDF Document Parser Module
 
-This module handles PDF document parsing using pdfplumber for text,
+This module handles PDF document parsing using PyMuPDF for text,
 table, and image extraction, including metadata and page-level processing.
 
 Key Features:
@@ -28,7 +28,6 @@ Author: Semantica Contributors
 License: MIT
 """
 
-import io
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -93,12 +92,13 @@ class PDFParser:
                 - extract_tables: Whether to extract tables (default: True)
                 - extract_images: Whether to extract images (default: False)
                 - pages: Specific page numbers to parse (None = all pages)
-                - use_text_flow: Forward to pdfplumber text extraction when supplied
+                - sort: Sort text by coordinates (default: True)
 
         Returns:
             dict: Parsed PDF data
         """
         file_path = Path(file_path)
+        options = {**self.config, **options}
 
         # Track PDF parsing
         tracking_id = self.progress_tracker.start_tracking(
@@ -118,34 +118,39 @@ class PDFParser:
 
             try:
                 try:
-                    import pdfplumber
+                    import pymupdf
                 except ImportError:
                     raise ProcessingError(
-                        "pdfplumber is required for PDF parsing. "
-                        "Install with: pip install pdfplumber"
+                        "PyMuPDF is required for PDF parsing. "
+                        "Install with: pip install 'semantica[parse-pdf]'"
                     )
-                with pdfplumber.open(str(file_path)) as pdf:
+                with pymupdf.open(str(file_path)) as pdf:
+                    if pdf.needs_pass:
+                        raise ProcessingError("PDF requires a password")
                     # Extract metadata
                     metadata = self._extract_metadata(pdf)
-                    metadata.page_count = len(pdf.pages)
+                    metadata.page_count = len(pdf)
 
                     # Extract pages
                     pages = []
-                    page_numbers = options.get("pages", range(len(pdf.pages)))
+                    page_numbers = options.get("pages")
+                    if page_numbers is None:
+                        page_numbers = range(len(pdf))
 
                     self.progress_tracker.update_tracking(
-                        tracking_id, message=f"Parsing {len(pdf.pages)} pages"
+                        tracking_id, message=f"Parsing {len(pdf)} pages"
                     )
 
                     for page_num in page_numbers:
-                        if page_num < len(pdf.pages):
-                            page = pdf.pages[page_num]
-                            try:
-                                page_data = self._parse_page(page, page_num + 1, options)
-                            finally:
-                                # PDF retains pages; release layout/object caches before advancing.
-                                page.close()
-                            pages.append(page_data)
+                        if type(page_num) is not int or not 0 <= page_num < len(pdf):
+                            raise ValidationError(f"Invalid zero-based PDF page index: {page_num}")
+                        page = pdf.load_page(page_num)
+                        try:
+                            page_data = self._parse_page(page, page_num + 1, options)
+                        finally:
+                            # Do not retain native pages after their plain-data result is copied.
+                            del page
+                        pages.append(page_data)
 
                     full_text = "\n\n".join(page.text for page in pages)
 
@@ -180,7 +185,7 @@ class PDFParser:
                         "metadata": metadata.__dict__,
                         "pages": [page.__dict__ for page in pages],
                         "full_text": full_text,
-                        "total_pages": len(pdf.pages),
+                        "total_pages": len(pdf),
                     }
 
             except Exception as e:
@@ -264,44 +269,37 @@ class PDFParser:
 
         return all_images
 
+    def extract_metadata(self, file_path: Union[str, Path]) -> Dict[str, Any]:
+        """Read metadata without extracting any pages."""
+        return self.parse(file_path, pages=[], extract_text=False,
+                          extract_tables=False, extract_images=False)["metadata"]
+
     def _parse_page(self, page, page_number: int, options: Dict[str, Any]) -> PDFPage:
         """Parse individual PDF page."""
         page_data = PDFPage(
-            page_number=page_number, text="", width=page.width, height=page.height
+            page_number=page_number, text="", width=page.rect.width, height=page.rect.height
         )
 
         # Extract text
         if options.get("extract_text", True):
-            text_options = {key: options[key] for key in ("use_text_flow",) if key in options}
-            page_data.text = page.extract_text(**text_options) or ""
+            page_data.text = page.get_text("text", sort=options.get("sort", True)) or ""
 
         # Extract tables
         if options.get("extract_tables", True):
-            tables = page.extract_tables()
-            if tables:
-                page_data.tables = [
-                    {
-                        "data": table,
-                        "bbox": None,  # pdfplumber doesn't provide bbox for tables directly
-                    }
-                    for table in tables
-                ]
+            page_data.tables = [
+                {"data": table.extract(), "bbox": list(table.bbox)}
+                for table in page.find_tables().tables
+            ]
 
         # Extract images
         if options.get("extract_images", False):
-            images = page.images
-            if images:
-                page_data.images = [
-                    {
-                        "x0": img.get("x0", 0),
-                        "y0": img.get("y0", 0),
-                        "x1": img.get("x1", 0),
-                        "y1": img.get("y1", 0),
-                        "width": img.get("width", 0),
-                        "height": img.get("height", 0),
-                    }
-                    for img in images
-                ]
+            for image in page.get_image_info():
+                x0, top, x1, bottom = image["bbox"]
+                page_data.images.append({
+                    "x0": x0, "y0": page.rect.height - bottom,
+                    "x1": x1, "y1": page.rect.height - top,
+                    "width": x1 - x0, "height": bottom - top,
+                })
 
         return page_data
 
@@ -310,11 +308,11 @@ class PDFParser:
         metadata = pdf.metadata or {}
 
         return PDFMetadata(
-            title=metadata.get("Title"),
-            author=metadata.get("Author"),
-            subject=metadata.get("Subject"),
-            creator=metadata.get("Creator"),
-            producer=metadata.get("Producer"),
-            creation_date=str(metadata.get("CreationDate", "")),
-            modification_date=str(metadata.get("ModDate", "")),
+            title=metadata.get("title"),
+            author=metadata.get("author"),
+            subject=metadata.get("subject"),
+            creator=metadata.get("creator"),
+            producer=metadata.get("producer"),
+            creation_date=str(metadata.get("creationDate", "")),
+            modification_date=str(metadata.get("modDate", "")),
         )

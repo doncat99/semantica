@@ -116,8 +116,8 @@ documents = [
   "beautifulsoup4>=4.15.0"
 ]
 parse-docling = ["docling==2.139.0", "docling-slim @ https://github.com/doncat99/docling/releases/download/ontoscience-docling-2.139.0.2/docling_slim-2.139.0+ontoscience.2-py3-none-any.whl#sha256=130798afe9758d1823dfb0fd37159e2d59932fb2c26336265c151e4baabf80de"]
-# pdfplumber powers the default PDFParser; not pulled in by any other extra.
-parse-pdf = ["pdfplumber>=0.10.0"]
+# PyMuPDF powers the single native PDFParser (AGPL/commercial dependency).
+parse-pdf = ["pymupdf>=1.28.2,<1.29"]
 
 # Runtime dependencies for the ProjectSnapshot worker.  The worker entrypoint
 # remains importable from the core wheel, while this extra installs the single
@@ -131,7 +131,7 @@ semantic-worker = [
   "beautifulsoup4>=4.15.0",
   "docling==2.139.0; python_version >= '3.10'",
   "docling-slim @ https://github.com/doncat99/docling/releases/download/ontoscience-docling-2.139.0.2/docling_slim-2.139.0+ontoscience.2-py3-none-any.whl#sha256=130798afe9758d1823dfb0fd37159e2d59932fb2c26336265c151e4baabf80de ; python_version >= '3.10'",
-  "pdfplumber>=0.10.0",
+  "pymupdf>=1.28.2,<1.29",
 ]
 
 # ---- SHACL Validation ----
