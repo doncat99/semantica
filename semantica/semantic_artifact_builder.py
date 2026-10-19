@@ -480,6 +480,35 @@ def _extract_project_sources(parsed_sources, request, progress):
 
     def phase(stage, jobs, handler, destination, base, span):
         completed = restored = 0
+        sources = [{"sourceId": source.source_id, "stage": stage,
+                    "completedChunks": 0, "restoredChunks": 0,
+                    "totalChunks": len(windows[index]), "inFlightChunks": 0,
+                    "state": "queued" if windows[index] else "completed"}
+                   for index, (source, _, _) in enumerate(parsed_sources)]
+
+        def emit():
+            if progress:
+                progress({"stage": stage, "percent": base + round(completed / max(1, total) * span),
+                          "detail": f"{stage.capitalize()} {completed} / {total} chunks",
+                          "metadata": {"completedChunks": completed, "restoredChunks": restored,
+                                       "totalChunks": total, "sourceProgress": [dict(row) for row in sources]}})
+
+        def dispatch(job):
+            source_index, _, item = job
+            with lock:
+                row = sources[source_index]
+                row["inFlightChunks"] += len(item) if stage == "embedding" else 1
+                row["state"] = "running"
+                emit()
+            try:
+                return handler(job)
+            except Exception:
+                with lock:
+                    row["inFlightChunks"] -= len(item) if stage == "embedding" else 1
+                    row["state"] = "failed"
+                    emit()
+                raise
+
         def done(_index, value):
             nonlocal completed, restored
             source_index, item_index, item = jobs[_index]
@@ -489,14 +518,15 @@ def _extract_project_sources(parsed_sources, request, progress):
                 destination[source_index][item_index] = value
                 completed += count
                 restored += count if reused else 0
-                if progress:
-                    progress({"stage": stage, "percent": base + round(completed / max(1, total) * span),
-                              "detail": f"{stage.capitalize()} {completed} / {total} chunks",
-                              "metadata": {"completedChunks": completed, "restoredChunks": restored, "totalChunks": total}})
-        if progress:
-            progress({"stage": stage, "percent": base, "detail": f"{stage.capitalize()} 0 / {total} chunks",
-                      "metadata": {"completedChunks": 0, "totalChunks": total}})
-        _native_parallel_map(jobs, handler, request.parallelism, done)
+                row = sources[source_index]
+                row["completedChunks"] += count
+                row["restoredChunks"] += count if reused else 0
+                row["inFlightChunks"] -= count
+                if row["state"] != "failed":
+                    row["state"] = "completed" if row["completedChunks"] == row["totalChunks"] else "running" if row["inFlightChunks"] else "queued"
+                emit()
+        emit()
+        _native_parallel_map(jobs, dispatch, request.parallelism, done)
 
     jobs = [(source_index, index, items[index])
             for index in range(max(map(len, windows), default=0))
