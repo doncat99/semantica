@@ -61,7 +61,7 @@ def test_ocr_recipe_and_text_revision_have_distinct_evidence_identity(tmp_path: 
     assert _build_source(request.sources[0], False, parsed=parsed)["representation"].id == native["representation"].id
 
 
-def test_failed_quality_is_durable_and_never_enters_knowledge_extraction(tmp_path, monkeypatch):
+def test_failed_quality_is_materialized_but_never_enters_knowledge_extraction(tmp_path, monkeypatch):
     import semantica.semantic_artifact_builder as pipeline
     source = tmp_path / "source.pdf"
     source.write_bytes(b"fixture")
@@ -91,13 +91,13 @@ def test_failed_quality_is_durable_and_never_enters_knowledge_extraction(tmp_pat
     monkeypatch.setattr(pipeline, "_build_source", lambda *args, **kwargs: pytest.fail("failed quality reached extraction"))
     token = active_checkpoint.set(Checkpoint())
     try:
-        for _ in range(2):
-            with pytest.raises(DocumentQualityError, match="explicit OCR repair"):
-                parse_source_artifact(parse_request)
+        first = parse_source_artifact(parse_request)
+        second = parse_source_artifact(parse_request)
     finally:
         active_checkpoint.reset(token)
     assert calls == [False]
     assert next(iter(cache.values()))[1]["quality"]["status"] == "needs_review"
+    assert first["artifactDigest"] == second["artifactDigest"]
 
 
 def test_empty_docling_source_enters_quality_repair_path(tmp_path, monkeypatch):

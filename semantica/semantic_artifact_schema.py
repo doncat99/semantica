@@ -745,7 +745,7 @@ class ReleaseRef(DigestModel):
 
 
 class DocumentProcessingProfile(StrictModel):
-    mode: Literal["disabled", "local", "remote"] = "local"
+    mode: Literal["disabled", "native", "local", "remote"] = "local"
     endpoint: Optional[str] = None
     binding_id: Optional[str] = Field(default=None, alias="bindingId")
     authorization_env: Optional[str] = Field(default=None, alias="authorizationEnv")

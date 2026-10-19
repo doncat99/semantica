@@ -29,7 +29,8 @@ from typing import Any
 from pydantic.json_schema import SkipJsonSchema
 from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, ValidationInfo, model_validator
 
-from .source import SourceQualityError, UnsupportedSourceFormatError, parse_source, source_content_revision
+from .source import (SourceQualityError, UnsupportedSourceFormatError, parse_source,
+                     source_content_revision, source_processing_revision)
 from .project_checkpoint import SnapshotCheckpoint, active_checkpoint
 from .kg.entity_resolver import EntityResolver
 from .kg.community_summarizer import CommunitySummarizer, EvidenceBudgetError, CommunityReportLLMSchema
@@ -57,6 +58,7 @@ from .semantic_artifact_schema import (
     ParseSourceRequest,
     BindParsedSourceRequest,
     ParsedSourceRef,
+    DocumentProcessingProfile,
     ReportSection,
     SourceClassification,
     SourceRelation,
@@ -615,19 +617,25 @@ def _assemble_source_results(windows, extracted_windows, embedded_batches):
 def build_grounded_source_snapshot(source: SourceBuildInput, *, scope_id: str, model: str,
                                    provider_instance, artifact_ref: str, created_at: str,
                                    document_processing: dict | None = None,
-                                   checkpoint_dir: str | None = None) -> SemanticArtifact:
+                                   checkpoint_dir: str | None = None,
+                                   parsed_source: ParsedSourceRef | None = None) -> SemanticArtifact:
     """Produce located facts through the same native owners, without retrieval indexing.
 
     The caller grants immutable local bytes and retains the returned snapshot before
     publication. Embedding/community work remains an explicit separate capability.
     """
     source = SourceBuildInput.model_validate(source)
+    profile = DocumentProcessingProfile.model_validate(document_processing or {}).model_dump(
+        mode="json", by_alias=True)
     recipe = stable_digest({"pipeline": "grounded-source", "model": model,
         "provider": type(provider_instance).__name__,
         "implementation": {name: _digest_file(Path(__file__).parent / name) for name in (
             'semantic_artifact_builder.py', 'semantic_extract/methods.py', 'semantic_extract/schemas.py',
             'semantic_extract/grounded_window.py', 'semantic_extract/providers.py')},
-        "document_processing": document_processing})
+        "document_processing": profile,
+        "source_processing_revision": source_processing_revision(Path(source.file_path),
+            mime_type=source.mime_type, force_ocr=False, document_processing=profile)})
+    token = None
     if checkpoint_dir is not None:
         from .project_checkpoint import SnapshotCheckpoint
         checkpoint = SnapshotCheckpoint.for_source(source, output_dir=checkpoint_dir,
@@ -639,18 +647,24 @@ def build_grounded_source_snapshot(source: SourceBuildInput, *, scope_id: str, m
         provider_instance.extraction_cache = ExtractionCache(ttl=None,
             backend=_ExtractionCheckpointBackend(checkpoint, provider_instance))
         provider_instance.cache_scope = {'scope': scope_id, 'recipe': recipe}
-    parsed = _parse_source(source, False, document_processing)
-    windows = list(_text_windows(parsed[0]))
-    extracted = []
-    for start, end, text in windows:
-        entities, relations, _ = extract_grounded_window(text, model=model,
-            provider_instance=provider_instance, retries=1)
-        output = {"entities": [asdict(item) for item in entities],
-                  "relations": [asdict(item) for item in relations]}
-        receipt = ModelReceipt(id="receipt:" + stable_digest([scope_id, created_at, model, start, end, text, output]).split(":")[1],
-            operation="structured_extraction", provider=type(provider_instance).__name__, model=model,
-            input_digest=stable_digest(text), output_digest=stable_digest(output), created_at=created_at)
-        extracted.append(({"entities": entities, "relations": relations}, [receipt], False))
+        token = active_checkpoint.set(checkpoint)
+    try:
+        parsed = (_load_parsed_source(source, parsed_source, False, profile)
+                  if parsed_source is not None else _parse_source(source, False, profile))
+        windows = list(_text_windows(parsed[0]))
+        extracted = []
+        for start, end, text in windows:
+            entities, relations, _ = extract_grounded_window(text, model=model,
+                provider_instance=provider_instance, retries=1)
+            output = {"entities": [asdict(item) for item in entities],
+                      "relations": [asdict(item) for item in relations]}
+            receipt = ModelReceipt(id="receipt:" + stable_digest([scope_id, created_at, model, start, end, text, output]).split(":")[1],
+                operation="structured_extraction", provider=type(provider_instance).__name__, model=model,
+                input_digest=stable_digest(text), output_digest=stable_digest(output), created_at=created_at)
+            extracted.append(({"entities": entities, "relations": relations}, [receipt], False))
+    finally:
+        if token is not None:
+            active_checkpoint.reset(token)
     result, receipts = _assemble_grounded_windows(windows, extracted)
     built = _build_source(source, False, result, parsed)
     built['representation'].created_at = created_at
@@ -1481,7 +1495,8 @@ def _write_json(path: Path, payload: Any) -> str:
     return _digest_bytes(encoded)
 
 
-def _parse_source(source: Any, force_ocr: bool, document_processing: dict | None = None) -> tuple[str, dict[str, Any], str, str, str, str]:
+def _parse_source(source: Any, force_ocr: bool, document_processing: dict | None = None,
+                  *, admit_quality: bool = True) -> tuple[str, dict[str, Any], str, str, str, str]:
     path = Path(source.file_path).resolve()
     if not path.is_file():
         raise SemanticArtifactError(f"source is not a file: {source.source_id}")
@@ -1492,7 +1507,8 @@ def _parse_source(source: Any, force_ocr: bool, document_processing: dict | None
     cache_key = {"sourceId": source.source_id, "contentHash": content_hash, "forceOcr": force_ocr, "documentProcessing": document_processing}
     cached = checkpoint.read("document", cache_key) if checkpoint else None
     if cached is not None:
-        _admit_document_quality(source.source_id, cached[1], force_ocr)
+        if admit_quality:
+            _admit_document_quality(source.source_id, cached[1], force_ocr)
         return tuple(cached)
     try:
         parsed = parse_source(
@@ -1511,7 +1527,8 @@ def _parse_source(source: Any, force_ocr: bool, document_processing: dict | None
     result = (parsed.text, document, parsed.origin, content_hash, parsed.parser, parsed.parser_version)
     if checkpoint:
         checkpoint.write("document", cache_key, result)
-    _admit_document_quality(source.source_id, document, force_ocr)
+    if admit_quality:
+        _admit_document_quality(source.source_id, document, force_ocr)
     return result
 
 
@@ -1532,15 +1549,18 @@ def _representation_revision(source: Any, force_ocr: bool, content_hash: str, pa
 def parse_source_artifact(request: ParseSourceRequest) -> dict[str, str]:
     """Materialize one source revision before any semantic/model work."""
     profile = request.document_processing.model_dump(mode="json", by_alias=True)
-    text, document, origin, content_hash, parser, parser_version = _parse_source(request.source, request.force_ocr, profile)
+    text, document, origin, content_hash, parser, parser_version = _parse_source(
+        request.source, request.force_ocr, profile, admit_quality=False)
     payload = {
-        "protocol": "semantica.parsed-source.v1",
+        "protocol": "semantica.parsed-source.v2",
         "sourceId": request.source.source_id,
         "materialRevision": content_hash,
         "name": request.source.name,
         "mimeType": request.source.mime_type,
         "forceOcr": request.force_ocr,
         "documentProcessing": profile,
+        "processingRevision": source_processing_revision(Path(request.source.file_path),
+            mime_type=request.source.mime_type, force_ocr=request.force_ocr, document_processing=profile),
         "parser": parser,
         "parserVersion": parser_version,
         "origin": origin,
@@ -1558,6 +1578,7 @@ def _write_parsed_source_artifact(request: ParseSourceRequest, payload: dict[str
     digest = _write_json(path, payload)
     return {"artifactPath": str(path), "artifactDigest": digest, "sourceId": request.source.source_id,
             "materialRevision": content_hash, "representationRevision": document["representation_revision"],
+            "processingRevision": payload["processingRevision"],
             "representationId": f"representation:{_safe_id(request.source.source_id)}:{document['representation_revision'][7:]}"}
 
 
@@ -1575,11 +1596,13 @@ def bind_parsed_source_artifact(request: BindParsedSourceRequest) -> dict[str, s
         raise SemanticArtifactError("parsed source artifact is invalid JSON") from exc
     profile = request.document_processing.model_dump(mode="json", by_alias=True)
     if not isinstance(payload, dict) or any((
-        payload.get("protocol") != "semantica.parsed-source.v1",
+        payload.get("protocol") != "semantica.parsed-source.v2",
         payload.get("materialRevision") != source.material_revision,
         payload.get("mimeType") != source.mime_type,
         payload.get("forceOcr") is not request.force_ocr,
         payload.get("documentProcessing") != profile,
+        payload.get("processingRevision") != source_processing_revision(Path(source.file_path),
+            mime_type=source.mime_type, force_ocr=request.force_ocr, document_processing=profile),
     )):
         raise SemanticArtifactError("parsed source content or processing profile changed")
     document = payload.get("document")
@@ -1616,13 +1639,15 @@ def _load_parsed_source(source: Any, ref: ParsedSourceRef, force_ocr: bool, prof
         raise SemanticArtifactError(f"source material revision does not match immutable bytes: {source.source_id}")
     payload = json.loads(path.read_bytes())
     if not isinstance(payload, dict) or any((
-        payload.get("protocol") != "semantica.parsed-source.v1",
+        payload.get("protocol") != "semantica.parsed-source.v2",
         payload.get("sourceId") != source.source_id or ref.source_id != source.source_id,
         payload.get("materialRevision") != source.material_revision,
         payload.get("name") != source.name,
         payload.get("mimeType") != source.mime_type,
         payload.get("forceOcr") is not force_ocr,
         payload.get("documentProcessing") != profile,
+        payload.get("processingRevision") != source_processing_revision(Path(source.file_path),
+            mime_type=source.mime_type, force_ocr=force_ocr, document_processing=profile),
     )):
         raise SemanticArtifactError(f"parsed source identity or processing profile changed: {source.source_id}")
     document = payload.get("document")
@@ -2335,14 +2360,11 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
     parsed_sources = []
     parsed_refs = {ref.source_id: ref for ref in request.parsed_sources}
     for source_index, source in enumerate(request.sources, start=1):
-        source_path = Path(source.file_path).resolve()
-        total_pages = None
-        if source_path.suffix.lower() == ".pdf":
-            try:
-                from .parse.pdf_parser import PDFParser
-                total_pages = PDFParser().extract_metadata(source_path)["page_count"]
-            except Exception:
-                pass
+        force_ocr = source.source_id in request.recipe.force_ocr_source_ids
+        parsed = _load_parsed_source(source, parsed_refs[source.source_id], force_ocr,
+            request.document_processing.model_dump(mode="json", by_alias=True))
+        document = parsed[1]
+        total_pages = len(document.get("pages") or []) or document.get("metadata", {}).get("page_count")
         if progress:
             progress({
                 "stage": "document_parsing",
@@ -2350,8 +2372,6 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                 "detail": f"Parsing document {source_index} / {len(request.sources)}",
                 **({"metadata": {"totalPages": total_pages}} if total_pages else {}),
             })
-        force_ocr = source.source_id in request.recipe.force_ocr_source_ids
-        parsed = _load_parsed_source(source, parsed_refs[source.source_id], force_ocr, request.document_processing.model_dump(mode="json", by_alias=True))
         parsed_sources.append((source, force_ocr, parsed))
     model_results = _extract_project_sources(parsed_sources, request, progress) if request.recipe.id == "model" else []
     for source_index, (source, force_ocr, parsed) in enumerate(parsed_sources):

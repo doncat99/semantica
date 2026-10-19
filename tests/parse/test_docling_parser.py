@@ -33,11 +33,16 @@ class TestDoclingParser(unittest.TestCase):
         first = SimpleNamespace(text="First page", prov=[SimpleNamespace(page_no=1)])
         second = SimpleNamespace(text="Second page", prov=[SimpleNamespace(page_no=2)])
         shared = SimpleNamespace(text="Spanning item", prov=[SimpleNamespace(page_no=1), SimpleNamespace(page_no=2)])
+        visits = []
+        def items():
+            visits.append(True)
+            return iter([(first, 0), (second, 0), (shared, 0)])
         document = SimpleNamespace(
             pages={number: SimpleNamespace(size=SimpleNamespace(width=100, height=200)) for number in [1, 2]},
-            iterate_items=lambda: iter([(first, 0), (second, 0), (shared, 0)]),
+            iterate_items=items,
         )
         pages = self.parser._extract_pages(SimpleNamespace(document=document), {})
+        self.assertEqual(len(visits), 1)
         self.assertEqual(pages[0]["text"], "First page\nSpanning item")
         self.assertEqual(pages[1]["text"], "Second page\nSpanning item")
 
@@ -112,6 +117,20 @@ class TestDoclingParser(unittest.TestCase):
         self.assertEqual(result["doctags"], restored.export_to_doctags())
         self.assertEqual(result["full_text"], result["doctags"])
         self.assertEqual(restored.texts[0].text, "北京大学位于北京。")
+
+    def test_doctags_are_exported_once_for_complete_document(self):
+        document = MagicMock()
+        document.pages = {}
+        document.tables = []
+        document.export_to_doctags.return_value = "<doctag>text</doctag>"
+        document.export_to_text.return_value = "text"
+        document.export_to_dict.return_value = {"name": "document"}
+        self.mock_converter.convert.return_value = SimpleNamespace(document=document, status="success", pages=[])
+        with patch.object(Path, 'exists', return_value=True):
+            result = DoclingParser(converter=self.mock_converter).parse(
+                "fixture.pdf", include_document=True, export_format="doctags")
+        self.assertEqual(result["doctags"], result["full_text"])
+        document.export_to_doctags.assert_called_once_with()
 
     def setUp(self):
         # Patch DOCLING_AVAILABLE to True for testing logic

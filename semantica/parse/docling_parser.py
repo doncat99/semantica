@@ -228,7 +228,8 @@ class DoclingParser:
                     message=f"Extracting text content ({export_format} format)..."
                 )
 
-            # Get document content
+            # Get document content once per format; large exports are not cheap views.
+            doc_dict = None
             if export_format == "markdown":
                 full_text = result.document.export_to_markdown()
             elif export_format == "html":
@@ -276,7 +277,12 @@ class DoclingParser:
                 for cell in getattr(page, "cells", [])
                 if getattr(cell, "text", "").strip() and isinstance(getattr(cell, "from_ocr", None), bool)
             }
-            plain_text = result.document.export_to_text() if options.get("include_document", False) else full_text
+            include_document = options.get("include_document", False)
+            plain_text = result.document.export_to_text() if include_document else full_text
+            if include_document and doc_dict is None:
+                doc_dict = result.document.export_to_dict()
+            doctags = full_text if export_format == "doctags" else (
+                result.document.export_to_doctags() if include_document else None)
             # With OCR disabled, surviving document text can only be native.
             # OCR-enabled conversion requires actual cell origins, never a guess.
             native_only = not (self.enable_ocr or self.force_full_page_ocr)
@@ -339,8 +345,8 @@ class DoclingParser:
                 "export_format": export_format,
                 "origin": origin,
                 **({
-                    "document": result.document.export_to_dict(),
-                    "doctags": result.document.export_to_doctags(),
+                    "document": doc_dict,
+                    "doctags": doctags,
                     "plain_text": plain_text,
                     "conversion_status": str(getattr(result, "status", "unknown")),
                 } if options.get("include_document", False) else {}),
@@ -510,20 +516,21 @@ class DoclingParser:
             # Use direct API access to pages
             # DoclingDocument.pages is a dict-like object
             if hasattr(doc, 'pages') and doc.pages:
+                page_items = {page_no: [] for page_no in doc.pages}
+                for item, _level in doc.iterate_items():
+                    item_pages = {
+                        entry.get("page_no") if isinstance(entry, dict) else getattr(entry, "page_no", None)
+                        for entry in getattr(item, "prov", [])
+                    }
+                    for page_no in item_pages & page_items.keys():
+                        page_items[page_no].append(item)
                 for page_no, page in doc.pages.items():
                     try:
                         # Extract text from page - iterate through items on this page
                         page_text_parts = []
                         page_tables = []
                         
-                        # Iterate through document items to find those on this page
-                        for item, level in doc.iterate_items():
-                            provenance = getattr(item, "prov", [])
-                            item_pages = {
-                                entry.get("page_no") if isinstance(entry, dict) else getattr(entry, "page_no", None)
-                                for entry in provenance
-                            }
-                            if page_no in item_pages:
+                        for item in page_items[page_no]:
                                 # Extract text from text items
                                 if hasattr(item, 'text'):
                                     page_text_parts.append(item.text)
@@ -535,7 +542,7 @@ class DoclingParser:
                                 
                                 # Extract tables on this page
                                 from docling_core.types.doc import TableItem
-                                if isinstance(item, TableItem):
+                                if options.get("extract_tables", True) and isinstance(item, TableItem):
                                     # Get table data for this page
                                     table_data = self._extract_single_table(item, doc, page_no)
                                     if table_data:

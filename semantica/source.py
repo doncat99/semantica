@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from hashlib import sha256
 from html.parser import HTMLParser
+from importlib.metadata import PackageNotFoundError, version
+import json
 from pathlib import Path
 import posixpath
 import re
@@ -30,6 +33,37 @@ def source_content_revision(path: Path) -> str:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
     return "b3-" + digest.hexdigest()
+
+
+def source_processing_revision(path: Path, *, mime_type: str, force_ocr: bool,
+                               document_processing: dict | None = None) -> str:
+    """Identify the native adapter contract used to materialize source bytes."""
+    suffix = path.suffix.lower()
+    profile = document_processing or {"mode": "local"}
+    inputs: dict[str, Any] = {
+        "contract": "semantica.source-processing.v1",
+        "suffix": suffix,
+        "mimeType": mime_type,
+        "forceOcr": force_ocr,
+        "documentProcessing": profile,
+        "sourceImplementation": sha256(Path(__file__).read_bytes()).hexdigest(),
+    }
+    if suffix in _DOCLING_SUFFIXES:
+        adapter_name = ("parse/pdf_parser.py" if profile.get("mode") == "native" else
+                        "parse/docling_parser.py" if profile.get("mode") == "local" else
+                        "project_remote_docling.py")
+        adapter = Path(__file__).parent / adapter_name
+        inputs["adapterImplementation"] = sha256(adapter.read_bytes()).hexdigest()
+        if profile.get("mode") in {"native", "local"}:
+            dependencies = {}
+            packages = ("PyMuPDF",) if profile.get("mode") == "native" else ("docling", "docling-core")
+            for package in packages:
+                try:
+                    dependencies[package] = version(package)
+                except PackageNotFoundError:
+                    dependencies[package] = None
+            inputs["dependencies"] = dependencies
+    return "sha256:" + sha256(json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
 @dataclass(frozen=True)
@@ -207,6 +241,19 @@ def parse_source(path: Path, *, name: str, mime_type: str, force_ocr: bool, docu
         profile = document_processing or {"mode": "local"}
         if profile["mode"] == "disabled":
             raise UnsupportedSourceFormatError("Docling processing is disabled for this build")
+        if profile["mode"] == "native":
+            if suffix != ".pdf" or force_ocr:
+                raise UnsupportedSourceFormatError(
+                    "native document processing supports text-layer PDFs without OCR"
+                )
+            from .parse.pdf_parser import PDFParser
+            result = PDFParser().parse(path, extract_tables=False, extract_images=False,
+                                       extract_links=True, sort=True)
+            text = result["full_text"]
+            return SourceDocument(text=text, document={
+                "format": "pdf-text", "source": name, "pages": result["pages"],
+                "metadata": result["metadata"],
+            }, origin="native", parser="semantica.PDFParser", parser_version="1")
         if profile["mode"] == "remote":
             from .project_remote_docling import parse_remote_docling
             result = parse_remote_docling(path, name=name, force_ocr=force_ocr, profile=profile)

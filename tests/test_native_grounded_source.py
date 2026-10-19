@@ -35,13 +35,66 @@ def test_grounded_source_reuses_native_owners_without_embedding(tmp_path, monkey
         pipeline.build_grounded_source_snapshot(source, **arguments)
 
 
-def test_source_retry_restores_entities_and_receipts_before_retrying_relations(tmp_path):
+def test_grounded_source_consumes_verified_parsed_artifact_without_parsing(tmp_path, monkeypatch):
+    path = tmp_path / 'original.txt'
+    text = 'Ada builds Engine.'
+    path.write_text(text)
+    source = SourceBuildInput(filePath=str(path), sourceId='source:original',
+        materialRevision=source_content_revision(path), name=path.name, mimeType='text/plain')
+    parsed = pipeline.parse_source_artifact(pipeline.ParseSourceRequest.model_validate({
+        'source': source.model_dump(mode='json', by_alias=True), 'outputDir': str(tmp_path / 'parsed'),
+        'forceOcr': False, 'documentProcessing': {'mode': 'local'},
+    }))
+    _stub_canonical_extraction(monkeypatch, lambda *_: ({
+        'entities': [{'id': 'Ada', 'name': 'Ada', 'type': 'CONCEPT', 'occurrence': 0}],
+        'relations': []}, receipt('structured_extraction', 1)))
+    monkeypatch.setattr(pipeline, '_parse_source', lambda *_args, **_kwargs: pytest.fail('unexpected parse'))
+    artifact = pipeline.build_grounded_source_snapshot(source, scope_id='scope:project', model='test',
+        provider_instance=SimpleNamespace(receipts=[]), artifact_ref='objects/representation.json',
+        created_at='2026-10-19T00:00:00Z', parsed_source=pipeline.ParsedSourceRef.model_validate({
+            key: parsed[key] for key in ('artifactPath', 'artifactDigest', 'sourceId')}))
+    assert artifact.document_representations[0].metadata['document']['text'] == text
+
+
+def test_native_pdf_profile_uses_pdf_parser_not_docling(tmp_path, monkeypatch):
+    import json
+    path = tmp_path / 'original.pdf'
+    path.write_bytes(b'%PDF fixture')
+    source = SourceBuildInput(filePath=str(path), sourceId='source:pdf',
+        materialRevision=source_content_revision(path), name=path.name, mimeType='application/pdf')
+    class Parser:
+        def parse(self, actual, **options):
+            assert actual == path and options == {
+                'extract_tables': False, 'extract_images': False,
+                'extract_links': True, 'sort': True}
+            return {'full_text': 'Native PDF text',
+                    'pages': [{'page_number': 1, 'text': 'Native PDF text'}],
+                    'metadata': {'page_count': 1}}
+    monkeypatch.setattr('semantica.parse.pdf_parser.PDFParser', Parser)
+    monkeypatch.setattr('semantica.parse.docling_parser.DoclingParser',
+                        lambda **_kwargs: pytest.fail('unexpected Docling'))
+    parsed = pipeline.parse_source_artifact(pipeline.ParseSourceRequest.model_validate({
+        'source': source.model_dump(mode='json', by_alias=True), 'outputDir': str(tmp_path / 'parsed'),
+        'forceOcr': False, 'documentProcessing': {'mode': 'native'},
+    }))
+    payload = json.loads(__import__('pathlib').Path(parsed['artifactPath']).read_bytes())
+    assert payload['parser'] == 'semantica.PDFParser'
+    assert payload['document']['text'] == 'Native PDF text'
+
+
+def test_source_retry_restores_entities_and_receipts_before_retrying_relations(tmp_path, monkeypatch):
     from semantica.utils.exceptions import ProcessingError
     path = tmp_path / 'original.txt'
     path.write_text('Ada builds Engine.')
     source = SourceBuildInput(filePath=str(path), sourceId='source:original',
         materialRevision=source_content_revision(path), name=path.name, mimeType='text/plain')
     calls = []
+    parses = []
+    original_parse = pipeline.parse_source
+    def counted_parse(*args, **kwargs):
+        parses.append(True)
+        return original_parse(*args, **kwargs)
+    monkeypatch.setattr(pipeline, 'parse_source', counted_parse)
 
     class Provider:
         def __init__(self, fail=False):
@@ -68,6 +121,7 @@ def test_source_retry_restores_entities_and_receipts_before_retrying_relations(t
     resumed = Provider()
     result = pipeline.build_grounded_source_snapshot(source, provider_instance=resumed, **arguments)
     assert calls == ['entities', 'relations', 'relations']
+    assert len(parses) == 1
     assert {item['call_id'] for item in resumed.receipts} == {'1', '3'}
     assert result.entities[0].canonical_name == 'Ada'
     third = Provider()

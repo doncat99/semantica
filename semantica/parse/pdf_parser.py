@@ -47,6 +47,7 @@ class PDFPage:
     height: float
     images: List[Dict[str, Any]] = field(default_factory=list)
     tables: List[Dict[str, Any]] = field(default_factory=list)
+    links: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -274,6 +275,31 @@ class PDFParser:
         return self.parse(file_path, pages=[], extract_text=False,
                           extract_tables=False, extract_images=False)["metadata"]
 
+    def render_pages(self, file_path: Union[str, Path], pages: List[int], *, dpi: int = 150) -> Dict[int, bytes]:
+        """Render selected zero-based pages without exposing the PDF reader to callers."""
+        if not 72 <= dpi <= 600:
+            raise ValidationError("PDF render dpi must be between 72 and 600")
+        path = Path(file_path)
+        try:
+            import pymupdf
+            with pymupdf.open(str(path)) as pdf:
+                if pdf.needs_pass:
+                    raise ProcessingError("PDF requires a password")
+                rendered = {}
+                for page_num in pages:
+                    if type(page_num) is not int or not 0 <= page_num < len(pdf):
+                        raise ValidationError(f"Invalid zero-based PDF page index: {page_num}")
+                    page = pdf.load_page(page_num)
+                    try:
+                        rendered[page_num] = page.get_pixmap(dpi=dpi).tobytes("png")
+                    finally:
+                        del page
+                return rendered
+        except (ProcessingError, ValidationError):
+            raise
+        except Exception as exc:
+            raise ProcessingError(f"Failed to render PDF: {exc}") from exc
+
     def _parse_page(self, page, page_number: int, options: Dict[str, Any]) -> PDFPage:
         """Parse individual PDF page."""
         page_data = PDFPage(
@@ -300,6 +326,14 @@ class PDFParser:
                     "x1": x1, "y1": page.rect.height - top,
                     "width": x1 - x0, "height": bottom - top,
                 })
+
+        if options.get("extract_links", False):
+            for link in page.get_links():
+                uri = link.get("uri")
+                rectangle = link.get("from")
+                if uri:
+                    page_data.links.append({"uri": uri,
+                        "quote": page.get_textbox(rectangle).strip() if rectangle is not None else ""})
 
         return page_data
 

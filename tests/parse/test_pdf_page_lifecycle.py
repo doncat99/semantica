@@ -43,6 +43,20 @@ def test_metadata_only_never_extracts_pages(original):
         assert PDFParser().extract_metadata(original)["page_count"] == 2
 
 
+def test_links_and_selected_page_rendering_stay_in_native_owner(tmp_path):
+    path = tmp_path / "linked.pdf"
+    with pymupdf.open() as pdf:
+        page = pdf.new_page()
+        page.insert_text((30, 50), "Report archive")
+        page.insert_link({"kind": pymupdf.LINK_URI, "from": pymupdf.Rect(25, 35, 140, 55),
+                          "uri": "https://example.test/reports"})
+        pdf.save(path)
+    parsed = PDFParser().parse(path, extract_tables=False, extract_links=True)
+    assert parsed["pages"][0]["links"] == [{"uri": "https://example.test/reports", "quote": "Report archive"}]
+    rendered = PDFParser().render_pages(path, [0], dpi=150)
+    assert rendered[0].startswith(b"\x89PNG")
+
+
 def test_document_closed_when_extraction_fails(original):
     module = MagicMock()
     pdf = module.open.return_value.__enter__.return_value
