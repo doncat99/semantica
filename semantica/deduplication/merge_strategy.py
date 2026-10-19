@@ -334,6 +334,13 @@ class MergeStrategyManager:
                 "merged_from": merged_from,
                 "merge_strategy": strategy.value,
             }
+            # Retain observed names so a later native resolution sees the same evidence.
+            aliases = sorted({name for entity in entities
+                              for name in [entity.get("name"), *(entity.get("aliases") or [])]
+                              if isinstance(name, str) and name.strip()
+                              and name != merged_entity["name"]})
+            if aliases:
+                merged_entity["aliases"] = aliases
 
             self.progress_tracker.stop_tracking(
                 tracking_id, status="completed", message="Entity merge completed"

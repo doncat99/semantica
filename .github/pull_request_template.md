@@ -28,6 +28,30 @@ Fixes #
 - 
 - 
 
+## Native Capability Assessment (required for implementation changes)
+
+<!-- Follow /AGENTS.md. Documentation-only changes may mark this section N/A. -->
+
+- Inspected fork revision:
+- Capability and existing native owner (file/symbol), or evidence it is absent:
+- Actual callers, configuration and relevant tests inspected:
+- Recent removals/refactors checked; why this does not restore a retired path:
+- Decision: reuse / repair existing owner / add genuinely absent capability:
+- Obsolete implementations removed and consumers migrated (if applicable):
+
+- [ ] This change introduces no second implementation, alternate prompt/algorithm,
+      or fallback for an existing native capability.
+- [ ] Regression evidence covers the native owner and affected callers, including
+      existing no-network/no-model-call guarantees where applicable.
+
+## Fork Change Record (required for every change)
+
+- Record path in `docs/fork-changes/`:
+- [ ] The record describes why/how, inspected native ownership, affected files,
+      verification and known limitations, distinguishing plans from results.
+- [ ] Upstream merge risks and keep/adapt/drop criteria are recorded; merge
+      resolutions preserve earlier decisions and append the new assessment.
+
 ## Testing
 
 <!-- Describe how you tested your changes -->

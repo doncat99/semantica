@@ -53,6 +53,7 @@ import math
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional, Tuple, Set
 
+from ..normalize.entity_normalizer import AliasResolver
 from ..utils.exceptions import ProcessingError
 from ..utils.logging import get_logger
 from ..utils.progress_tracker import get_progress_tracker
@@ -115,13 +116,31 @@ class SimilarityCalculator:
             relationship_weight: Weight for relationship similarity (default: 0.1)
             similarity_threshold: Default similarity threshold for filtering (default: 0.7)
             config: Configuration dictionary (merged with kwargs)
-            **kwargs: Additional configuration options
+            **kwargs: Additional configuration options. property_schema declares trusted
+                identity fields as {field: {"identity": True, "scope": [property_names]}}.
+                Declarations add conflict vetoes, not new positive admission rules.
+                Identity policy and alias_map are constructor-only, not per-call options.
         """
         self.logger = get_logger("similarity_calculator")
 
         # Merge configuration
         self.config = config or {}
         self.config.update(kwargs)
+
+        self.property_schema = self.config.get("property_schema", {})
+        if not isinstance(self.property_schema, dict):
+            raise ValueError("property_schema must be a mapping")
+        for name, spec in self.property_schema.items():
+            if (not isinstance(name, str) or not name.strip() or not isinstance(spec, dict)
+                    or set(spec) - {"identity", "scope"}
+                    or type(spec.get("identity", False)) is not bool
+                    or not isinstance(spec.get("scope", []), list)
+                    or any(not isinstance(key, str) or not key.strip() or key == name
+                           for key in spec.get("scope", []))):
+                raise ValueError("invalid identity property declaration")
+        if "require_identity" in self.config:
+            raise ValueError("require_identity is no longer supported; native resolution owns positive admission")
+        self.alias_resolver = AliasResolver(alias_map=self.config.get("alias_map", {}))
 
         # Component weights (used for weighted aggregation)
         self.embedding_weight = embedding_weight
@@ -158,6 +177,42 @@ class SimilarityCalculator:
             self.progress_tracker.enabled = True
 
         self.logger.debug("Similarity calculator initialized")
+
+    def _entity_names(self, entity: Dict[str, Any]) -> List[str]:
+        """Use declared aliases and the native normalizer, never infer aliases."""
+        name = entity.get("name") or entity.get("text") or ""
+        names = [name, *(entity.get("aliases") or [])]
+        return list(dict.fromkeys(
+            self.alias_resolver.resolve_aliases(value.strip()) or value.strip()
+            for value in names if isinstance(value, str) and value.strip()
+        ))
+
+    def _identity_values(self, entity: Dict[str, Any]) -> Dict[str, tuple]:
+        values = {}
+        props = entity.get("properties") or {}
+        for name, spec in self.property_schema.items():
+            if not spec.get("identity"):
+                continue
+            value = props.get(name)
+            scope = [props.get(key) for key in spec.get("scope", [])]
+            for item in [value, *scope]:
+                if item is not None and (type(item) not in (str, int, float, bool)
+                                         or isinstance(item, float) and not math.isfinite(item)):
+                    raise ValueError("identity values and scopes must be finite scalars")
+            if any(item is None or isinstance(item, str) and not item.strip() for item in [value, *scope]):
+                continue
+            values[name] = (tuple((type(item).__name__, item) for item in scope),
+                            (type(value).__name__, value))
+        return values
+
+    def identity_evidence(self, entity1: Dict[str, Any], entity2: Dict[str, Any]) -> Dict[str, Any]:
+        """Compare caller-declared, trusted identifiers only within the same scope."""
+        left, right = self._identity_values(entity1), self._identity_values(entity2)
+        matches, conflicts = [], []
+        for name in sorted(left.keys() & right.keys()):
+            if left[name][0] == right[name][0]:
+                (matches if left[name][1] == right[name][1] else conflicts).append(name)
+        return {"matches": matches, "conflicts": conflicts}
     
     def _prefilter_pair(
         self, entity1: Dict[str, Any], entity2: Dict[str, Any], thresholds: Dict[str, float]
@@ -239,6 +294,8 @@ class SimilarityCalculator:
         Returns:
             SimilarityResult object
         """
+        if any(key in options for key in ("property_schema", "require_identity", "alias_map")):
+            raise ValueError("identity policy belongs in the constructor")
         tracking_id = None
         if track:
             tracking_id = self.progress_tracker.start_tracking(
@@ -249,6 +306,12 @@ class SimilarityCalculator:
             )
 
         try:
+            identity = self.identity_evidence(entity1, entity2)
+            if identity["conflicts"]:
+                if tracking_id:
+                    self.progress_tracker.stop_tracking(tracking_id, status="completed",
+                                                        message="Identity constraint not satisfied")
+                return SimilarityResult(score=0.0, method="identity_constraint", metadata=identity)
             # Fast Prefilter
             merged_options = {**self.config, **options}
             prefilter_enabled = merged_options.get("prefilter_enabled", self.prefilter_enabled)
@@ -265,7 +328,7 @@ class SimilarityCalculator:
                     return SimilarityResult(
                         score=0.0,
                         method="prefiltered",
-                        metadata={"rejection_reason": reason}
+                        metadata={**identity, "rejection_reason": reason}
                     )
 
             components = {}
@@ -276,22 +339,20 @@ class SimilarityCalculator:
                     tracking_id, message="Calculating string similarity..."
                 )
             
-            name1 = entity1.get("_lower_name")
-            if name1 is None:
-                name1 = entity1.get("name") or entity1.get("text") or ""
-            
-            name2 = entity2.get("_lower_name")
-            if name2 is None:
-                name2 = entity2.get("name") or entity2.get("text") or ""
-                
-            string_score = self.calculate_string_similarity(name1, name2)
+            string_score = max((self.calculate_string_similarity(left, right)
+                                for left in self._entity_names(entity1)
+                                for right in self._entity_names(entity2)), default=0.0)
             components["string"] = string_score
 
             # Short-circuit if string similarity is too low
             if self.string_weight > 0.5 and string_score < 0.3 and not ("embedding" in entity1 and "embedding" in entity2):
                 overall_score = string_score * self.string_weight
                 if overall_score < (merged_options.get("threshold") or self.similarity_threshold) * 0.5:
-                    return SimilarityResult(score=overall_score, method="short_circuit", components=components)
+                    if tracking_id:
+                        self.progress_tracker.stop_tracking(tracking_id, status="completed",
+                                                            message="Low candidate similarity")
+                    return SimilarityResult(score=overall_score, method="short_circuit",
+                                            components=components, metadata=identity)
 
             # Property similarity
             if tracking_id:
@@ -343,7 +404,7 @@ class SimilarityCalculator:
             
             # Explainability metadata
             
-            metadata = {"weights": weights}
+            metadata = {**identity, "weights": weights}
             self.score_breakdown_enabled = merged_options.get("score_breakdown_enabled", self.score_breakdown_enabled)
             if self.score_breakdown_enabled:
                 metadata["score_breakdown"] = components
@@ -656,6 +717,10 @@ class SimilarityCalculator:
         strategy = options.get("candidate_strategy", "legacy")
         
         for idx, entity in enumerate(processed_entities):
+            for field, value in self._identity_values(entity).items():
+                blocks.setdefault(repr(("identity", field, value)), []).append(idx)
+            for name in self._entity_names(entity):
+                blocks.setdefault("alias:" + name.lower(), []).append(idx)
             name = entity.get("_lower_name", "")
             
             if not name:
@@ -698,6 +763,7 @@ class SimilarityCalculator:
         candidate_pairs = set()
         
         for indices in blocks.values():
+            indices = sorted(set(indices))
             n = len(indices)
             
             for i_idx in range(n):
@@ -743,6 +809,8 @@ class SimilarityCalculator:
         """
         Calculate similarity for all entity pairs in a batch using configurable candidate generation.
         """
+        if any(key in kwargs for key in ("property_schema", "require_identity", "alias_map")):
+            raise ValueError("identity policy belongs in the constructor")
         tracking_id = self.progress_tracker.start_tracking(
             file=None,
             module="deduplication",
@@ -751,7 +819,7 @@ class SimilarityCalculator:
         )
 
         try:
-            threshold = threshold or self.similarity_threshold
+            threshold = threshold if threshold is not None else self.similarity_threshold
             results = []
 
             options = {**self.config, **kwargs}
@@ -765,6 +833,8 @@ class SimilarityCalculator:
                     processed_entity = entity.copy()
                 else:
                     processed_entity = {"_original": entity}
+                if "properties" not in processed_entity:
+                    processed_entity["properties"] = processed_entity.get("metadata", {}).get("properties", {})
                 
                 rels = processed_entity.get("relationships")
                 if rels is None and "metadata" in processed_entity:

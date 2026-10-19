@@ -784,6 +784,8 @@ class SemanticArtifactBuildRequest(DigestModel):
     sources: List[SourceBuildInput]
     parsed_sources: List[ParsedSourceRef] = Field(alias="parsedSources")
     document_processing: DocumentProcessingProfile = Field(default_factory=DocumentProcessingProfile, alias="documentProcessing")
+    # Caller-verified identity properties supply vetoes, not mandatory merge keys.
+    identity_property_schema: Dict[str, Dict[str, Any]] = Field(default_factory=dict, alias="identityPropertySchema")
 
     @model_validator(mode="after")
     def validate_inputs(self) -> "SemanticArtifactBuildRequest":

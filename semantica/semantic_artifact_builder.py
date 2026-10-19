@@ -1289,13 +1289,17 @@ def _grounded_explanation(context: dict[str, Any], relay: Any):
     return sections, provider.receipts
 
 
-def _resolve_native_entities(mentions: list[KnowledgeEntity]):
-    """Project native resolution into the artifact contract without deciding identity."""
+def _resolve_native_entities(mentions: list[KnowledgeEntity], *, property_schema=None, resolver=None):
+    """Project native resolution; declared conflicts can veto, never replace it."""
+    if resolver is None:
+        resolver = EntityResolver(deduplication={"similarity": {
+            "property_schema": property_schema or {}}})
     by_id = {item.id: item for item in mentions}
     rows = [{"id": item.id, "name": item.canonical_name, "type": item.type,
-             "properties": item.attributes, "metadata": item.metadata} for item in mentions]
+             "properties": item.attributes, "aliases": item.aliases,
+             "metadata": item.metadata} for item in mentions]
     entities, remap, registry = [], {}, []
-    for row in EntityResolver().resolve_entities(rows):
+    for row in resolver.resolve_entities(rows):
         member_ids = row.get("merged_from") or [row["id"]]
         members = [by_id[item] for item in member_ids]
         source_ids = sorted({source for item in members for source in item.metadata.get("source_ids", [])})
@@ -2078,6 +2082,9 @@ def build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=Non
 
 
 def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=None, *, persist_snapshot: bool = True) -> dict[str, Any]:
+    # Validate caller-declared identity policy before extraction can spend model calls.
+    identity_resolver = EntityResolver(deduplication={"similarity": {
+        "property_schema": request.identity_property_schema}})
     if request.recipe.id not in {"deterministic", "model"}:
         raise SemanticArtifactError(
             f"unsupported semantic artifact recipe: {request.recipe.id}; "
@@ -2161,7 +2168,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
     mentions = entities
     identity_registry = []
     if request.recipe.id == "model":
-        entities, remap, identity_registry = _resolve_native_entities(mentions)
+        entities, remap, identity_registry = _resolve_native_entities(mentions, resolver=identity_resolver)
         assertions, relations = _remap_identity_facts(assertions, relations, remap, entities)
         assertions, relations, fact_conflicts = _shared_facts(request.project_id, assertions, relations)
     else:
@@ -2192,7 +2199,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
     # only its upstream artifacts.
     retrieval_artifact = ArtifactManifest(id=retrieval_artifact_id, artifact_type="retrieval", artifact_ref=str(retrieval_path), artifact_hash=retrieval_digest, depends_on=[item.id for item in representation_artifacts])
     receipt_ids = [receipt.id for receipt in model_receipts]
-    lineage = KernelLineage(schema_digest=request.release.schema_digest, recipe_id=request.recipe.id, recipe_digest=stable_digest(request.recipe.model_dump(mode="json", by_alias=True)), rule_version="semantica-semantic-artifact-v1", rule_digest=stable_digest({"pipeline": request.recipe.id}), ontology_version="semantica-default", ontology_digest=stable_digest({"ontology": "default"}), extraction_spec_digest=request.recipe.extraction_spec.digest if request.recipe.extraction_spec else None, model_receipt_ids=receipt_ids)
+    lineage = KernelLineage(schema_digest=request.release.schema_digest, recipe_id=request.recipe.id, recipe_digest=stable_digest(request.recipe.model_dump(mode="json", by_alias=True)), rule_version="semantica-semantic-artifact-v3", rule_digest=stable_digest({"pipeline": request.recipe.id, "identity_resolution": "native-conflict-veto-v1", "identity_property_schema": request.identity_property_schema}), ontology_version="semantica-default", ontology_digest=stable_digest({"ontology": "default"}), extraction_spec_digest=request.recipe.extraction_spec.digest if request.recipe.extraction_spec else None, model_receipt_ids=receipt_ids)
     retrieval_manifests = [
         RetrievalArtifactManifest(
             id="retrieval:graph",
