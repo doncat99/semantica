@@ -1644,38 +1644,6 @@ class VectorRetriever:
 
         return results
 
-    def cross_source_pairs(self, vectors, ids, source_ids, *, min_similarity=0.0, max_pairs=10000):
-        """Exact eligible pairs; exceeding the budget fails before downstream work.
-
-        Negative/orthogonal vectors are not semantic candidates. No top-k
-        truncation silently drops positive candidates when the budget is exceeded.
-        """
-        if len(ids) != len(source_ids):
-            raise ValueError("source scopes must cover every vector")
-        if isinstance(max_pairs, bool) or not isinstance(max_pairs, int) or max_pairs < 1:
-            raise ValueError("candidate budget must be positive")
-        if not np.isfinite(min_similarity) or not -1 <= min_similarity <= 1:
-            raise ValueError("candidate similarity threshold is invalid")
-        matrix = validate_vector_matrix(vectors)
-        if len(ids) != len(matrix) or len(set(ids)) != len(ids):
-            raise ValueError("vector IDs must be unique and cover every vector")
-        pairs = []
-        for index, vector in enumerate(matrix):
-            neighbors = [other for other in range(index + 1, len(matrix))
-                         if source_ids[index] and source_ids[other]
-                         and len(set(source_ids[index]) | set(source_ids[other])) > 1]
-            if not neighbors:
-                continue
-            hits = self.search_similar(vector, [matrix[other] for other in neighbors],
-                                       [ids[other] for other in neighbors], k=len(neighbors))
-            for hit in hits:
-                if hit["score"] <= min_similarity:
-                    continue
-                if len(pairs) >= max_pairs:
-                    raise ValueError(f"cross-source candidate budget exceeded ({max_pairs}); narrow the source scope")
-                pairs.append((ids[index], hit["id"]))
-        return sorted(pairs)
-
     def search_by_metadata(
         self,
         metadata_filters: Dict[str, Any],

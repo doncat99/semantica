@@ -1,3 +1,4 @@
+from tests.artifact_helpers import extract_source
 """Structural citations remain queryable evidence in the existing fact contract."""
 from types import SimpleNamespace
 
@@ -65,66 +66,54 @@ def test_window_context_uses_page_and_not_repeated_short_cell_text():
     locations = pipeline._docling_locations(document(), text)
     context = pipeline._window_grounding_context(locations, 0, 6)
     assert {item['ref'] for item in context} == {
-        '#/texts/0', '#/texts/1', '#/tables/0/r0:c0', '#/tables/0/r1:c0', '#/tables/0/r1:c1'}
+        '#/texts/0', '#/tables/0/r0:c0', '#/tables/0/r1:c0', '#/tables/0/r1:c1'}
     assert all(item['start'] is None for item in context if item['cell'])
     distant = {**locations[1], 'ref': 'distant', 'page': 99}
+    assert distant in pipeline._window_grounding_context([*locations, distant], 0, 6)
+    distant = {**distant, 'table_id': 'unrelated-table'}
     assert distant not in pipeline._window_grounding_context([*locations, distant], 0, 6)
+    formula = next(item for item in locations if item['ref'] == '#/texts/0')
+    formula['structure']['references'] = [{'$ref': '#/texts/1'}]
+    assert '#/texts/1' in {item['ref'] for item in pipeline._window_grounding_context(locations, 0, 6)}
 
 
-def test_repeated_variable_names_keep_distinct_scope_candidates(monkeypatch):
-    from semantica.semantic_artifact_schema import EvidenceSpan, DocumentLocator
-    spans = [EvidenceSpan(id=f'evidence:{i}', representation_id='representation:1', quote='m',
-        locator=DocumentLocator(representation_id='representation:1', origin='native', quote='m',
-            quality='precise', start_char=i * 10, end_char=i * 10 + 1, page=i + 1)) for i in range(2)]
-    entities = [SimpleNamespace(id=f'mention:{i}', canonical_name='m', type='variable', attributes={},
-        evidence_ids=[span.id]) for i, span in enumerate(spans)]
-    seen = []
-    monkeypatch.setattr(pipeline, '_identity_batch', lambda candidates, _relay: (seen.extend(candidates) or [], []))
-    pipeline._identity_judgments([{'source': SimpleNamespace(source_id='source:1'), 'text': 'm         m',
-        'entities': entities, 'evidence': spans}], None)
-    assert len(seen) == 2
-    assert [item['evidence'][0]['locator']['page'] for item in seen] == [1, 2]
-
-
-def test_chunk_checkpoint_fences_structure_and_restores_support_refs(monkeypatch):
-    from copy import deepcopy
-    from semantica.project_checkpoint import active_checkpoint
-    from semantica.semantic_artifact_schema import ModelReceipt, stable_digest
-    from semantica.semantic_extract.types import Entity, Relation
+def test_native_cache_fences_structure_and_restores_support_refs(tmp_path, monkeypatch):
+    from tests.artifact_helpers import stub_native_provider
+    from tests.test_semantic_artifact import _request
+    from semantica.project_checkpoint import SnapshotCheckpoint, active_checkpoint
+    from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest, ModelReceipt
 
     text = 'F = ma\nVariable unit\nm kg\nFor constant mass.'
-    receipt = ModelReceipt(id='receipt:1', operation='structured_extraction', provider='test',
-        model='test', input_digest='sha256:' + '1' * 64, output_digest='sha256:' + '2' * 64)
-    cache, calls = {}, []
-    class Checkpoint:
-        def read(self, kind, key):
-            return deepcopy(cache.get((kind, stable_digest(key))))
-        def write(self, kind, key, value):
-            cache[kind, stable_digest(key)] = deepcopy(value)
-    def extract(_text, **kwargs):
-        calls.append(kwargs['grounding_context'])
-        entities = [Entity('F', 'formula', 0, 1, metadata={'mention_id': 'f', 'span_occurrence': 0}),
-                    Entity('m', 'variable', 4, 5, metadata={'mention_id': 'm', 'span_occurrence': 0})]
-        relation = Relation(entities[0], 'uses_variable', entities[1], 0.9, 'F = ma',
-            {'subject_id': 'f', 'object_id': 'm', 'evidence_occurrence': 0,
-             'qualifiers': {'polarity': 'positive', 'condition': 'constant mass'},
-             'supporting_refs': ['#/texts/1']})
-        return entities, [relation], SimpleNamespace(receipts=[receipt])
-    monkeypatch.setattr(pipeline, '_project_model_provider', lambda _: None)
-    monkeypatch.setattr(pipeline, 'extract_grounded_window', extract)
-    monkeypatch.setattr(pipeline, '_embed_batch_checkpointed', lambda *_: ([[0.1]], receipt))
-    token = active_checkpoint.set(Checkpoint())
+    path = tmp_path / "source.txt"
+    path.write_text(text)
+    checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(
+        _request(path, tmp_path / "output")["params"]))
+    calls = []
+    def respond(stage, prompt):
+        calls.append(stage)
+        if stage == "entities":
+            return {"entities": [{"text": "F", "label": "formula", "occurrence": 0},
+                                 {"text": "m", "label": "variable", "occurrence": 0}]}
+        return {"relations": [{"subject_id": "mention:0", "predicate": "uses_variable", "object_id": "mention:1",
+            "evidence": "F = ma", "evidence_occurrence": 0,
+            "qualifiers": {"polarity": "positive", "condition": "constant mass"},
+            "supporting_refs": ["#/texts/1"]}]}
+    stub_native_provider(monkeypatch, respond)
+    receipt = ModelReceipt(id="receipt:embed", operation="embedding", provider="test", model="test",
+        input_digest="sha256:" + "1" * 64, output_digest="sha256:" + "2" * 64)
+    monkeypatch.setattr(pipeline, '_embed_texts', lambda *_: ([[0.1]], receipt))
+    token = active_checkpoint.set(checkpoint)
     try:
         args = (text, SimpleNamespace(model_id='test'), None)
-        first, _, _ = pipeline._extract_and_embed(*args, document=document())
-        restored, _, _ = pipeline._extract_and_embed(*args, document=document())
-        assert len(calls) == 1
+        first, _, _ = extract_source(*args, document=document())
+        restored, _, _ = extract_source(*args, document=document())
+        assert calls == ["entities", "relations"]
         assert first == restored
         assert restored['relations'][0]['supporting_refs'] == ['#/texts/1']
         changed = document()
         changed['document']['tables'][0]['data']['table_cells'][0]['col_span'] = 3
-        pipeline._extract_and_embed(*args, document=changed)
-        assert len(calls) == 2
+        extract_source(*args, document=changed)
+        assert calls == ["entities", "relations"] * 2
     finally:
         active_checkpoint.reset(token)
 

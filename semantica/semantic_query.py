@@ -49,47 +49,6 @@ def _string_list(value: Any, field: str) -> list[str]:
     return value
 
 
-def _records(value: Any, field: str) -> list[dict[str, Any]]:
-    if not isinstance(value, list) or not all(isinstance(item, dict) for item in value):
-        raise QueryError(f"retrieval artifact field {field} is invalid")
-    return value
-
-
-def _validated_records(value: Any, field: str, snapshot_items: Iterable[Any], evidence_ids: set[str]) -> list[dict[str, Any]]:
-    records = _records(value, field)
-    expected = {item.id: item.model_dump(mode="json", by_alias=True) for item in snapshot_items}
-    seen: set[str] = set()
-    for record in records:
-        record_id = record.get("id")
-        if not isinstance(record_id, str) or record_id in seen or record_id not in expected:
-            raise QueryError(f"retrieval artifact contains an unknown or duplicate {field} record")
-        if record != expected[record_id]:
-            raise QueryError(f"retrieval artifact {field} record does not match the snapshot")
-        evidence = _string_list(record.get("evidence_ids"), f"{field}.evidence_ids")
-        if not evidence or not set(evidence).issubset(evidence_ids):
-            raise QueryError(f"retrieval artifact contains an ungrounded {field} record")
-        seen.add(record_id)
-    if seen != set(expected):
-        raise QueryError(f"retrieval artifact does not cover snapshot {field} records")
-    return records
-
-
-def _validated_evidence_records(value: Any, snapshot: SemanticArtifact) -> list[dict[str, Any]]:
-    records = _records(value, "evidence")
-    expected = {item.id: item.model_dump(mode="json", by_alias=True) for item in snapshot.evidence_spans}
-    seen: set[str] = set()
-    for record in records:
-        record_id = record.get("id")
-        if not isinstance(record_id, str) or record_id in seen or record_id not in expected:
-            raise QueryError("retrieval artifact contains an unknown or duplicate evidence record")
-        if record != expected[record_id]:
-            raise QueryError("retrieval artifact evidence record does not match the snapshot")
-        seen.add(record_id)
-    if seen != set(expected):
-        raise QueryError("retrieval artifact does not cover snapshot evidence records")
-    return records
-
-
 def _fact_text(subject: str, predicate: Any, object_value: Any, qualifiers: Any, status: Any) -> tuple[str, str]:
     if not isinstance(qualifiers, dict) or qualifiers.get("polarity", "positive") not in {"positive", "negative"}:
         raise QueryError("retrieval artifact fact has invalid polarity")
@@ -132,7 +91,9 @@ def _semantic_evidence_scores(request, retrieval, evidence_by_id, representation
     if not isinstance(dimension, int) or dimension < 1 or len(vector) != dimension:
         raise QueryError("query embedding dimensions do not match the snapshot")
 
-    chunks = _records(retrieval.get("embeddings"), "embeddings")
+    chunks = retrieval.get("embeddings")
+    if not isinstance(chunks, list) or any(not isinstance(chunk, dict) for chunk in chunks):
+        raise QueryError("retrieval artifact field embeddings is invalid")
     if not chunks:
         raise QueryError("snapshot contains no embedding vectors; rebuild is required")
     for chunk in chunks:
@@ -179,30 +140,19 @@ def query_semantic_artifact(request: SemanticQueryRequest) -> SemanticQueryResul
     if graph_manifest is None or graph_manifest.artifact_hash != request.retrieval.digest:
         raise QueryError("retrieval artifact is not the snapshot graph manifest")
 
-    if retrieval_payload.get("format") == "semantica.retrieval-reference.v1":
-        duplicate_fields = {"entities", "assertions", "relations", "identity_decisions", "conflicts", "topics", "evidence"}
-        if duplicate_fields.intersection(retrieval_payload):
-            raise QueryError("reference retrieval artifact cannot duplicate snapshot records")
-        def records(items):
-            return [item.model_dump(mode="json", by_alias=True) for item in items]
-        evidence_records = records(snapshot.evidence_spans)
-        entity_records = records(snapshot.entities)
-        assertion_records = records(snapshot.assertions)
-        relation_records = records(snapshot.relations)
-        identity_records = records(snapshot.identity_decisions)
-        conflict_records = records(snapshot.conflicts)
-        topic_records = records(snapshot.topics)
-    elif "format" in retrieval_payload:
-        raise QueryError("unsupported retrieval artifact format")
-    else:
-        evidence_ids = {item.id for item in snapshot.evidence_spans}
-        evidence_records = _validated_evidence_records(retrieval_payload.get("evidence"), snapshot)
-        entity_records = _validated_records(retrieval_payload.get("entities"), "entities", snapshot.entities, evidence_ids)
-        assertion_records = _validated_records(retrieval_payload.get("assertions"), "assertions", snapshot.assertions, evidence_ids)
-        relation_records = _validated_records(retrieval_payload.get("relations"), "relations", snapshot.relations, evidence_ids)
-        identity_records = _validated_records(retrieval_payload.get("identity_decisions", []), "identity_decisions", snapshot.identity_decisions, evidence_ids)
-        conflict_records = _validated_records(retrieval_payload.get("conflicts", []), "conflicts", snapshot.conflicts, evidence_ids)
-        topic_records = _validated_records(retrieval_payload.get("topics"), "topics", snapshot.topics, evidence_ids)
+    if retrieval_payload.get("format") != "semantica.retrieval-reference.v1":
+        raise QueryError("unsupported retrieval artifact format; rebuild is required")
+    duplicate_fields = {"entities", "assertions", "relations", "identity_decisions", "conflicts", "topics", "evidence"}
+    if duplicate_fields.intersection(retrieval_payload):
+        raise QueryError("reference retrieval artifact cannot duplicate snapshot records")
+    def records(items):
+        return [item.model_dump(mode="json", by_alias=True) for item in items]
+    evidence_records = records(snapshot.evidence_spans)
+    entity_records = records(snapshot.entities)
+    assertion_records = records(snapshot.assertions)
+    relation_records = records(snapshot.relations)
+    conflict_records = records(snapshot.conflicts)
+    topic_records = records(snapshot.topics)
     evidence_by_id = {item.get("id"): item for item in evidence_records if isinstance(item.get("id"), str)}
     representation_by_id = {item.id: item.model_dump(mode="json", by_alias=True) for item in snapshot.document_representations}
     entity_by_id = {item.get("id"): item for item in entity_records if isinstance(item.get("id"), str)}
@@ -220,10 +170,6 @@ def query_semantic_artifact(request: SemanticQueryRequest) -> SemanticQueryResul
         target = entity_by_id.get(relation.get("target_entity_id"), {})
         text, polarity = _fact_text(source.get("canonical_name", relation.get("source_entity_id", "")), relation.get("type", ""), target.get("canonical_name", relation.get("target_entity_id", "")), relation.get("qualifiers"), relation.get("status"))
         candidates.append((str(relation["id"]), "relation", text, _string_list(relation.get("evidence_ids", []), "relation.evidence_ids"), relation.get("status"), polarity))
-    for decision in identity_records:
-        names = [entity_by_id.get(item, {}).get("canonical_name", item) for item in decision.get("from_entity_ids", [])]
-        text = f"{decision.get('decision_type', '')} identity: {', '.join(names)}; {decision.get('reason', '')}"
-        candidates.append((str(decision["id"]), "identity_decision", text, _string_list(decision.get("evidence_ids", []), "identity_decision.evidence_ids"), decision.get("decision_type"), None))
     for conflict in conflict_records:
         text = f"{conflict.get('conflict_type', '')} conflict ({conflict.get('status', '')}): {conflict.get('reason', '')}"
         candidates.append((str(conflict["id"]), "conflict", text, _string_list(conflict.get("evidence_ids", []), "conflict.evidence_ids"), conflict.get("status"), None))
@@ -234,20 +180,29 @@ def query_semantic_artifact(request: SemanticQueryRequest) -> SemanticQueryResul
 
     allowed_sources = set(request.source_ids) if request.source_ids is not None else None
     evidence_scores = _semantic_evidence_scores(request, retrieval_payload, evidence_by_id, representation_by_id) if request.mode == "semantic" else None
-    hits = []
+    admitted = []
     for item_id, kind, text, evidence, status, polarity in candidates:
         sources = _source_ids(evidence, evidence_by_id, representation_by_id)
         if not evidence or not sources:
             continue
         if allowed_sources is not None and not set(sources).issubset(allowed_sources):
             continue
+        admitted.append((item_id, kind, text, evidence, status, polarity, sources))
+    lexical_scores = {}
+    if evidence_scores is None:
+        ranked = ContextRetriever()._keyword_match_entities(
+            [{"id": item[0], "name": item[2]} for item in admitted],
+            request.query or "", len(admitted))
+        lexical_scores = {item["id"]: score for item, score in ranked}
+    hits = []
+    for item_id, kind, text, evidence, status, polarity, sources in admitted:
         if evidence_scores is not None:
             matches = [evidence_scores[item] for item in evidence if item in evidence_scores]
             if not matches:
                 continue
             score = max(matches)
         else:
-            score = ContextRetriever.lexical_score(request.query or "", text)
+            score = lexical_scores.get(item_id, 0.0)
             if score <= 0:
                 continue
         hits.append(QueryHit(

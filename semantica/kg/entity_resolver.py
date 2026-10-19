@@ -22,7 +22,7 @@ License: MIT
 
 from typing import Any, Dict, List, Optional
 
-from ..deduplication.duplicate_detector import DuplicateDetector, DuplicateGroup
+from ..deduplication.duplicate_detector import DuplicateGroup
 from ..deduplication.entity_merger import EntityMerger
 from ..utils.entity_ids import get_entity_id
 from ..utils.logging import get_logger
@@ -79,11 +79,15 @@ class EntityResolver:
         self.similarity_threshold = similarity_threshold
 
         # Initialize deduplication components
-        deduplication_config = config.get("deduplication", {})
         merger_config = config.get("merger", {})
-
-        self.duplicate_detector = DuplicateDetector(**deduplication_config)
-        self.entity_merger = EntityMerger(**merger_config)
+        deduplication_config = dict(merger_config.get("detector", {}))
+        for key, value in config.get("deduplication", {}).items():
+            if key in deduplication_config and deduplication_config[key] != value:
+                raise ValueError("Conflicting resolver and merger detector configuration")
+            deduplication_config[key] = value
+        self.entity_merger = EntityMerger(**{**merger_config, "detector": deduplication_config})
+        # Resolution and materialization share one detector and identity policy.
+        self.duplicate_detector = self.entity_merger.duplicate_detector
 
         self.logger.debug(
             f"Entity resolver initialized with strategy: {strategy}, "
@@ -139,7 +143,7 @@ class EntityResolver:
             self.logger.debug(
                 f"Detecting duplicate groups with threshold {self.similarity_threshold}"
             )
-            duplicate_groups = self.detect_duplicate_groups(entities)
+            duplicate_groups = self._detect_duplicate_groups(entities)
 
             self.logger.debug(f"Found {len(duplicate_groups)} duplicate group(s)")
 
@@ -165,7 +169,7 @@ class EntityResolver:
                     ]
                 else:
                     merge_operations = self.entity_merger.merge_duplicates(
-                        group.entities, **self.config
+                        group.entities, **{**self.config, "threshold": self.similarity_threshold}
                     )
 
                 # Process each merge operation
@@ -216,10 +220,10 @@ class EntityResolver:
             )
             raise
 
-    def detect_duplicate_groups(
+    def _detect_duplicate_groups(
         self, entities: List[Dict[str, Any]]
     ) -> List[DuplicateGroup]:
-        """Detect groups without merging; exact_key can scope exact matching."""
+        """Detect duplicate groups according to the configured strategy."""
         if self.resolution_strategy != "exact":
             return self.duplicate_detector.detect_duplicate_groups(
                 entities, threshold=self.similarity_threshold
@@ -230,13 +234,12 @@ class EntityResolver:
             name = self._get_entity_name(entity)
             normalized = str(name).strip() if name is not None else ""
             if normalized:
-                key = self.config["exact_key"](entity) if self.config.get("exact_key") else normalized.casefold()
-                groups.setdefault(key, []).append(entity)
+                groups.setdefault(normalized.casefold(), []).append(entity)
 
         return [
             DuplicateGroup(entities=group, confidence=1.0)
             for group in groups.values()
-            if len(group) > 1
+            if len(group) > 1 and self.duplicate_detector.is_group_compatible(group)
         ]
 
     @staticmethod
@@ -271,7 +274,8 @@ class EntityResolver:
         """
         self.logger.info(f"Merging duplicates from {len(entities)} entities")
 
-        merge_operations = self.entity_merger.merge_duplicates(entities, **self.config)
+        merge_operations = self.entity_merger.merge_duplicates(
+            entities, **{**self.config, "threshold": self.similarity_threshold})
 
         merged_entities = [op.merged_entity for op in merge_operations]
 

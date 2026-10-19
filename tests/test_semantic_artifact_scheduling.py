@@ -56,17 +56,23 @@ def test_global_queue_interleaves_sources_preserves_order_and_budget(monkeypatch
             active -= 1
         return ({'entities': [], 'relations': []}, [], False)
     monkeypatch.setattr(builder, '_extract_window', extract)
-    monkeypatch.setattr(builder, '_embed_batch_checkpointed', lambda batch, text, relay: ([[1.] for _ in batch], SimpleNamespace()))
-    monkeypatch.setattr(builder, '_extract_and_embed', lambda text, *args, **kwargs: (text, kwargs['extracted_windows'], kwargs['embedded_batches']))
+    monkeypatch.setattr(builder, '_embed_texts', lambda texts, relay: ([[1.] for _ in texts], SimpleNamespace()))
     request = SimpleNamespace(parallelism=2, relays={'model': None, 'embedding': None}, recipe=SimpleNamespace(extraction_spec=None))
     events = []
-    result = builder._extract_project_sources([(None, False, ('abc', {})), (None, False, ('xy', {}))], request, events.append)
+    result = builder._extract_project_sources([(SimpleNamespace(source_id='a'), False, ('abc', {})), (SimpleNamespace(source_id='b'), False, ('xy', {}))], request, events.append)
     assert peak == 2
     assert calls[:2] == ['abc', 'xy']
-    assert [value[0] for value in result] == ['abc', 'xy']
-    counts = [event['metadata']['completedChunks'] for event in events if event['stage'] == 'extracting']
-    assert counts == list(range(6))
     assert [len(value[1]) for value in result] == [3, 2]
+    assert [[chunk['start_char'] for chunk in value[1]] for value in result] == [[0, 1, 2], [0, 1]]
+    counts = [event['metadata']['completedChunks'] for event in events if event['stage'] == 'extracting']
+    assert sorted(set(counts)) == list(range(6))
+    initial = events[0]['metadata']['sourceProgress']
+    assert [(s['sourceId'], s['completedChunks'], s['totalChunks'], s['state']) for s in initial] == [('a', 0, 3, 'queued'), ('b', 0, 2, 'queued')]
+    extracting = [event for event in events if event['stage'] == 'extracting']
+    assert any(row['inFlightChunks'] > 0 for event in extracting for row in event['metadata']['sourceProgress'])
+    final = extracting[-1]['metadata']['sourceProgress']
+    assert [(s['sourceId'], s['completedChunks'], s['totalChunks'], s['state']) for s in final] == [('a', 3, 3, 'completed'), ('b', 2, 2, 'completed')]
+    assert all(sum(s['completedChunks'] for s in event['metadata']['sourceProgress']) == event['metadata']['completedChunks'] for event in events)
 
 
 def test_exhausted_transient_failure_stops_dispatching_new_chunks():

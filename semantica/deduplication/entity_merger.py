@@ -358,6 +358,8 @@ class EntityMerger:
             raise ValidationError(
                 f"Need at least 2 entities to merge, got {len(entities)}"
             )
+        if not self.duplicate_detector.is_group_compatible(entities):
+            raise ValidationError("Entity group violates native identity/type constraints")
 
         # Get strategy value safely for logging
         strategy_val = "default"

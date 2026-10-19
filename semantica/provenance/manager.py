@@ -354,6 +354,7 @@ class ProvenanceManager:
 
                 agent_info = self._resolve_agent_kwargs(kwargs)
                 activity_info = self._resolve_activity_kwargs(kwargs, "entity_tracking")
+                recorded_at = kwargs.get("timestamp") or utc_now_iso()
 
                 entry = ProvenanceEntry(
                     entity_id=entity_id,
@@ -368,8 +369,9 @@ class ProvenanceManager:
                     source_quote=kwargs.get("source_quote"),
                     confidence=kwargs.get("confidence", 1.0),
                     metadata=metadata or {},
-                    first_seen=existing.first_seen if existing else utc_now_iso(),
-                    last_updated=utc_now_iso(),
+                    timestamp=recorded_at,
+                    first_seen=existing.first_seen if existing else recorded_at,
+                    last_updated=recorded_at,
                     parent_entity_id=parent_id,
                     used_entities=list(kwargs.get("used_entities", [])),
                     activity_started_at_time=activity_info["activity_started_at_time"],
@@ -447,6 +449,7 @@ class ProvenanceManager:
         """
         agent_info = self._resolve_agent_kwargs(kwargs)
         activity_info = self._resolve_activity_kwargs(kwargs, "relationship_tracking")
+        recorded_at = kwargs.get("timestamp") or utc_now_iso()
 
         entry = ProvenanceEntry(
             entity_id=relationship_id,
@@ -460,8 +463,9 @@ class ProvenanceManager:
             source_location=kwargs.get("source_location"),
             confidence=kwargs.get("confidence", 1.0),
             metadata=metadata or {},
-            first_seen=utc_now_iso(),
-            last_updated=utc_now_iso(),
+            timestamp=recorded_at,
+            first_seen=recorded_at,
+            last_updated=recorded_at,
             activity_started_at_time=activity_info["activity_started_at_time"],
             activity_ended_at_time=activity_info["activity_ended_at_time"],
             acted_on_behalf_of=kwargs.get("acted_on_behalf_of"),
@@ -1518,4 +1522,3 @@ class ProvenanceManager:
             "total_entries": len(entries),
             "broken_links": broken_links,
         }
-

@@ -16,12 +16,75 @@ from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest
 from tests.test_semantic_artifact import _request, _typed_prompt_context
 
 
+def test_embedding_restart_uses_one_verified_payload_and_original_receipt(tmp_path, monkeypatch):
+    from semantica.project_checkpoint import active_checkpoint
+    from semantica.semantic_artifact_builder import _embed_texts
+
+    source = tmp_path / "source.txt"
+    source.write_text("A source")
+    request = SemanticArtifactBuildRequest.model_validate(_request(source, tmp_path / "first")["params"])
+    checkpoint = SnapshotCheckpoint(request)
+    relay = request.relays["embedding"]
+    calls = []
+
+    class Response:
+        status = 200
+        def __enter__(self):
+            return self
+        def __exit__(self, *_):
+            pass
+        def read(self):
+            return json.dumps({"model": relay.model_id, "usage": {"total_tokens": 2},
+                "data": [{"index": 0, "embedding": [1.0, 0.5]}]}).encode()
+
+    def send(request, timeout):
+        calls.append(request.data)
+        return Response()
+
+    monkeypatch.setenv(relay.authorization_env, "fixture")
+    monkeypatch.setattr("urllib.request.urlopen", send)
+    token = active_checkpoint.set(checkpoint)
+    try:
+        vectors, receipt = _embed_texts(["A source"], relay)
+    finally:
+        active_checkpoint.reset(token)
+    second = _request(source, tmp_path / "second")
+    second["params"]["resumeCheckpointDirs"] = [str(checkpoint.root)]
+    restored = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(second["params"]))
+    token = active_checkpoint.set(restored)
+    try:
+        resumed_vectors, resumed_receipt = _embed_texts(["A source"], relay)
+    finally:
+        active_checkpoint.reset(token)
+    assert resumed_vectors == vectors == [[1.0, 0.5]]
+    assert resumed_receipt.model_dump() == receipt.model_dump()
+    assert resumed_receipt._checkpoint_restored is True
+    assert len(calls) == 1
+    assert len(list(checkpoint.root.glob("relay-*.json"))) == 1
+    assert len(list(restored.root.glob("relay-*.json"))) == 1
+    assert not list(checkpoint.root.glob("embedding-batch-*.json"))
+    assert not list(restored.root.glob("embedding-batch-*.json"))
+    key = {"operation": "embedding", "bindingId": relay.binding_id,
+           "modelId": relay.model_id, "payload": json.loads(calls[0])}
+    cached = restored.read("relay", key)
+    cached["response"]["data"][0]["index"] = 1
+    restored.write("relay", key, cached)
+    token = active_checkpoint.set(restored)
+    try:
+        with pytest.raises(Exception, match="index does not match input order"):
+            _embed_texts(["A source"], relay)
+    finally:
+        active_checkpoint.reset(token)
+    assert len(calls) == 1
+
+
 def test_worker_process_restart_reuses_durable_parse_and_model_calls(tmp_path):
     source = tmp_path / "source.txt"
     source.write_text("A source explains durable knowledge production.", encoding="utf-8")
     request = _request(source, tmp_path / "output", recipe="model")
     parsed_artifact = Path(request["params"]["parsedSources"][0]["artifactPath"])
     parsed_bytes = parsed_artifact.read_bytes()
+    first_call = threading.Event()
     second_call = threading.Event()
     release_call = threading.Event()
     calls = []
@@ -33,6 +96,7 @@ def test_worker_process_restart_reuses_durable_parse_and_model_calls(tmp_path):
         def do_POST(self):
             payload = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             calls.append(payload)
+            first_call.set()
             if len(calls) == 2:
                 second_call.set()
                 release_call.wait(30)
@@ -81,11 +145,16 @@ def test_worker_process_restart_reuses_durable_parse_and_model_calls(tmp_path):
     try:
         child.stdin.write(json.dumps(request) + "\n")
         child.stdin.flush()
+        # Separate cold imports from progress; restarted workers already get 30s.
+        if not first_call.wait(30):
+            child.kill()
+            stdout, stderr = child.communicate(timeout=10)
+            pytest.fail(f"worker did not reach its first model request: {stdout} {stderr}")
         if not second_call.wait(15):
             child.kill()
             stdout, stderr = child.communicate(timeout=10)
             pytest.fail(f"worker did not reach its second model request: {stdout} {stderr}")
-        assert len(list((tmp_path / "output" / "checkpoint").glob("relay-*.json"))) == 1
+        assert len(list((tmp_path / "output" / "checkpoint").glob("extraction-entities-*.json"))) == 1
         child.kill()
         child.communicate(timeout=10)
         assert child.returncode != 0
@@ -118,6 +187,7 @@ def test_worker_process_restart_reuses_durable_parse_and_model_calls(tmp_path):
         assert repeated.returncode == 0, stderr
         assert json.loads(stdout.strip().splitlines()[-1]) == result
         assert len(calls) == count
+        assert not list((tmp_path / "output" / "checkpoint").glob("provenance-*.json"))
         assert parsed_artifact.read_bytes() == parsed_bytes
         source.write_text("The material changed without changing its declared revision.")
         changed = worker()
@@ -195,21 +265,25 @@ def test_quota_failure_new_run_reuses_completed_extraction_windows(tmp_path, mon
     with pytest.raises(Exception, match="MODEL_GATEWAY_COOLDOWN"):
         build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(first["params"]))
     checkpoint = tmp_path / "first" / "checkpoint"
-    assert len(list(checkpoint.glob("relay-*.json"))) == 2
+    assert not list(checkpoint.glob("relay-*.json"))
+    assert len(list(checkpoint.glob("extraction-*.json"))) == 2
     first_window_prompts = calls[:2]
 
     second = _request(source, tmp_path / "second", recipe="model")
     second["params"]["parallelism"] = 1
-    second["params"]["relays"]["model"]["maxOutputTokens"] = 32768
+    second["params"]["relays"]["model"]["maxOutputTokens"] = 393216
     second["params"]["resumeCheckpointDirs"] = [str(checkpoint)]
-    second["params"]["resumeCheckpointModelTokenLimits"] = {str(checkpoint): 393216}
     quota_exhausted = False
     result = build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(second["params"]))
     assert result["snapshot"] is not None
     assert all(calls.count(prompt) == 1 for prompt in first_window_prompts)
     second_checkpoint = tmp_path / "second" / "checkpoint"
-    assert len(list(second_checkpoint.glob("chunk-extraction-*.json"))) >= 2
-    assert len(list(second_checkpoint.glob("embedding-batch-*.json"))) >= 1
+    assert len(list(second_checkpoint.glob("extraction-entities-*.json"))) >= 2
+    assert not list(second_checkpoint.glob("embedding-batch-*.json"))
+    embedding_entries = [json.loads(path.read_bytes())["payload"]
+                         for path in second_checkpoint.glob("relay-*.json")
+                         if json.loads(path.read_bytes())["payload"]["receipt"]["operation"] == "embedding"]
+    assert embedding_entries
 
 
 def test_checkpoint_rejects_corrupt_payload_and_changed_recipe(tmp_path):
@@ -227,6 +301,30 @@ def test_checkpoint_rejects_corrupt_payload_and_changed_recipe(tmp_path):
     request["params"]["recipe"]["forceOcrSourceIds"] = ["source-1"]
     with pytest.raises(SnapshotCheckpointError, match="inputs changed"):
         SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(request["params"]))
+
+
+def test_checkpoint_fences_identity_policy_changes(tmp_path):
+    source = tmp_path / "source.txt"
+    source.write_text("A source")
+    request = _request(source, tmp_path / "output")
+    SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(request["params"]))
+    request["params"]["identityPropertySchema"] = {"external_key": {"identity": True}}
+    with pytest.raises(SnapshotCheckpointError, match="inputs changed"):
+        SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(request["params"]))
+
+
+def test_checkpoint_fences_native_resolution_contract_changes(tmp_path, monkeypatch):
+    from semantica.project_checkpoint import PROCESSING_CONTRACTS
+
+    source = tmp_path / "source.txt"
+    source.write_text("A source")
+    request = SemanticArtifactBuildRequest.model_validate(_request(source, tmp_path / "output")["params"])
+    checkpoint = SnapshotCheckpoint(request)
+    manifest = (checkpoint.root / "manifest.json").read_bytes()
+    monkeypatch.setitem(PROCESSING_CONTRACTS, "identityResolution", "different-policy")
+    with pytest.raises(SnapshotCheckpointError, match="inputs changed"):
+        SnapshotCheckpoint(request)
+    assert (checkpoint.root / "manifest.json").read_bytes() == manifest
 
 
 def test_new_run_reuses_only_matching_verified_relay_entries(tmp_path):
@@ -258,9 +356,8 @@ def test_new_run_does_not_reuse_checkpoint_after_recipe_change(tmp_path):
     second = _request(source, tmp_path / "second")
     second["params"]["recipe"]["forceOcrSourceIds"] = ["source-1"]
     second["params"]["resumeCheckpointDirs"] = [str(first_checkpoint.root)]
-    second_checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(second["params"]))
-
-    assert second_checkpoint.read("document", {"source": "source-1"}) is None
+    with pytest.raises(SnapshotCheckpointError, match="inputs changed"):
+        SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(second["params"]))
 
 
 def test_external_checkpoint_entry_must_match_its_manifest_fence(tmp_path):
@@ -282,38 +379,6 @@ def test_external_checkpoint_entry_must_match_its_manifest_fence(tmp_path):
         second_checkpoint.read("document", {"source": "source-1"})
 
 
-def test_completed_model_response_survives_lower_output_limit(tmp_path):
-    source = tmp_path / "source.txt"
-    source.write_text("A source", encoding="utf-8")
-    first = _request(source, tmp_path / "first", recipe="model")
-    first["params"]["relays"]["model"]["maxOutputTokens"] = 393216
-    first_checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(first["params"]))
-    key = {"operation": "structured_extraction", "bindingId": "default", "modelId": "model-1",
-           "payload": {"model": "model-1", "messages": [{"role": "user", "content": "Extract entities"}],
-                       "max_tokens": 393216}}
-    saved = {"response": {"choices": [{"finish_reason": "stop", "message": {"content": "{}"}}],
-                          "usage": {"completion_tokens": 100}}, "receipt": {"id": "receipt:saved"}}
-    first_checkpoint.write("relay", key, saved)
-    second = _request(source, tmp_path / "second", recipe="model")
-    second["params"]["relays"]["model"]["maxOutputTokens"] = 32768
-    second["params"]["resumeCheckpointDirs"] = [str(first_checkpoint.root)]
-    second["params"]["resumeCheckpointModelTokenLimits"] = {str(first_checkpoint.root): 393216}
-    second_checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(second["params"]))
-    current_key = {**key, "payload": {**key["payload"], "max_tokens": 32768}}
-    assert second_checkpoint.read("relay", current_key) is None
-    assert second_checkpoint.read_with_lower_model_limit(current_key) == saved
-    assert second_checkpoint.read("relay", current_key) == saved
-    second_checkpoint.reject("relay", current_key, saved)
-    assert second_checkpoint.read("relay", current_key) is None
-    assert second_checkpoint.read_with_lower_model_limit(current_key) is None
-
-    first_checkpoint.write("relay", key, {**saved, "response": {**saved["response"],
-        "choices": [{"finish_reason": "length", "message": {"content": "{}"}}]}})
-    assert second_checkpoint.read_with_lower_model_limit(current_key) is None
-    first_checkpoint.write("relay", key, {**saved, "response": {**saved["response"],
-        "usage": {"completion_tokens": 40000}}})
-    assert second_checkpoint.read_with_lower_model_limit(current_key) is None
-
 
 def test_new_run_skips_semantically_rejected_relay_payload(tmp_path):
     source = tmp_path / "source.txt"
@@ -332,22 +397,19 @@ def test_new_run_skips_semantically_rejected_relay_payload(tmp_path):
     assert second_checkpoint.read("relay", key) is None
 
 
-def test_package_upgrade_reuses_verified_completed_chunks(tmp_path):
+def test_package_upgrade_rejects_historical_completed_chunks(tmp_path):
     source = tmp_path / "source.txt"
     source.write_text("A source")
     first = _request(source, tmp_path / "first", recipe="model")
     prior = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(first["params"]))
     key = {"sourceText": "same-text", "window": {"start": 0, "end": 8, "digest": "same-window"}}
     saved = {"extracted": {"entities": [], "relations": []}, "receipts": []}
-    prior.write("chunk-extraction", key, saved)
-    original = next(prior.root.glob("chunk-extraction-*.json")).read_bytes()
+    prior.write("extraction-entities", key, saved)
+    original = next(prior.root.glob("extraction-entities-*.json")).read_bytes()
     second = _request(source, tmp_path / "second", recipe="model")
     second["params"]["release"]["artifactDigest"] = "sha256:" + "9" * 64
     second["params"]["inputRevision"] = "sha256:" + "8" * 64
     second["params"]["resumeCheckpointDirs"] = [str(prior.root)]
-    upgraded = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(second["params"]))
-    assert upgraded.read("chunk-extraction", key) == saved
-    assert next(prior.root.glob("chunk-extraction-*.json")).read_bytes() == original
-    entry = json.loads(next(upgraded.root.glob("chunk-extraction-*.json")).read_bytes())
-    assert entry["fence"] == upgraded.fence
-    assert upgraded.fence != prior.fence
+    with pytest.raises(SnapshotCheckpointError, match="inputs changed"):
+        SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(second["params"]))
+    assert next(prior.root.glob("extraction-entities-*.json")).read_bytes() == original

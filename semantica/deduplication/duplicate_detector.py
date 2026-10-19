@@ -247,7 +247,7 @@ class DuplicateDetector:
             )
             # Calculate similarity for all entity pairs
             similarities = self.similarity_calculator.batch_calculate_similarity(
-                entities, threshold=detection_threshold
+                entities, threshold=detection_threshold, **options
             )
 
             self.logger.debug(
@@ -282,7 +282,7 @@ class DuplicateDetector:
                 # structurally so no threshold value can admit them.
                 if (
                     candidate.confidence >= self.confidence_threshold
-                    and "type_mismatch" not in candidate.reasons
+                    and candidate.metadata.get("merge_allowed", True)
                 ):
                     candidates.append(candidate)
 
@@ -303,7 +303,7 @@ class DuplicateDetector:
                     )
 
             # Sort, filter, and cap results
-            candidates = self._apply_result_limits(candidates)
+            candidates = self._apply_result_limits(self._compatible_candidates(candidates))
 
             self.logger.info(
                 f"Detected {len(candidates)} duplicate candidate(s) "
@@ -345,8 +345,7 @@ class DuplicateDetector:
         Args:
             entities: List of entity dictionaries to group
             threshold: Minimum similarity threshold (overrides instance default)
-            **options: Detection options; candidates may supply already admitted pairs
-                       instead of running similarity detection.
+            **options: Additional detection options passed to detect_duplicates()
 
         Returns:
             List of DuplicateGroup objects, each containing:
@@ -383,11 +382,9 @@ class DuplicateDetector:
             )
 
             # Detect duplicate candidates
-            candidates = options.pop("candidates", None)
-            if candidates is None:
-                candidates = self.detect_duplicates(
-                    entities, threshold=threshold, **options
-                )
+            candidates = self.detect_duplicates(
+                entities, threshold=threshold, **options
+            )
 
             self.progress_tracker.update_tracking(
                 tracking_id, message="Building duplicate groups..."
@@ -635,7 +632,7 @@ class DuplicateDetector:
                         # excluded structurally regardless of the threshold.
                         if (
                             candidate.confidence >= self.confidence_threshold
-                            and "type_mismatch" not in candidate.reasons
+                            and candidate.metadata.get("merge_allowed", True)
                         ):
                             candidates.append(candidate)
 
@@ -657,7 +654,7 @@ class DuplicateDetector:
                         )
 
             # Sort, filter, and cap results
-            candidates = self._apply_result_limits(candidates)
+            candidates = self._apply_result_limits(self._compatible_candidates(candidates))
 
             self.logger.info(
                 f"Incremental detection found {len(candidates)} duplicate candidate(s)"
@@ -675,6 +672,17 @@ class DuplicateDetector:
                 tracking_id, status="failed", message=str(e)
             )
             raise
+
+    def _compatible_candidates(self, candidates: List[DuplicateCandidate]) -> List[DuplicateCandidate]:
+        """Check whole components before result caps can conceal conflicting members."""
+        compatible_entities = {
+            self._normalize_entity_id(entity)
+            for group in self._build_duplicate_groups(candidates)
+            for entity in group.entities
+        }
+        return [candidate for candidate in candidates
+                if all(self._normalize_entity_id(entity) in compatible_entities
+                       for entity in (candidate.entity1, candidate.entity2))]
 
     def _apply_result_limits(
         self, candidates: List[DuplicateCandidate]
@@ -786,8 +794,20 @@ class DuplicateDetector:
                     "common_properties": 0,
                     "type_match": False,
                     "type_mismatch": True,
+                    "merge_allowed": False,
                 },
             )
+
+        props1 = self._get_entity_value(entity1, "properties", {})
+        props2 = self._get_entity_value(entity2, "properties", {})
+        identity = self.similarity_calculator.identity_evidence(
+            {"properties": props1}, {"properties": props2}
+        )
+        if identity["conflicts"]:
+            return DuplicateCandidate(entity1=entity1, entity2=entity2,
+                similarity_score=similarity_score, confidence=0.0,
+                reasons=["identity_conflict"],
+                metadata={**identity, "merge_allowed": False})
 
         # Check for exact name match (strong indicator)
         name1 = str(self._get_entity_value(entity1, "name", "")).lower().strip()
@@ -797,9 +817,6 @@ class DuplicateDetector:
             confidence += 0.1
 
         # Check property value matches
-        props1 = self._get_entity_value(entity1, "properties", {})
-        props2 = self._get_entity_value(entity2, "properties", {})
-
         common_props = set(props1.keys()) & set(props2.keys())
         if common_props:
             # Count properties with matching values
@@ -827,6 +844,8 @@ class DuplicateDetector:
             confidence=confidence,
             reasons=reasons,
             metadata={
+                **identity,
+                "merge_allowed": True,
                 "name_match": name1 == name2,
                 "common_properties": len(common_props),
                 "type_match": entity_type1 == entity_type2,
@@ -893,7 +912,20 @@ class DuplicateDetector:
                 if group2 in groups:
                     groups.remove(group2)
 
-        return groups
+        # Connectedness is not identity: an unknown bridge cannot erase a conflict.
+        compatible = []
+        for group in groups:
+            if self.is_group_compatible(group.entities):
+                compatible.append(group)
+            else:
+                self.logger.warning("Leaving ambiguous duplicate component unmerged: %s",
+                                    [self._normalize_entity_id(e) for e in group.entities])
+        return compatible
+
+    def is_group_compatible(self, entities: List[Dict[str, Any]]) -> bool:
+        """Check native constraints without rescoring or choosing an arbitrary side."""
+        return all(self._create_duplicate_candidate(left, right, 1.0).metadata.get("merge_allowed", True)
+                   for index, left in enumerate(entities) for right in entities[index + 1:])
 
     def _calculate_group_confidence(self, group: DuplicateGroup) -> float:
         """Calculate confidence for duplicate group."""

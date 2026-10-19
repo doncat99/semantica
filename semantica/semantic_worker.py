@@ -34,7 +34,8 @@ from .semantic_artifact_schema import BindParsedSourceRequest, RelayRef
 PROTOCOL = "semantica.semantic-worker.v1"
 METHOD = "build_semantic_artifacts"
 MODEL_RECEIPT_OPERATIONS = {
-    "structured_extraction", "identity_resolution", "relationship_discovery",
+    "structured_extraction",
+    "identity_resolution", "relationship_discovery",  # Historical receipts only; new builds do not run these stages.
     "knowledge_explanation", "knowledge_synthesis", "source_classification",
 }
 
@@ -47,6 +48,7 @@ class ReadingReportsRequest(BaseModel):
     project_id: str = Field(alias="projectId")
     output_dir: str = Field(alias="outputDir")
     relay: RelayRef
+    target_ids: list[str] | None = Field(default=None, alias="targetIds", min_length=1)
 
 
 class EvidenceExplanationRequest(ReadingReportsRequest):
@@ -115,7 +117,7 @@ def _reading_reports(params: Dict[str, Any], progress: Optional[Callable[[Dict[s
                      for representation in snapshot.document_representations]
     reports, receipts = _explanation_reports(snapshot.project_id, source_builds, snapshot.entities,
         snapshot.assertions, snapshot.relations, snapshot.communities, snapshot.topics,
-        snapshot.evidence_spans, request.relay)
+        snapshot.evidence_spans, request.relay, target_ids=request.target_ids)
     _report_support_sources(snapshot.document_representations, snapshot.evidence_spans,
         snapshot.entities, snapshot.assertions, snapshot.relations, snapshot.communities,
         snapshot.topics, reports)

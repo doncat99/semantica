@@ -1,6 +1,19 @@
 from typing import Any, List, Optional
 from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict
 
+def validate_fact_qualifiers(value: dict) -> dict:
+    if not isinstance(value, dict):
+        raise ValueError("fact qualifiers must be an object")
+    if set(value) - {"polarity", "condition", "time", "unit", "value"}:
+        raise ValueError("fact qualifiers contain unsupported keys")
+    if value.get("polarity") not in {"positive", "negative"}:
+        raise ValueError("fact qualifiers require positive or negative polarity")
+    if any(not isinstance(item, str) or not item.strip()
+           for key, item in value.items() if key != "polarity"):
+        raise ValueError("fact qualifier values must be non-empty strings")
+    return value
+
+
 class EntityOut(BaseModel):
     """Canonical schema for entity extraction output."""
     model_config = ConfigDict(populate_by_name=True, extra="ignore")

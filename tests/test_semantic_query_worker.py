@@ -87,11 +87,6 @@ def _request(built, query="Ada"):
 def _rewrite_artifacts(built, *, snapshot_change=None, retrieval_change=None):
     snapshot = json.loads(built["snapshot_path"].read_text())
     retrieval = json.loads(built["retrieval_path"].read_text())
-    if retrieval_change and retrieval.pop("format", None) == "semantica.retrieval-reference.v1":
-        for field, key in (("entities", "entities"), ("assertions", "assertions"), ("relations", "relations"),
-                           ("identity_decisions", "identity_decisions"), ("conflicts", "conflicts"),
-                           ("topics", "topics"), ("evidence", "evidence_spans")):
-            retrieval[field] = deepcopy(snapshot[key])
     if snapshot_change:
         snapshot_change(snapshot)
     if retrieval_change:
@@ -128,22 +123,11 @@ def test_query_worker_returns_snapshot_bound_evidence(tmp_path):
     assert any(context["kind"] == "evidence" and "Ada Lovelace" in context["text"] for context in result["contexts"])
 
 
-def test_query_worker_returns_grounded_identity_decisions_and_conflicts(tmp_path):
+def test_query_worker_returns_grounded_conflicts(tmp_path):
     built = _build(tmp_path)
     snapshot = json.loads(built["snapshot_path"].read_text())
     entity_id = snapshot["entities"][0]["id"]
     evidence_id = snapshot["evidence_spans"][0]["id"]
-    decision = {
-        "id": "decision:query-test",
-        "decision_type": "accept",
-        "from_entity_ids": [entity_id],
-        "to_entity_id": entity_id,
-        "evidence_ids": [evidence_id],
-        "reason": "corroborated identity evidence",
-        "decided_by": "semantica",
-        "decided_at": "2026-01-01T00:00:00Z",
-        "metadata": {},
-    }
     conflict = {
         "id": "conflict:query-test",
         "conflict_type": "identity",
@@ -155,25 +139,13 @@ def test_query_worker_returns_grounded_identity_decisions_and_conflicts(tmp_path
         "reason": "corroborated identity conflict",
         "resolution": None,
     }
-    _rewrite_artifacts(
-        built,
-        snapshot_change=lambda value: (
-            value["identity_decisions"].append(decision),
-            value["conflicts"].append(conflict),
-        ),
-        retrieval_change=lambda value: (
-            value.setdefault("identity_decisions", []).append(decision),
-            value.setdefault("conflicts", []).append(conflict),
-        ),
-    )
+    _rewrite_artifacts(built, snapshot_change=lambda value: value["conflicts"].append(conflict))
 
     response = _serve(_request(built, "corroborated"))
 
     assert response["ok"] is True, response
     hits = {context["kind"]: context for context in response["result"]["contexts"]}
-    assert hits["identity_decision"]["status"] == "accept"
     assert hits["conflict"]["status"] == "open"
-    assert hits["identity_decision"]["evidenceIds"] == [evidence_id]
     assert hits["conflict"]["sourceIds"] == ["source-1"]
 
 
@@ -206,10 +178,7 @@ def test_query_worker_preserves_positive_negative_and_contradicted_fact_semantic
     def add_snapshot(value):
         value["assertions"].extend(facts)
 
-    def add_retrieval(value):
-        value["assertions"].extend(facts)
-
-    _rewrite_artifacts(built, snapshot_change=add_snapshot, retrieval_change=add_retrieval)
+    _rewrite_artifacts(built, snapshot_change=add_snapshot)
 
     response = _serve(_request(built, "designed"))
 
@@ -226,28 +195,27 @@ def test_query_worker_preserves_positive_negative_and_contradicted_fact_semantic
     assert contradicted["text"].startswith("Contradicted fact:")
 
 
-@pytest.mark.parametrize("corruption", ["unknown-object", "missing-evidence", "unknown-evidence"])
-def test_query_worker_rejects_ungrounded_retrieval_records(tmp_path, corruption):
+@pytest.mark.parametrize("field", ["entities", "assertions", "relations", "identity_decisions", "conflicts", "topics", "evidence"])
+def test_query_worker_rejects_copied_snapshot_records(tmp_path, field):
     built = _build(tmp_path)
-
-    def corrupt(retrieval):
-        if corruption == "unknown-object":
-            record = deepcopy(retrieval["entities"][0])
-            record["id"] = "entity:unknown"
-            retrieval["entities"].append(record)
-        elif corruption == "missing-evidence":
-            retrieval["entities"][0]["evidence_ids"] = []
-        else:
-            record = deepcopy(retrieval["evidence"][0])
-            record["id"] = "evidence:unknown"
-            retrieval["evidence"].append(record)
-
-    _rewrite_artifacts(built, retrieval_change=corrupt)
-
+    _rewrite_artifacts(built, retrieval_change=lambda value: value.update({field: []}))
     response = _serve(_request(built))
-
     assert response["ok"] is False
     assert response["error"]["type"] == "QueryError"
+
+
+@pytest.mark.parametrize("old_format", [None, "semantica.retrieval.v0"])
+def test_query_worker_requires_current_reference_format(tmp_path, old_format):
+    built = _build(tmp_path)
+    def change(value):
+        if old_format is None:
+            value.pop("format")
+        else:
+            value["format"] = old_format
+    _rewrite_artifacts(built, retrieval_change=change)
+    response = _serve(_request(built))
+    assert response["ok"] is False
+    assert "rebuild is required" in response["error"]["message"]
 
 
 def test_query_worker_returns_empty_contexts_without_fallback(tmp_path):
