@@ -2,7 +2,7 @@
 
 - Record ID: 2026-10-19-pymupdf-native-parser
 - Date / author: 2026-10-19 / Codex, requested by repository owner
-- Status: implemented; native source regressions passed, installed consumer validation pending
+- Status: implemented; source and installed consumer qualification passed
 - Fork base revision: d1834228
 - Upstream reference: not refreshed for this change
 - Related record: [page lifecycle](2026-10-19-pdf-page-lifecycle.md)
@@ -44,8 +44,22 @@ document closes on extraction error; scanned-page warnings remain covered.
 Invalid negative/out-of-range/noninteger page indices now fail explicitly rather
 than silently selecting/skipping pages. `pages=None` helpers now select all pages.
 
-Installed wheel/consumer qualification will be appended after it runs. Reading
-order/whitespace can change; the benchmark found text differences on page 210.
+Committed implementation: `4c44ad1978cf7eca7a17e833774a8186d45d59f3`.
+Wheel SHA256: `dc0551f64f697a1a63b5a99625fa80892f9205324184fed1f720236eb9ac70b5`.
+All installed package files were verified byte-for-byte against this wheel;
+dependency verification passed. With the installed native owner, the original
+210-page file completed through ESG's unchanged 180-second subprocess boundary
+in 11.100 seconds; page extraction summed to 4.601 seconds, page 49 took 0.087
+seconds, and peak child RSS was 601,047,040 bytes. All 210 text hashes matched
+the previous PyMuPDF benchmark. This is one run, not a load/stability guarantee.
+Five ESG release-evidence tests passed: real bytes, page/quote validation,
+persistent extraction reuse, and rejection of fabricated quotes, bad checksums
+and altered artifacts. Navigation/model responses in that test remain synthetic.
+Sixteen installed-runtime recovery/settlement tests passed against isolated
+PostgreSQL/Neo4j test storage, including durable retry exhaustion and restart.
+Receipts: ESG `data/audits/pymupdf-switch-20261019/`.
+
+Reading order/whitespace can change; the benchmark found text differences on page 210.
 Speed does not establish semantic equivalence or ESG delivery quality. No business
 production start is implied. The existing structured Docling source path is not
 replaced; no email extraction or OCR capability is added.
