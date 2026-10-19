@@ -65,7 +65,14 @@ def test_global_queue_interleaves_sources_preserves_order_and_budget(monkeypatch
     assert [len(value[1]) for value in result] == [3, 2]
     assert [[chunk['start_char'] for chunk in value[1]] for value in result] == [[0, 1, 2], [0, 1]]
     counts = [event['metadata']['completedChunks'] for event in events if event['stage'] == 'extracting']
-    assert counts == list(range(6))
+    assert sorted(set(counts)) == list(range(6))
+    initial = events[0]['metadata']['sourceProgress']
+    assert [(s['sourceId'], s['completedChunks'], s['totalChunks'], s['state']) for s in initial] == [('a', 0, 3, 'queued'), ('b', 0, 2, 'queued')]
+    extracting = [event for event in events if event['stage'] == 'extracting']
+    assert any(row['inFlightChunks'] > 0 for event in extracting for row in event['metadata']['sourceProgress'])
+    final = extracting[-1]['metadata']['sourceProgress']
+    assert [(s['sourceId'], s['completedChunks'], s['totalChunks'], s['state']) for s in final] == [('a', 3, 3, 'completed'), ('b', 2, 2, 'completed')]
+    assert all(sum(s['completedChunks'] for s in event['metadata']['sourceProgress']) == event['metadata']['completedChunks'] for event in events)
 
 
 def test_exhausted_transient_failure_stops_dispatching_new_chunks():
