@@ -32,6 +32,7 @@ def extract_grounded_window(
     retries: int = 1,
     provider_factory: Callable[[], Any] | None = None,
     grounding_context: list[dict[str, Any]] | None = None,
+    formula_semantics: bool = False,
 ) -> tuple[list[Entity], list[Relation], Any]:
     """Run Semantica's native strict entity and relation extractors.
 
@@ -60,6 +61,7 @@ def extract_grounded_window(
                 max_retries=1, grounding_retries=1, extraction_spec=specification,
                 rejection_receipts=getattr(current_provider, "rejections", None),
                 grounding_context=grounding_context,
+                formula_semantics=formula_semantics,
             )
             if not entities:
                 _record_rejections(current_provider)
@@ -70,6 +72,7 @@ def extract_grounded_window(
                 max_retries=1, grounding_retries=1, extraction_spec=specification,
                 confidence_threshold=0,
                 grounding_context=grounding_context,
+                formula_semantics=formula_semantics,
                 rejection_receipts=getattr(current_provider, "rejections", None),
             )
             _record_rejections(current_provider)

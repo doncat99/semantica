@@ -64,7 +64,7 @@ class SnapshotCheckpoint:
             "inputRevision": request.input_revision, "baseSnapshot": baseline,
             "processingContracts": deepcopy(PROCESSING_CONTRACTS),
             "sources": sorted(sources, key=lambda item: item["sourceId"]),
-            "recipe": request.recipe.model_dump(mode="json", by_alias=True),
+            "recipe": request.recipe.lineage_payload(),
             "documentProcessing": request.document_processing.model_dump(mode="json", by_alias=True),
             "identityPropertySchema": request.identity_property_schema,
             "release": request.release.model_dump(mode="json", by_alias=True),

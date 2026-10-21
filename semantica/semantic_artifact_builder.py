@@ -403,16 +403,16 @@ def _extraction_context_batches(window, context, max_bytes=None):
     return batches
 
 
-def _extract_window(text, model_relay, extraction_spec, locations, item):
+def _extract_window(text, model_relay, extraction_spec, locations, item, formula_semantics=False):
     start, end, window = item
     context = _window_grounding_context(locations, start, end)
     batches = _extraction_context_batches(window, context)
     if len(batches) == 1:
-        return _extract_window_context(text, model_relay, extraction_spec, item, batches[0])
+        return _extract_window_context(text, model_relay, extraction_spec, item, batches[0], formula_semantics)
     entities, relations, receipts, restored = [], [], [], True
     for index, batch in enumerate(batches):
         extracted, batch_receipts, batch_restored = _extract_window_context(
-            text, model_relay, extraction_spec, item, batch)
+            text, model_relay, extraction_spec, item, batch, formula_semantics)
         # IDs are local to each native extraction call. Namespace them without
         # making identity decisions; native resolution owns entity equivalence.
         by_id = {entity.metadata["mention_id"]: replace(entity, metadata={
@@ -431,7 +431,7 @@ def _extract_window(text, model_relay, extraction_spec, locations, item):
     return {"entities": entities, "relations": relations}, receipts, restored
 
 
-def _extract_window_context(text, model_relay, extraction_spec, item, context):
+def _extract_window_context(text, model_relay, extraction_spec, item, context, formula_semantics=False):
     start, end, window = item
     provider = _project_model_provider(model_relay)
     checkpoint = active_checkpoint.get()
@@ -449,6 +449,7 @@ def _extract_window_context(text, model_relay, extraction_spec, item, context):
         provider_instance=provider,
         extraction_spec=extraction_spec, retries=1,
         grounding_context=context,
+        formula_semantics=formula_semantics,
     )
     extracted = {"entities": entities, "relations": relations}
     restored = bool(provider.receipts) and all(
@@ -521,7 +522,8 @@ def _extract_project_sources(parsed_sources, request, progress):
     try:
         phase("extracting", jobs,
               lambda job: _extract_window(parsed_sources[job[0]][2][0], request.relays["model"],
-                                          request.recipe.extraction_spec, locations[job[0]], job[2]),
+                                          request.recipe.extraction_spec, locations[job[0]], job[2],
+                                          parsed_sources[job[0]][0].source_id in getattr(request.recipe, "formula_semantics_source_ids", ())),
               extracted, 20, 40)
     except ProcessingError as exc:
         raise _typed_extraction_error(exc) from exc
@@ -2239,7 +2241,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
     # only its upstream artifacts.
     retrieval_artifact = ArtifactManifest(id=retrieval_artifact_id, artifact_type="retrieval", artifact_ref=str(retrieval_path), artifact_hash=retrieval_digest, depends_on=[item.id for item in representation_artifacts])
     receipt_ids = [receipt.id for receipt in model_receipts]
-    lineage = KernelLineage(schema_digest=request.release.schema_digest, recipe_id=request.recipe.id, recipe_digest=stable_digest(request.recipe.model_dump(mode="json", by_alias=True)), rule_version="semantica-semantic-artifact-v3", rule_digest=stable_digest({"pipeline": request.recipe.id, "identity_resolution": "native-conflict-veto-v1", "identity_property_schema": request.identity_property_schema}), ontology_version="semantica-default", ontology_digest=stable_digest({"ontology": "default"}), extraction_spec_digest=request.recipe.extraction_spec.digest if request.recipe.extraction_spec else None, model_receipt_ids=receipt_ids)
+    lineage = KernelLineage(schema_digest=request.release.schema_digest, recipe_id=request.recipe.id, recipe_digest=stable_digest(request.recipe.lineage_payload()), rule_version="semantica-semantic-artifact-v3", rule_digest=stable_digest({"pipeline": request.recipe.id, "identity_resolution": "native-conflict-veto-v1", "identity_property_schema": request.identity_property_schema}), ontology_version="semantica-default", ontology_digest=stable_digest({"ontology": "default"}), extraction_spec_digest=request.recipe.extraction_spec.digest if request.recipe.extraction_spec else None, model_receipt_ids=receipt_ids)
     retrieval_manifests = [
         RetrievalArtifactManifest(
             id="retrieval:graph",

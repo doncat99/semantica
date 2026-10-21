@@ -140,6 +140,37 @@ def test_native_cache_reuses_entities_after_relation_transport_retry(tmp_path, m
         (item.text, item.start_char, item.end_char) for item in second["entities"]]
 
 
+def test_formula_semantics_opt_in_invalidates_only_selected_extraction(tmp_path, monkeypatch):
+    from tests.artifact_helpers import stub_native_provider
+    from tests.test_semantic_artifact import _request
+    from semantica.project_checkpoint import SnapshotCheckpoint, active_checkpoint
+    from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest
+
+    text = "C = E / R"
+    path = tmp_path / "source.txt"
+    path.write_text(text)
+    checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(
+        _request(path, tmp_path / "output")["params"]))
+    calls = []
+
+    def respond(stage, prompt):
+        calls.append((stage, "Identify explicitly stated formulas" in prompt))
+        return {"entities": []}
+
+    stub_native_provider(monkeypatch, respond)
+    token = active_checkpoint.set(checkpoint)
+    try:
+        args = (text, SimpleNamespace(model_id="test"), None, (0, len(text), text),
+                [{"kind": "formula", "text": text, "start": 0, "end": len(text)}])
+        pipeline._extract_window_context(*args)
+        pipeline._extract_window_context(*args, formula_semantics=False)
+        pipeline._extract_window_context(*args, formula_semantics=True)
+        pipeline._extract_window_context(*args, formula_semantics=True)
+    finally:
+        active_checkpoint.reset(token)
+    assert calls == [("entities", False), ("entities", True)]
+
+
 @pytest.mark.parametrize("field,value", [("max_output_tokens", 4096), ("binding_id", "other"),
                                         ("context_window_tokens", 65536)])
 def test_native_cache_scopes_host_admitted_model_configuration(tmp_path, monkeypatch, field, value):

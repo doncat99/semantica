@@ -225,6 +225,24 @@ def test_build_request_accepts_sources_not_semantic_objects():
         SemanticArtifactBuildRequest.model_validate(bad)
 
 
+def test_formula_semantics_requires_explicit_known_pdf_with_model_recipe():
+    payload = _build_request_payload()
+    default_recipe = SemanticArtifactBuildRequest.model_validate(payload).recipe
+    assert default_recipe.formula_semantics_source_ids == []
+    assert default_recipe.lineage_payload() == default_recipe.model_dump(mode="json", by_alias=True, exclude={"formula_semantics_source_ids"})
+    payload["recipe"]["formulaSemanticsSourceIds"] = ["source-1"]
+    with pytest.raises(ValidationError, match="model recipe"):
+        SemanticArtifactBuildRequest.model_validate(payload)
+    payload["recipe"]["id"] = "model"
+    selected_recipe = SemanticArtifactBuildRequest.model_validate(payload).recipe
+    assert selected_recipe.formula_semantics_source_ids == ["source-1"]
+    assert selected_recipe.lineage_payload()["formulaSemanticsSourceIds"] == ["source-1"]
+    payload["sources"][0]["name"] = "notes.txt"
+    payload["sources"][0]["mimeType"] = "text/plain"
+    with pytest.raises(ValidationError, match="PDF sources"):
+        SemanticArtifactBuildRequest.model_validate(payload)
+
+
 def test_build_request_preserves_host_source_and_provider_model_ids():
     payload = _build_request_payload()
     payload["sources"][0]["sourceId"] = "6996f3a7-b132-4474-aa13-d14d746218cd"

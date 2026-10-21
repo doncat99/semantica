@@ -673,10 +673,15 @@ class SourceClassification(StrictModel):
 
 class RecipeRef(StrictModel):
     force_ocr_source_ids: List[str] = Field(default_factory=list, alias="forceOcrSourceIds")
+    formula_semantics_source_ids: List[str] = Field(default_factory=list, alias="formulaSemanticsSourceIds")
     classification_profile: Optional[ClassificationProfile] = Field(default=None, alias="classificationProfile")
     extraction_spec: Optional[ExtractionSpecification] = Field(default=None, alias="extractionSpec")
     id: str
     version: str
+
+    def lineage_payload(self) -> Dict[str, Any]:
+        return self.model_dump(mode="json", by_alias=True,
+            exclude={"formula_semantics_source_ids"} if not self.formula_semantics_source_ids else None)
 
 
 class RelayRef(StrictModel):
@@ -799,6 +804,13 @@ class SemanticArtifactBuildRequest(DigestModel):
             raise ValueError("source ids must be unique")
         if set(self.recipe.force_ocr_source_ids) - source_ids:
             raise ValueError("OCR recipe references an unknown source")
+        if len(set(self.recipe.formula_semantics_source_ids)) != len(self.recipe.formula_semantics_source_ids) or set(self.recipe.formula_semantics_source_ids) - source_ids:
+            raise ValueError("formula semantics recipe requires unique known sources")
+        selected_sources = [source for source in self.sources if source.source_id in self.recipe.formula_semantics_source_ids]
+        if any(source.mime_type.lower() != "application/pdf" and not source.name.lower().endswith(".pdf") for source in selected_sources):
+            raise ValueError("formula semantics recipe requires PDF sources")
+        if self.recipe.formula_semantics_source_ids and self.recipe.id != "model":
+            raise ValueError("formula semantics requires the model recipe")
         if self.recipe.classification_profile and self.recipe.id != "model":
             raise ValueError("classification requires the model recipe")
         if self.recipe.extraction_spec and self.recipe.id != "model":

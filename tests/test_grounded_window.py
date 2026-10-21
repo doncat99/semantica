@@ -76,6 +76,27 @@ def test_grounded_window_with_no_entities_does_not_extract_relations(monkeypatch
     ) == ([], [], provider)
 
 
+def test_formula_semantics_is_explicit_and_uses_existing_extraction_calls(monkeypatch):
+    calls = []
+    provider = object()
+
+    def entities(_text, **kwargs):
+        calls.append(("entities", kwargs["formula_semantics"]))
+        return ["formula"]
+
+    def relations(_text, _entities, **kwargs):
+        calls.append(("relations", kwargs["formula_semantics"]))
+        return []
+
+    monkeypatch.setattr(grounded_window, "extract_entities_llm", entities)
+    monkeypatch.setattr(grounded_window, "extract_relations_llm", relations)
+    grounded_window.extract_grounded_window("C = E / R", model="test", provider_instance=provider)
+    grounded_window.extract_grounded_window("C = E / R", model="test", provider_instance=provider,
+                                             formula_semantics=True)
+    assert calls == [("entities", False), ("relations", False),
+                     ("entities", True), ("relations", True)]
+
+
 def test_grounded_window_recreates_provider_for_each_retry(monkeypatch):
     providers = []
     attempts = []
