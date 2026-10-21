@@ -30,3 +30,32 @@ Semantic worker releases are built on GitHub Actions from the Semantica fork. Th
 ## Verification record
 
 Record the workflow URL, source revision, Release tag, every asset name and GitHub digest, and the acceptance receipts before changing the OntoScience pin.
+
+## Contributor dependency verification
+
+`docling` is the upstream meta-package; the fork's `docling-slim` wheel owns the
+`docling` Python modules. This is intentional, not two parsing implementations.
+Both `parse-docling` and `semantic-worker` select the hash-pinned fork wheel.
+
+Use uv 0.9.10 (the CI pin). After changing dependencies, run `uv lock`, review the
+diff, and commit `uv.lock` together with `pyproject.toml`. CI's existing
+`uv lock --check` rejects stale resolution. Validate in a fresh environment:
+
+```sh
+verification_env=$(mktemp -d /tmp/semantica-dependency-check.XXXXXX)
+uv lock --check
+UV_PROJECT_ENVIRONMENT="$verification_env/venv" uv sync --locked --extra semantic-worker --no-install-project --python 3.12
+"$verification_env/venv/bin/python" -c 'from importlib.metadata import version; from docling.models.stages.code_formula.native_formula import transcribe_native_fraction; assert version("docling") == "2.139.0"; assert version("docling-slim") == "2.139.0+ontoscience.2"; assert transcribe_native_fraction([]) is None'
+```
+
+An existing `.venv` is mutable local state, not proof of the current dependency
+selection. Use `uv sync --locked --extra semantic-worker` to reconcile an intended
+development environment; do not reuse an old draft checkout's environment for
+main validation. The fresh check above preserves those environments.
+
+The universal contributor lock and platform-specific native constraints have
+different scopes. When dependencies change, also regenerate affected native
+constraints using their recorded compile commands and run native relocation
+acceptance. The native acceptance checks both Docling distribution versions and
+the fork's formula API. A local environment check does not release a bundle or
+update OntoScience's immutable consumer pin.

@@ -1921,14 +1921,14 @@ wheels = [
 
 [[package]]
 name = "docling"
-version = "2.135.0"
+version = "2.139.0"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "docling-slim", extra = ["standard"] },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/37/d7/1d61271cffa1d626f1c70bdd566f8a1c074a28bcf23beb9f42407736b83e/docling-2.135.0.tar.gz", hash = "sha256:11c55f1feeb017e4a842f01d6d405453b5c0160b1b0269765a44df06403753c6", size = 9101, upload-time = "2026-10-07T10:44:56.744Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/b1/b2/16f722585da55e10f46e6aa73b5b4859551fd35d4895a68921936a807f74/docling-2.139.0.tar.gz", hash = "sha256:96ea55bd0ee8009737be11fd4ab1eef0a084070729d411d8d0a9c109f29d339e", size = 9100, upload-time = "2026-10-14T12:21:19.372Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/fb/96/8c8c76fac75d3e54bc8d2049bf7dfe14bbded300198c1aaa48f0dceba59d/docling-2.135.0-py3-none-any.whl", hash = "sha256:6d90f69c4a1f549ffe004905fd98e9a0060564bb5449d7119ce2668964986325", size = 5240, upload-time = "2026-10-07T10:44:55.442Z" },
+    { url = "https://files.pythonhosted.org/packages/54/2f/6e49e552e8f561e089496fc8ff7177d2193680f7b8f9f85b9260c0f93be9/docling-2.139.0-py3-none-any.whl", hash = "sha256:354d29dca9a86f3f309d0fcf2842ec62fdbaa1af34faa86a1584a984a382ccb4", size = 5240, upload-time = "2026-10-14T12:21:17.857Z" },
 ]
 
 [[package]]
@@ -2024,8 +2024,8 @@ wheels = [
 
 [[package]]
 name = "docling-slim"
-version = "2.135.0"
-source = { registry = "https://pypi.org/simple" }
+version = "2.139.0+ontoscience.2"
+source = { url = "https://github.com/doncat99/docling/releases/download/ontoscience-docling-2.139.0.2/docling_slim-2.139.0+ontoscience.2-py3-none-any.whl" }
 dependencies = [
     { name = "certifi" },
     { name = "docling-core" },
@@ -2037,9 +2037,8 @@ dependencies = [
     { name = "requests" },
     { name = "tqdm" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/fa/98/45a55f6b2d5560395bb49184e4e5d55b3829864f34b0b4dd51529e0f2461/docling_slim-2.135.0.tar.gz", hash = "sha256:375d5eb001be8f68598b2a6b976e31c45d388493082699512181872f3aded4e7", size = 805279, upload-time = "2026-10-07T10:43:30.674Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/81/17/ae5c9760bcd5f2abb9ab155e7f52357b9b109929b581fd4af9eede4a1621/docling_slim-2.135.0-py3-none-any.whl", hash = "sha256:5e8c5f9086494ff2460d30fc37151c4d006b4b9ed603b2a4dd5ee29bea45fd12", size = 985040, upload-time = "2026-10-07T10:43:28.669Z" },
+    { url = "https://github.com/doncat99/docling/releases/download/ontoscience-docling-2.139.0.2/docling_slim-2.139.0+ontoscience.2-py3-none-any.whl", hash = "sha256:130798afe9758d1823dfb0fd37159e2d59932fb2c26336265c151e4baabf80de" },
 ]
 
 [package.optional-dependencies]
@@ -2077,6 +2076,195 @@ standard = [
     { name = "typer" },
     { name = "websockets" },
 ]
+
+[package.metadata]
+requires-dist = [
+    { name = "accelerate", marker = "extra == 'all'", specifier = ">=1.0.0,<2" },
+    { name = "accelerate", marker = "extra == 'all'", specifier = ">=1.2.1,<2.0.0" },
+    { name = "accelerate", marker = "extra == 'models-local'", specifier = ">=1.0.0,<2" },
+    { name = "accelerate", marker = "extra == 'models-vlm-inline'", specifier = ">=1.2.1,<2.0.0" },
+    { name = "accelerate", marker = "extra == 'standard'", specifier = ">=1.0.0,<2" },
+    { name = "arelle-release", marker = "extra == 'all'", specifier = ">=2.38.17,<3.0.0" },
+    { name = "arelle-release", marker = "extra == 'format-xml-xbrl'", specifier = ">=2.38.17,<3.0.0" },
+    { name = "beautifulsoup4", marker = "extra == 'all'", specifier = ">=4.12.3,<5.0.0" },
+    { name = "beautifulsoup4", marker = "extra == 'format-email'", specifier = ">=4.12.3,<5.0.0" },
+    { name = "beautifulsoup4", marker = "extra == 'format-html'", specifier = ">=4.12.3,<5.0.0" },
+    { name = "beautifulsoup4", marker = "extra == 'format-web'", specifier = ">=4.12.3,<5.0.0" },
+    { name = "beautifulsoup4", marker = "extra == 'format-xml-jats'", specifier = ">=4.12.3,<5.0.0" },
+    { name = "beautifulsoup4", marker = "extra == 'format-xml-uspto'", specifier = ">=4.12.3,<5.0.0" },
+    { name = "beautifulsoup4", marker = "extra == 'standard'", specifier = ">=4.12.3,<5.0.0" },
+    { name = "certifi", specifier = ">=2024.7.4" },
+    { name = "defusedxml", marker = "extra == 'all'", specifier = ">=0.7.1,<0.8.0" },
+    { name = "defusedxml", marker = "extra == 'format-iwork'", specifier = ">=0.7.1,<0.8.0" },
+    { name = "defusedxml", marker = "extra == 'format-xml-uspto'", specifier = ">=0.7.1,<0.8.0" },
+    { name = "defusedxml", marker = "extra == 'models-local'", specifier = ">=0.7.1,<0.8.0" },
+    { name = "defusedxml", marker = "extra == 'standard'", specifier = ">=0.7.1,<0.8.0" },
+    { name = "docling-core", specifier = ">=2.98.0,<3.0.0" },
+    { name = "docling-core", extras = ["chunking"], marker = "extra == 'all'", specifier = ">=2.98.0,<3.0.0" },
+    { name = "docling-core", extras = ["chunking"], marker = "extra == 'feat-chunking'", specifier = ">=2.98.0,<3.0.0" },
+    { name = "docling-core", extras = ["chunking"], marker = "extra == 'standard'", specifier = ">=2.98.0,<3.0.0" },
+    { name = "docling-ibm-models", marker = "extra == 'all'", specifier = ">=4.0.2,<5" },
+    { name = "docling-ibm-models", marker = "extra == 'models-local'", specifier = ">=4.0.2,<5" },
+    { name = "docling-ibm-models", marker = "extra == 'standard'", specifier = ">=4.0.2,<5" },
+    { name = "docling-parse", marker = "extra == 'all'", specifier = ">=7.22.1,<8.0.0" },
+    { name = "docling-parse", marker = "extra == 'format-pdf'", specifier = ">=7.22.1,<8.0.0" },
+    { name = "docling-parse", marker = "extra == 'format-pdf-docling'", specifier = ">=7.22.1,<8.0.0" },
+    { name = "docling-parse", marker = "extra == 'standard'", specifier = ">=7.22.1,<8.0.0" },
+    { name = "easyocr", marker = "extra == 'all'", specifier = ">=1.7,<2.0" },
+    { name = "easyocr", marker = "extra == 'feat-ocr-easyocr'", specifier = ">=1.7,<2.0" },
+    { name = "einops", marker = "extra == 'all'", specifier = ">=0.8.1,<1.0.0" },
+    { name = "einops", marker = "extra == 'models-vlm-inline'", specifier = ">=0.8.1,<1.0.0" },
+    { name = "filetype", specifier = ">=1.2.0,<2.0.0" },
+    { name = "httpx", marker = "extra == 'all'", specifier = ">=0.28,<1.0.0" },
+    { name = "httpx", marker = "extra == 'service-client'", specifier = ">=0.28,<1.0.0" },
+    { name = "httpx", marker = "extra == 'standard'", specifier = ">=0.28,<1.0.0" },
+    { name = "huggingface-hub", marker = "extra == 'all'", specifier = ">=0.23,<2" },
+    { name = "huggingface-hub", marker = "extra == 'models-local'", specifier = ">=0.23,<2" },
+    { name = "huggingface-hub", marker = "extra == 'standard'", specifier = ">=0.23,<2" },
+    { name = "langcodes", specifier = ">=3.5.0,<4.0.0" },
+    { name = "librosa", marker = "extra == 'format-video'", specifier = ">=0.10.0,<1.0.0" },
+    { name = "lxml", marker = "extra == 'all'", specifier = ">=4.0.0,<7.0.0" },
+    { name = "lxml", marker = "extra == 'format-xml-jats'", specifier = ">=4.0.0,<7.0.0" },
+    { name = "mail-parser", marker = "extra == 'all'", specifier = ">=4.1.4,<5.0.0" },
+    { name = "mail-parser", marker = "extra == 'format-email'", specifier = ">=4.1.4,<5.0.0" },
+    { name = "mail-parser", marker = "extra == 'standard'", specifier = ">=4.1.4,<5.0.0" },
+    { name = "marko", marker = "extra == 'all'", specifier = ">=2.1.2,<3.0.0" },
+    { name = "marko", marker = "extra == 'format-markdown'", specifier = ">=2.1.2,<3.0.0" },
+    { name = "marko", marker = "extra == 'format-web'", specifier = ">=2.1.2,<3.0.0" },
+    { name = "marko", marker = "extra == 'standard'", specifier = ">=2.1.2,<3.0.0" },
+    { name = "mlx-vlm", marker = "python_full_version >= '3.10' and platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'all'", specifier = ">=0.7.0,<1.0.0" },
+    { name = "mlx-vlm", marker = "python_full_version >= '3.10' and platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'models-vlm-inline'", specifier = ">=0.7.0,<1.0.0" },
+    { name = "mlx-whisper", marker = "python_full_version >= '3.10' and platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'all'", specifier = ">=0.4.3" },
+    { name = "mlx-whisper", marker = "python_full_version >= '3.10' and platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'format-audio'", specifier = ">=0.4.3" },
+    { name = "mlx-whisper", marker = "python_full_version >= '3.10' and platform_machine == 'arm64' and sys_platform == 'darwin' and extra == 'format-video'", specifier = ">=0.4.3" },
+    { name = "nemotron-ocr", marker = "python_full_version == '3.12.*' and platform_machine == 'x86_64' and sys_platform == 'linux' and extra == 'feat-ocr-nemotron'", specifier = ">=2.0.0" },
+    { name = "numba", marker = "extra == 'all'", specifier = ">=0.63.0" },
+    { name = "numba", marker = "extra == 'format-audio'", specifier = ">=0.63.0" },
+    { name = "numba", marker = "extra == 'format-video'", specifier = ">=0.63.0" },
+    { name = "numpy", marker = "extra == 'all'", specifier = ">=1.24.0,<3.0.0" },
+    { name = "numpy", marker = "extra == 'convert-core'", specifier = ">=1.24.0,<3.0.0" },
+    { name = "numpy", marker = "extra == 'extract-core'", specifier = ">=1.24.0,<3.0.0" },
+    { name = "numpy", marker = "extra == 'standard'", specifier = ">=1.24.0,<3.0.0" },
+    { name = "ocrmac", marker = "sys_platform == 'darwin' and extra == 'all'", specifier = ">=1.0.0,<2.0.0" },
+    { name = "ocrmac", marker = "sys_platform == 'darwin' and extra == 'feat-ocr-mac'", specifier = ">=1.0.0,<2.0.0" },
+    { name = "odfdo", marker = "extra == 'format-opendocument'", specifier = ">=3.22.0,<4.0.0" },
+    { name = "onnxruntime", marker = "python_full_version >= '3.11' and python_full_version < '3.14' and extra == 'feat-ocr-rapidocr-onnx'", specifier = ">=1.7.0,<2.0.0" },
+    { name = "onnxruntime", marker = "python_full_version < '3.11' and extra == 'feat-ocr-rapidocr-onnx'", specifier = ">=1.7.0,<1.24" },
+    { name = "onnxruntime", marker = "python_full_version >= '3.14' and extra == 'feat-ocr-rapidocr-onnx'", specifier = ">=1.24.1,<2.0.0" },
+    { name = "onnxruntime", marker = "python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform == 'darwin' and extra == 'all'", specifier = "<2.0.0" },
+    { name = "onnxruntime", marker = "python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform == 'darwin' and extra == 'models-onnxruntime'", specifier = "<2.0.0" },
+    { name = "onnxruntime", marker = "python_full_version < '3.11' and sys_platform == 'darwin' and extra == 'all'", specifier = "<1.24" },
+    { name = "onnxruntime", marker = "python_full_version < '3.11' and sys_platform == 'darwin' and extra == 'models-onnxruntime'", specifier = "<1.24" },
+    { name = "onnxruntime", marker = "python_full_version >= '3.14' and sys_platform == 'darwin' and extra == 'all'", specifier = ">=1.24.1,<2.0.0" },
+    { name = "onnxruntime", marker = "python_full_version >= '3.14' and sys_platform == 'darwin' and extra == 'models-onnxruntime'", specifier = ">=1.24.1,<2.0.0" },
+    { name = "onnxruntime-gpu", marker = "(python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform == 'linux' and extra == 'all') or (python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform == 'win32' and extra == 'all')", specifier = "<2.0.0" },
+    { name = "onnxruntime-gpu", marker = "(python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform == 'linux' and extra == 'models-onnxruntime') or (python_full_version >= '3.11' and python_full_version < '3.14' and sys_platform == 'win32' and extra == 'models-onnxruntime')", specifier = "<2.0.0" },
+    { name = "onnxruntime-gpu", marker = "(python_full_version < '3.11' and sys_platform == 'linux' and extra == 'all') or (python_full_version < '3.11' and sys_platform == 'win32' and extra == 'all')", specifier = "<1.24" },
+    { name = "onnxruntime-gpu", marker = "(python_full_version < '3.11' and sys_platform == 'linux' and extra == 'models-onnxruntime') or (python_full_version < '3.11' and sys_platform == 'win32' and extra == 'models-onnxruntime')", specifier = "<1.24" },
+    { name = "onnxruntime-gpu", marker = "(python_full_version >= '3.14' and sys_platform == 'linux' and extra == 'all') or (python_full_version >= '3.14' and sys_platform == 'win32' and extra == 'all')", specifier = ">=1.24.1,<2.0.0" },
+    { name = "onnxruntime-gpu", marker = "(python_full_version >= '3.14' and sys_platform == 'linux' and extra == 'models-onnxruntime') or (python_full_version >= '3.14' and sys_platform == 'win32' and extra == 'models-onnxruntime')", specifier = ">=1.24.1,<2.0.0" },
+    { name = "open-clip-torch", marker = "extra == 'all'", specifier = ">=3.2.0,<4.0.0" },
+    { name = "open-clip-torch", marker = "extra == 'models-vlm-inline'", specifier = ">=3.2.0,<4.0.0" },
+    { name = "openai-whisper", marker = "extra == 'all'", specifier = ">=20250625" },
+    { name = "openai-whisper", marker = "extra == 'format-audio'", specifier = ">=20250625" },
+    { name = "openai-whisper", marker = "extra == 'format-video'", specifier = ">=20250625" },
+    { name = "openpyxl", marker = "extra == 'all'", specifier = ">=3.1.5,<4.0.0" },
+    { name = "openpyxl", marker = "extra == 'format-office'", specifier = ">=3.1.5,<4.0.0" },
+    { name = "openpyxl", marker = "extra == 'format-xlsx'", specifier = ">=3.1.5,<4.0.0" },
+    { name = "openpyxl", marker = "extra == 'standard'", specifier = ">=3.1.5,<4.0.0" },
+    { name = "pandas", marker = "extra == 'all'", specifier = ">=2.1.4,<4.0.0" },
+    { name = "pandas", marker = "extra == 'feat-ocr-tesserocr'", specifier = ">=2.1.4,<4.0.0" },
+    { name = "peft", marker = "extra == 'all'", specifier = ">=0.18.1" },
+    { name = "peft", marker = "extra == 'models-vlm-inline'", specifier = ">=0.18.1" },
+    { name = "pillow", marker = "extra == 'all'", specifier = ">=10.0.0,<13.0.0" },
+    { name = "pillow", marker = "extra == 'convert-core'", specifier = ">=10.0.0,<13.0.0" },
+    { name = "pillow", marker = "extra == 'extract-core'", specifier = ">=10.0.0,<13.0.0" },
+    { name = "pillow", marker = "extra == 'standard'", specifier = ">=10.0.0,<13.0.0" },
+    { name = "playwright", marker = "extra == 'all'", specifier = ">=1.58.0" },
+    { name = "playwright", marker = "extra == 'format-html-render'", specifier = ">=1.58.0" },
+    { name = "pluggy", specifier = ">=1.0.0,<2.0.0" },
+    { name = "polyfactory", marker = "extra == 'all'", specifier = ">=2.22.2" },
+    { name = "polyfactory", marker = "extra == 'extract-core'", specifier = ">=2.22.2" },
+    { name = "polyfactory", marker = "extra == 'standard'", specifier = ">=2.22.2" },
+    { name = "pydantic", specifier = ">=2.0.0,<3.0.0" },
+    { name = "pydantic-settings", specifier = ">=2.3.0,<3.0.0" },
+    { name = "pylatexenc", marker = "extra == 'all'", specifier = ">=2.10,<3.0" },
+    { name = "pylatexenc", marker = "extra == 'format-latex'", specifier = ">=2.10,<3.0" },
+    { name = "pylatexenc", marker = "extra == 'format-office'", specifier = ">=2.10,<3.0" },
+    { name = "pylatexenc", marker = "extra == 'format-pptx'", specifier = ">=2.10,<3.0" },
+    { name = "pylatexenc", marker = "extra == 'standard'", specifier = ">=2.10,<3.0" },
+    { name = "pypdfium2", marker = "extra == 'all'", specifier = ">=4.30.0,!=4.30.1,<6.0.0" },
+    { name = "pypdfium2", marker = "extra == 'format-pdf'", specifier = ">=4.30.0,!=4.30.1,<6.0.0" },
+    { name = "pypdfium2", marker = "extra == 'format-pdf-pypdfium2'", specifier = ">=4.30.0,!=4.30.1,<6.0.0" },
+    { name = "pypdfium2", marker = "extra == 'standard'", specifier = ">=4.30.0,!=4.30.1,<6.0.0" },
+    { name = "python-docx", marker = "extra == 'all'", specifier = ">=1.2.0,<2.0.0" },
+    { name = "python-docx", marker = "extra == 'format-docx'", specifier = ">=1.2.0,<2.0.0" },
+    { name = "python-docx", marker = "extra == 'format-office'", specifier = ">=1.2.0,<2.0.0" },
+    { name = "python-docx", marker = "extra == 'standard'", specifier = ">=1.2.0,<2.0.0" },
+    { name = "python-dotenv", marker = "extra == 'all'", specifier = "~=1.0" },
+    { name = "python-dotenv", marker = "extra == 'cli'", specifier = "~=1.0" },
+    { name = "python-dotenv", marker = "extra == 'service-client'", specifier = "~=1.0" },
+    { name = "python-dotenv", marker = "extra == 'standard'", specifier = "~=1.0" },
+    { name = "python-oxmsg", marker = "extra == 'all'", specifier = ">=0.0.2,<0.1.0" },
+    { name = "python-oxmsg", marker = "extra == 'format-email'", specifier = ">=0.0.2,<0.1.0" },
+    { name = "python-oxmsg", marker = "extra == 'standard'", specifier = ">=0.0.2,<0.1.0" },
+    { name = "python-pptx", marker = "extra == 'all'", specifier = ">=1.0.2,<2.0.0" },
+    { name = "python-pptx", marker = "extra == 'format-office'", specifier = ">=1.0.2,<2.0.0" },
+    { name = "python-pptx", marker = "extra == 'format-pptx'", specifier = ">=1.0.2,<2.0.0" },
+    { name = "python-pptx", marker = "extra == 'standard'", specifier = ">=1.0.2,<2.0.0" },
+    { name = "qwen-vl-utils", marker = "extra == 'all'", specifier = ">=0.0.11" },
+    { name = "qwen-vl-utils", marker = "extra == 'models-vlm-inline'", specifier = ">=0.0.11" },
+    { name = "rapidocr", marker = "extra == 'all'", specifier = ">=3.9.1,<4.0.0" },
+    { name = "rapidocr", marker = "extra == 'feat-ocr-rapidocr'", specifier = ">=3.9.1,<4.0.0" },
+    { name = "rapidocr", marker = "extra == 'feat-ocr-rapidocr-onnx'", specifier = ">=3.9.1,<4.0.0" },
+    { name = "rapidocr", marker = "extra == 'standard'", specifier = ">=3.9.1,<4.0.0" },
+    { name = "requests", specifier = ">=2.32.2,<3.0.0" },
+    { name = "resemblyzer", marker = "extra == 'format-video'", specifier = ">=0.1.4,<0.2.0" },
+    { name = "rich", marker = "extra == 'all'", specifier = ">=13.0.0" },
+    { name = "rich", marker = "extra == 'cli'", specifier = ">=13.0.0" },
+    { name = "rich", marker = "extra == 'service-client'", specifier = ">=13.0.0" },
+    { name = "rich", marker = "extra == 'standard'", specifier = ">=13.0.0" },
+    { name = "rtree", marker = "extra == 'all'", specifier = ">=1.3.0,<2.0.0" },
+    { name = "rtree", marker = "extra == 'convert-core'", specifier = ">=1.3.0,<2.0.0" },
+    { name = "rtree", marker = "extra == 'extract-core'", specifier = ">=1.3.0,<2.0.0" },
+    { name = "rtree", marker = "extra == 'standard'", specifier = ">=1.3.0,<2.0.0" },
+    { name = "scikit-image", marker = "extra == 'all'", specifier = ">=0.19" },
+    { name = "scikit-image", marker = "extra == 'feat-ocr-easyocr'", specifier = ">=0.19" },
+    { name = "scikit-learn", marker = "extra == 'format-video'", specifier = ">=1.3.0,<2.0.0" },
+    { name = "scipy", marker = "extra == 'all'", specifier = ">=1.6.0,<2.0.0" },
+    { name = "scipy", marker = "extra == 'convert-core'", specifier = ">=1.6.0,<2.0.0" },
+    { name = "scipy", marker = "extra == 'extract-core'", specifier = ">=1.6.0,<2.0.0" },
+    { name = "scipy", marker = "extra == 'standard'", specifier = ">=1.6.0,<2.0.0" },
+    { name = "soundfile", marker = "extra == 'format-video'", specifier = ">=0.12.1,<1.0.0" },
+    { name = "tesserocr", marker = "extra == 'all'", specifier = ">=2.7.1,<3.0.0" },
+    { name = "tesserocr", marker = "extra == 'feat-ocr-tesserocr'", specifier = ">=2.7.1,<3.0.0" },
+    { name = "timm", marker = "extra == 'all'", specifier = ">=1.0.22,<2.0.0" },
+    { name = "timm", marker = "extra == 'models-vlm-inline'", specifier = ">=1.0.22,<2.0.0" },
+    { name = "torch", marker = "extra == 'all'", specifier = ">=2.2.2,<3.0.0" },
+    { name = "torch", marker = "extra == 'models-local'", specifier = ">=2.2.2,<3.0.0" },
+    { name = "torch", marker = "extra == 'standard'", specifier = ">=2.2.2,<3.0.0" },
+    { name = "torchvision", marker = "extra == 'all'", specifier = ">=0,<1" },
+    { name = "torchvision", marker = "extra == 'models-local'", specifier = ">=0,<1" },
+    { name = "torchvision", marker = "extra == 'standard'", specifier = ">=0,<1" },
+    { name = "tqdm", specifier = ">=4.65.0,<5.0.0" },
+    { name = "transformers", marker = "sys_platform == 'darwin' and extra == 'all'", specifier = ">=4.42.0,!=5.0.*,!=5.1.*,!=5.2.*,!=5.3.*,!=5.9.*,!=5.10.*,!=5.11.*,!=5.12.*,!=5.13.*,!=5.14.*,!=5.15.*,<6.0.0" },
+    { name = "transformers", marker = "sys_platform == 'darwin' and extra == 'models-vlm-inline'", specifier = ">=4.42.0,!=5.0.*,!=5.1.*,!=5.2.*,!=5.3.*,!=5.9.*,!=5.10.*,!=5.11.*,!=5.12.*,!=5.13.*,!=5.14.*,!=5.15.*,<6.0.0" },
+    { name = "transformers", marker = "sys_platform != 'darwin' and extra == 'all'", specifier = ">=4.42.0,!=5.0.*,!=5.1.*,!=5.2.*,!=5.3.*,!=5.13.0,<6.0.0" },
+    { name = "transformers", marker = "sys_platform != 'darwin' and extra == 'models-vlm-inline'", specifier = ">=4.42.0,!=5.0.*,!=5.1.*,!=5.2.*,!=5.3.*,!=5.13.0,<6.0.0" },
+    { name = "tritonclient", extras = ["grpc"], marker = "extra == 'all'", specifier = ">=2.65.0,<3.0.0" },
+    { name = "tritonclient", extras = ["grpc"], marker = "extra == 'models-remote'", specifier = ">=2.65.0,<3.0.0" },
+    { name = "typer", marker = "extra == 'all'", specifier = ">=0.19.0,<0.27.0" },
+    { name = "typer", marker = "extra == 'cli'", specifier = ">=0.19.0,<0.27.0" },
+    { name = "typer", marker = "extra == 'service-client'", specifier = ">=0.19.0,<0.27.0" },
+    { name = "typer", marker = "extra == 'standard'", specifier = ">=0.19.0,<0.27.0" },
+    { name = "websockets", marker = "extra == 'all'", specifier = ">=14.0,<17.0" },
+    { name = "websockets", marker = "extra == 'service-client'", specifier = ">=14.0,<17.0" },
+    { name = "websockets", marker = "extra == 'standard'", specifier = ">=14.0,<17.0" },
+    { name = "whisper-s2t-reborn", marker = "(platform_machine != 'arm64' and extra == 'all') or (sys_platform != 'darwin' and extra == 'all')", specifier = ">=1.7.1,<2.0.0" },
+    { name = "whisper-s2t-reborn", marker = "(platform_machine != 'arm64' and extra == 'format-audio') or (sys_platform != 'darwin' and extra == 'format-audio')", specifier = ">=1.7.1,<2.0.0" },
+    { name = "whisper-s2t-reborn", marker = "(platform_machine != 'arm64' and extra == 'format-video') or (sys_platform != 'darwin' and extra == 'format-video')", specifier = ">=1.7.1,<2.0.0" },
+]
+provides-extras = ["all", "cli", "convert-core", "extract-core", "feat-chunking", "feat-ocr-easyocr", "feat-ocr-mac", "feat-ocr-nemotron", "feat-ocr-rapidocr", "feat-ocr-rapidocr-onnx", "feat-ocr-tesserocr", "format-audio", "format-docx", "format-email", "format-html", "format-html-render", "format-iwork", "format-latex", "format-markdown", "format-office", "format-opendocument", "format-pdf", "format-pdf-docling", "format-pdf-pypdfium2", "format-pptx", "format-video", "format-web", "format-xlsx", "format-xml-jats", "format-xml-uspto", "format-xml-xbrl", "models-local", "models-onnxruntime", "models-remote", "models-vlm-inline", "service-client", "standard"]
 
 [[package]]
 name = "docstring-parser"
@@ -6075,33 +6263,6 @@ wheels = [
 ]
 
 [[package]]
-name = "pdfminer-six"
-version = "20260107"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "charset-normalizer" },
-    { name = "cryptography" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/34/a4/5cec1112009f0439a5ca6afa8ace321f0ab2f48da3255b7a1c8953014670/pdfminer_six-20260107.tar.gz", hash = "sha256:96bfd431e3577a55a0efd25676968ca4ce8fd5b53f14565f85716ff363889602", size = 8512094, upload-time = "2026-01-07T13:29:12.937Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/20/8b/28c4eaec9d6b036a52cb44720408f26b1a143ca9bce76cc19e8f5de00ab4/pdfminer_six-20260107-py3-none-any.whl", hash = "sha256:366585ba97e80dffa8f00cebe303d2f381884d8637af4ce422f1df3ef38111a9", size = 6592252, upload-time = "2026-01-07T13:29:10.742Z" },
-]
-
-[[package]]
-name = "pdfplumber"
-version = "0.11.10"
-source = { registry = "https://pypi.org/simple" }
-dependencies = [
-    { name = "pdfminer-six" },
-    { name = "pillow" },
-    { name = "pypdfium2" },
-]
-sdist = { url = "https://files.pythonhosted.org/packages/05/56/6f450312ba05a27d7713b73857c1a25100dbda04fbc1331b13fb227a607d/pdfplumber-0.11.10.tar.gz", hash = "sha256:b95b2d28c66efb0a794a83b88c6c6aea5987532a445d20a1cbcfa657022e6e57", size = 102892, upload-time = "2026-06-15T03:31:31.035Z" }
-wheels = [
-    { url = "https://files.pythonhosted.org/packages/a2/9a/07d658e1e7fad860f1c541ab941348125dbdab773be3a0afaf32361866c7/pdfplumber-0.11.10-py3-none-any.whl", hash = "sha256:7741ea81bf165b474b153e6789d10d18e06b6ddcf3ec84289c3ef2fed6802580", size = 60047, upload-time = "2026-06-15T03:31:29.702Z" },
-]
-
-[[package]]
 name = "pexpect"
 version = "4.9.0"
 source = { registry = "https://pypi.org/simple" }
@@ -7041,6 +7202,23 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/bb/27/2707d1dba764495f3d54ae75a28e07f9e6090da224598df3551153ce07f2/pymilvus-3.0.2.tar.gz", hash = "sha256:607ac1bcc96719c1716e0027d4a59c6411ad783fb934cbe0618b6d6c0831550d", size = 376724, upload-time = "2026-09-18T08:54:14.014Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/88/76/7155ce419d3a4525571b27e317c80b2f69b874ce75bdecfb9ffe3fe3b6ab/pymilvus-3.0.2-py3-none-any.whl", hash = "sha256:0ec7ca3a7d24d2ce13b2610c577f0978b08f461176222ea4dc1440375efc1cea", size = 417694, upload-time = "2026-09-18T08:54:12.848Z" },
+]
+
+[[package]]
+name = "pymupdf"
+version = "1.28.2"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/a3/fb/b6761fa2d5266f2cdb24c3b91f4023070ab7848381417678e7a289a1d52a/pymupdf-1.28.2.tar.gz", hash = "sha256:5e0be7908a715aa20333caddd73f1d6f01e4cd0c26e869fa2dd0b7f344da2249", size = 87903557, upload-time = "2026-08-06T21:43:23.321Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/b4/51/550c9a75c4ff3245cb4ecb7bb95cbe2ab7374230b8e2b7a1f7259444150b/pymupdf-1.28.2-cp310-abi3-macosx_10_15_x86_64.whl", hash = "sha256:5fc315b425ff1f7afdd1ea2f348205cb19b806767daae7ce4d64115799c2bae1", size = 24645079, upload-time = "2026-08-06T21:37:25.001Z" },
+    { url = "https://files.pythonhosted.org/packages/fa/01/3591f781b417b382a8487a2356e927acfe858b1043bab0ec47f6805bb109/pymupdf-1.28.2-cp310-abi3-macosx_11_0_arm64.whl", hash = "sha256:7113846b35dbf0a033f088e4f4fb543dabeb4b0b12c112966a1ca1ee2d5eacae", size = 23875605, upload-time = "2026-08-06T21:37:40.369Z" },
+    { url = "https://files.pythonhosted.org/packages/d2/86/4a68f080b71b46802178346af46486e1697508e760855ff5f3b218a6dff7/pymupdf-1.28.2-cp310-abi3-manylinux_2_28_aarch64.whl", hash = "sha256:3050a233dde1211efe89ada74e2add6238436434159f46097a1423aad2842545", size = 25095554, upload-time = "2026-08-06T21:37:58.485Z" },
+    { url = "https://files.pythonhosted.org/packages/c7/06/dace3e27af26690cb20bead80dbac42941b0841eb689b8aabbd67dde16f0/pymupdf-1.28.2-cp310-abi3-manylinux_2_28_x86_64.whl", hash = "sha256:397d6715c1f0df7548a92d0afd8ce370fc48fa47aeefac16be2bc04a16a8227f", size = 25762500, upload-time = "2026-08-06T21:38:17.438Z" },
+    { url = "https://files.pythonhosted.org/packages/e5/61/4146dfa1d8172a1ce8d59f0eed94896ddefb8deb2274534d0522fbb8abf5/pymupdf-1.28.2-cp310-abi3-musllinux_1_2_x86_64.whl", hash = "sha256:f89fb2d86d07d643a269f17a093105057e20c79c1d06c103b53600067b6d2b01", size = 25986309, upload-time = "2026-08-06T21:38:35.472Z" },
+    { url = "https://files.pythonhosted.org/packages/52/60/1fb6e64676f7500ebe89054b9e5bbbe14d3101c92d5f1a40ac9a35227673/pymupdf-1.28.2-cp310-abi3-win32.whl", hash = "sha256:530ef543a3885b3b81cb72a854e7c5a625a9233201221132bb6c31698c6a2bdb", size = 18525353, upload-time = "2026-08-06T21:38:47.697Z" },
+    { url = "https://files.pythonhosted.org/packages/4a/61/d563bbccba262f9dd6d2d35ccb72593648184d886188efb12d9ce8f34dd6/pymupdf-1.28.2-cp310-abi3-win_amd64.whl", hash = "sha256:ebd244918798502d7b4504c90410d1711a4d7675a32584ca30f1bab419ecbffe", size = 19826532, upload-time = "2026-08-06T21:39:00.213Z" },
+    { url = "https://files.pythonhosted.org/packages/e2/93/08f404a1f0155fe24137cf2d3aabd3e2b4b08c62053ed89c60f2611be3e9/pymupdf-1.28.2-cp310-abi3-win_arm64.whl", hash = "sha256:ffe91a24edc75c80da2a4b62f50fc0f54632d34fc8fe4cbc48e5c7ff07cf8fb4", size = 19759252, upload-time = "2026-08-06T21:39:12.937Z" },
+    { url = "https://files.pythonhosted.org/packages/58/8c/d897dcd32a25b58186c968b15ce4324ca029e9d96460de12325314e390be/pymupdf-1.28.2-cp313-abi3-pyemscripten_2025_0_wasm32.whl", hash = "sha256:2e1b574c0fd2cb238021033fd3c0f9c4388816638df064e4bfb56d9d81736dc8", size = 18399403, upload-time = "2026-08-06T21:39:25.008Z" },
 ]
 
 [[package]]
@@ -8379,6 +8557,7 @@ all = [
     { name = "d3blocks" },
     { name = "defusedxml" },
     { name = "docling" },
+    { name = "docling-slim" },
     { name = "faiss-cpu" },
     { name = "falkordb" },
     { name = "fastapi" },
@@ -8412,7 +8591,6 @@ all = [
     { name = "opentelemetry-instrumentation" },
     { name = "opentelemetry-sdk" },
     { name = "opentelemetry-semantic-conventions" },
-    { name = "pdfplumber" },
     { name = "pgvector" },
     { name = "pika" },
     { name = "pinecone" },
@@ -8423,6 +8601,7 @@ all = [
     { name = "pulsar-client" },
     { name = "pyarrow" },
     { name = "pymilvus" },
+    { name = "pymupdf" },
     { name = "pyoxigraph" },
     { name = "pyshacl" },
     { name = "python-docx" },
@@ -8647,19 +8826,21 @@ open-ontologies = [
 ]
 parse-docling = [
     { name = "docling" },
+    { name = "docling-slim" },
 ]
 parse-pdf = [
-    { name = "pdfplumber" },
+    { name = "pymupdf" },
 ]
 semantic-worker = [
     { name = "beautifulsoup4" },
     { name = "blake3" },
     { name = "docling" },
+    { name = "docling-slim" },
     { name = "lxml" },
     { name = "onnxruntime", version = "1.23.2", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "onnxruntime", version = "1.30.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
     { name = "openpyxl" },
-    { name = "pdfplumber" },
+    { name = "pymupdf" },
     { name = "python-docx" },
 ]
 shacl = [
@@ -8766,8 +8947,10 @@ requires-dist = [
     { name = "databricks-sdk", marker = "extra == 'db-databricks'", specifier = ">=0.60.0" },
     { name = "databricks-sql-connector", marker = "extra == 'db-databricks'", specifier = ">=4.0.0" },
     { name = "defusedxml", marker = "extra == 'explorer'", specifier = ">=0.7.1" },
-    { name = "docling", marker = "python_full_version >= '3.10' and extra == 'semantic-worker'", specifier = ">=2.132.0" },
-    { name = "docling", marker = "extra == 'parse-docling'", specifier = ">=2.132.0" },
+    { name = "docling", marker = "python_full_version >= '3.10' and extra == 'semantic-worker'", specifier = "==2.139.0" },
+    { name = "docling", marker = "extra == 'parse-docling'", specifier = "==2.139.0" },
+    { name = "docling-slim", marker = "python_full_version >= '3.10' and extra == 'semantic-worker'", url = "https://github.com/doncat99/docling/releases/download/ontoscience-docling-2.139.0.2/docling_slim-2.139.0+ontoscience.2-py3-none-any.whl" },
+    { name = "docling-slim", marker = "extra == 'parse-docling'", url = "https://github.com/doncat99/docling/releases/download/ontoscience-docling-2.139.0.2/docling_slim-2.139.0+ontoscience.2-py3-none-any.whl" },
     { name = "faiss-cpu", marker = "extra == 'vectorstore-faiss'", specifier = ">=1.7.0" },
     { name = "faiss-gpu", marker = "extra == 'gpu'", specifier = ">=1.7.0" },
     { name = "falkordb", marker = "extra == 'graph-falkordb'", specifier = ">=1.0.0" },
@@ -8816,8 +8999,6 @@ requires-dist = [
     { name = "opentelemetry-sdk", marker = "extra == 'monitoring'", specifier = ">=1.30.0,<2.0.0" },
     { name = "opentelemetry-semantic-conventions", marker = "extra == 'monitoring'", specifier = ">=0.58b0,<0.65" },
     { name = "pandas", specifier = ">=1.3.0" },
-    { name = "pdfplumber", marker = "extra == 'parse-pdf'", specifier = ">=0.10.0" },
-    { name = "pdfplumber", marker = "extra == 'semantic-worker'", specifier = ">=0.10.0" },
     { name = "pgvector", marker = "extra == 'vectorstore-pgvector'", specifier = ">=0.2.0" },
     { name = "pika", marker = "extra == 'infra'", specifier = ">=1.3.0" },
     { name = "pillow", specifier = ">=12.2.0" },
@@ -8834,6 +9015,8 @@ requires-dist = [
     { name = "pyarrow", marker = "extra == 'ingest-parquet'", specifier = ">=24.0.0" },
     { name = "pydantic", specifier = ">=2.13.4" },
     { name = "pymilvus", marker = "extra == 'vectorstore-milvus'", specifier = ">=2.0.0" },
+    { name = "pymupdf", marker = "extra == 'parse-pdf'", specifier = ">=1.28.2,<1.29" },
+    { name = "pymupdf", marker = "extra == 'semantic-worker'", specifier = ">=1.28.2,<1.29" },
     { name = "pyoxigraph", marker = "extra == 'tripletstore-oxigraph'", specifier = ">=0.5.0" },
     { name = "pyshacl", marker = "extra == 'shacl'", specifier = ">=0.25.0" },
     { name = "python-docx", marker = "extra == 'documents'", specifier = ">=1.2.0" },
