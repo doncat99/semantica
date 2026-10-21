@@ -15,10 +15,8 @@ from typing import Any, Callable, Dict, Optional, TextIO
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .semantic_artifact_builder import (
-    SemanticArtifactError, _explanation_reports, _report_support_sources, explain_evidence,
-    bind_parsed_source_artifact, build_semantic_artifacts, parse_source_artifact,
-)
+from .semantic_artifact_errors import SemanticArtifactError
+from .semantic_source_artifact import bind_parsed_source_artifact, parse_source_artifact
 from .semantic_artifact_schema import (
     ParseSourceRequest,
     SemanticArtifact,
@@ -83,6 +81,8 @@ def _verified_snapshot(request: ReadingReportsRequest) -> SemanticArtifact:
 
 
 def _explain_evidence(params: Dict[str, Any], progress: Optional[Callable[[Dict[str, Any]], None]]) -> Dict[str, Any]:
+    from .semantic_artifact_builder import explain_evidence
+
     request = EvidenceExplanationRequest.model_validate(params)
     if set(request.target) != {"id", "type", "title"} or not all(request.target.values()):
         raise SemanticArtifactError("explanation target requires id, type and title")
@@ -108,6 +108,8 @@ def _explain_evidence(params: Dict[str, Any], progress: Optional[Callable[[Dict[
 
 
 def _reading_reports(params: Dict[str, Any], progress: Optional[Callable[[Dict[str, Any]], None]]) -> Dict[str, Any]:
+    from .semantic_artifact_builder import _explanation_reports, _report_support_sources
+
     request = ReadingReportsRequest.model_validate(params)
     snapshot = _verified_snapshot(request)
     if progress:
@@ -185,6 +187,17 @@ def _response(request_id: Optional[str], ok: bool, *, result: Optional[Dict[str,
 
 def handle_request(raw: Dict[str, Any], progress: Optional[Callable[[Dict[str, Any]], None]] = None) -> Dict[str, Any]:
     request = WorkerRequest.model_validate(raw)
+    from .semantic_worker_context import document_processing_authorization, worker_authorization
+    token = worker_authorization.set(request.authorization)
+    document_token = document_processing_authorization.set(request.document_processing_authorization)
+    try:
+        return _dispatch(request, progress)
+    finally:
+        document_processing_authorization.reset(document_token)
+        worker_authorization.reset(token)
+
+
+def _dispatch(request: WorkerRequest, progress: Optional[Callable[[Dict[str, Any]], None]]) -> Dict[str, Any]:
     if request.method == "schema":
         return _response(request.id, True, result={"semantic_graph": semantic_artifact_json_schema(),
                                                     "build_request": build_request_json_schema()})
@@ -205,6 +218,8 @@ def handle_request(raw: Dict[str, Any], progress: Optional[Callable[[Dict[str, A
     if request.method != METHOD:
         raise ValueError(f"unsupported semantic worker method: {request.method}")
     build_request = SemanticArtifactBuildRequest.model_validate(request.params)
+    from .semantic_artifact_builder import build_semantic_artifacts
+
     built = build_semantic_artifacts(build_request, progress=progress, persist_snapshot=False)
     snapshot: SemanticArtifact = built["snapshot"]
     artifacts = [{

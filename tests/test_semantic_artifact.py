@@ -166,7 +166,8 @@ def test_semantic_worker_explains_verified_graph_and_returns_digest_and_receipt(
         seen.append((snapshot.id, target, evidence_ids, relay.model_id))
         return [ReportSection(title="Meaning", text="Grounded explanation.", evidence_ids=["ev-1"])], [receipt]
 
-    monkeypatch.setattr(semantic_worker, "explain_evidence", explain)
+    from semantica import semantic_artifact_builder
+    monkeypatch.setattr(semantic_artifact_builder, "explain_evidence", explain)
     params = {"snapshotPath": str(path), "snapshotDigest": digest, "snapshotId": "snapshot:one",
               "projectId": "project-1", "outputDir": str(tmp_path),
               "target": {"id": "section:1", "type": "source-scope", "title": "First section"},

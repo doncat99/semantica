@@ -2,6 +2,7 @@ import pytest
 from types import SimpleNamespace
 
 from semantica import semantic_artifact_builder as pipeline
+from semantica import semantic_source_artifact as source_artifact
 from semantica.source import source_content_revision
 from semantica.semantic_artifact_schema import SourceBuildInput, stable_digest
 from tests.test_semantic_artifact_long_context import _stub_canonical_extraction, receipt
@@ -90,11 +91,11 @@ def test_source_retry_restores_entities_and_receipts_before_retrying_relations(t
         materialRevision=source_content_revision(path), name=path.name, mimeType='text/plain')
     calls = []
     parses = []
-    original_parse = pipeline.parse_source
+    original_parse = source_artifact.parse_source
     def counted_parse(*args, **kwargs):
         parses.append(True)
         return original_parse(*args, **kwargs)
-    monkeypatch.setattr(pipeline, 'parse_source', counted_parse)
+    monkeypatch.setattr(source_artifact, 'parse_source', counted_parse)
 
     class Provider:
         def __init__(self, fail=False):

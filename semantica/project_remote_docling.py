@@ -4,7 +4,6 @@ from __future__ import annotations
 import base64
 from hashlib import sha256
 import json
-import os
 import math
 from pathlib import Path
 from time import monotonic
@@ -14,6 +13,7 @@ from urllib.parse import quote, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .project_checkpoint import active_checkpoint
+from .semantic_worker_context import document_processing_token
 
 
 class RemoteDoclingError(ValueError):
@@ -35,8 +35,8 @@ def parse_remote_docling(path: Path, *, name: str, force_ocr: bool, profile: dic
     parsed = urlsplit(endpoint)
     if parsed.scheme not in {"http", "https"} or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
         raise RemoteDoclingError("remote Docling endpoint must be an absolute HTTP(S) URL without credentials, query or fragment")
-    token = os.environ.get(profile.get("authorizationEnv", ""))
-    if token is None:
+    token = document_processing_token()
+    if not token:
         raise RemoteDoclingError("remote Docling credential is unavailable")
     checkpoint = active_checkpoint.get()
     if checkpoint is None:

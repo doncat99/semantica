@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -20,7 +21,7 @@ def test_worker_rejects_changed_bytes_before_parsing(tmp_path, monkeypatch):
     revision = source_content_revision(source)
     request = SourceBuildInput(filePath=str(source), sourceId="s1", materialRevision=revision, name=source.name, mimeType="text/plain")
     source.write_bytes(b"changed")
-    monkeypatch.setattr("semantica.semantic_artifact_builder.parse_source", lambda *args, **kwargs: pytest.fail("changed source reached parser"))
+    monkeypatch.setattr("semantica.semantic_source_artifact.parse_source", lambda *args, **kwargs: pytest.fail("changed source reached parser"))
     with pytest.raises(SemanticArtifactError, match="material revision"):
         _parse_source(request, False)
 
@@ -98,7 +99,7 @@ def test_docling_enables_ocr_only_for_explicit_repair(tmp_path: Path, monkeypatc
                 "plain_text": "Native text",
             }
 
-    monkeypatch.setattr(docling_parser, "DoclingParser", FakeDoclingParser)
+    monkeypatch.setattr(docling_parser.DoclingParser, "lease", lambda **kwargs: nullcontext(FakeDoclingParser(**kwargs)))
     parse_source(source, name=source.name, mime_type="application/pdf", force_ocr=force_ocr)
 
     assert options["enable_ocr"] is force_ocr
@@ -125,7 +126,7 @@ def test_docling_accepts_exported_text_with_adapter_origin(tmp_path: Path, monke
                 "plain_text": "Native text retained by the assembled document.",
             }
 
-    monkeypatch.setattr(docling_parser, "DoclingParser", FakeDoclingParser)
+    monkeypatch.setattr(docling_parser.DoclingParser, "lease", lambda **kwargs: nullcontext(FakeDoclingParser(**kwargs)))
     parsed = parse_source(source, name=source.name, mime_type="application/pdf", force_ocr=False)
     assert parsed.text.startswith("Native text")
     assert parsed.origin == "native"
@@ -144,7 +145,7 @@ def test_empty_docling_text_is_classified_as_quality_repair(tmp_path: Path, monk
         def parse(self, *_args, **_kwargs):
             return {"conversion_status": "success", "document": {}, "metadata": {}, "pages": [], "plain_text": ""}
 
-    monkeypatch.setattr(docling_parser, "DoclingParser", FakeDoclingParser)
+    monkeypatch.setattr(docling_parser.DoclingParser, "lease", lambda **kwargs: nullcontext(FakeDoclingParser(**kwargs)))
     with pytest.raises(SourceQualityError, match="no usable text"):
         parse_source(source, name=source.name, mime_type="application/pdf", force_ocr=False)
 

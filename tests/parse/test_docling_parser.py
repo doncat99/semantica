@@ -1,10 +1,73 @@
 import unittest
+import gc
+import weakref
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 from pathlib import Path
 from semantica.parse.docling_parser import DoclingParser, DoclingMetadata
 
 class TestDoclingParser(unittest.TestCase):
+    def test_source_conversions_share_converter_without_retaining_document_results(self):
+        from docling_core.types.doc import DoclingDocument, DocItemLabel
+        from semantica.source import parse_source
+
+        class Result:
+            pass
+
+        references = []
+        def convert(path):
+            document = DoclingDocument(name=Path(path).name)
+            document.add_text(label=DocItemLabel.TEXT, text=Path(path).name)
+            result = Result()
+            result.document, result.status, result.pages = document, "success", []
+            references.append(weakref.ref(result))
+            return result
+
+        self.mock_converter.convert.side_effect = convert
+        with patch.object(Path, 'exists', return_value=True):
+            first = parse_source(Path("first.pdf"), name="first.pdf", mime_type="application/pdf", force_ocr=False)
+            second = parse_source(Path("second.pdf"), name="second.pdf", mime_type="application/pdf", force_ocr=False)
+        self.mock_converter_cls.assert_called_once()
+        self.assertEqual(self.mock_converter.convert.call_count, 2)
+        self.assertEqual(first.text, "first.pdf")
+        self.assertEqual(second.text, "second.pdf")
+        gc.collect()
+        self.assertTrue(all(reference() is None for reference in references))
+
+    def test_source_failure_discards_converter_before_next_conversion(self):
+        from docling_core.types.doc import DoclingDocument, DocItemLabel
+        from semantica.source import parse_source
+        from semantica.utils.exceptions import ProcessingError
+
+        document = DoclingDocument(name="recovered")
+        document.add_text(label=DocItemLabel.TEXT, text="Recovered content")
+        self.mock_converter.convert.side_effect = [RuntimeError("broken pipeline"), SimpleNamespace(
+            document=document, status="success", pages=[])]
+        with patch.object(Path, 'exists', return_value=True):
+            with self.assertRaisesRegex(ProcessingError, "broken pipeline"):
+                parse_source(Path("broken.pdf"), name="broken.pdf", mime_type="application/pdf", force_ocr=False)
+            result = parse_source(Path("recovered.pdf"), name="recovered.pdf", mime_type="application/pdf", force_ocr=False)
+        self.assertEqual(self.mock_converter_cls.call_count, 2)
+        self.assertEqual(result.text, "Recovered content")
+
+    def test_source_ocr_change_replaces_converter_configuration(self):
+        from docling_core.types.doc import DoclingDocument, DocItemLabel
+        from docling.datamodel.base_models import InputFormat
+        from semantica.source import parse_source
+
+        document = DoclingDocument(name="ocr")
+        document.add_text(label=DocItemLabel.TEXT, text="Content")
+        self.mock_converter.convert.return_value = SimpleNamespace(document=document, status="success", pages=[
+            SimpleNamespace(cells=[SimpleNamespace(text="Content", from_ocr=True)])])
+        with patch.object(Path, 'exists', return_value=True):
+            for force in [False, True]:
+                parse_source(Path("source.pdf"), name="source.pdf", mime_type="application/pdf", force_ocr=force)
+        self.assertEqual(self.mock_converter_cls.call_count, 2)
+        options = [call.kwargs["format_options"][InputFormat.PDF].pipeline_options
+                   for call in self.mock_converter_cls.call_args_list]
+        self.assertFalse(options[0].do_ocr)
+        self.assertTrue(options[1].do_ocr)
+
     def test_explicit_formula_enrichment_reaches_docling_pipeline(self):
         with patch.object(Path, 'exists', return_value=True):
             DoclingParser(do_formula_enrichment=True, do_code_enrichment=True).parse('fixture.pdf')
@@ -133,6 +196,7 @@ class TestDoclingParser(unittest.TestCase):
         document.export_to_doctags.assert_called_once_with()
 
     def setUp(self):
+        DoclingParser.clear_shared()
         # Patch DOCLING_AVAILABLE to True for testing logic
         self.available_patcher = patch('semantica.parse.docling_parser.DOCLING_AVAILABLE', True)
         self.available_patcher.start()
@@ -144,6 +208,7 @@ class TestDoclingParser(unittest.TestCase):
         self.parser = DoclingParser()
 
     def tearDown(self):
+        DoclingParser.clear_shared()
         patch.stopall()
 
     def test_parse_returns_dict(self):

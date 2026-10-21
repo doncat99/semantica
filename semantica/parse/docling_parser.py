@@ -33,8 +33,11 @@ License: MIT
 """
 
 import time
+import json
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from threading import Lock
 from typing import Any, Dict, List, Optional, Union
 
 from ..utils.exceptions import ProcessingError, ValidationError
@@ -80,6 +83,40 @@ class DoclingMetadata:
 
 class DoclingParser:
     """Docling-based document parser for enhanced table extraction."""
+
+    _shared_lock = Lock()
+    _shared = None
+
+    @classmethod
+    @contextmanager
+    def lease(cls, **config):
+        """Reuse one configured parser per process, never concurrently.
+
+        Keep only the latest configuration so changing OCR/model options cannot
+        retain several heavyweight pipelines. Conversion results remain local to
+        parse(), not the lease. Injected converters keep their explicit owner.
+        """
+        if "converter" in config:
+            raise ValueError("injected converters cannot use the shared parser")
+        if config.get("artifacts_path"):
+            config["artifacts_path"] = str(Path(config["artifacts_path"]).resolve())
+        configuration = json.dumps(config, sort_keys=True, separators=(",", ":"))
+        with cls._shared_lock:
+            if cls._shared is None or cls._shared[0] != configuration:
+                cls._shared = None
+                cls._shared = (configuration, cls(**json.loads(configuration)))
+            try:
+                yield cls._shared[1]
+            except BaseException:
+                # A failed pipeline may hold invalid native state; recreate it.
+                cls._shared = None
+                raise
+
+    @classmethod
+    def clear_shared(cls):
+        """Release the idle pipeline; wait for a current conversion to finish."""
+        with cls._shared_lock:
+            cls._shared = None
 
     def __init__(self, **config):
         """

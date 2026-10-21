@@ -87,7 +87,8 @@ def test_failed_quality_is_materialized_but_never_enters_knowledge_extraction(tm
         calls.append(kwargs["force_ocr"])
         return SourceDocument("Broken \ufffd\ufffd text", {"format": "docling"}, "native", "docling", "2")
 
-    monkeypatch.setattr(pipeline, "parse_source", parse)
+    from semantica import semantic_source_artifact
+    monkeypatch.setattr(semantic_source_artifact, "parse_source", parse)
     monkeypatch.setattr(pipeline, "_build_source", lambda *args, **kwargs: pytest.fail("failed quality reached extraction"))
     token = active_checkpoint.set(Checkpoint())
     try:
@@ -117,6 +118,7 @@ def test_empty_docling_source_enters_quality_repair_path(tmp_path, monkeypatch):
     def parse(*_args, **_kwargs):
         raise SourceQualityError("Docling conversion produced no usable text")
 
-    monkeypatch.setattr(pipeline, "parse_source", parse)
+    from semantica import semantic_source_artifact
+    monkeypatch.setattr(semantic_source_artifact, "parse_source", parse)
     with pytest.raises(DocumentQualityError, match="no usable text"):
         parse_source_artifact(parse_request)

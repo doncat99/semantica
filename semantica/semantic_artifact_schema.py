@@ -748,13 +748,12 @@ class DocumentProcessingProfile(StrictModel):
     mode: Literal["disabled", "native", "local", "remote"] = "local"
     endpoint: Optional[str] = None
     binding_id: Optional[str] = Field(default=None, alias="bindingId")
-    authorization_env: Optional[str] = Field(default=None, alias="authorizationEnv")
     remote_cancellation: Literal["unsupported"] = Field(default="unsupported", alias="remoteCancellation")
 
     @model_validator(mode="after")
     def validate_remote(self) -> "DocumentProcessingProfile":
-        if self.mode == "remote" and (not self.endpoint or not self.binding_id or not self.authorization_env):
-            raise ValueError("remote document processing requires endpoint, bindingId and authorizationEnv")
+        if self.mode == "remote" and (not self.endpoint or not self.binding_id):
+            raise ValueError("remote document processing requires endpoint and bindingId")
         return self
 
 
@@ -844,10 +843,30 @@ class BindParsedSourceRequest(ParseSourceRequest):
 
 
 class WorkerRequest(StrictModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True, hide_input_in_errors=True)
     protocol: Literal[WORKER_PROTOCOL] = WORKER_PROTOCOL
     id: str
     method: Literal["parse_source", "bind_parsed_source", "build_semantic_artifacts", "validate_artifact", "validate_extraction_spec", "schema", "generate_reading_reports", "explain_evidence"]
     params: Dict[str, Any] = Field(default_factory=dict)
+    authorization: Optional[Dict[str, str]] = Field(default=None, repr=False, exclude=True)
+    document_processing_authorization: Optional[str] = Field(default=None, alias="documentProcessingAuthorization", repr=False, exclude=True)
+
+    @field_validator("authorization", mode="after")
+    @classmethod
+    def validate_authorization(cls, value: Optional[Dict[str, str]]) -> Optional[Dict[str, str]]:
+        if value is None:
+            return None
+        for name, token in value.items():
+            if not ENV_VAR_RE.fullmatch(name) or len(token) > 16384 or any(char in token for char in "\r\n\0"):
+                raise ValueError("authorization contains an invalid environment name or credential")
+        return value
+
+    @field_validator("document_processing_authorization", mode="after")
+    @classmethod
+    def validate_document_processing_authorization(cls, value: Optional[str]) -> Optional[str]:
+        if value is not None and (len(value) > 16384 or any(char in value for char in "\r\n\0")):
+            raise ValueError("document processing authorization is invalid")
+        return value
 
 
 class WorkerError(StrictModel):
