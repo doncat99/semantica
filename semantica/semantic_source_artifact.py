@@ -45,7 +45,7 @@ def _parse_source(source: Any, force_ocr: bool, document_processing: dict | None
     cached = checkpoint.read("document", cache_key) if checkpoint else None
     if cached is not None:
         if admit_quality:
-            _admit_document_quality(source.source_id, cached[1], force_ocr)
+            _admit_document_quality(cached[1], force_ocr)
         return tuple(cached)
     try:
         parsed = parse_source(
@@ -65,7 +65,7 @@ def _parse_source(source: Any, force_ocr: bool, document_processing: dict | None
     if checkpoint:
         checkpoint.write("document", cache_key, result)
     if admit_quality:
-        _admit_document_quality(source.source_id, document, force_ocr)
+        _admit_document_quality(document, force_ocr)
     return result
 
 
@@ -166,7 +166,7 @@ def bind_parsed_source_artifact(request: BindParsedSourceRequest) -> dict[str, s
     rebound_document["representation_revision"] = _representation_revision(
         source, request.force_ocr, source.material_revision, parser, version, origin, rebound_document)
     rebound = {**payload, "sourceId": source.source_id, "name": source.name, "document": rebound_document}
-    _admit_document_quality(source.source_id, rebound_document, request.force_ocr)
+    _admit_document_quality(rebound_document, request.force_ocr)
     return _write_parsed_source_artifact(request, rebound)
 
 
@@ -196,5 +196,5 @@ def _load_parsed_source(source: Any, ref: ParsedSourceRef, force_ocr: bool, prof
     if (document.get("content_hash") != source.material_revision or document.get("mime_type") != source.mime_type
         or document.get("representation_revision") != _representation_revision(source, force_ocr, source.material_revision, parser, version, origin, document)):
         raise SemanticArtifactError(f"parsed source representation revision changed: {source.source_id}")
-    _admit_document_quality(source.source_id, document, force_ocr)
+    _admit_document_quality(document, force_ocr)
     return document["text"], document, origin, source.material_revision, parser, version
