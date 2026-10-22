@@ -5,9 +5,32 @@ import argparse
 import hashlib
 import json
 import os
+import platform
 from pathlib import Path
 import shutil
 import subprocess
+
+
+def acceleration_inventory() -> dict:
+    """Report installed capabilities, never claim that a provider executed work."""
+    import onnxruntime
+    import torch
+
+    return {
+        "platform": platform.system(),
+        "machine": platform.machine(),
+        "torch": {
+            "version": torch.__version__,
+            "cudaBuild": torch.version.cuda,
+            "cudaAvailable": torch.cuda.is_available(),
+            "cudaDeviceCount": torch.cuda.device_count(),
+            "mpsAvailable": torch.backends.mps.is_available(),
+        },
+        "onnxruntime": {
+            "version": onnxruntime.__version__,
+            "availableProviders": onnxruntime.get_available_providers(),
+        },
+    }
 
 
 def digest_file(path: Path) -> str:

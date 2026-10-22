@@ -1,4 +1,6 @@
 from pathlib import Path
+from types import SimpleNamespace
+import sys
 
 import pytest
 
@@ -7,7 +9,24 @@ from semantica.bundle import (
     digest_file,
     remove_generated_bytecode,
     verify_bundle_inventory,
+    acceleration_inventory,
 )
+
+
+def test_acceleration_inventory_does_not_confuse_build_with_available_hardware(monkeypatch):
+    monkeypatch.setitem(sys.modules, "torch", SimpleNamespace(
+        __version__="test-cuda-build", version=SimpleNamespace(cuda="13.0"),
+        cuda=SimpleNamespace(is_available=lambda: False, device_count=lambda: 0),
+        backends=SimpleNamespace(mps=SimpleNamespace(is_available=lambda: False)),
+    ))
+    monkeypatch.setitem(sys.modules, "onnxruntime", SimpleNamespace(
+        __version__="test-ort", get_available_providers=lambda: ["CPUExecutionProvider"],
+    ))
+    evidence = acceleration_inventory()
+    assert evidence["torch"]["cudaBuild"] == "13.0"
+    assert evidence["torch"]["cudaAvailable"] is False
+    assert evidence["onnxruntime"]["availableProviders"] == ["CPUExecutionProvider"]
+    assert "gpuValidated" not in evidence
 
 
 def manifest_for(path: Path) -> dict:

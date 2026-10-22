@@ -12,7 +12,7 @@ from docx import Document
 from PIL import Image, ImageDraw, ImageFont
 from pptx import Presentation
 from openpyxl import Workbook
-from semantica.bundle import verify_bundle_inventory, parser_dependency_files, document_parser_digest
+from semantica.bundle import verify_bundle_inventory, parser_dependency_files, document_parser_digest, acceleration_inventory
 from semantica.source import parse_source, UnsupportedSourceFormatError
 from semantica.project_document_quality import assess_document_quality
 
@@ -149,4 +149,6 @@ with tempfile.TemporaryDirectory(prefix="semantica-native-acceptance-") as direc
     destination.write_text(json.dumps({"artifactDigest": manifest["artifactDigest"], "schemaDigest": manifest["schemaDigest"],
         "parsers": parsed, "queryContexts": len(queried["contexts"]), "documentQualityAdmission": True,
         "representationRevisions": True, "postRunInventoryVerified": True, "deterministicProtocolOnly": True,
+        "accelerationCapabilities": acceleration_inventory(),
+        "accelerationValidation": {"device": "cpu", "gpuInferenceValidated": False},
         "parserDependencyClosureVerified": True, "parserDependencyFiles": len(parser_files)}, indent=2) + "\n")
