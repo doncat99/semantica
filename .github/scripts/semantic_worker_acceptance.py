@@ -39,8 +39,9 @@ assert document_parser_digest(manifest["files"], parser_files) == manifest["docu
 assert Path(sys.executable).is_relative_to(root)
 assert "semantica" in str(parse_source.__code__.co_filename)
 assert Path(parse_source.__code__.co_filename).is_relative_to(root)
-assert version("docling") == "2.139.0"
-assert version("docling-slim") == "2.139.0+ontoscience.2"
+assert version("docling") == "2.141.0"
+assert version("docling-slim") == "2.141.0+ontoscience.2"
+assert version("docling-ibm-models") == "4.0.4+ontoscience.3"
 from docling.datamodel.pipeline_options import PdfPipelineOptions
 from docling.models.stages.code_formula.native_formula import transcribe_native_fraction
 assert "do_native_formula_enrichment" in PdfPipelineOptions.model_fields

@@ -24,3 +24,8 @@ bundle and PDF ownership tests passed (33 tests). These checks establish lock
 and packaging contracts only; native platform acceptance and the consuming
 App's ESG Report rebuild remain required. Upstream merge impact is limited
 to fork-specific dependency pins and generated locks.
+
+The first native release run (39760893895) reproduced stale installed-version
+assertions in the existing relocated-artifact acceptance owner. Updated those
+assertions to the new Docling versions and added the exact IBM fork version;
+all offline parsing, formula, inventory and worker checks remain mandatory.
