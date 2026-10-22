@@ -56,12 +56,13 @@ def test_batched_window_keeps_local_entity_ids_and_relation_endpoints_disjoint(m
     monkeypatch.setattr(pipeline, "_window_grounding_context", lambda *_: context)
     monkeypatch.setattr(pipeline, "MODEL_CONTEXT_BYTES", 6_000)
     calls = []
-    def extract(*args):
-        calls.append(args[-1])
+    def extract(text, relay, spec, item, context, formula_semantics):
+        assert formula_semantics is False
+        calls.append(context)
         a = Entity("AEP", "ORG", 0, 3, metadata={"mention_id": "a"})
         b = Entity("report", "CONCEPT", 4, 10, metadata={"mention_id": "b"})
         return {"entities": [a, b], "relations": [Relation(a, "describes", b, metadata={
-            "subject_id": "a", "object_id": "b", "supporting_refs": [args[-1][-1]["ref"]]})]}, [len(calls)], len(calls) == 1
+            "subject_id": "a", "object_id": "b", "supporting_refs": [context[-1]["ref"]]})]}, [len(calls)], len(calls) == 1
     monkeypatch.setattr(pipeline, "_extract_window_context", extract)
     extracted, receipts, restored = pipeline._extract_window("AEP report", SimpleNamespace(), None, [], (0, 10, "AEP report"))
     assert len(calls) > 1 and len(receipts) == len(calls)

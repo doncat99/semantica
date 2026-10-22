@@ -45,7 +45,8 @@ def test_global_queue_interleaves_sources_preserves_order_and_budget(monkeypatch
     lock = threading.Lock()
     active = peak = 0
     calls = []
-    def extract(text, relay, spec, locations, item):
+    def extract(text, relay, spec, locations, item, formula_semantics):
+        assert formula_semantics is False
         nonlocal active, peak
         with lock:
             active += 1
