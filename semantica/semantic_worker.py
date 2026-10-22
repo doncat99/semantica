@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from hashlib import sha256
 from pathlib import Path
@@ -28,6 +29,8 @@ from .semantic_artifact_schema import (
 )
 from .semantic_extract.schema import ExtractionSpecification
 from .semantic_artifact_schema import BindParsedSourceRequest, RelayRef
+from . import semantic_artifact_schema as _artifact_schema
+from .semantic_extract import schema as _extraction_schema
 
 PROTOCOL = "semantica.semantic-worker.v1"
 METHOD = "build_semantic_artifacts"
@@ -36,6 +39,32 @@ MODEL_RECEIPT_OPERATIONS = {
     "identity_resolution", "relationship_discovery",  # Historical receipts only; new builds do not run these stages.
     "knowledge_explanation", "knowledge_synthesis", "source_classification",
 }
+_SAFE_VALIDATION_TYPES = re.compile(r"^[a-z][a-z0-9_]{0,79}$")
+
+
+def _safe_validation_details(error: ValidationError) -> Dict[str, Any]:
+    field_names = set()
+    for module in (_artifact_schema, _extraction_schema):
+        for candidate in vars(module).values():
+            if isinstance(candidate, type) and issubclass(candidate, BaseModel):
+                for name, field in candidate.model_fields.items():
+                    field_names.add(name)
+                    if isinstance(field.alias, str):
+                        field_names.add(field.alias)
+
+    errors = []
+    for item in error.errors(include_input=False, include_context=False, include_url=False)[:32]:
+        location = []
+        for part in item.get("loc", ()):
+            if isinstance(part, int) and part >= 0:
+                location.append(part)
+            elif isinstance(part, str) and part in field_names:
+                location.append(part)
+        error_type = item.get("type")
+        if not isinstance(error_type, str) or not _SAFE_VALIDATION_TYPES.fullmatch(error_type):
+            error_type = "validation_error"
+        errors.append({"location": location, "type": error_type})
+    return {"validationErrorCount": error.error_count(), "validationErrors": errors}
 
 
 class ReadingReportsRequest(BaseModel):
@@ -152,8 +181,12 @@ def _response(request_id: Optional[str], ok: bool, *, result: Optional[Dict[str,
     if ok:
         payload["result"] = result or {}
     else:
+        validation_error = isinstance(error, ValidationError)
         payload["error"] = {"type": error.__class__.__name__ if error else "Error",
-                             "message": str(error) if error else "unknown error"}
+                             "message": "Semantica request validation failed" if validation_error else str(error) if error else "unknown error"}
+        if validation_error:
+            payload["error"]["diagnostic"] = {"origin": "protocol_error", "code": "SEMANTIC_WORKER_INTERNAL_ERROR",
+                                                **_safe_validation_details(error)}
         if isinstance(error, SemanticArtifactError):
             if error.status is not None:
                 payload["error"]["status"] = error.status
