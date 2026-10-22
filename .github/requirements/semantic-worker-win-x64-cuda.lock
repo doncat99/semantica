@@ -51,17 +51,19 @@ dill==0.4.1
     # via multiprocess
 doclang==0.7.3
     # via docling-core
-docling==2.139.0
+docling==2.141.0
     # via semantica (pyproject.toml)
 docling-core==2.103.1
     # via
     #   docling-parse
     #   docling-slim
-docling-ibm-models==4.0.4
-    # via docling-slim
+docling-ibm-models @ https://github.com/doncat99/docling-ibm-models/releases/download/ontoscience-models-4.0.4.3/docling_ibm_models-4.0.4+ontoscience.3-py3-none-any.whl#sha256=fad09be297a3c9152ba801931b1d76a201e5a6abd7a8a81220e0402b2a5f8d87
+    # via
+    #   semantica (pyproject.toml)
+    #   docling-slim
 docling-parse==7.22.4
     # via docling-slim
-docling-slim @ https://github.com/doncat99/docling/releases/download/ontoscience-docling-2.139.0.2/docling_slim-2.139.0+ontoscience.2-py3-none-any.whl#sha256=130798afe9758d1823dfb0fd37159e2d59932fb2c26336265c151e4baabf80de
+docling-slim @ https://github.com/doncat99/docling/releases/download/ontoscience-docling-2.141.0.2/docling_slim-2.141.0+ontoscience.2-py3-none-any.whl#sha256=525c2fcfb06cdc6f5860736c824b033ecbf81e2230b8e149982788f0ee97a814
     # via
     #   semantica (pyproject.toml)
     #   docling

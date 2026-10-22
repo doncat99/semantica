@@ -45,7 +45,7 @@ diff, and commit `uv.lock` together with `pyproject.toml`. CI's existing
 verification_env=$(mktemp -d /tmp/semantica-dependency-check.XXXXXX)
 uv lock --check
 UV_PROJECT_ENVIRONMENT="$verification_env/venv" uv sync --locked --extra semantic-worker --no-install-project --python 3.12
-"$verification_env/venv/bin/python" -c 'from importlib.metadata import version; from docling.models.stages.code_formula.native_formula import transcribe_native_fraction; assert version("docling") == "2.139.0"; assert version("docling-slim") == "2.139.0+ontoscience.2"; assert transcribe_native_fraction([]) is None'
+"$verification_env/venv/bin/python" -c 'from importlib.metadata import version; from docling.models.stages.code_formula.native_formula import transcribe_native_fraction; assert version("docling") == "2.141.0"; assert version("docling-slim") == "2.141.0+ontoscience.2"; assert version("docling-ibm-models") == "4.0.4+ontoscience.3"; assert transcribe_native_fraction([]) is None'
 ```
 
 An existing `.venv` is mutable local state, not proof of the current dependency

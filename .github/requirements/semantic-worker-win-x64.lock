@@ -26,14 +26,10 @@ certifi==2026.7.22
     #   httpcore
     #   httpx
     #   requests
-cffi==2.1.1
-    # via cryptography
 chardet==7.6.0
     # via semantica (pyproject.toml)
 charset-normalizer==3.5.1
-    # via
-    #   pdfminer-six
-    #   requests
+    # via requests
 click==8.5.0
     # via
     #   semantica (pyproject.toml)
@@ -49,8 +45,6 @@ colorama==0.4.6
     #   typer
 colorlog==6.12.0
     # via rapidocr
-cryptography==50.0.1
-    # via pdfminer-six
 defusedxml==0.7.1
     # via
     #   docling-core
@@ -59,18 +53,22 @@ dill==0.4.1
     # via multiprocess
 doclang==0.7.3
     # via docling-core
-docling==2.139.0
+docling==2.141.0
     # via semantica (pyproject.toml)
-docling-core==2.100.0
+docling-core==2.103.1
     # via
     #   docling-parse
     #   docling-slim
-docling-ibm-models==4.0.3
-    # via docling-slim
+docling-ibm-models @ https://github.com/doncat99/docling-ibm-models/releases/download/ontoscience-models-4.0.4.3/docling_ibm_models-4.0.4+ontoscience.3-py3-none-any.whl#sha256=fad09be297a3c9152ba801931b1d76a201e5a6abd7a8a81220e0402b2a5f8d87
+    # via
+    #   semantica (pyproject.toml)
+    #   docling-slim
 docling-parse==7.22.3
     # via docling-slim
-docling-slim @ https://github.com/doncat99/docling/releases/download/ontoscience-docling-2.139.0.2/docling_slim-2.139.0+ontoscience.2-py3-none-any.whl#sha256=130798afe9758d1823dfb0fd37159e2d59932fb2c26336265c151e4baabf80de
-    # via docling
+docling-slim @ https://github.com/doncat99/docling/releases/download/ontoscience-docling-2.141.0.2/docling_slim-2.141.0+ontoscience.2-py3-none-any.whl#sha256=525c2fcfb06cdc6f5860736c824b033ecbf81e2230b8e149982788f0ee97a814
+    # via
+    #   semantica (pyproject.toml)
+    #   docling
 et-xmlfile==2.0.0
     # via openpyxl
 faker==40.39.0
@@ -194,10 +192,6 @@ pandas==3.0.6
     # via
     #   semantica (pyproject.toml)
     #   docling-core
-pdfminer-six==20260107
-    # via pdfplumber
-pdfplumber==0.11.10
-    # via semantica (pyproject.toml)
 pillow==12.3.0
     # via
     #   semantica (pyproject.toml)
@@ -205,7 +199,6 @@ pillow==12.3.0
     #   docling-ibm-models
     #   docling-parse
     #   docling-slim
-    #   pdfplumber
     #   python-pptx
     #   rapidocr
     #   torchvision
@@ -223,8 +216,6 @@ pyarrow==25.0.1
     # via semantica (pyproject.toml)
 pyclipper==1.4.0
     # via rapidocr
-pycparser==3.0
-    # via cffi
 pydantic==2.13.5
     # via
     #   semantica (pyproject.toml)
@@ -244,12 +235,12 @@ pygments==2.21.0
     #   rich
 pylatexenc==2.11
     # via docling-slim
+pymupdf==1.28.2
+    # via semantica (pyproject.toml)
 pyparsing==3.3.3
     # via rdflib
 pypdfium2==5.13.0
-    # via
-    #   docling-slim
-    #   pdfplumber
+    # via docling-slim
 python-dateutil==2.9.0.post0
     # via pandas
 python-docx==1.2.0
