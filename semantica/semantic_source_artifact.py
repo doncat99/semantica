@@ -69,12 +69,14 @@ def _parse_source(source: Any, force_ocr: bool, document_processing: dict | None
     return result
 
 
-def _admit_document_quality(source_id: str, document: dict, force_ocr: bool) -> None:
+def _admit_document_quality(document: dict, force_ocr: bool) -> None:
     quality = document.get("quality", {})
     if quality.get("status") == "needs_review":
-        codes = sorted({item["code"] for item in quality["issues"]})
-        action = "OCR repair also failed quality admission" if force_ocr else "explicit OCR repair or source correction required"
-        raise DocumentQualityError(f"Document quality failed for {source_id}: {','.join(codes)}; {action}; representation {document.get('representation_revision')} retained in checkpoint")
+        safe_codes = {"formula_transcription_missing", "fragmented_cjk_encoding", "unmapped_characters"}
+        codes = sorted({item["code"] for item in quality["issues"] if item.get("code") in safe_codes})
+        action = "OCR repair did not satisfy document quality admission" if force_ocr else "explicit OCR repair or source correction required"
+        raise DocumentQualityError("Document quality admission failed; " + action, code="DOCUMENT_QUALITY_ERROR",
+            diagnostic={"origin": "document_quality", "qualityIssueCodes": codes, "forceOcr": force_ocr})
 
 
 def _representation_revision(source: Any, force_ocr: bool, content_hash: str, parser: str, parser_version: str, origin: str, document: dict) -> str:

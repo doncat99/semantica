@@ -31,6 +31,25 @@ def test_encoding_loss_is_reported():
     assert quality["issues"][0]["code"] == "unmapped_characters"
 
 
+def test_quality_admission_failure_has_safe_business_diagnostic():
+    from semantica.semantic_worker import _response
+    from semantica.semantic_artifact_builder import _admit_document_quality
+
+    with pytest.raises(DocumentQualityError) as failure:
+        _admit_document_quality({
+            "quality": {"status": "needs_review", "issues": [{"code": "unmapped_characters", "quote": "private text"}]},
+            "representation_revision": "private-revision",
+        }, False)
+
+    response = _response("request-1", False, error=failure.value)
+    assert response["error"]["code"] == "DOCUMENT_QUALITY_ERROR"
+    assert response["error"]["diagnostic"] == {
+        "origin": "document_quality", "qualityIssueCodes": ["unmapped_characters"], "forceOcr": False,
+    }
+    assert "private text" not in str(response)
+    assert "private-revision" not in str(response)
+
+
 @pytest.mark.parametrize("value", ["", r"& \quad \quad", r"\frac{}{}", r"\begin{aligned} & \quad \end{aligned}"])
 def test_missing_formula_transcription_requires_review(value):
     document = {"document": {"texts": [{"label": "formula", "text": value,
