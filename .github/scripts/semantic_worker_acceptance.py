@@ -12,7 +12,7 @@ from docx import Document
 from PIL import Image, ImageDraw, ImageFont
 from pptx import Presentation
 from openpyxl import Workbook
-from semantica.bundle import verify_bundle_inventory, parser_dependency_files, document_parser_digest, acceleration_inventory
+from semantica.bundle import verify_bundle_inventory, parser_dependency_files, document_parser_digest, acceleration_inventory, validate_acceleration_profile
 from semantica.source import parse_source, UnsupportedSourceFormatError
 from semantica.project_document_quality import assess_document_quality
 
@@ -20,6 +20,20 @@ from semantica.project_document_quality import assess_document_quality
 root = Path(sys.argv[1]).resolve()
 destination = Path(sys.argv[2]).resolve()
 manifest = json.loads((root / "manifest.json").read_text())
+release = json.loads((root / "release.json").read_text())
+capabilities = acceleration_inventory()
+profile = release.get("accelerationProfile", "cpu")
+validate_acceleration_profile(profile, capabilities, release["packages"])
+if profile == "directml":
+    from omegaconf import OmegaConf
+    from rapidocr.inference_engine.onnxruntime.main import OrtInferSession
+    from onnxruntime import ExecutionMode
+    options = OrtInferSession._init_sess_opts(OmegaConf.create({
+        "use_dml": True, "enable_cpu_mem_arena": False,
+        "intra_op_num_threads": 1, "inter_op_num_threads": 1,
+    }))
+    assert not options.enable_mem_pattern, "RapidOCR DirectML session fix is missing"
+    assert options.execution_mode == ExecutionMode.ORT_SEQUENTIAL
 parser_files = parser_dependency_files(root)
 assert document_parser_digest(manifest["files"], parser_files) == manifest["documentParserDigest"]
 assert Path(sys.executable).is_relative_to(root)
@@ -149,6 +163,7 @@ with tempfile.TemporaryDirectory(prefix="semantica-native-acceptance-") as direc
     destination.write_text(json.dumps({"artifactDigest": manifest["artifactDigest"], "schemaDigest": manifest["schemaDigest"],
         "parsers": parsed, "queryContexts": len(queried["contexts"]), "documentQualityAdmission": True,
         "representationRevisions": True, "postRunInventoryVerified": True, "deterministicProtocolOnly": True,
-        "accelerationCapabilities": acceleration_inventory(),
+        "accelerationProfile": profile,
+        "accelerationCapabilities": capabilities,
         "accelerationValidation": {"device": "cpu", "gpuInferenceValidated": False},
         "parserDependencyClosureVerified": True, "parserDependencyFiles": len(parser_files)}, indent=2) + "\n")

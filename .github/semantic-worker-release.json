@@ -3,6 +3,11 @@
   "titlePrefix": "OntoScience semantic worker ",
   "uvVersion": "0.9.10",
   "pythonVersion": "3.12",
+  "accelerationProfiles": {
+    "cpu": {"extra": "semantic-worker", "torchBackend": "cpu", "targets": ["darwin-arm64", "linux-x64", "win-x64"]},
+    "cuda": {"extra": "semantic-worker-cuda", "torchBackend": "cu130", "targets": ["linux-x64", "win-x64"]},
+    "directml": {"extra": "semantic-worker-directml", "torchBackend": "cpu", "targets": ["win-x64"]}
+  },
   "targets": {
     "darwin-arm64": {"runtimeTarget": "darwin-arm64", "python": "python/bin/python3"},
     "linux-x64": {"runtimeTarget": "linux-x64", "python": "python/bin/python3"},

@@ -33,6 +33,27 @@ def acceleration_inventory() -> dict:
     }
 
 
+def validate_acceleration_profile(profile: str, inventory: dict, packages: list) -> None:
+    """Check artifact capabilities, never label a CPU build host as GPU acceptance."""
+    ort_distributions = {name.lower().replace("_", "-") for name, _ in packages} & {
+        "onnxruntime", "onnxruntime-gpu", "onnxruntime-directml",
+    }
+    expected = {"cpu": "onnxruntime", "cuda": "onnxruntime-gpu", "directml": "onnxruntime-directml"}
+    if profile not in expected:
+        raise ValueError(f"unknown acceleration profile: {profile}")
+    if ort_distributions != {expected[profile]}:
+        raise ValueError(f"{profile} requires exactly {expected[profile]}, found {sorted(ort_distributions)}")
+    providers = inventory["onnxruntime"]["availableProviders"]
+    if profile == "cuda" and (
+        not inventory["torch"]["cudaBuild"] or "CUDAExecutionProvider" not in providers
+    ):
+        raise ValueError("CUDA artifact requires CUDA Torch and CUDAExecutionProvider")
+    if profile == "directml" and (
+        inventory["platform"] != "Windows" or "DmlExecutionProvider" not in providers
+    ):
+        raise ValueError("DirectML artifact requires Windows and DmlExecutionProvider")
+
+
 def digest_file(path: Path) -> str:
     with path.open("rb") as stream:
         return "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest()
@@ -78,6 +99,8 @@ def parser_dependency_files(root: Path) -> set[str]:
     from packaging.utils import canonicalize_name
     installed = {canonicalize_name(d.metadata["Name"]): d for d in metadata.distributions()}
     pending = ["docling", "rapidocr", "blake3", "pandas"]
+    # RapidOCR does not require an ORT distribution: the selected worker extra owns it.
+    pending.extend(name for name in ("onnxruntime", "onnxruntime-gpu", "onnxruntime-directml") if name in installed)
     seen, files = set(), set()
     while pending:
         name = canonicalize_name(pending.pop())
@@ -167,7 +190,7 @@ def build_office_bundle(*, office_root: Path, office_receipt: Path, output: Path
     return manifest
 
 
-def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, output: Path, uv: str, source_revision: str, office_root: Path | None = None, office_receipt: Path | None = None) -> dict:
+def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, output: Path, uv: str, source_revision: str, acceleration: str = "cpu", office_root: Path | None = None, office_receipt: Path | None = None) -> dict:
     """Inputs are release artifacts, never a Semantica source checkout or venv."""
     if output.exists():
         raise ValueError("bundle output must not already exist")
@@ -196,13 +219,21 @@ def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, output: P
         shutil.copy2(office_receipt, output / "office-release.json")
     python = output / "python" / python_name
     # This interpreter is our private copy, not the managed source distribution.
-    subprocess.run([uv, "pip", "install", "--python", str(python), "--system", "--break-system-packages", f"{wheel.resolve()}[semantic-worker]"], check=True)
+    extra = {"cpu": "semantic-worker", "cuda": "semantic-worker-cuda", "directml": "semantic-worker-directml"}[acceleration]
+    subprocess.run([uv, "pip", "install", "--python", str(python), "--system", "--break-system-packages", f"{wheel.resolve()}[{extra}]"], check=True)
     packages = subprocess.run([str(python), "-I", "-B", "-c",
         "import importlib.metadata as m, json; print(json.dumps(sorted((d.metadata['Name'], d.version) for d in m.distributions())))"],
         capture_output=True, text=True, check=True)
+    capabilities = subprocess.run([str(python), "-I", "-B", "-c",
+        "import json; from semantica.bundle import acceleration_inventory; print(json.dumps(acceleration_inventory()))"],
+        capture_output=True, text=True, check=True)
+    inventory = json.loads(capabilities.stdout)
+    validate_acceleration_profile(acceleration, inventory, json.loads(packages.stdout))
     (output / "release.json").write_text(json.dumps({
         "sourceRevision": source_revision, "wheel": wheel.name, "wheelDigest": digest_file(wheel),
         "packages": json.loads(packages.stdout),
+        "accelerationProfile": acceleration,
+        "accelerationCapabilities": inventory,
     }, indent=2) + "\n", encoding="utf-8")
     for name in model_names:
         shutil.copytree(models_root / name, output / "models" / name, symlinks=False,
@@ -263,6 +294,7 @@ def main() -> None:
     parser.add_argument("--office-receipt", type=Path)
     parser.add_argument("--office-output", type=Path)
     parser.add_argument("--target")
+    parser.add_argument("--acceleration", choices=["cpu", "cuda", "directml"], default="cpu")
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--uv", default="uv")
     parser.add_argument("--source-revision", required=True)

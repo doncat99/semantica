@@ -4,6 +4,11 @@ on:
   push:
     tags: ['ontoscience-semantic-worker-*']
   workflow_dispatch:
+    inputs:
+      gpu_profiles:
+        type: boolean
+        default: false
+        description: 'Also build CUDA and DirectML variants (requires corrected pinned OCR dependencies)'
 
 permissions:
   contents: read
@@ -13,6 +18,19 @@ env:
   RELEASE_SCRIPT: .github/scripts/semantic_worker_release.py
 
 jobs:
+  plan:
+    runs-on: ubuntu-24.04
+    outputs:
+      matrix: ${{ steps.matrix.outputs.matrix }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      - id: matrix
+        env:
+          INCLUDE_GPU: ${{ inputs.gpu_profiles }}
+        run: |
+          args=()
+          if [[ "$INCLUDE_GPU" == true ]]; then args+=(--include-gpu); fi
+          echo "matrix=$(python3 .github/scripts/semantic_worker_release.py matrix "${args[@]}")" >> "$GITHUB_OUTPUT"
   wheel:
     runs-on: ubuntu-24.04
     steps:
@@ -31,28 +49,16 @@ jobs:
           retention-days: 1
 
   native:
-    needs: wheel
+    needs: [wheel, plan]
     strategy:
       fail-fast: false
-      matrix:
-        include:
-          - runner: macos-14
-            target: darwin-arm64
-            python: python/bin/python3
-          - runner: ubuntu-24.04
-            target: linux-x64
-            python: python/bin/python3
-          - runner: windows-2022
-            target: win-x64
-            python: python/python.exe
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 90
     defaults:
       run:
         shell: bash
     env:
-      UV_CONSTRAINT: ${{ github.workspace }}/.github/requirements/semantic-worker-${{ matrix.target }}.lock
-      UV_TORCH_BACKEND: cpu
       DOCLING_DEVICE: cpu
       ORT_DISABLE_TELEMETRY: '1'
       PYTHONDONTWRITEBYTECODE: '1'
@@ -78,23 +84,27 @@ jobs:
             echo "Expected exactly one Semantica wheel, found ${#wheels[@]}" >&2
             exit 1
           fi
-          uv run --no-project --python 3.12 "$RELEASE_SCRIPT" bundle --target '${{ matrix.target }}' --native-inputs native-inputs --wheel "${wheels[0]}" --models native-inputs/models --output native-bundle --source-revision "$GITHUB_SHA"
+          uv run --no-project --python 3.12 "$RELEASE_SCRIPT" bundle --target '${{ matrix.target }}' --acceleration '${{ matrix.acceleration }}' --native-inputs native-inputs --wheel "${wheels[0]}" --models native-inputs/models --output native-bundle --source-revision "$GITHUB_SHA"
       - name: Relocate and validate installed worker
         run: |
           mv native-bundle "$RUNNER_TEMP/semantica-relocated"
-          "$RUNNER_TEMP/semantica-relocated/${{ matrix.python }}" -I -B .github/scripts/semantic_worker_acceptance.py "$RUNNER_TEMP/semantica-relocated" native-dist/${{ matrix.target }}-acceptance.json
+          suffix="-${{ matrix.acceleration }}"
+          if [[ '${{ matrix.acceleration }}' == cpu ]]; then suffix=""; fi
+          "$RUNNER_TEMP/semantica-relocated/${{ matrix.python }}" -I -B .github/scripts/semantic_worker_acceptance.py "$RUNNER_TEMP/semantica-relocated" "native-dist/${{ matrix.target }}${suffix}-acceptance.json"
       - name: Prepare platform release artifacts
         env:
           COPYFILE_DISABLE: '1'
         run: |
-          archive="semantica-${{ matrix.target }}-${GITHUB_SHA:0:12}.tar.gz"
+          suffix="-${{ matrix.acceleration }}"
+          if [[ '${{ matrix.acceleration }}' == cpu ]]; then suffix=""; fi
+          archive="semantica-${{ matrix.target }}${suffix}-${GITHUB_SHA:0:12}.tar.gz"
           tar -czf "native-dist/$archive" -C "$RUNNER_TEMP/semantica-relocated" .
-          cp "$RUNNER_TEMP/semantica-relocated/manifest.json" native-dist/${{ matrix.target }}-manifest.json
+          cp "$RUNNER_TEMP/semantica-relocated/manifest.json" "native-dist/${{ matrix.target }}${suffix}-manifest.json"
           rm -f native-dist/*.whl
       - name: Pass platform artifacts to publish job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
         with:
-          name: semantic-worker-${{ matrix.target }}
+          name: semantic-worker-${{ matrix.target }}-${{ matrix.acceleration }}
           path: native-dist/*
           if-no-files-found: error
           retention-days: 1

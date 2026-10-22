@@ -10,7 +10,18 @@ from semantica.bundle import (
     remove_generated_bytecode,
     verify_bundle_inventory,
     acceleration_inventory,
+    validate_acceleration_profile,
+    parser_dependency_files,
 )
+
+
+def test_parser_dependency_closure_tracks_selected_ort_without_rapidocr_requirement(tmp_path, monkeypatch):
+    from importlib import metadata
+    distributions = [SimpleNamespace(metadata={"Name": name}, requires=[],
+        files=[Path(f"{name}/runtime.bin")], locate_file=lambda file: tmp_path / file)
+        for name in ("docling", "rapidocr", "blake3", "pandas", "onnxruntime-gpu")]
+    monkeypatch.setattr(metadata, "distributions", lambda: distributions)
+    assert "onnxruntime-gpu/runtime.bin" in parser_dependency_files(tmp_path)
 
 
 def test_acceleration_inventory_does_not_confuse_build_with_available_hardware(monkeypatch):
@@ -27,6 +38,25 @@ def test_acceleration_inventory_does_not_confuse_build_with_available_hardware(m
     assert evidence["torch"]["cudaAvailable"] is False
     assert evidence["onnxruntime"]["availableProviders"] == ["CPUExecutionProvider"]
     assert "gpuValidated" not in evidence
+
+
+def test_cuda_bundle_validation_does_not_require_gpu_on_build_host():
+    inventory = {"platform": "Linux", "torch": {"cudaBuild": "13.0", "cudaAvailable": False},
+        "onnxruntime": {"availableProviders": ["CUDAExecutionProvider", "CPUExecutionProvider"]}}
+    validate_acceleration_profile("cuda", inventory, [("onnxruntime-gpu", "1.31.0")])
+    with pytest.raises(ValueError, match="exactly"):
+        validate_acceleration_profile("cuda", inventory, [("onnxruntime-gpu", "1.31.0"), ("onnxruntime", "1.30.0")])
+    inventory["torch"]["cudaBuild"] = None
+    with pytest.raises(ValueError, match="CUDA Torch"):
+        validate_acceleration_profile("cuda", inventory, [("onnxruntime-gpu", "1.31.0")])
+
+
+def test_directml_bundle_requires_windows_and_real_provider():
+    inventory = {"platform": "Windows", "onnxruntime": {"availableProviders": ["DmlExecutionProvider", "CPUExecutionProvider"]}}
+    validate_acceleration_profile("directml", inventory, [("onnxruntime-directml", "1.24.4")])
+    inventory["platform"] = "Linux"
+    with pytest.raises(ValueError, match="Windows"):
+        validate_acceleration_profile("directml", inventory, [("onnxruntime-directml", "1.24.4")])
 
 
 def manifest_for(path: Path) -> dict:
