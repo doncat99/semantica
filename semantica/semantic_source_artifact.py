@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import logging
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -70,13 +71,14 @@ def _parse_source(source: Any, force_ocr: bool, document_processing: dict | None
 
 
 def _admit_document_quality(document: dict, force_ocr: bool) -> None:
+    """Retain local transcription findings without rejecting readable source content."""
     quality = document.get("quality", {})
     if quality.get("status") == "needs_review":
         safe_codes = {"formula_transcription_missing", "fragmented_cjk_encoding", "unmapped_characters"}
         codes = sorted({item["code"] for item in quality["issues"] if item.get("code") in safe_codes})
-        action = "OCR repair did not satisfy document quality admission" if force_ocr else "explicit OCR repair or source correction required"
-        raise DocumentQualityError("Document quality admission failed; " + action, code="DOCUMENT_QUALITY_ERROR",
-            diagnostic={"origin": "document_quality", "qualityIssueCodes": codes, "forceOcr": force_ocr})
+        logging.getLogger(__name__).warning(
+            "Document transcription needs review; qualityIssueCodes=%s forceOcr=%s; continuing with located findings retained",
+            codes, force_ocr)
 
 
 def _representation_revision(source: Any, force_ocr: bool, content_hash: str, parser: str, parser_version: str, origin: str, document: dict) -> str:

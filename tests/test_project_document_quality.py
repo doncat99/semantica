@@ -31,23 +31,14 @@ def test_encoding_loss_is_reported():
     assert quality["issues"][0]["code"] == "unmapped_characters"
 
 
-def test_quality_admission_failure_has_safe_business_diagnostic():
-    from semantica.semantic_worker import _response
+@pytest.mark.parametrize("force_ocr", [False, True])
+def test_quality_review_is_nonfatal_and_retains_exact_issue_locations(force_ocr):
     from semantica.semantic_artifact_builder import _admit_document_quality
-
-    with pytest.raises(DocumentQualityError) as failure:
-        _admit_document_quality({
-            "quality": {"status": "needs_review", "issues": [{"code": "unmapped_characters", "quote": "private text"}]},
-            "representation_revision": "private-revision",
-        }, False)
-
-    response = _response("request-1", False, error=failure.value)
-    assert response["error"]["code"] == "DOCUMENT_QUALITY_ERROR"
-    assert response["error"]["diagnostic"] == {
-        "origin": "document_quality", "qualityIssueCodes": ["unmapped_characters"], "forceOcr": False,
-    }
-    assert "private text" not in str(response)
-    assert "private-revision" not in str(response)
+    document = {"text": "Readable paragraph\nBroken \ufffd\ufffd text",
+        "quality": {"status": "needs_review", "issues": [{"code": "unmapped_characters", "pageNumber": 2}]}}
+    _admit_document_quality(document, force_ocr)
+    assert document["text"].startswith("Readable paragraph")
+    assert document["quality"] == {"status": "needs_review", "issues": [{"code": "unmapped_characters", "pageNumber": 2}]}
 
 
 @pytest.mark.parametrize("value", ["", r"& \quad \quad", r"\frac{}{}", r"\begin{aligned} & \quad \end{aligned}"])
@@ -80,7 +71,7 @@ def test_ocr_recipe_and_text_revision_have_distinct_evidence_identity(tmp_path: 
     assert _build_source(request.sources[0], False, parsed=parsed)["representation"].id == native["representation"].id
 
 
-def test_failed_quality_is_materialized_but_never_enters_knowledge_extraction(tmp_path, monkeypatch):
+def test_quality_findings_survive_cached_parse_and_snapshot_loading(tmp_path, monkeypatch):
     import semantica.semantic_artifact_builder as pipeline
     source = tmp_path / "source.pdf"
     source.write_bytes(b"fixture")
@@ -118,6 +109,19 @@ def test_failed_quality_is_materialized_but_never_enters_knowledge_extraction(tm
     assert calls == [False]
     assert next(iter(cache.values()))[1]["quality"]["status"] == "needs_review"
     assert first["artifactDigest"] == second["artifactDigest"]
+    from semantica.semantic_artifact_schema import ParsedSourceRef
+    source_input = parse_request.source
+    ref = ParsedSourceRef.model_validate({"sourceId": source_input.source_id,
+        "artifactPath": first["artifactPath"], "artifactDigest": first["artifactDigest"]})
+    profile = parse_request.document_processing.model_dump(mode="json", by_alias=True)
+    parsed = semantic_source_artifact._load_parsed_source(source_input, ref, False, profile)
+    assert parsed[0] == "Broken \ufffd\ufffd text"
+    assert parsed[1]["quality"]["status"] == "needs_review"
+    built = _build_source(source_input, False, parsed=parsed)
+    assert built["representation"].metadata["document"]["quality"] == parsed[1]["quality"]
+    Path(first["artifactPath"]).write_text("tampered")
+    with pytest.raises(Exception, match="artifact digest is invalid"):
+        semantic_source_artifact._load_parsed_source(source_input, ref, False, profile)
 
 
 def test_empty_docling_source_enters_quality_repair_path(tmp_path, monkeypatch):
