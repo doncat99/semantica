@@ -23,3 +23,17 @@ class SemanticArtifactError(RuntimeError):
 
 class DocumentQualityError(SemanticArtifactError):
     """A parsed representation needs an explicit repair before knowledge production."""
+
+
+class ModelOutputError(SemanticArtifactError):
+    """A response-local defect; never a transport, authorization or integrity failure."""
+
+
+def model_output_cause(error: BaseException) -> ModelOutputError | None:
+    seen = set()
+    while error is not None and id(error) not in seen:
+        seen.add(id(error))
+        if isinstance(error, ModelOutputError):
+            return error
+        error = error.__cause__
+    return None

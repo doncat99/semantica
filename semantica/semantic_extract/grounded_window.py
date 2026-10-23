@@ -4,6 +4,7 @@ from __future__ import annotations
 from typing import Any, Callable
 
 from ..utils.exceptions import ProcessingError
+from ..semantic_artifact_errors import model_output_cause
 from .methods import extract_entities_llm, extract_relations_llm
 from .schema import ExtractionSpecification
 from .types import Entity, Relation
@@ -51,6 +52,8 @@ def extract_grounded_window(
     provider_name = provider
     last_error: Exception | None = None
     for attempt in range(max(0, retries) + 1):
+        entities = []
+        stage = "entities"
         current_provider = provider_instance if attempt == 0 else (provider_factory() if provider_factory else provider_instance)
         if current_provider is None:
             raise ProcessingError("grounded extraction requires a provider instance")
@@ -66,6 +69,7 @@ def extract_grounded_window(
             if not entities:
                 _record_rejections(current_provider)
                 return entities, [], current_provider
+            stage = "relations"
             relations = extract_relations_llm(
                 text, entities, provider=provider_name, model=model,
                 provider_instance=current_provider, grounding="strict",
@@ -82,6 +86,15 @@ def extract_grounded_window(
             reject = getattr(current_provider, "reject_last", None)
             if callable(reject) and not _retryable_failure(exc):
                 reject()
+            local = model_output_cause(exc)
+            if local is not None and hasattr(current_provider, "rejections"):
+                current_provider.rejections.append({
+                    "code": local.code, "stage": stage,
+                    "action": "skipped_relations" if stage == "relations" else "skipped_extraction",
+                    "diagnostic": local.diagnostic or {},
+                })
+                _record_rejections(current_provider)
+                return entities, [], current_provider
             if attempt >= max(0, retries) or not _retryable_failure(exc):
                 raise
     raise last_error or ProcessingError("grounded extraction failed")

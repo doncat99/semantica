@@ -202,13 +202,21 @@ def _response(request_id: Optional[str], ok: bool, *, result: Optional[Dict[str,
                 payload["error"]["diagnostic"] = error.diagnostic
             if error.gateway:
                 payload["error"]["gateway"] = error.gateway
-        if error is not None and "diagnostic" not in payload["error"]:
+        if error is not None:
             code = payload["error"].setdefault("code", "SEMANTIC_WORKER_INTERNAL_ERROR")
-            diagnostic = {"origin": "protocol_error", "code": code}
+            diagnostic = {"origin": "protocol_error", "code": code, **payload["error"].get("diagnostic", {})}
             parallel_context = getattr(error, "parallel_context", None)
             if parallel_context is not None:
                 diagnostic["parallelTask"] = parallel_context
-            frame = error.__traceback__
+            cause = error
+            seen = set()
+            while cause is not None and id(cause) not in seen:
+                seen.add(id(cause))
+                if isinstance(cause, ValidationError):
+                    diagnostic.update(_safe_validation_details(cause))
+                deepest = cause
+                cause = cause.__cause__
+            frame = deepest.__traceback__
             if frame is not None:
                 while frame.tb_next is not None:
                     frame = frame.tb_next

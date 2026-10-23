@@ -30,7 +30,7 @@ from pydantic.json_schema import SkipJsonSchema
 from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, ValidationInfo, model_validator
 
 from .source import source_processing_revision
-from .semantic_artifact_errors import DocumentQualityError, SemanticArtifactError
+from .semantic_artifact_errors import DocumentQualityError, SemanticArtifactError, ModelOutputError
 from .semantic_source_artifact import (
     _digest_bytes, _digest_file, _safe_id, _write_json, _parse_source,
     _admit_document_quality, _representation_revision, parse_source_artifact,
@@ -468,20 +468,24 @@ def _extract_project_sources(parsed_sources, request, progress):
 
     def phase(stage, jobs, handler, destination, base, span):
         completed = restored = 0
+        warning_count = skipped = 0
         sources = [{"sourceId": source.source_id, "stage": stage,
                     "completedChunks": 0, "restoredChunks": 0,
                     "totalChunks": len(windows[index]), "inFlightChunks": 0,
                     "state": "queued" if windows[index] else "completed"}
                    for index, (source, _, _) in enumerate(parsed_sources)]
 
-        def emit():
+        def emit(warning=None):
             if progress:
                 progress({"stage": stage, "percent": base + round(completed / max(1, total) * span),
                           "detail": f"{stage.capitalize()} {completed} / {total} chunks",
                           "metadata": {"completedChunks": completed, "restoredChunks": restored,
+                                       "warningCount": warning_count, "skippedExtractionChunks": skipped,
+                                       **({"warning": warning} if warning is not None else {}),
                                        "totalChunks": total, "sourceProgress": [dict(row) for row in sources]}})
 
         def dispatch(job):
+            nonlocal warning_count, skipped
             source_index, _, item = job
             with lock:
                 row = sources[source_index]
@@ -489,7 +493,28 @@ def _extract_project_sources(parsed_sources, request, progress):
                 row["state"] = "running"
                 emit()
             try:
-                return handler(job)
+                value = handler(job)
+                if stage == "extracting":
+                    source = parsed_sources[source_index][0]
+                    start, end, _ = item
+                    pages = sorted({loc["page"] for loc in locations[source_index]
+                                    if isinstance(loc.get("page"), int)
+                                    and isinstance(loc.get("start"), int)
+                                    and isinstance(loc.get("end"), int)
+                                    and loc["start"] < end and loc["end"] > start})
+                    for receipt in value[1]:
+                        for rejection in receipt.metadata.get("rejected_candidates", []):
+                            warning = {"sourceId": source.source_id,
+                                "stage": rejection.get("stage", "extraction"),
+                                "code": rejection.get("code", "EXTRACTION_CANDIDATE_REJECTED"),
+                                "action": rejection.get("action", "discarded_candidate"),
+                                "pages": pages, "windowStart": start, "windowEnd": end,
+                                "diagnostic": rejection.get("diagnostic", {})}
+                            with lock:
+                                warning_count += 1
+                                skipped += int(warning["action"] == "skipped_extraction")
+                                emit(warning)
+                return value
             except Exception:
                 with lock:
                     row["inFlightChunks"] -= len(item) if stage == "embedding" else 1
@@ -921,7 +946,11 @@ class _ProjectModelProvider(BaseProvider):
         try:
             return schema.model_validate_json(content, context=validation_context)
         except ValidationError as error:
-            raise ProcessingError('Typed relay response failed schema validation') from error
+            try:
+                raise ModelOutputError('Typed relay response failed schema validation',
+                    code='MODEL_OUTPUT_SCHEMA_INVALID', diagnostic={"validationErrorCount": error.error_count()}) from error
+            except ModelOutputError as local:
+                raise ProcessingError(str(local)) from local
 
     def generate(self, prompt: str, **kwargs) -> str:
         # A failed request must never reject a previous successful response.
@@ -958,13 +987,13 @@ class _ProjectModelProvider(BaseProvider):
         self.receipts.append(receipt)
         choices = response.get("choices")
         if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
-            raise SemanticArtifactError(f"{self.operation} response has invalid choices")
+            raise ModelOutputError(f"{self.operation} response has invalid choices", code='MODEL_OUTPUT_CHOICES_INVALID')
         message = choices[0].get("message")
         if choices[0].get('finish_reason') != 'stop' or not isinstance(message, dict) or message.get('refusal'):
-            raise SemanticArtifactError(f"{self.operation} response incomplete or refused")
+            raise ModelOutputError(f"{self.operation} response incomplete or refused", code='MODEL_OUTPUT_INCOMPLETE')
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str) or not content.strip():
-            raise SemanticArtifactError(f"{self.operation} response has no JSON content")
+            raise ModelOutputError(f"{self.operation} response has no JSON content", code='MODEL_OUTPUT_EMPTY')
         return content
 
     def reject_last(self) -> None:

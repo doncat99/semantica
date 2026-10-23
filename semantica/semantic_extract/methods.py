@@ -1541,13 +1541,25 @@ Grounding requirements:
                                 raise ProcessingError(
                                     f"entity candidate_index={index}: {exc}"
                                 ) from exc
+                            if rejection_receipts is not None:
+                                rejection_receipts.append({
+                                    "candidate_index": index,
+                                    "reason": "entity is not grounded in source text",
+                                    "kind": "grounding",
+                                })
                             logger.warning("Discarding entity that is not grounded in source text: %r", e_out.text)
                             continue
                         metadata.update({"mention_id": f"mention:{len(entities)}", "span_occurrence": occurrence})
                     try:
                         attributes = extraction_schema.validate_attributes(e_out.label, e_out.attributes) if extraction_schema else dict(e_out.attributes)
                     except ValueError as exc:
-                        raise ProcessingError(str(exc)) from exc
+                        if rejection_receipts is not None:
+                            rejection_receipts.append({
+                                "candidate_index": index,
+                                "reason": f"entity attributes are invalid: {exc}",
+                                "kind": "schema",
+                            })
+                        continue
                     entities.append(Entity(
                         text=e_out.text,
                         label=e_out.label,
@@ -2807,6 +2819,8 @@ def _parse_grounded_relation_result(
             if reject_invalid and rejections is not None:
                 rejections.append({"candidate_index": index, "reason": str(exc)})
     if items and malformed == len(items):
+        if reject_invalid:
+            return relations
         raise ProcessingError("grounded relation response contains no schema-valid candidates")
     if invalid and not reject_invalid:
         raise ProcessingError("; ".join(invalid[:5]))
