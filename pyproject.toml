@@ -135,6 +135,7 @@ semantic-worker-directml = [
   "onnxruntime-directml>=1.23.0; sys_platform == 'win32'",
 ]
 semantic-worker-common = [
+  "openai==3.37.0",
   "blake3==1.0.8",
   "python-docx>=1.2.0",
   "openpyxl>=3.1.5",

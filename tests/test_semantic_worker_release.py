@@ -5,6 +5,14 @@ from argparse import Namespace
 
 import pytest
 
+
+def test_all_worker_profiles_include_the_native_typed_schema_dependency():
+    import tomllib
+    from packaging.requirements import Requirement
+    config = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
+    requirements = [Requirement(value) for value in config["project"]["optional-dependencies"]["semantic-worker-common"]]
+    assert any(requirement.name == "openai" for requirement in requirements)
+
 SCRIPT = Path(__file__).parents[1] / ".github/scripts/semantic_worker_release.py"
 spec = importlib.util.spec_from_file_location("semantic_worker_release", SCRIPT)
 module = importlib.util.module_from_spec(spec)

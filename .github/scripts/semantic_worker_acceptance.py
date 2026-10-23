@@ -159,11 +159,16 @@ with tempfile.TemporaryDirectory(prefix="semantica-native-acceptance-") as direc
         source = next(item for item in sources if item["sourceId"] == representation["source_id"])
         assert representation["content_hash"] == representation["material_revision_id"] == source["materialRevision"]
     assert assess_document_quality("Broken \ufffd\ufffd mapping", {})["status"] == "needs_review"
+    model_result = scratch / "model-acceptance.json"
+    subprocess.run([sys.executable, "-I", "-B",
+        str(Path(__file__).with_name("semantic_worker_model_acceptance.py")),
+        str(root), str(model_result)], check=True, timeout=240)
     verify_bundle_inventory(root, manifest, remove_untracked_bytecode=True)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps({"artifactDigest": manifest["artifactDigest"], "schemaDigest": manifest["schemaDigest"],
         "parsers": parsed, "queryContexts": len(queried["contexts"]), "documentQualityAdmission": True,
-        "representationRevisions": True, "postRunInventoryVerified": True, "deterministicProtocolOnly": True,
+        "representationRevisions": True, "postRunInventoryVerified": True, "deterministicProtocolOnly": False,
+        "modelPathAcceptance": json.loads(model_result.read_text()),
         "accelerationProfile": profile,
         "accelerationCapabilities": capabilities,
         "accelerationValidation": {"device": "cpu", "gpuInferenceValidated": False},
