@@ -10,7 +10,7 @@ import json
 from pathlib import Path
 import posixpath
 import re
-from typing import Any, Literal
+from typing import Any, Callable, Literal
 from urllib.parse import unquote
 from xml.etree import ElementTree
 from zipfile import BadZipFile, ZipFile
@@ -208,7 +208,8 @@ def _parse_epub(path: Path, name: str) -> SourceDocument:
         raise UnsupportedSourceFormatError(f"invalid EPUB source: {name}") from exc
 
 
-def parse_source(path: Path, *, name: str, mime_type: str, force_ocr: bool, document_processing: dict | None = None) -> SourceDocument:
+def parse_source(path: Path, *, name: str, mime_type: str, force_ocr: bool, document_processing: dict | None = None,
+                 progress_callback: Callable[[Any], None] | None = None) -> SourceDocument:
     """Parse one source exactly once through its admitted format adapter.
 
     Text files use the standard library. Structured formats use the single
@@ -264,7 +265,8 @@ def parse_source(path: Path, *, name: str, mime_type: str, force_ocr: bool, docu
 
         with DoclingParser.lease(enable_ocr=force_ocr, force_full_page_ocr=force_ocr,
                                  export_format="doctags") as parser:
-            result = parser.parse(path, export_format="doctags", include_document=True)
+            result = parser.parse(path, export_format="doctags", include_document=True, **(
+                {"progress_callback": progress_callback} if progress_callback is not None else {}))
         if not result.get("plain_text", "").strip():
             raise SourceQualityError(
                 "Docling conversion produced no usable text; explicit OCR repair or source correction required"

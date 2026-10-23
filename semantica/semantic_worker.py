@@ -238,7 +238,7 @@ def _dispatch(request: WorkerRequest, progress: Optional[Callable[[Dict[str, Any
         spec = ExtractionSpecification.model_validate(request.params)
         return _response(request.id, True, result={"valid": True, "digest": spec.digest})
     if request.method == "parse_source":
-        return _response(request.id, True, result=parse_source_artifact(ParseSourceRequest.model_validate(request.params)))
+        return _response(request.id, True, result=parse_source_artifact(ParseSourceRequest.model_validate(request.params), progress=progress))
     if request.method == "bind_parsed_source":
         return _response(request.id, True, result=bind_parsed_source_artifact(BindParsedSourceRequest.model_validate(request.params)))
     if request.method == "validate_artifact":

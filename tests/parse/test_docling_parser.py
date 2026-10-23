@@ -7,6 +7,72 @@ from pathlib import Path
 from semantica.parse.docling_parser import DoclingParser, DoclingMetadata
 
 class TestDoclingParser(unittest.TestCase):
+    def test_worker_streams_source_pages_before_artifact_without_finishing_on_last_page(self):
+        import io
+        import json
+        import tempfile
+        from semantica.semantic_worker import serve, PROTOCOL
+        from semantica.source import source_content_revision
+        from docling_core.types.doc import DoclingDocument, DocItemLabel
+
+        document = DoclingDocument(name="progress")
+        document.add_text(label=DocItemLabel.TEXT, text="Usable document content")
+        output = io.StringIO()
+        def convert(path, *, progress_callback):
+            progress_callback(SimpleNamespace(kind="phase_started"))
+            for completed, page, success in [(1, 3, False), (2, 1, True), (3, 2, False)]:
+                progress_callback(SimpleNamespace(kind="page_completed", page_no=page,
+                    completed_pages=completed, total_pages=3, success=success))
+            # Page work is done, but document assembly has not returned yet.
+            lines = [json.loads(line) for line in output.getvalue().splitlines()]
+            self.assertEqual(len(lines), 3)
+            self.assertTrue(all(line["type"] == "progress" for line in lines))
+            return SimpleNamespace(document=document, status="success", pages=[
+                SimpleNamespace(cells=[SimpleNamespace(text="Usable document content", from_ocr=force_ocr)])])
+        self.mock_converter.convert.side_effect = convert
+        with tempfile.TemporaryDirectory() as root:
+            path = Path(root) / "private-name.pdf"
+            path.write_bytes(b"fixture")
+            for force_ocr in (False, True):
+                output.seek(0)
+                output.truncate()
+                request = {"protocol": PROTOCOL, "id": "parse-request", "method": "parse_source",
+                    "params": {"source": {"sourceId": "source-fixture", "filePath": str(path),
+                        "name": path.name, "mimeType": "application/pdf", "materialRevision": source_content_revision(path)},
+                        "outputDir": root, "forceOcr": force_ocr, "documentProcessing": {"mode": "local"}}}
+                self.assertEqual(serve(io.StringIO(json.dumps(request) + "\n"), output), 0)
+                lines = [json.loads(line) for line in output.getvalue().splitlines()]
+                self.assertTrue(lines[-1]["ok"], lines[-1])
+                self.assertEqual([line["metadata"] for line in lines[:-1]], [
+                    {"sourceId": "source-fixture", "completedPages": 1, "totalPages": 3, "failedPages": 1},
+                    {"sourceId": "source-fixture", "completedPages": 2, "totalPages": 3, "failedPages": 1},
+                    {"sourceId": "source-fixture", "completedPages": 3, "totalPages": 3, "failedPages": 2}])
+                self.assertTrue(all(line["id"] == "parse-request" for line in lines))
+                self.assertTrue(all(line["stage"] == ("recognizing" if force_ocr else "document_parsing") for line in lines[:-1]))
+                self.assertNotIn("private-name", json.dumps(lines[:-1]))
+
+    def test_source_forwards_native_page_progress_without_recounting(self):
+        from docling_core.types.doc import DoclingDocument, DocItemLabel
+        from semantica.source import parse_source
+
+        document = DoclingDocument(name="progress")
+        document.add_text(label=DocItemLabel.TEXT, text="Usable content")
+        events = [SimpleNamespace(kind="page_completed", page_no=3, completed_pages=1,
+                                  total_pages=3, success=False),
+                  SimpleNamespace(kind="page_completed", page_no=1, completed_pages=2,
+                                  total_pages=3, success=True)]
+        received = []
+        def convert(path, *, progress_callback):
+            for event in events:
+                progress_callback(event)
+            return SimpleNamespace(document=document, status="success", pages=[])
+        self.mock_converter.convert.side_effect = convert
+        with patch.object(Path, 'exists', return_value=True):
+            result = parse_source(Path("progress.pdf"), name="progress.pdf",
+                mime_type="application/pdf", force_ocr=False, progress_callback=received.append)
+        self.assertEqual(received, events)
+        self.assertEqual(result.text, "Usable content")
+
     def test_source_conversions_share_converter_without_retaining_document_results(self):
         from docling_core.types.doc import DoclingDocument, DocItemLabel
         from semantica.source import parse_source

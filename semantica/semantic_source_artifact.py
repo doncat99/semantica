@@ -5,7 +5,7 @@ import json
 import logging
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .semantic_artifact_errors import DocumentQualityError, SemanticArtifactError
 from .semantic_artifact_schema import (BindParsedSourceRequest, ParseSourceRequest,
@@ -34,7 +34,8 @@ def _write_json(path: Path, payload: Any) -> str:
 
 
 def _parse_source(source: Any, force_ocr: bool, document_processing: dict | None = None,
-                  *, admit_quality: bool = True) -> tuple[str, dict[str, Any], str, str, str, str]:
+                  *, admit_quality: bool = True,
+                  progress_callback: Callable[[Any], None] | None = None) -> tuple[str, dict[str, Any], str, str, str, str]:
     path = Path(source.file_path).resolve()
     if not path.is_file():
         raise SemanticArtifactError(f"source is not a file: {source.source_id}")
@@ -55,6 +56,7 @@ def _parse_source(source: Any, force_ocr: bool, document_processing: dict | None
             mime_type=source.mime_type,
             force_ocr=force_ocr,
             document_processing=document_processing,
+            **({"progress_callback": progress_callback} if progress_callback is not None else {}),
         )
     except SourceQualityError as exc:
         raise DocumentQualityError(str(exc), code="DOCUMENT_QUALITY_ERROR") from exc
@@ -87,11 +89,26 @@ def _representation_revision(source: Any, force_ocr: bool, content_hash: str, pa
         "document": {key: value for key, value in document.items() if key not in {"metadata", "representation_revision"}}})
 
 
-def parse_source_artifact(request: ParseSourceRequest) -> dict[str, str]:
+def parse_source_artifact(request: ParseSourceRequest, *, progress: Callable[[dict[str, Any]], None] | None = None) -> dict[str, str]:
     """Materialize one source revision before any semantic/model work."""
+    failed_pages = 0
+
+    def on_conversion_progress(event: Any) -> None:
+        nonlocal failed_pages
+        if event.kind != "page_completed":
+            return
+        # Docling counts completed work, including failed pages, not page order.
+        failed_pages += int(not event.success)
+        progress({"stage": "recognizing" if request.force_ocr else "document_parsing",
+                  "percent": round(event.completed_pages / max(1, event.total_pages) * 70),
+                  "metadata": {"sourceId": request.source.source_id,
+                               "completedPages": event.completed_pages,
+                               "totalPages": event.total_pages, "failedPages": failed_pages}})
+
     profile = request.document_processing.model_dump(mode="json", by_alias=True)
     text, document, origin, content_hash, parser, parser_version = _parse_source(
-        request.source, request.force_ocr, profile, admit_quality=False)
+        request.source, request.force_ocr, profile, admit_quality=False,
+        **({"progress_callback": on_conversion_progress} if progress is not None else {}))
     payload = {
         "protocol": "semantica.parsed-source.v2",
         "sourceId": request.source.source_id,

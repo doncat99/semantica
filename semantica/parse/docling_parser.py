@@ -162,6 +162,7 @@ class DoclingParser:
                 - include_document: Include complete document JSON and DocTags from
                   the same conversion (default: False).
                 - pages: Specific page numbers to parse (None = all pages) - PDF only
+                - progress_callback: Optional native Docling conversion event callback.
 
         Returns:
             dict: Parsed document data matching Semantica format
@@ -227,7 +228,7 @@ class DoclingParser:
             export_format = options.get("export_format", self.export_format)
 
             # Stage 2: Document conversion (10-70%) - This is the longest step
-            # Note: This is a blocking operation, but we'll update progress after it completes
+            # Conversion blocks; the optional native callback reports live page work.
             # Emphasize Docling as core dependency in message
             self.progress_tracker.update_progress(
                 tracking_id,
@@ -239,7 +240,9 @@ class DoclingParser:
             # Convert document using Docling (blocking operation)
             # Store start time for ETA calculation
             conversion_start = time.time()
-            result = self._converter.convert(str(file_path))
+            progress_callback = options.get("progress_callback")
+            result = self._converter.convert(str(file_path), **(
+                {"progress_callback": progress_callback} if progress_callback is not None else {}))
             conversion_elapsed = time.time() - conversion_start
             
             # Stage 3: Document conversion complete (70%)
