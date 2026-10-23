@@ -53,3 +53,21 @@ schema implementation is introduced.
 - Reuse an upstream native owner if introduced; rerun isolated installed model
   paths and dependency specifications after merging. Do not replace native
   schema conversion with a second implementation.
+
+## 2026-10-23 native release verification
+
+- Correction to the pending status above: immutable CPU release
+  `ontoscience-semantic-worker-0db605b84500`, source
+  `0db605b84500eed77cbbf8d9f7f831949d0af72b`, passed GitHub Actions
+  [39882530655](https://github.com/doncat99/semantica/actions/runs/39882530655).
+  Run time: 01:10:58–01:19:17 UTC (8 minutes 19 seconds).
+- macOS arm64, Linux x64 and Windows x64 installed-artifact acceptance receipts
+  all report verified parser dependency closure and post-run inventory,
+  `deterministicProtocolOnly=false`, fresh build/query workers, loopback-only
+  entity/relation extraction, embedding, classification, explanation, and both
+  keyword and semantic queries. Each records four model receipts and one
+  explanation receipt. Downloaded manifest/receipt SHA-256 values match release
+  asset digests; artifact identities match between manifests and receipts.
+- OntoScience consumes this exact release through its immutable pin. Real ESG
+  project completion remains separate runtime evidence; these native checks
+  do not establish real-model quality or GPU hardware support.
