@@ -9,7 +9,8 @@ def extract_source(text, model, embedding, *, extraction_spec=None, progress=Non
     request = SimpleNamespace(parallelism=parallelism,
         recipe=SimpleNamespace(extraction_spec=extraction_spec),
         relays={"model": model, "embedding": embedding})
-    source = SimpleNamespace(source_id="source")
+    from semantica.semantic_artifact_builder import stable_digest
+    source = SimpleNamespace(source_id="source", material_revision=stable_digest(text))
     return _extract_project_sources([(source, False, (text, document or {}))], request, progress)[0]
 
 

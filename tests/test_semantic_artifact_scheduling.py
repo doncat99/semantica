@@ -60,7 +60,7 @@ def test_global_queue_interleaves_sources_preserves_order_and_budget(monkeypatch
     monkeypatch.setattr(builder, '_embed_texts', lambda texts, relay: ([[1.] for _ in texts], SimpleNamespace()))
     request = SimpleNamespace(parallelism=2, relays={'model': None, 'embedding': None}, recipe=SimpleNamespace(extraction_spec=None))
     events = []
-    result = builder._extract_project_sources([(SimpleNamespace(source_id='a'), False, ('abc', {})), (SimpleNamespace(source_id='b'), False, ('xy', {}))], request, events.append)
+    result = builder._extract_project_sources([(SimpleNamespace(source_id='a', material_revision='immutable-a'), False, ('abc', {})), (SimpleNamespace(source_id='b', material_revision='immutable-b'), False, ('xy', {}))], request, events.append)
     assert peak == 2
     assert calls[:2] == ['abc', 'xy']
     assert [len(value[1]) for value in result] == [3, 2]

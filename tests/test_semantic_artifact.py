@@ -303,7 +303,7 @@ def test_product_output_rejects_citation_shape_through_native_typed_provider(mon
     ]
     prompts = []
 
-    def relay_response(relay, payload, operation):
+    def relay_response(relay, payload, operation, *, business_context=None):
         prompts.append(payload["messages"][0]["content"])
         result = {"model": relay.model_id, "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(outputs.pop(0))}}]}
         return result, ModelReceipt(id=f"receipt:{len(prompts)}", operation=operation, provider="test",
@@ -327,7 +327,7 @@ def test_product_output_uses_host_admitted_output_limit(monkeypatch):
 
     payloads = []
 
-    def relay_response(relay, payload, operation):
+    def relay_response(relay, payload, operation, *, business_context=None):
         payloads.append(payload)
         result = {"model": relay.model_id, "choices": [{"finish_reason": "stop", "message": {"content": json.dumps({"assignments": [{
             "dimension_id": "purpose", "item_id": "history", "confidence": 0.9, "citations": [
@@ -362,7 +362,7 @@ def test_product_output_rejects_semantic_citation_and_vocabulary(monkeypatch):
     ]
     prompts = []
 
-    def relay_response(relay, payload, operation):
+    def relay_response(relay, payload, operation, *, business_context=None):
         prompts.append(payload["messages"][0]["content"])
         result = {"model": relay.model_id, "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(outputs.pop(0))}}]}
         return result, ModelReceipt(id=f"receipt:{len(prompts)}", operation=operation, provider="test",
@@ -467,7 +467,7 @@ def test_semantic_classification_rejects_invalid_model_evidence(tmp_path, monkey
         assignments.append({**assignment, "item_id": "manual"})
     receipt = ModelReceipt(id="receipt:test", operation="source_classification", provider="test", model="test", input_digest=H1, output_digest=H2)
     calls = []
-    def relay_response(*args):
+    def relay_response(*args, **kwargs):
         calls.append(args)
         return {"model": "test", "choices": [{"finish_reason": "stop", "message": {"content": json.dumps({"assignments": assignments})}}]}, receipt
     monkeypatch.setattr("semantica.semantic_artifact_builder._relay_json", relay_response)
@@ -489,7 +489,7 @@ def test_semantic_classification_preserves_source_offsets_and_unclassified_dimen
     span = built["passages"][0]
     receipt = ModelReceipt(id="receipt:test", operation="source_classification", provider="test", model="test", input_digest=H1, output_digest=H2)
     output = {"assignments": [{"dimension_id": "purpose", "item_id": "history", "confidence": 0.9, "citations": [{"evidence_id": span.id, "quote": span.quote}]}]}
-    monkeypatch.setattr(pipeline, "_relay_json", lambda *args: (
+    monkeypatch.setattr(pipeline, "_relay_json", lambda *args, **kwargs: (
         {"model": "test", "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(output)}}]}, receipt))
     validations = []
     native_validate = pipeline._ClassificationOutput.model_validate_json
@@ -570,7 +570,7 @@ def test_explanation_rejects_missing_or_hallucinated_citations(tmp_path, monkeyp
     result = {"title": "Explanation", "summary": "Unsupported", "findings": [
         {"summary": "Explanation", "explanation": "Unsupported claim", "citations": citation}]}
     calls = []
-    def respond(*args):
+    def respond(*args, **kwargs):
         calls.append(args)
         return {"model": "test", "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(result)}}]}, receipt
     monkeypatch.setattr("semantica.semantic_artifact_builder._relay_json", respond)
@@ -940,7 +940,7 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
     second.write_text(text + " Ada Lovelace was a mathematician.", encoding="utf-8")
     operations = []
 
-    def relay_response(relay, payload, operation):
+    def relay_response(relay, payload, operation, *, business_context=None):
         operations.append(operation)
         if operation == "embedding":
             result = {"data": [
@@ -1014,8 +1014,10 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
     base_path = tmp_path / "base-snapshot.json"
     base_path.write_text(snapshot.model_dump_json(by_alias=True))
     request["params"]["baseSnapshot"] = {"snapshotId": snapshot.id, "snapshotPath": str(base_path), "artifactDigest": "sha256:" + __import__("hashlib").sha256(base_path.read_bytes()).hexdigest(), "schemaDigest": H3}
+    request["params"]["resumeCheckpointDirs"] = [str(Path(request["params"]["outputDir"]) / "checkpoint")]
     request["params"]["outputDir"] = str(tmp_path / "repeat")
     repeated = build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(request["params"]))["snapshot"]
+    assert operations.count("structured_extraction") == 4
     assert operations.count("knowledge_explanation") == 0
     assert repeated.change_delta.updated_ids == []
     canonical_ids = {entity.id for entity in snapshot.entities}

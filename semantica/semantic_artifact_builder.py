@@ -72,7 +72,7 @@ from .semantic_artifact_schema import (
 )
 from .semantic_extract import NamedEntityRecognizer, extract_grounded_window
 from .semantic_extract.providers import BaseProvider
-from .semantic_extract.methods import _exact_occurrence, _grounded_qualifiers
+from .semantic_extract.methods import _exact_occurrence, _grounded_qualifiers, _GENERATION_CACHE_KEYS
 from .semantic_extract.types import Entity, Relation
 from .semantic_extract.cache import CacheBackend, ExtractionCache, _encode_value, _decode_value
 from .split.structural_chunker import StructuralChunker
@@ -126,6 +126,7 @@ class _RelayCooldown:
 
 
 _active_relay_gates: ContextVar[Any] = ContextVar("active_relay_gates", default=None)
+_completed_generation_only: ContextVar[bool] = ContextVar("completed_generation_only", default=False)
 
 
 # Target size for the native structural chunker.  Structure boundaries may
@@ -436,7 +437,7 @@ def _extract_window_context(text, model_relay, extraction_spec, item, context, f
     provider = _project_model_provider(model_relay)
     checkpoint = active_checkpoint.get()
     if checkpoint:
-        provider.extraction_cache = ExtractionCache(ttl=None,
+        provider.extraction_cache = _ProjectExtractionCache(ttl=None,
             backend=_ExtractionCheckpointBackend(checkpoint, provider))
         provider.cache_scope = {
             "source": _digest_bytes(text.encode("utf-8")), "window": [start, end],
@@ -458,8 +459,32 @@ def _extract_window_context(text, model_relay, extraction_spec, item, context, f
     return extracted, provider.receipts, restored
 
 
-def _extract_project_sources(parsed_sources, request, progress):
-    windows = [list(_text_windows(parsed[0])) for _, _, parsed in parsed_sources]
+def _source_windows(source, force_ocr, text, *, completed=False):
+    """Resume the original extraction plan while its source text remains intact."""
+    checkpoint = active_checkpoint.get()
+    key = {"sourceId": source.source_id, "materialRevision": source.material_revision, "forceOcr": force_ocr}
+    saved = checkpoint.read("source-windows", key) if checkpoint else None
+    if saved is None and completed:
+        raise SemanticArtifactError("completed work recovery plan is missing; preserve the adopted snapshot and restore its checkpoint",
+                                    code="COMPLETED_WORK_RECOVERY_GAP")
+    if saved is None and checkpoint and checkpoint.has_prior_extraction(key):
+        raise SemanticArtifactError(
+            "historical extraction window plan is missing; preserve completed work and restore its plan before retrying")
+    items = saved if saved is not None else list(_text_windows(text))
+    if not isinstance(items, (list, tuple)) or any(
+            not isinstance(item, (list, tuple)) or len(item) != 3
+            or type(item[0]) is not int or type(item[1]) is not int
+            or not 0 <= item[0] < item[1] <= len(text)
+            or text[item[0]:item[1]] != item[2] for item in items):
+        raise SemanticArtifactError("saved extraction windows do not match source text")
+    if checkpoint and saved is None:
+        checkpoint.write("source-windows", key, items)
+    return items
+
+
+def _extract_project_sources(parsed_sources, request, progress, completed_source_ids=()):
+    windows = [_source_windows(source, force_ocr, parsed[0], completed=source.source_id in completed_source_ids)
+               for source, force_ocr, parsed in parsed_sources]
     locations = [_docling_locations(parsed[1] or {}, parsed[0]) for _, _, parsed in parsed_sources]
     total = sum(map(len, windows))
     extracted = [[None] * len(items) for items in windows]
@@ -487,6 +512,8 @@ def _extract_project_sources(parsed_sources, request, progress):
         def dispatch(job):
             nonlocal warning_count, skipped
             source_index, _, item = job
+            reuse_token = _completed_generation_only.set(
+                stage == "extracting" and parsed_sources[source_index][0].source_id in completed_source_ids)
             with lock:
                 row = sources[source_index]
                 row["inFlightChunks"] += len(item) if stage == "embedding" else 1
@@ -521,6 +548,8 @@ def _extract_project_sources(parsed_sources, request, progress):
                     row["state"] = "failed"
                     emit()
                 raise
+            finally:
+                _completed_generation_only.reset(reuse_token)
 
         def done(_index, value):
             nonlocal completed, restored
@@ -647,22 +676,33 @@ def build_grounded_source_snapshot(source: SourceBuildInput, *, scope_id: str, m
         "source_processing_revision": source_processing_revision(Path(source.file_path),
             mime_type=source.mime_type, force_ocr=False, document_processing=profile)})
     token = None
+    checkpoint = None
+    completed_key = {"sourceId": source.source_id, "materialRevision": source.material_revision,
+                     "artifactRef": artifact_ref}
     if checkpoint_dir is not None:
         from .project_checkpoint import SnapshotCheckpoint
         checkpoint = SnapshotCheckpoint.for_source(source, output_dir=checkpoint_dir,
             scope_id=scope_id, recipe=recipe, created_at=created_at)
+        completed = checkpoint.read("grounded-source-result", completed_key)
+        if completed is not None:
+            artifact = SemanticArtifact.model_validate(completed["artifact"])
+            if artifact.project_id != scope_id:
+                raise SemanticArtifactError("saved source result belongs to another scope")
+            provider_instance.receipts = completed["receipts"]
+            provider_instance.rejections = completed["rejections"]
+            return artifact
         if not hasattr(provider_instance, 'receipts'):
             provider_instance.receipts = []
         if not hasattr(provider_instance, 'rejections'):
             provider_instance.rejections = []
-        provider_instance.extraction_cache = ExtractionCache(ttl=None,
+        provider_instance.extraction_cache = _ProjectExtractionCache(ttl=None,
             backend=_ExtractionCheckpointBackend(checkpoint, provider_instance))
-        provider_instance.cache_scope = {'scope': scope_id, 'recipe': recipe}
+        provider_instance.cache_scope = {'scope': scope_id}
         token = active_checkpoint.set(checkpoint)
     try:
         parsed = (_load_parsed_source(source, parsed_source, False, profile)
                   if parsed_source is not None else _parse_source(source, False, profile))
-        windows = list(_text_windows(parsed[0]))
+        windows = _source_windows(source, False, parsed[0])
         extracted = []
         for start, end, text in windows:
             entities, relations, _ = extract_grounded_window(text, model=model,
@@ -684,7 +724,7 @@ def build_grounded_source_snapshot(source: SourceBuildInput, *, scope_id: str, m
     assertions, relations = _remap_identity_facts(built["assertions"], built["relations"], remap, entities)
     assertions, relations, conflicts = reconcile_qualified_facts(scope_id, assertions, relations)
     receipt_ids = [item.id for item in receipts]
-    return SemanticArtifact(snapshot_id="snapshot:" + stable_digest([
+    artifact = SemanticArtifact(snapshot_id="snapshot:" + stable_digest([
         scope_id, source.source_id, source.material_revision, created_at, recipe, result]).split(":")[1],
         project_id=scope_id, created_at=created_at, lineage=KernelLineage(
             schema_digest=stable_digest(SemanticArtifact.model_json_schema()),
@@ -697,16 +737,33 @@ def build_grounded_source_snapshot(source: SourceBuildInput, *, scope_id: str, m
         entity_mentions=mentions, entities=entities, identity_registry=registry,
         assertions=assertions, relations=relations, conflicts=conflicts, model_receipts=receipts,
         metadata={"pipeline": "semantica", "recipe": "grounded-source", "publication_status": "not_published"})
+    if checkpoint is not None:
+        checkpoint.write("grounded-source-result", completed_key, {
+            "artifact": artifact.model_dump(mode="json", by_alias=True),
+            "receipts": provider_instance.receipts, "rejections": provider_instance.rejections})
+    return artifact
 
 
-def _relay_json(relay: Any, payload: dict[str, Any], operation: str) -> tuple[dict[str, Any], ModelReceipt]:
+def _relay_cache_key(relay, payload, operation, business_context=None):
+    if operation == "embedding":
+        return {"operation": operation, "bindingId": getattr(relay, "binding_id", None),
+                "modelId": relay.model_id, "payload": payload}
+    return {"operation": operation, "context": business_context}
+
+
+def _relay_json(relay: Any, payload: dict[str, Any], operation: str, *, business_context=None) -> tuple[dict[str, Any], ModelReceipt]:
     checkpoint = active_checkpoint.get() if operation != "structured_extraction" else None
-    cache_key = {"operation": operation, "bindingId": getattr(relay, "binding_id", None), "modelId": relay.model_id, "payload": payload}
+    if checkpoint is not None and operation != "embedding" and business_context is None:
+        raise SemanticArtifactError("durable generation requires explicit business context; refusing prompt-bound persistence")
+    cache_key = _relay_cache_key(relay, payload, operation, business_context)
     cached = checkpoint.read("relay", cache_key) if checkpoint else None
     if cached is not None:
         receipt = ModelReceipt.model_validate(cached["receipt"])
         object.__setattr__(receipt, "_checkpoint_restored", True)
         return cached["response"], receipt
+    if operation != "embedding" and _completed_generation_only.get():
+        raise SemanticArtifactError("completed work recovery entry is missing; preserve the adopted snapshot and restore its checkpoint",
+                                    code="COMPLETED_WORK_RECOVERY_GAP")
     gates = _active_relay_gates.get()
     if gates is None:
         return _relay_uncached(relay, payload, operation, checkpoint, cache_key)
@@ -881,6 +938,25 @@ def _safe_gateway_receipt(value: Any) -> dict[str, Any] | None:
     return receipt or None
 
 
+class _ProjectExtractionCache(ExtractionCache):
+    """Reuse admitted project work across execution selections, with one business key.
+
+    Text, grounding, extraction specification and window boundaries stay in the
+    key. Generic extraction caches retain their normal model-specific policy.
+    """
+
+    def _generate_key(self, text, **params):
+        params = dict(params)
+        for key in {"model", "provider", "max_text_length", "structured_output_mode", *_GENERATION_CACHE_KEYS}:
+            params.pop(key, None)
+        scope = params.get("provider_scope")
+        if isinstance(scope, dict):
+            params["provider_scope"] = {key: value for key, value in scope.items()
+                                        if key not in {"binding", "contextWindowTokens", "maxOutputTokens", "recipe"}}
+        return super()._generate_key(text, **params)
+
+
+
 class _ExtractionCheckpointBackend(CacheBackend):
     """Native cache persistence with the build's input fence and receipt provenance."""
 
@@ -940,7 +1016,7 @@ class _ProjectModelProvider(BaseProvider):
         from openai.lib._pydantic import to_strict_json_schema
         from pydantic import ValidationError
         try:
-            content = self.generate(prompt, response_schema=to_strict_json_schema(schema), **kwargs)
+            content = self.generate(prompt, response_schema=to_strict_json_schema(schema), business_context=validation_context, **kwargs)
         except SemanticArtifactError as error:
             raise ProcessingError(str(error)) from error
         try:
@@ -971,14 +1047,15 @@ class _ProjectModelProvider(BaseProvider):
         if response_schema is not None:
             payload['response_format'] = {'type': 'json_schema', 'json_schema': {
                 'name': 'semantic_output', 'schema': response_schema, 'strict': True}}
-        response, receipt = _relay_json(self.relay, payload, self.operation)
-        cache_key = {"operation": self.operation, "bindingId": getattr(self.relay, "binding_id", None),
-                     "modelId": self.relay.model_id, "payload": payload}
+        business_context = kwargs.get("business_context")
+        response, receipt = _relay_json(self.relay, payload, self.operation, business_context=business_context)
+        cache_key = _relay_cache_key(self.relay, payload, self.operation, business_context)
         if self.operation != "structured_extraction":
             self.last_checkpoint_entry = (cache_key, {
                 "response": response, "receipt": receipt.model_dump(mode="json", by_alias=True),
             })
-        if response.get("model") != self.relay.model_id:
+        if response.get("model") != receipt.model or (not getattr(receipt, "_checkpoint_restored", False)
+                and receipt.model != self.relay.model_id):
             raise SemanticArtifactError(f"{self.operation} response model does not match the admitted relay model")
         if isinstance(response.get("usage"), dict):
             receipt.metadata["usage"] = response["usage"]
@@ -1029,6 +1106,11 @@ def _embed_texts(texts: list[str], relay: Any) -> tuple[list[list[float]], Model
 
 
 def _product_json(relay: Any, operation: str, instruction: str, context: dict[str, Any], schema: type[BaseModel]) -> tuple[BaseModel, list[ModelReceipt]]:
+    checkpoint = active_checkpoint.get()
+    key = {"operation": operation, "context": context}
+    saved = checkpoint.read("product-result", key) if checkpoint else None
+    if saved is not None:
+        return schema.model_validate(saved["result"], context=context), [ModelReceipt.model_validate(item) for item in saved["receipts"]]
     provider = _project_model_provider(relay, operation)
     try:
         result = provider.generate_typed(
@@ -1039,6 +1121,9 @@ def _product_json(relay: Any, operation: str, instruction: str, context: dict[st
         )
     except ProcessingError as exc:
         raise _typed_extraction_error(exc) from exc
+    if checkpoint:
+        checkpoint.write("product-result", key, {"result": result.model_dump(mode="json"),
+            "receipts": [item.model_dump(mode="json", by_alias=True) for item in provider.receipts]})
     return result, provider.receipts
 
 
@@ -1399,6 +1484,15 @@ def explain_evidence(snapshot: SemanticArtifact, target: dict[str, str], evidenc
 
 
 def _grounded_explanation(context: dict[str, Any], relay: Any):
+    checkpoint = active_checkpoint.get()
+    key = {"context": context}
+    saved = checkpoint.read("grounded-explanation", key) if checkpoint else None
+    if saved is not None:
+        reports = [_GroundedCommunityReport.model_validate(item, context=context) for item in saved["reports"]]
+        receipts = [ModelReceipt.model_validate(item) for item in saved["receipts"]]
+        return [ReportSection(title=item["summary"].strip(), text=item["explanation"].strip(),
+            evidence_ids=sorted({citation["evidence_id"] for citation in item["citations"]}))
+            for report in reports for item in report.findings], receipts
     instruction = (
         "Explain the supplied knowledge for a reader learning the subject. Return strict JSON "
         "{title,summary,findings:[{summary,explanation,citations:[{evidence_id}]}]}. Write substantive connected explanations: "
@@ -1434,6 +1528,10 @@ def _grounded_explanation(context: dict[str, Any], relay: Any):
     sections = [ReportSection(title=item["summary"].strip(), text=item["explanation"].strip(),
         evidence_ids=sorted({citation["evidence_id"] for citation in item["citations"]}))
         for report in reports for item in report.findings]
+    if checkpoint:
+        checkpoint.write("grounded-explanation", key, {
+            "reports": [report.model_dump(mode="json") for report in reports],
+            "receipts": [item.model_dump(mode="json", by_alias=True) for item in provider.receipts]})
     return sections, provider.receipts
 
 
@@ -1557,7 +1655,7 @@ def _find_span(text: str, quote: str, start: int = 0) -> tuple[int, int]:
 
 def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | None = None, parsed: tuple[str, dict[str, Any], str, str, str, str] | None = None) -> dict[str, Any]:
     text, document, origin, content_hash, parser, parser_version = parsed or _parse_source(source, force_ocr)
-    representation_revision = _representation_revision(source, force_ocr, content_hash, parser, parser_version, origin, document)
+    representation_revision = document.get("representation_revision") or _representation_revision(source, force_ocr, content_hash, parser, parser_version, origin, document)
     representation_id = f"representation:{_safe_id(source.source_id)}:{representation_revision[7:]}"
     representation_artifact_id = f"artifact:{representation_id}"
     source_locations = _docling_locations(document, text)
@@ -2151,9 +2249,11 @@ def build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=Non
     """Build, validate, and materialize Semantica's generic semantic artifacts."""
     token = active_checkpoint.set(SnapshotCheckpoint(request))
     gate_token = _active_relay_gates.set((threading.Lock(), {}))
+    reuse_token = _completed_generation_only.set(False)
     try:
         return _build_semantic_artifacts(request, progress=progress, persist_snapshot=persist_snapshot)
     finally:
+        _completed_generation_only.reset(reuse_token)
         _active_relay_gates.reset(gate_token)
         active_checkpoint.reset(token)
 
@@ -2176,8 +2276,6 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
             raise SemanticArtifactError("base snapshot is not a file")
         if _digest_file(base_path) != request.base_snapshot.artifact_digest:
             raise SemanticArtifactError("base snapshot digest does not match its reference")
-        if request.base_snapshot.schema_digest != request.release.schema_digest:
-            raise SemanticArtifactError("base snapshot schema does not match the selected release")
         try:
             base_snapshot = SemanticArtifact.model_validate_json(base_path.read_bytes())
         except Exception as exc:
@@ -2205,7 +2303,29 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                 **({"metadata": {"totalPages": total_pages}} if total_pages else {}),
             })
         parsed_sources.append((source, force_ocr, parsed))
-    model_results = _extract_project_sources(parsed_sources, request, progress) if request.recipe.id == "model" else []
+    completed_source_ids = set()
+    if base_snapshot and base_snapshot.extraction_spec == request.recipe.extraction_spec:
+        completed_source_ids = {source.source_id for source, force_ocr, parsed in parsed_sources
+            if any(rep.source_id == source.source_id and rep.recipe_id == "model"
+                   and rep.material_revision_id == source.material_revision
+                   and rep.content_hash == parsed[3]
+                   and rep.recipe_digest == stable_digest({"parser": rep.metadata.get("document", {}).get("format"), "ocr": force_ocr})
+                   for rep in base_snapshot.document_representations)}
+        if completed_source_ids:
+            checkpoint = active_checkpoint.get()
+            prior_recipe = checkpoint.read("recipe-provenance", base_snapshot.lineage.recipe_digest) if checkpoint else None
+            if not isinstance(prior_recipe, dict) or stable_digest(prior_recipe) != base_snapshot.lineage.recipe_digest:
+                raise SemanticArtifactError("completed work requirements are missing; restore verified checkpoint provenance",
+                                            code="COMPLETED_WORK_RECOVERY_GAP")
+            prior_formula_sources = set(prior_recipe.get("formulaSemanticsSourceIds", []))
+            formula_sources = set(request.recipe.formula_semantics_source_ids)
+            completed_source_ids = {source_id for source_id in completed_source_ids
+                if (source_id in prior_formula_sources) == (source_id in formula_sources)}
+    # A vector-only rebuild cannot implicitly buy missing project generation either.
+    _completed_generation_only.set(bool(base_snapshot) and bool(parsed_sources)
+        and len(completed_source_ids) == len(parsed_sources)
+        and base_snapshot.lineage.recipe_digest == stable_digest(request.recipe.lineage_payload()))
+    model_results = _extract_project_sources(parsed_sources, request, progress, completed_source_ids) if request.recipe.id == "model" else []
     for source_index, (source, force_ocr, parsed) in enumerate(parsed_sources):
         if request.recipe.id == "model":
             model_result, embeddings, source_receipts = model_results[source_index]

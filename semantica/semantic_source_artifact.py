@@ -43,9 +43,16 @@ def _parse_source(source: Any, force_ocr: bool, document_processing: dict | None
     if source.material_revision != content_hash:
         raise SemanticArtifactError(f"source material revision does not match immutable bytes: {source.source_id}")
     checkpoint = active_checkpoint.get()
-    cache_key = {"sourceId": source.source_id, "contentHash": content_hash, "forceOcr": force_ocr, "documentProcessing": document_processing}
+    cache_key = {"sourceId": source.source_id, "contentHash": content_hash, "forceOcr": force_ocr}
     cached = checkpoint.read("document", cache_key) if checkpoint else None
     if cached is not None:
+        if (not isinstance(cached, (list, tuple)) or len(cached) != 6
+                or not isinstance(cached[0], str) or not isinstance(cached[1], dict)
+                or any(not isinstance(cached[index], str) for index in (2, 3, 4, 5))
+                or cached[3] != content_hash or cached[1].get("content_hash") != content_hash
+                or cached[1].get("mime_type") != source.mime_type
+                or cached[1].get("text") != cached[0]):
+            raise SemanticArtifactError("saved parsed source has invalid content or structure")
         if admit_quality:
             _admit_document_quality(cached[1], force_ocr)
         return tuple(cached)
@@ -85,8 +92,15 @@ def _admit_document_quality(document: dict, force_ocr: bool) -> None:
 
 def _representation_revision(source: Any, force_ocr: bool, content_hash: str, parser: str, parser_version: str, origin: str, document: dict) -> str:
     return stable_digest({"sourceRevision": source.material_revision, "contentHash": content_hash,
-        "parser": parser, "parserVersion": parser_version, "forceOcr": force_ocr, "origin": origin,
+        "forceOcr": force_ocr,
         "document": {key: value for key, value in document.items() if key not in {"metadata", "representation_revision"}}})
+
+
+def _has_representation_identity(document: dict) -> bool:
+    # The verified artifact digest protects persisted identity, not today's producer formula.
+    revision = document.get("representation_revision")
+    return (isinstance(revision, str) and revision.startswith("sha256:") and len(revision) == 71
+            and all(c in "0123456789abcdef" for c in revision[7:]))
 
 
 def parse_source_artifact(request: ParseSourceRequest, *, progress: Callable[[dict[str, Any]], None] | None = None) -> dict[str, str]:
@@ -158,9 +172,6 @@ def bind_parsed_source_artifact(request: BindParsedSourceRequest) -> dict[str, s
         payload.get("materialRevision") != source.material_revision,
         payload.get("mimeType") != source.mime_type,
         payload.get("forceOcr") is not request.force_ocr,
-        payload.get("documentProcessing") != profile,
-        payload.get("processingRevision") != source_processing_revision(Path(source.file_path),
-            mime_type=source.mime_type, force_ocr=request.force_ocr, document_processing=profile),
     )):
         raise SemanticArtifactError("parsed source content or processing profile changed")
     document = payload.get("document")
@@ -177,9 +188,7 @@ def bind_parsed_source_artifact(request: BindParsedSourceRequest) -> dict[str, s
         "name": payload.get("name"),
         "sourceId": payload.get("sourceId"),
     })
-    if (document.get("source") != original.name
-            or document.get("representation_revision") != _representation_revision(
-                original, request.force_ocr, source.material_revision, parser, version, origin, document)):
+    if document.get("source") != original.name or not _has_representation_identity(document):
         raise SemanticArtifactError("parsed source representation revision is invalid")
     rebound_document = {**document, "source": source.name}
     rebound_document["representation_revision"] = _representation_revision(
@@ -200,12 +209,9 @@ def _load_parsed_source(source: Any, ref: ParsedSourceRef, force_ocr: bool, prof
         payload.get("protocol") != "semantica.parsed-source.v2",
         payload.get("sourceId") != source.source_id or ref.source_id != source.source_id,
         payload.get("materialRevision") != source.material_revision,
-        payload.get("name") != source.name,
+        not isinstance(payload.get("name"), str),
         payload.get("mimeType") != source.mime_type,
         payload.get("forceOcr") is not force_ocr,
-        payload.get("documentProcessing") != profile,
-        payload.get("processingRevision") != source_processing_revision(Path(source.file_path),
-            mime_type=source.mime_type, force_ocr=force_ocr, document_processing=profile),
     )):
         raise SemanticArtifactError(f"parsed source identity or processing profile changed: {source.source_id}")
     document = payload.get("document")
@@ -213,7 +219,7 @@ def _load_parsed_source(source: Any, ref: ParsedSourceRef, force_ocr: bool, prof
     if not isinstance(document, dict) or not isinstance(document.get("text"), str) or not all(isinstance(value, str) for value in (origin, parser, version)):
         raise SemanticArtifactError(f"parsed source document is invalid: {source.source_id}")
     if (document.get("content_hash") != source.material_revision or document.get("mime_type") != source.mime_type
-        or document.get("representation_revision") != _representation_revision(source, force_ocr, source.material_revision, parser, version, origin, document)):
+        or document.get("source") != payload["name"] or not _has_representation_identity(document)):
         raise SemanticArtifactError(f"parsed source representation revision changed: {source.source_id}")
     _admit_document_quality(document, force_ocr)
     return document["text"], document, origin, source.material_revision, parser, version

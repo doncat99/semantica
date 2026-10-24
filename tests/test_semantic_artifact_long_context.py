@@ -155,7 +155,7 @@ def test_stage_progress_precedes_relay_calls(monkeypatch):
 
 
 def test_parallel_extraction_is_bounded_and_preserves_window_order(monkeypatch):
-    windows = [(index * 10, index * 10 + 4, f"Fact{index}") for index in range(4)]
+    windows = [(index * 10, index * 10 + len(f"Fact{index}"), f"Fact{index}") for index in range(4)]
     monkeypatch.setattr(pipeline, "_text_windows", lambda text: iter(windows))
     lock = Lock()
     active = peak = 0
@@ -172,7 +172,8 @@ def test_parallel_extraction_is_bounded_and_preserves_window_order(monkeypatch):
 
     _stub_canonical_extraction(monkeypatch, extract)
     monkeypatch.setattr(pipeline, "_embed_texts", lambda texts, relay: ([[1.0, 0.0] for _ in texts], receipt("embedding", 1)))
-    result, embeddings, receipts = extract_source("unused", SimpleNamespace(model_id="test"), None, parallelism=2)
+    text = "".join(f"Fact{index}".ljust(10) for index in range(4))
+    result, embeddings, receipts = extract_source(text, SimpleNamespace(model_id="test"), None, parallelism=2)
     assert peak == 2
     assert [entity["name"] for entity in result["entities"]] == [item[2] for item in windows]
     assert [item["start_char"] for item in embeddings] == [item[0] for item in windows]
@@ -180,7 +181,7 @@ def test_parallel_extraction_is_bounded_and_preserves_window_order(monkeypatch):
 
 
 def test_parallel_embedding_batches_are_bounded_and_ordered(monkeypatch):
-    windows = [(index * 10, index * 10 + 4, f"Fact{index}") for index in range(24)]
+    windows = [(index * 10, index * 10 + len(f"Fact{index}"), f"Fact{index}") for index in range(24)]
     monkeypatch.setattr(pipeline, "_text_windows", lambda text: iter(windows))
     _stub_canonical_extraction(monkeypatch, lambda window, relay: ({"entities": [], "relations": []}, receipt("structured_extraction", int(window[4:]))))
     lock = Lock()
@@ -197,7 +198,8 @@ def test_parallel_embedding_batches_are_bounded_and_ordered(monkeypatch):
         return [[float(int(text[4:]))] for text in texts], receipt("embedding", int(texts[0][4:]))
 
     monkeypatch.setattr(pipeline, "_embed_texts", embed)
-    _, embeddings, receipts = extract_source("unused", SimpleNamespace(model_id="test"), None, parallelism=2)
+    text = "".join(f"Fact{index}".ljust(10) for index in range(24))
+    _, embeddings, receipts = extract_source(text, SimpleNamespace(model_id="test"), None, parallelism=2)
     assert peak == 2
     assert [chunk["vector"] for chunk in embeddings] == [[float(index)] for index in range(24)]
     assert [item.id for item in receipts[-3:]] == [f"receipt:embedding:{index}" for index in (0, 8, 16)]
@@ -209,7 +211,7 @@ def test_parallel_embedding_batches_are_bounded_and_ordered(monkeypatch):
     [{"index": 0, "embedding": [1.0]}, {"index": 1, "embedding": [1.0, 2.0]}],
 ])
 def test_batch_embedding_rejects_invalid_response(monkeypatch, data):
-    monkeypatch.setattr(pipeline, "_relay_json", lambda *args: ({"model": "test", "data": data}, receipt("embedding", 1)))
+    monkeypatch.setattr(pipeline, "_relay_json", lambda *args, **kwargs: ({"model": "test", "data": data}, receipt("embedding", 1)))
     with pytest.raises(pipeline.SemanticArtifactError, match="embedding response"):
         pipeline._embed_texts(["one", "two"], SimpleNamespace(model_id="test"))
 
@@ -270,7 +272,7 @@ def test_native_report_cannot_introduce_evidence_from_another_batch(monkeypatch)
         {"summary": "Invented", "explanation": "Unsupported",
          "citations": [{"evidence_id": "other-evidence"}]}]}
     calls = []
-    def respond(*args):
+    def respond(*args, **kwargs):
         calls.append(args)
         return {"model": "test", "choices": [{"finish_reason": "stop", "message": {"content": __import__('json').dumps(result)}}]}, receipt("knowledge_explanation", 1)
     monkeypatch.setattr(pipeline, "_relay_json", respond)

@@ -67,7 +67,7 @@ def test_parallel_extraction_failure_retains_task_and_window_context(monkeypatch
     monkeypatch.setattr(
         semantic_artifact_builder,
         "_text_windows",
-        lambda _text: [(12, 34, "window")],
+        lambda text: [(12, 34, text[12:34])],
     )
 
     def grounded(_text, **_kwargs):
@@ -77,7 +77,7 @@ def test_parallel_extraction_failure_retains_task_and_window_context(monkeypatch
 
     with pytest.raises(SemanticArtifactError) as failure:
         extract_source(
-            "source", SimpleNamespace(model_id="model-1"), object(), parallelism=1
+            "prefix text " + "window content exactly", SimpleNamespace(model_id="model-1"), object(), parallelism=1
         )
 
     assert failure.value.status == 404
@@ -191,7 +191,7 @@ def test_semantic_artifact_has_no_parallel_structured_extractor():
 def test_project_model_provider_uses_host_admitted_output_limit(monkeypatch):
     request = {}
 
-    def relay_json(_relay, payload, operation):
+    def relay_json(_relay, payload, operation, *, business_context=None):
         request.update(payload)
         return {
             "choices": [{"finish_reason": "stop", "message": {"content": '{"entities": []}'}}],

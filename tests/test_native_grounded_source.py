@@ -119,6 +119,8 @@ def test_source_retry_restores_entities_and_receipts_before_retrying_relations(t
         checkpoint_dir=str(tmp_path / 'checkpoint'))
     with pytest.raises(ProcessingError, match='interrupted relations'):
         pipeline.build_grounded_source_snapshot(source, provider_instance=Provider(True), **arguments)
+    monkeypatch.setattr(pipeline, '_text_windows', lambda *_: pytest.fail('must resume saved window plan'))
+    arguments['model'] = 'replacement-model'
     resumed = Provider()
     result = pipeline.build_grounded_source_snapshot(source, provider_instance=resumed, **arguments)
     assert calls == ['entities', 'relations', 'relations']
@@ -126,6 +128,7 @@ def test_source_retry_restores_entities_and_receipts_before_retrying_relations(t
     assert {item['call_id'] for item in resumed.receipts} == {'1', '3'}
     assert result.entities[0].canonical_name == 'Ada'
     third = Provider()
+    arguments['model'] = 'replacement-model'
     assert pipeline.build_grounded_source_snapshot(source, provider_instance=third, **arguments) == result
     assert calls == ['entities', 'relations', 'relations']
     assert third.receipts == resumed.receipts

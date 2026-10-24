@@ -781,6 +781,7 @@ class SemanticArtifactBuildRequest(DigestModel):
     input_revision: str = Field(alias="inputRevision")
     parallelism: int = Field(default=1, ge=1, le=16)
     output_dir: str = Field(alias="outputDir")
+    checkpoint_dir: Optional[str] = Field(default=None, alias="checkpointDir")
     resume_checkpoint_dirs: List[str] = Field(default_factory=list, alias="resumeCheckpointDirs")
     recipe: RecipeRef
     relays: Dict[str, RelayRef]
@@ -797,6 +798,8 @@ class SemanticArtifactBuildRequest(DigestModel):
             raise ValueError("at least one source is required")
         if not isabs(self.output_dir):
             raise ValueError("outputDir must be absolute")
+        if self.checkpoint_dir is not None and not isabs(self.checkpoint_dir):
+            raise ValueError("checkpointDir must be absolute")
         if any(not isabs(item) for item in self.resume_checkpoint_dirs):
             raise ValueError("resumeCheckpointDirs must contain absolute paths")
         source_ids = {source.source_id for source in self.sources}
