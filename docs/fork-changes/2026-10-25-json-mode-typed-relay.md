@@ -67,3 +67,19 @@ This supersedes the earlier unresolved test result, not the App deployment gap.
   validation, adapt or drop this patch rather than layering another fallback.
 - After merge, run typed admission, relay error, native extraction and consumer
   provider tests, then immutable native artifact acceptance.
+
+## 2026-10-25 packaged acceptance follow-up
+
+Inspected revision `3cf2c75c724bc657a8c98b4899c14c4319e9334e`.
+The native artifact acceptance caller
+`.github/scripts/semantic_worker_model_acceptance.py::verify_model_paths`
+still asserted the removed `json_schema` wire format. Full relocated acceptance
+reproduced this mismatch before App replacement. Updated its deterministic relay
+to require exactly `json_object` and a nonempty object schema in the prompt;
+artifact result admission remains exercised by the existing build/query assertions.
+No runtime implementation, retry, compatibility mode, or data identity changed.
+The installed artifact model-path acceptance rerun passed: entities, relations,
+classification, embeddings, explanation, keyword and semantic retrieval, with
+4 model receipts and 1 explanation receipt. Evidence in consumer
+`.tmp/esg-model-native-acceptance-fixed.json`; full new-artifact acceptance and
+App update remain pending. Upstream disposition remains pending.

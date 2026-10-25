@@ -37,8 +37,10 @@ def verify_model_paths(root, destination):
                     {"embedding": [0.25, 0.5, 0.75], "index": index}
                     for index, _ in enumerate(payload["input"])], "usage": {"total_tokens": 4}}
             elif self.path == "/v1/chat/completions":
-                assert payload["response_format"]["type"] == "json_schema"
+                assert payload["response_format"] == {"type": "json_object"}
                 prompt = payload["messages"][0]["content"]
+                schema = json.loads(prompt.split("\nReturn one JSON object matching this JSON Schema:\n", 1)[1])
+                assert schema["type"] == "object" and schema["properties"]
                 if "Explain the supplied knowledge" in prompt:
                     calls.append("explanation")
                     refs = re.findall(r"^(?:- )?\[([^\]\n]+)\]: ", prompt, re.MULTILINE)
