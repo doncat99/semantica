@@ -217,7 +217,7 @@ def _typed_extraction_error(error: ProcessingError) -> SemanticArtifactError:
                 str(error),
                 status=cause.status,
                 code=cause.code,
-                retryable=cause.retryable,
+                retryable=False if getattr(error, 'task_retry_exhausted', False) else cause.retryable,
                 retry_after_ms=cause.retry_after_ms,
                 upstream_request_id=cause.upstream_request_id,
                 diagnostic=diagnostic or None,
@@ -283,7 +283,8 @@ def _text_windows(text: str):
         yield cursor, len(text), text[cursor:]
 
 
-def _native_parallel_map(items: list[Any], handler: Any, parallelism: int, on_complete: Any = None) -> list[Any]:
+def _native_parallel_map(items: list[Any], handler: Any, parallelism: int, on_complete: Any = None,
+                         *, max_attempts: int = 1, on_retry: Any = None) -> list[Any]:
     """Run work through Semantica's canonical parallelism manager.
 
     The artifact builder owns ordering and checkpoint semantics, while worker
@@ -297,12 +298,14 @@ def _native_parallel_map(items: list[Any], handler: Any, parallelism: int, on_co
         if on_complete is not None:
             on_complete(index, value)
         return value
-    tasks = [Task(task_id=str(index), handler=run, args=(index, item))
+    tasks = [Task(task_id=str(index), handler=run, args=(index, item), max_attempts=max_attempts,
+                  on_retry=(lambda attempt, delay, error, index=index: on_retry(index, attempt, delay, error))
+                  if on_retry else None)
              for index, item in enumerate(items)]
     results = ParallelismManager(max_workers=max(1, parallelism)).execute_parallel(
         tasks,
         fail_fast_permanent=True,
-        fail_fast=True,
+        fail_fast=max_attempts == 1,
     )
     ordered = [None] * len(items)
     for result in results:
@@ -313,6 +316,7 @@ def _native_parallel_map(items: list[Any], handler: Any, parallelism: int, on_co
             )
             if hasattr(cause, "retryable"):
                 failure.retryable = cause.retryable
+            failure.task_retry_exhausted = max_attempts > 1 and result.attempts >= max_attempts
             item = items[int(result.task_id)]
             # Flattened project jobs carry source/window indices before the window.
             source_index = None
@@ -330,6 +334,7 @@ def _native_parallel_map(items: list[Any], handler: Any, parallelism: int, on_co
             if source_index is not None:
                 failure.parallel_context["sourceIndex"] = source_index
             failure.parallel_context["errorType"] = type(cause).__name__
+            failure.parallel_context["attempts"] = result.attempts
             failure.parallel_context["errorMessage"] = str(cause)[:500]
             raise failure from cause
         ordered[int(result.task_id)] = result.result
@@ -404,10 +409,25 @@ def _extraction_context_batches(window, context, max_bytes=None):
     return batches
 
 
+def _window_context_key(text, item, extraction_spec, formula_semantics=False):
+    return {'sourceText': _digest_bytes(text.encode('utf-8')), 'window': list(item[:2]),
+            'extractionSpec': getattr(extraction_spec, 'digest', None), 'formulaSemantics': formula_semantics}
+
+
 def _extract_window(text, model_relay, extraction_spec, locations, item, formula_semantics=False):
     start, end, window = item
-    context = _window_grounding_context(locations, start, end)
-    batches = _extraction_context_batches(window, context)
+    checkpoint = active_checkpoint.get()
+    key = _window_context_key(text, item, extraction_spec, formula_semantics)
+    batches = checkpoint.read('window-contexts', key) if checkpoint else None
+    if batches is None:
+        context = _window_grounding_context(locations, start, end)
+        batches = _extraction_context_batches(window, context)
+        if checkpoint:
+            checkpoint.write('window-contexts', key, batches)
+    if not isinstance(batches, list) or not batches or any(
+            not isinstance(batch, list) or any(not isinstance(record, dict) for record in batch)
+            for batch in batches):
+        raise SemanticArtifactError('saved extraction context plan is invalid')
     if len(batches) == 1:
         return _extract_window_context(text, model_relay, extraction_spec, item, batches[0], formula_semantics)
     entities, relations, receipts, restored = [], [], [], True
@@ -494,8 +514,12 @@ def _extract_project_sources(parsed_sources, request, progress, completed_source
     def phase(stage, jobs, handler, destination, base, span):
         completed = restored = 0
         warning_count = skipped = 0
+        retry_count = 0
+        last_retry = None
+        started_at_ms = int(time.time() * 1000)
+        started = time.monotonic()
         sources = [{"sourceId": source.source_id, "stage": stage,
-                    "completedChunks": 0, "restoredChunks": 0,
+                    "completedChunks": 0, "restoredChunks": 0, "failedChunks": 0,
                     "totalChunks": len(windows[index]), "inFlightChunks": 0,
                     "state": "queued" if windows[index] else "completed"}
                    for index, (source, _, _) in enumerate(parsed_sources)]
@@ -505,6 +529,9 @@ def _extract_project_sources(parsed_sources, request, progress, completed_source
                 progress({"stage": stage, "percent": base + round(completed / max(1, total) * span),
                           "detail": f"{stage.capitalize()} {completed} / {total} chunks",
                           "metadata": {"completedChunks": completed, "restoredChunks": restored,
+                                       "retryCount": retry_count, "startedAtMs": started_at_ms,
+                                       "elapsedMs": round((time.monotonic() - started) * 1000),
+                                       **({"lastRetry": last_retry} if last_retry is not None else {}),
                                        "warningCount": warning_count, "skippedExtractionChunks": skipped,
                                        **({"warning": warning} if warning is not None else {}),
                                        "totalChunks": total, "sourceProgress": [dict(row) for row in sources]}})
@@ -517,7 +544,7 @@ def _extract_project_sources(parsed_sources, request, progress, completed_source
             with lock:
                 row = sources[source_index]
                 row["inFlightChunks"] += len(item) if stage == "embedding" else 1
-                row["state"] = "running"
+                row["state"] = "failed" if row["failedChunks"] else "running"
                 emit()
             try:
                 value = handler(job)
@@ -545,6 +572,7 @@ def _extract_project_sources(parsed_sources, request, progress, completed_source
             except Exception:
                 with lock:
                     row["inFlightChunks"] -= len(item) if stage == "embedding" else 1
+                    row["failedChunks"] += len(item) if stage == "embedding" else 1
                     row["state"] = "failed"
                     emit()
                 raise
@@ -564,11 +592,36 @@ def _extract_project_sources(parsed_sources, request, progress, completed_source
                 row["completedChunks"] += count
                 row["restoredChunks"] += count if reused else 0
                 row["inFlightChunks"] -= count
-                if row["state"] != "failed":
-                    row["state"] = "completed" if row["completedChunks"] == row["totalChunks"] else "running" if row["inFlightChunks"] else "queued"
+                row["state"] = "failed" if row["failedChunks"] else "completed" if row["completedChunks"] == row["totalChunks"] else "running" if row["inFlightChunks"] else "queued"
                 emit()
+
+        def retry(index, attempt, delay, error):
+            nonlocal retry_count, last_retry
+            source_index, _, item = jobs[index]
+            with lock:
+                retry_count += 1
+                last_retry = {"taskId": str(index), "attempt": attempt, "delayMs": delay}
+                row = sources[source_index]
+                row["failedChunks"] -= len(item) if stage == "embedding" else 1
+                row["state"] = "failed" if row["failedChunks"] else "running" if row["inFlightChunks"] else "queued"
+                emit()
+
+        stopped = threading.Event()
+
+        def heartbeat():
+            while not stopped.wait(5):
+                with lock:
+                    emit()
+
         emit()
-        _native_parallel_map(jobs, dispatch, request.parallelism, done)
+        reporter = threading.Thread(target=heartbeat, name=f"{stage}-progress", daemon=True)
+        reporter.start()
+        try:
+            _native_parallel_map(jobs, dispatch, request.parallelism, done,
+                                 max_attempts=2, on_retry=retry)
+        finally:
+            stopped.set()
+            reporter.join()
 
     jobs = [(source_index, index, items[index])
             for index in range(max(map(len, windows), default=0))
@@ -585,9 +638,12 @@ def _extract_project_sources(parsed_sources, request, progress, completed_source
     jobs = [(source_index, index, items[index])
             for index in range(max(map(len, batches), default=0))
             for source_index, items in enumerate(batches) if index < len(items)]
-    phase("embedding", jobs,
-          lambda job: _embed_texts([window for _, _, window in job[2]], request.relays["embedding"]),
-          embedded, 60, 30)
+    try:
+        phase("embedding", jobs,
+              lambda job: _embed_texts([window for _, _, window in job[2]], request.relays["embedding"]),
+              embedded, 60, 30)
+    except ProcessingError as exc:
+        raise _typed_extraction_error(exc) from exc
     return [_assemble_source_results(windows[index], extracted[index], embedded[index])
             for index, (_, _, parsed) in enumerate(parsed_sources)]
 
@@ -1013,10 +1069,9 @@ class _ProjectModelProvider(BaseProvider):
         self.last_checkpoint_entry = None
 
     def generate_typed(self, prompt, schema, max_retries=3, validation_context=None, **kwargs):
-        from openai.lib._pydantic import to_strict_json_schema
         from pydantic import ValidationError
         try:
-            content = self.generate(prompt, response_schema=to_strict_json_schema(schema), business_context=validation_context, **kwargs)
+            content = self.generate(prompt, response_schema=schema.model_json_schema(), business_context=validation_context, **kwargs)
         except SemanticArtifactError as error:
             raise ProcessingError(str(error)) from error
         try:
@@ -1045,8 +1100,8 @@ class _ProjectModelProvider(BaseProvider):
         }
         response_schema = kwargs.get('response_schema')
         if response_schema is not None:
-            payload['response_format'] = {'type': 'json_schema', 'json_schema': {
-                'name': 'semantic_output', 'schema': response_schema, 'strict': True}}
+            # JSON mode is the wire contract; Pydantic owns strict result admission.
+            payload['messages'][0]['content'] = prompt + '\nReturn one JSON object matching this JSON Schema:\n' + json.dumps(response_schema, ensure_ascii=False, separators=(',', ':'))
         business_context = kwargs.get("business_context")
         response, receipt = _relay_json(self.relay, payload, self.operation, business_context=business_context)
         cache_key = _relay_cache_key(self.relay, payload, self.operation, business_context)

@@ -254,7 +254,7 @@ class SnapshotCheckpoint:
                     # Native production keys carry their own dependencies. Unknown
                     # opaque units cannot cross a business-input change safely.
                     if prior_business != inputs and not file.name.startswith((
-                            "document-", "source-windows-", "extraction-", "extraction-origin-",
+                            "document-", "source-windows-", "window-contexts-", "extraction-", "extraction-origin-",
                             "relay-", "product-result-", "grounded-explanation-", "remote-docling-", "rejected-", "recipe-provenance-")):
                         raise ValueError("inputs changed; unscoped result belongs to different business content")
                     name, normalized = self._import_entry(file.name, entry, prior_inputs, prior_fence,

@@ -17,9 +17,10 @@ from typing import Any, Callable, Dict, Optional, TextIO
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from .semantic_artifact_errors import SemanticArtifactError
-from .semantic_source_artifact import bind_parsed_source_artifact, parse_source_artifact
+from .semantic_source_artifact import bind_parsed_source_artifact, parse_source_artifact, upgrade_parsed_source_artifact
 from .semantic_artifact_schema import (
     ParseSourceRequest,
+    UpgradeParsedSourceRequest,
     SemanticArtifact,
     SemanticArtifactBuildRequest,
     WorkerRequest,
@@ -249,6 +250,8 @@ def _dispatch(request: WorkerRequest, progress: Optional[Callable[[Dict[str, Any
         return _response(request.id, True, result=parse_source_artifact(ParseSourceRequest.model_validate(request.params), progress=progress))
     if request.method == "bind_parsed_source":
         return _response(request.id, True, result=bind_parsed_source_artifact(BindParsedSourceRequest.model_validate(request.params)))
+    if request.method == "upgrade_parsed_source":
+        return _response(request.id, True, result=upgrade_parsed_source_artifact(UpgradeParsedSourceRequest.model_validate(request.params)))
     if request.method == "validate_artifact":
         snapshot = SemanticArtifact.model_validate(request.params)
         return _response(request.id, True, result={"valid": True, "snapshot_id": snapshot.id})

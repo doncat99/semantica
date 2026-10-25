@@ -103,6 +103,8 @@ def test_support_quotes_cannot_be_joined_to_invent_a_condition():
 
 
 def test_document_context_reaches_both_native_prompts_without_leaking_provider_kwargs():
+    import json
+    from semantica.semantic_extract.methods import _prompt_grounding_context
     from semantica.semantic_extract.grounded_window import extract_grounded_window
     from semantica.semantic_extract.schemas import GroundedEntitiesResponse, GroundedRelationsResponse
 
@@ -132,6 +134,13 @@ def test_document_context_reaches_both_native_prompts_without_leaking_provider_k
                            {'ref': 'definition', 'quote': 'm is mass in kg.'}])
     assert len(provider.prompts) == 2
     assert all('m is mass in kg.' in prompt for prompt in provider.prompts)
-    assert all('"window_span": [0, 6]' in prompt for prompt in provider.prompts)
+    context = [{'ref': 'formula', 'quote': 'F = ma'},
+               {'ref': 'definition', 'quote': 'm is mass in kg.'}]
+    expected = _prompt_grounding_context('F = ma', context)
+    for prompt in provider.prompts:
+        wire = prompt.split('without repeating it:\n', 1)[1].split('\n', 1)[0]
+        assert json.loads(wire) == expected
+        assert len(wire) < len(json.dumps(expected, ensure_ascii=False))
+    assert all('"window_span":[0,6]' in prompt for prompt in provider.prompts)
     assert all('"quote": "F = ma"' not in prompt for prompt in provider.prompts)
     assert relations[0].metadata['qualifiers']['unit'] == 'kg'

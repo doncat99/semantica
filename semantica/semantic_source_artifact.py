@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from .semantic_artifact_errors import DocumentQualityError, SemanticArtifactError
-from .semantic_artifact_schema import (BindParsedSourceRequest, ParseSourceRequest,
+from .semantic_artifact_schema import (BindParsedSourceRequest, ParseSourceRequest, UpgradeParsedSourceRequest,
     ParsedSourceRef, SourceBuildInput, stable_digest)
 from .source import (SourceQualityError, UnsupportedSourceFormatError, parse_source,
     source_content_revision, source_processing_revision)
@@ -150,8 +150,42 @@ def _write_parsed_source_artifact(request: ParseSourceRequest, payload: dict[str
     digest = _write_json(path, payload)
     return {"artifactPath": str(path), "artifactDigest": digest, "sourceId": request.source.source_id,
             "materialRevision": content_hash, "representationRevision": document["representation_revision"],
-            "processingRevision": payload["processingRevision"],
+            **({"processingRevision": payload["processingRevision"]} if "processingRevision" in payload else {}),
             "representationId": f"representation:{_safe_id(request.source.source_id)}:{document['representation_revision'][7:]}"}
+
+
+def upgrade_parsed_source_artifact(request: UpgradeParsedSourceRequest) -> dict[str, str]:
+    """Import a complete historical carrier; never reinterpret its document or producer."""
+    path = Path(request.artifact_path).resolve()
+    if not path.is_file() or _digest_file(path) != request.artifact_digest:
+        raise SemanticArtifactError("parsed source artifact digest is invalid")
+    try:
+        payload = json.loads(path.read_bytes())
+    except ValueError as exc:
+        raise SemanticArtifactError("parsed source artifact is invalid JSON") from exc
+    if not isinstance(payload, dict) or payload.get("protocol") not in {
+            "semantica.parsed-source.v1", "semantica.parsed-source.v2"}:
+        raise SemanticArtifactError("unsupported parsed source carrier")
+    document = payload.get("document")
+    if (not isinstance(document, dict) or not isinstance(document.get("text"), str)
+            or any(not isinstance(payload.get(key), str) or not payload[key]
+                   for key in ("sourceId", "materialRevision", "name", "mimeType", "origin", "parser", "parserVersion"))
+            or not isinstance(payload.get("forceOcr"), bool)
+            or document.get("content_hash") != payload["materialRevision"]
+            or document.get("mime_type") != payload["mimeType"]
+            or document.get("source") != payload["name"]
+            or not _has_representation_identity(document)
+            or document["representation_revision"] != request.representation_revision
+            or request.representation_id != f"representation:{_safe_id(payload['sourceId'])}:{request.representation_revision[7:]}"):
+        raise SemanticArtifactError("parsed source representation identity is invalid")
+    output_dir = Path(request.output_dir).resolve()
+    output_dir.mkdir(parents=True, exist_ok=True)
+    target = output_dir / f"upgraded-{request.artifact_digest[7:]}.json"
+    digest = _write_json(target, {**payload, "protocol": "semantica.parsed-source.v2"})
+    return {"artifactPath": str(target), "artifactDigest": digest, "sourceId": payload["sourceId"],
+            "materialRevision": payload["materialRevision"], "representationId": request.representation_id,
+            "representationRevision": request.representation_revision,
+            **({"processingRevision": payload["processingRevision"]} if "processingRevision" in payload else {})}
 
 
 def bind_parsed_source_artifact(request: BindParsedSourceRequest) -> dict[str, str]:

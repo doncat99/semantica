@@ -8,6 +8,7 @@ from pathlib import Path
 def test_lightweight_worker_operations_do_not_import_build_pipeline():
     code = textwrap.dedent('''
         import io, json, sys, tempfile
+        from hashlib import sha256
         from pathlib import Path
         from semantica.semantic_worker import handle_request, serve
         from semantica.source import source_content_revision
@@ -27,11 +28,22 @@ def test_lightweight_worker_operations_do_not_import_build_pipeline():
             params = {"source": source, "outputDir": str(root / "parsed"),
                       "documentProcessing": {"mode": "local"}, "forceOcr": False}
             parsed = request("parse_source", params)["result"]
+            old = root / "historical.json"
+            payload = json.loads(Path(parsed["artifactPath"]).read_bytes())
+            payload["protocol"] = "semantica.parsed-source.v1"
+            payload.pop("processingRevision")
+            old.write_text(json.dumps(payload))
+            upgraded = request("upgrade_parsed_source", {"artifactPath": str(old),
+                "artifactDigest": "sha256:" + sha256(old.read_bytes()).hexdigest(),
+                "representationRevision": parsed["representationRevision"],
+                "representationId": parsed["representationId"], "outputDir": str(root / "upgraded")})["result"]
+            assert "processingRevision" not in upgraded
             bound = request("bind_parsed_source", {**params,
                 "source": {**source, "sourceId": "two", "name": "other.txt"},
-                "parsedArtifactPath": parsed["artifactPath"],
-                "parsedArtifactDigest": parsed["artifactDigest"]})["result"]
+                "parsedArtifactPath": upgraded["artifactPath"],
+                "parsedArtifactDigest": upgraded["artifactDigest"]})["result"]
             assert bound["sourceId"] == "two"
+            assert "processingRevision" not in bound
             path.write_text("changed")
             output = io.StringIO()
             messages = [{"id": "bad", "method": "parse_source", "params": params},

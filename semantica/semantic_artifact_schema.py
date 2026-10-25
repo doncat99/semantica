@@ -857,11 +857,26 @@ class BindParsedSourceRequest(ParseSourceRequest):
         return value
 
 
+class UpgradeParsedSourceRequest(StrictModel):
+    artifact_path: str = Field(alias="artifactPath")
+    artifact_digest: str = Field(alias="artifactDigest", pattern=r"^sha256:[a-f0-9]{64}$")
+    representation_revision: str = Field(alias="representationRevision", pattern=r"^sha256:[a-f0-9]{64}$")
+    representation_id: str = Field(alias="representationId")
+    output_dir: str = Field(alias="outputDir")
+
+    @field_validator("artifact_path", "output_dir", mode="after")
+    @classmethod
+    def validate_absolute_path(cls, value: str) -> str:
+        if not isabs(value):
+            raise ValueError("upgrade paths must be absolute")
+        return value
+
+
 class WorkerRequest(StrictModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True, hide_input_in_errors=True)
     protocol: Literal[WORKER_PROTOCOL] = WORKER_PROTOCOL
     id: str
-    method: Literal["parse_source", "bind_parsed_source", "build_semantic_artifacts", "validate_artifact", "validate_extraction_spec", "schema", "generate_reading_reports", "explain_evidence"]
+    method: Literal["parse_source", "bind_parsed_source", "upgrade_parsed_source", "build_semantic_artifacts", "validate_artifact", "validate_extraction_spec", "schema", "generate_reading_reports", "explain_evidence"]
     params: Dict[str, Any] = Field(default_factory=dict)
     authorization: Optional[Dict[str, str]] = Field(default=None, repr=False, exclude=True)
     document_processing_authorization: Optional[str] = Field(default=None, alias="documentProcessingAuthorization", repr=False, exclude=True)

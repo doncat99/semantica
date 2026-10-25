@@ -51,6 +51,8 @@ class Task:
     args: tuple = field(default_factory=tuple)
     kwargs: Dict[str, Any] = field(default_factory=dict)
     priority: int = 0
+    max_attempts: int = 1
+    on_retry: Optional[Callable] = None
 
 
 @dataclass
@@ -62,17 +64,29 @@ class ParallelExecutionResult:
     result: Any = None
     error: Optional[Exception] = None
     execution_time: float = 0.0
+    attempts: int = 1
 
 
 def _execute_task(task: Task) -> ParallelExecutionResult:
     started = time.perf_counter()
-    try:
-        return ParallelExecutionResult(task_id=task.task_id, success=True,
-                                       result=task.handler(*task.args, **task.kwargs),
-                                       execution_time=time.perf_counter() - started)
-    except Exception as error:
-        return ParallelExecutionResult(task_id=task.task_id, success=False, error=error,
-                                       execution_time=time.perf_counter() - started)
+    for attempt in range(1, max(1, task.max_attempts) + 1):
+        try:
+            return ParallelExecutionResult(task_id=task.task_id, success=True,
+                                           result=task.handler(*task.args, **task.kwargs),
+                                           execution_time=time.perf_counter() - started, attempts=attempt)
+        except Exception as error:
+            from ..semantic_extract.providers import BaseProvider
+            chain = list(BaseProvider._error_chain(error))
+            transient = not BaseProvider._is_permanent_failure(error) and any(
+                getattr(cause, 'retryable', None) is True for cause in chain)
+            if not transient or attempt >= task.max_attempts:
+                return ParallelExecutionResult(task_id=task.task_id, success=False, error=error,
+                                               execution_time=time.perf_counter() - started, attempts=attempt)
+            delay_ms = max([1000 * attempt] + [delay for cause in chain
+                           if type(delay := getattr(cause, 'retry_after_ms', None)) is int and delay >= 0])
+            if task.on_retry:
+                task.on_retry(attempt + 1, delay_ms, error)
+            time.sleep(delay_ms / 1000)
 
 
 class ParallelismManager:

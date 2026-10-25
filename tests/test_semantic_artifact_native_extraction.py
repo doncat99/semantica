@@ -88,6 +88,7 @@ def test_parallel_extraction_failure_retains_task_and_window_context(monkeypatch
         "windowStart": 12,
         "windowEnd": 34,
         "errorType": "ProcessingError",
+        "attempts": 2,
         "errorMessage": "grounded extraction failed",
     }
 
@@ -214,7 +215,7 @@ def test_project_model_provider_uses_host_admitted_output_limit(monkeypatch):
     assert request["max_tokens"] == 32768
 
 
-def test_native_extraction_preserves_retryable_relay_failure(monkeypatch):
+def test_native_extraction_preserves_relay_cause_but_stops_after_task_retry_budget(monkeypatch):
     relay_failure = SemanticArtifactError(
         "structured_extraction relay returned HTTP 500: INTERNAL_ERROR",
         status=500,
@@ -222,7 +223,10 @@ def test_native_extraction_preserves_retryable_relay_failure(monkeypatch):
         retryable=True,
     )
 
+    calls = []
+
     def grounded(_text, **_kwargs):
+        calls.append(_text)
         raise ProcessingError("typed extraction failed") from relay_failure
 
     monkeypatch.setattr(semantic_artifact_builder, "extract_grounded_window", grounded)
@@ -234,7 +238,9 @@ def test_native_extraction_preserves_retryable_relay_failure(monkeypatch):
 
     assert failure.value.status == 500
     assert failure.value.code == "INTERNAL_ERROR"
-    assert failure.value.retryable is True
+    assert len(calls) == 2
+    assert failure.value.diagnostic["parallelTask"]["attempts"] == 2
+    assert failure.value.retryable is False
 
 
 def test_native_parallel_map_propagates_permanent_failure_for_fail_fast():
@@ -324,6 +330,30 @@ def test_provider_does_not_manual_fallback_for_unauthorized_sdk_error():
 
     assert calls == ["generate"]
     assert failure.value.retryable is False
+
+
+@pytest.mark.parametrize('content,valid', [('{"value":7}', True), ('{"value":"bad"}', False), ('not JSON', False)])
+def test_typed_relay_uses_json_object_and_local_schema_without_fallback(monkeypatch, content, valid):
+    class Output(BaseModel):
+        value: int
+
+    calls = []
+    def relay_json(relay, payload, operation, **kwargs):
+        calls.append(payload)
+        assert payload['response_format'] == {'type': 'json_object'}
+        assert '"properties"' in payload['messages'][0]['content']
+        assert '"value"' in payload['messages'][0]['content']
+        receipt = ModelReceipt(id='test', operation=operation, provider='test', model='model-1', input_digest='sha256:' + 'a' * 64, output_digest='sha256:' + 'b' * 64)
+        return {'model': 'model-1', 'choices': [{'finish_reason': 'stop', 'message': {'content': content}}]}, receipt
+
+    monkeypatch.setattr(semantic_artifact_builder, '_relay_json', relay_json)
+    provider = semantic_artifact_builder._project_model_provider(SimpleNamespace(model_id='model-1', max_output_tokens=32768))
+    if valid:
+        assert provider.generate_typed('Extract JSON', Output).value == 7
+    else:
+        with pytest.raises(ProcessingError):
+            provider.generate_typed('Extract JSON', Output)
+    assert len(calls) == 1
 
 
 def test_typed_provider_keeps_relay_failure_as_its_cause(monkeypatch):
