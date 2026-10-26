@@ -6,6 +6,8 @@ from semantica.semantic_artifact_builder import _extract_project_sources
 
 def extract_source(text, model, embedding, *, extraction_spec=None, progress=None,
                    parallelism=1, document=None):
+    if isinstance(model, SimpleNamespace):
+        model = SimpleNamespace(**{"context_window_tokens": 500000, "max_output_tokens": 32768, **vars(model)})
     request = SimpleNamespace(parallelism=parallelism,
         recipe=SimpleNamespace(extraction_spec=extraction_spec),
         relays={"model": model, "embedding": embedding})

@@ -1492,6 +1492,7 @@ Grounding requirements:
         entities = []
         if grounding == "strict":
             kwargs["max_retries"] = 1
+        original_prompt = prompt
         for attempt in range(grounding_retries + 1):
             active_schema = grounded_entities_wire(extraction_spec) if grounding == "strict" else EntitiesResponse
             result_obj = None
@@ -1573,12 +1574,11 @@ Grounding requirements:
             except ProcessingError as exc:
                 if attempt >= grounding_retries or (result_obj is None and not hasattr(exc, "previous_json")):
                     raise
-                previous = (result_obj.model_dump(mode="json", by_alias=True)
-                            if result_obj is not None else exc.previous_json)
-                prompt += (
-                    f"\n\nCorrect the invalid grounded output: {exc}\n"
-                    f"Previous grounded JSON:\n{json.dumps(previous, ensure_ascii=False)}\n"
-                    "Preserve valid values, repair the invalid grounding fields, and return the complete JSON object."
+                # Rejected output is unbounded; retain all source evidence instead.
+                prompt = original_prompt + (
+                    f"\n\nThe previous extraction failed validation: {str(exc)[:512]}\n"
+                    "Extract again from the complete source above, correct the invalid grounding "
+                    "fields, and return the complete JSON object."
                 )
         
         logger.info(f"Successfully extracted {len(entities)} entities using {provider}/{model} (typed)")
@@ -2486,6 +2486,7 @@ Do not guess ambiguous mathematical layout."""
         )
         result_obj = None
         relations = []
+        original_prompt = prompt
         for attempt in range(grounding_retries + 1):
             result_obj = None
             try:
@@ -2510,16 +2511,11 @@ Do not guess ambiguous mathematical layout."""
             except ProcessingError as exc:
                 if attempt >= grounding_retries or (result_obj is None and not hasattr(exc, "previous_json")):
                     raise
-                previous = (
-                    result_obj.model_dump(mode="json", by_alias=True)
-                    if hasattr(result_obj, "model_dump")
-                    else result_obj if result_obj is not None else exc.previous_json
-                )
-                prompt += (
-                    f"\n\nCorrect the invalid grounded output: {exc}\n"
-                    f"Previous grounded JSON:\n{json.dumps(previous, ensure_ascii=False)}\n"
-                    "Preserve every valid relation and repair only the invalid fields; "
-                    "return the complete JSON object."
+                # Rejected output is unbounded; retain all source evidence instead.
+                prompt = original_prompt + (
+                    f"\n\nThe previous extraction failed validation: {str(exc)[:512]}\n"
+                    "Extract all supported relations again from the complete source and entity "
+                    "mentions above, correct the invalid fields, and return the complete JSON object."
                 )
         if verbose_mode:
             logger.debug(

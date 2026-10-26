@@ -39,7 +39,7 @@ def test_large_context_preserves_rows_headers_notes_and_every_ref():
 
 def test_small_context_keeps_exact_checkpoint_input():
     context = contexts()[:6]
-    assert pipeline._extraction_context_batches("report", context) == [context]
+    assert pipeline._extraction_context_batches("report", context, 6000) == [context]
 
 
 def test_indivisible_row_has_typed_nonretryable_local_failure():
@@ -54,7 +54,6 @@ def test_batched_window_keeps_local_entity_ids_and_relation_endpoints_disjoint(m
     from semantica.semantic_extract.types import Entity, Relation
     context = contexts()
     monkeypatch.setattr(pipeline, "_window_grounding_context", lambda *_: context)
-    monkeypatch.setattr(pipeline, "MODEL_CONTEXT_BYTES", 6_000)
     calls = []
     def extract(text, relay, spec, item, context, formula_semantics):
         assert formula_semantics is False
@@ -64,7 +63,7 @@ def test_batched_window_keeps_local_entity_ids_and_relation_endpoints_disjoint(m
         return {"entities": [a, b], "relations": [Relation(a, "describes", b, metadata={
             "subject_id": "a", "object_id": "b", "supporting_refs": [context[-1]["ref"]]})]}, [len(calls)], len(calls) == 1
     monkeypatch.setattr(pipeline, "_extract_window_context", extract)
-    extracted, receipts, restored = pipeline._extract_window("AEP report", SimpleNamespace(), None, [], (0, 10, "AEP report"))
+    extracted, receipts, restored = pipeline._extract_window("AEP report", SimpleNamespace(context_window_tokens=7000, max_output_tokens=1000), None, [], (0, 10, "AEP report"))
     assert len(calls) > 1 and len(receipts) == len(calls)
     ids = [entity.metadata["mention_id"] for entity in extracted["entities"]]
     assert len(ids) == len(set(ids))
@@ -90,7 +89,6 @@ def test_interrupted_evidence_batches_restore_completed_passes(tmp_path, monkeyp
     from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest
     context = contexts()
     monkeypatch.setattr(pipeline, '_window_grounding_context', lambda *_: context)
-    monkeypatch.setattr(pipeline, 'MODEL_CONTEXT_BYTES', 6_000)
     source = tmp_path / "source.txt"
     source.write_text("AEP report")
     checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(
@@ -103,13 +101,13 @@ def test_interrupted_evidence_batches_restore_completed_passes(tmp_path, monkeyp
         return {"entities": []}
     stub_native_provider(monkeypatch, respond)
     token = active_checkpoint.set(checkpoint)
-    args = ('AEP report', SimpleNamespace(model_id='test'), None, [], (0, 10, 'AEP report'))
+    args = ('AEP report', SimpleNamespace(model_id='test', context_window_tokens=7000, max_output_tokens=1000), None, [], (0, 10, 'AEP report'))
     try:
         with pytest.raises(Exception, match='interrupted'):
             pipeline._extract_window(*args)
         assert len(list(checkpoint.root.glob("extraction-entities-*.json"))) == 1
         pipeline._extract_window(*args)
-        expected = len(pipeline._extraction_context_batches('AEP report', context))
+        expected = len(pipeline._extraction_context_batches('AEP report', context, 6000))
         assert len(calls) == expected + 1
         before = len(calls)
         assert pipeline._extract_window(*args)[2] is True
@@ -123,3 +121,22 @@ def test_oversize_text_without_structure_fails_before_model_request():
         pipeline._extraction_context_batches('x' * 100, [], max_bytes=50)
     assert failure.value.code == 'EXTRACTION_CONTEXT_BUDGET_EXCEEDED'
     assert failure.value.diagnostic['upstreamRequestSent'] is False
+
+
+def test_complete_request_overhead_refines_only_unsatisfied_evidence_batches(monkeypatch):
+    context = contexts()
+    monkeypatch.setattr(pipeline, '_window_grounding_context', lambda *_: context)
+    admitted, rejected = [], []
+    def extract(text, relay, spec, item, records, formula):
+        size = pipeline._context_size({'text': item[2], 'structure': records}) + 3000
+        if size > 10000:
+            rejected.append(records)
+            raise pipeline.SemanticArtifactError('schema overhead', code='MODEL_CONTEXT_BUDGET_EXCEEDED',
+                retryable=False, diagnostic={'estimatedInputTokens': size, 'inputTokenBudget': 10000})
+        admitted.append(records)
+        return {'entities': [], 'relations': []}, [], False
+    monkeypatch.setattr(pipeline, '_extract_window_context', extract)
+    pipeline._extract_window('report', SimpleNamespace(context_window_tokens=11000, max_output_tokens=1000),
+                             None, [], (0, 6, 'report'))
+    assert rejected and len(admitted) > len(rejected)
+    assert {r['ref'] for batch in admitted for r in batch} == {r['ref'] for r in context}

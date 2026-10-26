@@ -17,7 +17,7 @@ def test_representation_identity_ignores_producer(tmp_path):
     assert first == _representation_revision(source, False, "immutable", "new", "2", "remote", {"text": "content"})
 
 
-def test_document_checkpoint_survives_profile_upgrade(tmp_path, monkeypatch):
+def test_document_checkpoint_rejects_legacy_key_after_profile_upgrade(tmp_path, monkeypatch):
     from semantica.project_checkpoint import active_checkpoint
     from semantica.semantic_source_artifact import _parse_source
     source = tmp_path / "source.txt"
@@ -34,10 +34,46 @@ def test_document_checkpoint_survives_profile_upgrade(tmp_path, monkeypatch):
     current["outputDir"] = str(tmp_path / "second")
     current["resumeCheckpointDirs"] = [str(checkpoint.root)]
     resumed = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(current))
+    calls = []
+    monkeypatch.setattr("semantica.semantic_source_artifact.parse_source",
+                        lambda *a, **k: calls.append(k) or type("Parsed", (), {
+                            "text": "A source", "document": {"text": "A source"},
+                            "origin": "remote", "parser": "new-parser", "parser_version": "2",
+                        })())
+    token = active_checkpoint.set(resumed)
+    try:
+        result = _parse_source(item, False, {"mode": "remote"})
+        assert result[0] == "A source"
+        assert calls
+    finally:
+        active_checkpoint.reset(token)
+
+
+def test_document_checkpoint_reuses_matching_processing_revision(tmp_path, monkeypatch):
+    from semantica.project_checkpoint import active_checkpoint
+    from semantica.semantic_source_artifact import _parse_source
+    source = tmp_path / "source.txt"
+    source.write_text("A source")
+    params = _request(source, tmp_path / "first")["params"]
+    request = SemanticArtifactBuildRequest.model_validate(params)
+    checkpoint = SnapshotCheckpoint(request)
+    item = request.sources[0]
+    profile = request.document_processing.model_dump(mode="json", by_alias=True)
+    processing_revision = profile["processingRevision"]
+    key = {"sourceId": item.source_id, "contentHash": item.material_revision,
+           "forceOcr": False, "processingRevision": processing_revision}
+    saved = ["A source", {"text": "A source", "content_hash": item.material_revision,
+                            "mime_type": item.mime_type}, "local", item.material_revision,
+             "old-parser", "1"]
+    checkpoint.write("document", key, saved)
+    current = deepcopy(params)
+    current["outputDir"] = str(tmp_path / "second")
+    current["resumeCheckpointDirs"] = [str(checkpoint.root)]
+    resumed = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(current))
     monkeypatch.setattr("semantica.semantic_source_artifact.parse_source", lambda *a, **k: pytest.fail("must reuse"))
     token = active_checkpoint.set(resumed)
     try:
-        assert _parse_source(item, False, {"mode": "remote"}) == tuple(saved)
+        assert _parse_source(item, False, profile) == tuple(saved)
     finally:
         active_checkpoint.reset(token)
 

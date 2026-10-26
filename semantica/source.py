@@ -37,33 +37,17 @@ def source_content_revision(path: Path) -> str:
 
 def source_processing_revision(path: Path, *, mime_type: str, force_ocr: bool,
                                document_processing: dict | None = None) -> str:
-    """Identify the native adapter contract used to materialize source bytes."""
+    """Return the explicitly configured processing identity for this profile.
+
+    Implementation source is deliberately excluded. Behavior changes require an
+    explicit processingRevision change in the published processing profile.
+    """
     suffix = path.suffix.lower()
     profile = document_processing or {"mode": "local"}
-    inputs: dict[str, Any] = {
-        "contract": "semantica.source-processing.v1",
-        "suffix": suffix,
-        "mimeType": mime_type,
-        "forceOcr": force_ocr,
-        "documentProcessing": profile,
-        "sourceImplementation": sha256(Path(__file__).read_bytes()).hexdigest(),
-    }
-    if suffix in _DOCLING_SUFFIXES:
-        adapter_name = ("parse/pdf_parser.py" if profile.get("mode") == "native" else
-                        "parse/docling_parser.py" if profile.get("mode") == "local" else
-                        "project_remote_docling.py")
-        adapter = Path(__file__).parent / adapter_name
-        inputs["adapterImplementation"] = sha256(adapter.read_bytes()).hexdigest()
-        if profile.get("mode") in {"native", "local"}:
-            dependencies = {}
-            packages = ("PyMuPDF",) if profile.get("mode") == "native" else ("docling", "docling-core")
-            for package in packages:
-                try:
-                    dependencies[package] = version(package)
-                except PackageNotFoundError:
-                    dependencies[package] = None
-            inputs["dependencies"] = dependencies
-    return "sha256:" + sha256(json.dumps(inputs, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+    revision = profile.get("processingRevision", "semantica-document-processing-v1")
+    if not isinstance(revision, str) or not revision.strip():
+        raise ValueError("document processing requires an explicit processingRevision")
+    return revision.strip()
 
 
 @dataclass(frozen=True)
@@ -249,7 +233,8 @@ def parse_source(path: Path, *, name: str, mime_type: str, force_ocr: bool, docu
                 )
             from .parse.pdf_parser import PDFParser
             result = PDFParser().parse(path, extract_tables=False, extract_images=False,
-                                       extract_links=True, sort=True)
+                                       extract_links=True,
+                                       sort=profile.get("pdfTextOrder", "coordinates") == "coordinates")
             text = result["full_text"]
             return SourceDocument(text=text, document={
                 "format": "pdf-text", "source": name, "pages": result["pages"],

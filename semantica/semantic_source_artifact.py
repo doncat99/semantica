@@ -43,7 +43,11 @@ def _parse_source(source: Any, force_ocr: bool, document_processing: dict | None
     if source.material_revision != content_hash:
         raise SemanticArtifactError(f"source material revision does not match immutable bytes: {source.source_id}")
     checkpoint = active_checkpoint.get()
-    cache_key = {"sourceId": source.source_id, "contentHash": content_hash, "forceOcr": force_ocr}
+    profile = document_processing or {"mode": "local"}
+    processing_revision = source_processing_revision(path, mime_type=source.mime_type,
+        force_ocr=force_ocr, document_processing=profile)
+    cache_key = {"sourceId": source.source_id, "contentHash": content_hash,
+                 "forceOcr": force_ocr, "processingRevision": processing_revision}
     cached = checkpoint.read("document", cache_key) if checkpoint else None
     if cached is not None:
         if (not isinstance(cached, (list, tuple)) or len(cached) != 6
@@ -62,7 +66,7 @@ def _parse_source(source: Any, force_ocr: bool, document_processing: dict | None
             name=source.name,
             mime_type=source.mime_type,
             force_ocr=force_ocr,
-            document_processing=document_processing,
+            document_processing=profile,
             **({"progress_callback": progress_callback} if progress_callback is not None else {}),
         )
     except SourceQualityError as exc:

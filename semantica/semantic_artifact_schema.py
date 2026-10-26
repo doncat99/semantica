@@ -751,6 +751,8 @@ class ReleaseRef(DigestModel):
 
 class DocumentProcessingProfile(StrictModel):
     mode: Literal["disabled", "native", "local", "remote"] = "local"
+    processing_revision: str = Field(default="semantica-document-processing-v1", alias="processingRevision")
+    pdf_text_order: Literal["coordinates", "content"] = Field(default="coordinates", alias="pdfTextOrder")
     endpoint: Optional[str] = None
     binding_id: Optional[str] = Field(default=None, alias="bindingId")
     remote_cancellation: Literal["unsupported"] = Field(default="unsupported", alias="remoteCancellation")

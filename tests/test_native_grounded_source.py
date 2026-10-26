@@ -57,7 +57,8 @@ def test_grounded_source_consumes_verified_parsed_artifact_without_parsing(tmp_p
     assert artifact.document_representations[0].metadata['document']['text'] == text
 
 
-def test_native_pdf_profile_uses_pdf_parser_not_docling(tmp_path, monkeypatch):
+@pytest.mark.parametrize('order,sort', [('coordinates', True), ('content', False)])
+def test_native_pdf_profile_uses_pdf_parser_not_docling(tmp_path, monkeypatch, order, sort):
     import json
     path = tmp_path / 'original.pdf'
     path.write_bytes(b'%PDF fixture')
@@ -67,7 +68,7 @@ def test_native_pdf_profile_uses_pdf_parser_not_docling(tmp_path, monkeypatch):
         def parse(self, actual, **options):
             assert actual == path and options == {
                 'extract_tables': False, 'extract_images': False,
-                'extract_links': True, 'sort': True}
+                'extract_links': True, 'sort': sort}
             return {'full_text': 'Native PDF text',
                     'pages': [{'page_number': 1, 'text': 'Native PDF text'}],
                     'metadata': {'page_count': 1}}
@@ -76,7 +77,7 @@ def test_native_pdf_profile_uses_pdf_parser_not_docling(tmp_path, monkeypatch):
                         lambda **_kwargs: pytest.fail('unexpected Docling'))
     parsed = pipeline.parse_source_artifact(pipeline.ParseSourceRequest.model_validate({
         'source': source.model_dump(mode='json', by_alias=True), 'outputDir': str(tmp_path / 'parsed'),
-        'forceOcr': False, 'documentProcessing': {'mode': 'native'},
+        'forceOcr': False, 'documentProcessing': {'mode': 'native', 'pdfTextOrder': order},
     }))
     payload = json.loads(__import__('pathlib').Path(parsed['artifactPath']).read_bytes())
     assert payload['parser'] == 'semantica.PDFParser'

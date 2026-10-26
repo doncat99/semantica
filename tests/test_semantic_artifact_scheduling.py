@@ -66,7 +66,8 @@ def test_global_queue_interleaves_sources_preserves_order_and_budget(monkeypatch
     assert [len(value[1]) for value in result] == [3, 2]
     assert [[chunk['start_char'] for chunk in value[1]] for value in result] == [[0, 1, 2], [0, 1]]
     counts = [event['metadata']['completedChunks'] for event in events if event['stage'] == 'extracting']
-    assert sorted(set(counts)) == list(range(6))
+    assert counts[0] == 0 and counts[-1] == 5
+    assert counts == sorted(counts)
     initial = events[0]['metadata']['sourceProgress']
     assert [(s['sourceId'], s['completedChunks'], s['totalChunks'], s['state']) for s in initial] == [('a', 0, 3, 'queued'), ('b', 0, 2, 'queued')]
     extracting = [event for event in events if event['stage'] == 'extracting']
@@ -74,6 +75,35 @@ def test_global_queue_interleaves_sources_preserves_order_and_budget(monkeypatch
     final = extracting[-1]['metadata']['sourceProgress']
     assert [(s['sourceId'], s['completedChunks'], s['totalChunks'], s['state']) for s in final] == [('a', 3, 3, 'completed'), ('b', 2, 2, 'completed')]
     assert all(sum(s['completedChunks'] for s in event['metadata']['sourceProgress']) == event['metadata']['completedChunks'] for event in events)
+
+
+def test_restore_coalesces_warnings_without_blocking_worker_lock(monkeypatch):
+    monkeypatch.setattr(builder, '_text_windows', lambda text: [(i, i + 1, c) for i, c in enumerate(text)])
+    monkeypatch.setattr(builder, '_docling_locations', lambda *args: [])
+    calls, events = [], []
+    receipt = SimpleNamespace(metadata={'rejected_candidates': [
+        {'action': 'discarded_candidate', 'diagnostic': {'reason': 'ungrounded'}} for _ in range(100)]})
+    def extract(*args):
+        calls.append(args)
+        return ({'entities': [], 'relations': []}, [receipt], True)
+    monkeypatch.setattr(builder, '_extract_window', extract)
+    monkeypatch.setattr(builder, '_embed_texts', lambda texts, relay: ([[1.] for _ in texts], SimpleNamespace()))
+    def progress(event):
+        if event['stage'] == 'extracting' and any(r['inFlightChunks'] for r in event['metadata']['sourceProgress']):
+            # A slow stdout consumer cannot hold the source-state lock.
+            deadline = time.monotonic() + 2
+            while len(calls) < 20 and time.monotonic() < deadline:
+                time.sleep(.001)
+            assert len(calls) == 20
+        events.append(event)
+    source = SimpleNamespace(source_id='a', material_revision='a')
+    request = SimpleNamespace(parallelism=4, relays={'model': None, 'embedding': None}, recipe=SimpleNamespace(extraction_spec=None))
+    builder._extract_project_sources([(source, False, ('a' * 20, {}))], request, progress)
+    extraction = [e for e in events if e['stage'] == 'extracting']
+    assert len(extraction) < 10
+    assert extraction[-1]['metadata']['warningCount'] == 2000
+    assert extraction[-1]['metadata']['restoredChunks'] == 20
+    assert len(receipt.metadata['rejected_candidates']) == 100
 
 
 def test_exhausted_transient_failure_stops_dispatching_new_chunks():
@@ -115,11 +145,12 @@ def test_typed_retry_respects_gateway_delay_and_permanent_failure(monkeypatch):
     assert delays == []
 
 
-def test_flattened_failure_reports_actual_window_offsets():
+@pytest.mark.parametrize("window", [(500, 900, 'text'), [500, 900, 'text']])
+def test_flattened_failure_reports_actual_window_offsets(window):
     def fail(item):
         raise builder.SemanticArtifactError('offline', retryable=True)
     with pytest.raises(Exception) as failure:
-        builder._native_parallel_map([(2, 4, (500, 900, 'text'))], fail, 1)
+        builder._native_parallel_map([(2, 4, window)], fail, 1)
     assert failure.value.parallel_context['sourceIndex'] == 2
     assert failure.value.parallel_context['windowStart'] == 500
     assert failure.value.parallel_context['windowEnd'] == 900

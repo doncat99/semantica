@@ -32,7 +32,7 @@ def test_classification_never_votes_or_adds_adjudication(monkeypatch, choices, c
         "id": "purpose", "label": "Purpose", "cardinality": cardinality,
         "vocabulary": [{"id": key, "label": key} for key in ("alpha", "beta")]}])
     spans = [SimpleNamespace(id="ev:" + str(i), quote="source") for i in range(2)]
-    monkeypatch.setattr(pipeline, "_context_batches", lambda *args: [
+    monkeypatch.setattr(pipeline, "_context_batches", lambda *args, **kwargs: [
         {"evidence": [{"id": span.id}]} for span in spans])
     calls = []
     def classify(built, profile, relay):
@@ -44,7 +44,7 @@ def test_classification_never_votes_or_adds_adjudication(monkeypatch, choices, c
                 confidence=[.9, .4][i], evidence_ids=["ev:" + str(i)])]), []
     monkeypatch.setattr(pipeline, "_classify_source_batch", classify)
     result, _ = pipeline._classify_source({"source": SimpleNamespace(source_id="source"),
-                                          "passages": spans}, profile, None)
+                                          "passages": spans}, profile, SimpleNamespace(context_window_tokens=500000, max_output_tokens=32768))
     assert [item.item_id for item in result.assignments] == expected
     assert len(calls) == 2
     assert result.unclassified_dimension_ids == ([] if expected else ["purpose"])
@@ -78,12 +78,28 @@ def test_native_report_preflights_all_chunks_before_any_request(monkeypatch):
             {"id": "small", "text": "small"}, {"id": "large", "text": "x" * 2000}])
 
 
+def test_relay_budgets_complete_serialized_request_without_sending(monkeypatch):
+    import json
+    monkeypatch.setenv("TEST_RELAY_TOKEN", "offline")
+    monkeypatch.setattr(pipeline.urllib.request, "urlopen", lambda *a, **k: pytest.fail("must not send"))
+    payload = {"messages": [{"role": "user", "content": '漢字"\\' * 20_000}],
+               "response_format": {"type": "json_object"}}
+    expected = len(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode())
+    with pytest.raises(pipeline.SemanticArtifactError) as failure:
+        pipeline._relay_uncached(SimpleNamespace(authorization_env="TEST_RELAY_TOKEN", context_window_tokens=100000, max_output_tokens=10000), payload,
+                                 "structured_extraction", None, None)
+    assert failure.value.code == "MODEL_CONTEXT_BUDGET_EXCEEDED"
+    assert failure.value.retryable is False
+    assert failure.value.diagnostic['requestBytes'] == expected
+    assert failure.value.diagnostic['inputTokenBudget'] == 90000
+    assert failure.value.diagnostic['upstreamRequestSent'] is False
+
+
 def test_builder_reports_local_budget_failure_without_sending(monkeypatch):
-    monkeypatch.setattr(pipeline, "MODEL_REQUEST_BYTES", 100)
     monkeypatch.setattr(pipeline, "_project_model_provider", lambda *a: SimpleNamespace(receipts=[]))
     with pytest.raises(pipeline.SemanticArtifactError) as failure:
         pipeline._grounded_explanation({"target": {"id": "c"}, "entities": [], "relations": [],
-            "assertions": [], "evidence": [{"id": "e", "quote": "source"}]}, None)
+            "assertions": [], "evidence": [{"id": "e", "quote": "source"}]}, SimpleNamespace(model_id='test', context_window_tokens=1100, max_output_tokens=1000))
     assert failure.value.code == "REPORT_CONTEXT_BUDGET_EXCEEDED"
     assert failure.value.retryable is False
     assert failure.value.diagnostic["upstreamRequestSent"] is False
@@ -120,7 +136,8 @@ def test_native_cache_reuses_entities_after_relation_transport_retry(tmp_path, m
             raise pipeline.SemanticArtifactError("transport unavailable", status=503,
                 code="UPSTREAM_UNAVAILABLE", retryable=True)
         if stage == "entities":
-            return {"entities": [{"text": name, "label": "Concept", "occurrence": 0}
+            return {"entities": [{"text": name, "label": "Concept", "occurrence": 0,
+                                  "confidence": 1.0, "attributes": {}}
                                   for name in ("Fund", "Bond")]}
         return {"relations": []}
     stub_native_provider(monkeypatch, respond)
@@ -134,7 +151,8 @@ def test_native_cache_reuses_entities_after_relation_transport_retry(tmp_path, m
     assert calls == ["entities", "relations", "relations"]
     assert len(receipts) == len({item.id for item in receipts}) == 2
     assert not reused and restored
-    assert not any(getattr(item, "_checkpoint_restored", False) for item in receipts)
+    assert all(getattr(item, "_checkpoint_restored", False) for item in restored_receipts)
+    assert not getattr(receipts[1], "_checkpoint_restored", False)
     assert [item.id for item in receipts] == [item.id for item in restored_receipts]
     assert [(item.text, item.start_char, item.end_char) for item in first["entities"]] == [
         (item.text, item.start_char, item.end_char) for item in second["entities"]]
@@ -173,7 +191,7 @@ def test_formula_semantics_opt_in_invalidates_only_selected_extraction(tmp_path,
 
 @pytest.mark.parametrize("field,value", [("max_output_tokens", 4096), ("binding_id", "other"),
                                         ("context_window_tokens", 65536)])
-def test_native_cache_scopes_host_admitted_model_configuration(tmp_path, monkeypatch, field, value):
+def test_native_cache_survives_host_admitted_model_configuration_changes(tmp_path, monkeypatch, field, value):
     from tests.artifact_helpers import stub_native_provider
     from tests.test_semantic_artifact import _request
     from semantica.project_checkpoint import SnapshotCheckpoint, active_checkpoint
@@ -196,6 +214,6 @@ def test_native_cache_scopes_host_admitted_model_configuration(tmp_path, monkeyp
         assert calls == ["entities"]
         setattr(relay, field, value)
         pipeline._extract_window_context(*args)
-        assert calls == ["entities", "entities"]
+        assert calls == ["entities"]
     finally:
         active_checkpoint.reset(token)

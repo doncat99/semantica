@@ -69,7 +69,7 @@ def test_native_grounded_extractors_apply_typed_spec_and_examples(monkeypatch):
     assert "Process uses material" in provider.prompts[1]
 
 
-def test_native_grounded_extraction_retries_schema_violations():
+def test_native_grounded_extraction_rejects_invalid_attribute_candidate():
     text = "Blue whale is endangered."
     specification = ExtractionSpecification.model_validate({
         "id": "conservation", "version": "1",
@@ -82,10 +82,13 @@ def test_native_grounded_extraction_retries_schema_violations():
         EntitiesResponse(entities=[EntityOut(text="Blue whale", label="Species", occurrence=0, attributes={"endangered": True})]),
     )
 
-    entities = extract_entities_llm(text, provider="bifrost", provider_instance=provider, grounding="strict", grounding_retries=1, extraction_spec=specification)
+    rejected = []
+    entities = extract_entities_llm(text, provider="bifrost", provider_instance=provider, grounding="strict", grounding_retries=1, extraction_spec=specification, rejection_receipts=rejected)
 
-    assert entities[0].attributes == {"endangered": True}
-    assert "invalid type" in provider.prompts[1]
+    assert entities == []
+    assert len(provider.prompts) == 1
+    assert rejected[0]["kind"] == "schema"
+    assert "invalid" in rejected[0]["reason"]
 
 
 def test_grounded_native_extractors_preserve_mentions_evidence_and_qualifiers():
@@ -215,7 +218,8 @@ def test_grounded_native_extractors_retry_invalid_grounding():
     assert [relation.predicate for relation in relations] == ["affects"]
     assert "does not reference an entity mention" in relation_provider.prompts[1]
     assert "candidate_index=0" in relation_provider.prompts[1]
-    assert '"subject_id": "invented"' in relation_provider.prompts[1]
+    assert "Previous grounded JSON" not in relation_provider.prompts[1]
+    assert relation_provider.prompts[0] in relation_provider.prompts[1]
 
 
 def test_unique_grounded_quote_uses_its_deterministic_occurrence():
@@ -349,7 +353,7 @@ def test_grounded_relation_isolates_candidate_missing_required_field_after_typed
     assert "qualifiers" in rejected[0]["reason"]
 
 
-def test_repeated_grounded_quote_retry_includes_range_and_previous_json():
+def test_repeated_grounded_quote_retry_includes_range_without_echoing_output():
     text = "Alpha references Alpha."
     provider = TypedProvider(
         EntitiesResponse(entities=[EntityOut(text="Alpha", label="concept", occurrence=7)]),
@@ -366,7 +370,24 @@ def test_repeated_grounded_quote_retry_includes_range_and_previous_json():
 
     assert entities[0].start_char == text.rindex("Alpha")
     assert "found 2 exact occurrence(s)" in provider.prompts[1]
-    assert '"occurrence": 7' in provider.prompts[1]
+    assert "Previous grounded JSON" not in provider.prompts[1]
+    assert provider.prompts[0] in provider.prompts[1]
+
+
+def test_grounding_retry_does_not_grow_with_rejected_output():
+    text = "Alpha references Beta." + " " * 60_000
+    provider = TypedProvider(
+        EntitiesResponse(entities=[
+            EntityOut(text="missing", label="concept", occurrence=0,
+                      attributes={"untrusted": "x" * 40_000}),
+        ]),
+        EntitiesResponse(entities=[EntityOut(text="Alpha", label="concept", occurrence=0)]),
+    )
+    entities = extract_entities_llm(text, provider="bifrost", provider_instance=provider,
+                                    grounding="strict", grounding_retries=1, max_text_length=100_000)
+    assert entities[0].text == "Alpha"
+    assert provider.prompts[0] in provider.prompts[1]
+    assert len(provider.prompts[1].encode()) - len(provider.prompts[0].encode()) < 4096
 
 
 def test_strict_grounding_delegates_semantic_repair_to_one_outer_retry():
@@ -621,7 +642,7 @@ def test_grounded_relation_ignores_noncanonical_endpoint_text_but_keeps_id_valid
     assert relations[0].object.text == "outcomes"
 
 @pytest.mark.parametrize('first', [{'predicate': 'uses'}, {'relations': 'invalid'}, {'relations': [{}, 'qualifiers']}])
-def test_strict_relation_repairs_invalid_envelope_with_previous_json(first):
+def test_strict_relation_repairs_invalid_envelope_without_echoing_previous_json(first):
     import json
     from semantica.semantic_extract.providers import BaseProvider
     from semantica.semantic_extract.types import Entity
@@ -640,7 +661,8 @@ def test_strict_relation_repairs_invalid_envelope_with_previous_json(first):
         provider_instance=provider, grounding='strict', grounding_retries=1)
     assert result == []
     assert len(provider.prompts) == 2
-    assert json.dumps(first, ensure_ascii=False) in provider.prompts[1]
+    assert "Previous grounded JSON" not in provider.prompts[1]
+    assert provider.prompts[0] in provider.prompts[1]
 
 
 def test_strict_relation_keeps_valid_sibling_beside_scalar():

@@ -111,10 +111,11 @@ def test_extraction_reports_active_stage_and_preserves_exact_evidence(monkeypatc
 
     extracted, _, _ = extract_source(text, SimpleNamespace(model_id="test"), None, progress=events.append)
 
-    assert [event["stage"] for event in events] == ["extracting"] * 3 + ["embedding"] * 3
+    assert set(event["stage"] for event in events) == {"extracting", "embedding"}
     assert events[0]["metadata"]["completedChunks"] == 0
-    assert events[2]["metadata"]["completedChunks"] == 1
-    assert events[2]["metadata"]["restoredChunks"] == 0
+    extraction_final = [event for event in events if event["stage"] == "extracting"][-1]
+    assert extraction_final["metadata"]["completedChunks"] == 1
+    assert extraction_final["metadata"]["restoredChunks"] == 0
     evidence = extracted["relations"][0]["evidence"]
     assert evidence == text
 
@@ -130,8 +131,9 @@ def test_extraction_reports_restored_checkpoint_chunks(monkeypatch):
 
     extract_source("source", SimpleNamespace(model_id="test"), None, progress=events.append)
 
-    assert events[2]["metadata"]["completedChunks"] == events[-1]["metadata"]["completedChunks"] == 1
-    assert events[2]["metadata"]["restoredChunks"] == events[-1]["metadata"]["restoredChunks"] == 1
+    for stage in ("extracting", "embedding"):
+        final = [event for event in events if event["stage"] == stage][-1]
+        assert final["metadata"]["completedChunks"] == final["metadata"]["restoredChunks"] == 1
 
 
 def test_stage_progress_precedes_relay_calls(monkeypatch):
@@ -226,7 +228,7 @@ def test_classification_and_native_reports_visit_every_passage(tmp_path, monkeyp
     calls = []
 
     def model(relay, operation, instruction, context, schema):
-        assert pipeline._context_size(context) <= pipeline.MODEL_CONTEXT_BYTES
+        assert pipeline._context_size(context) <= 12000
         calls.append(operation)
         assert operation == "source_classification"
         seen[operation].update(item["id"] for item in context["evidence"])
@@ -252,8 +254,9 @@ def test_classification_and_native_reports_visit_every_passage(tmp_path, monkeyp
                 context=batch)
     monkeypatch.setattr(pipeline, "_project_model_provider", lambda *args: Provider())
     profile = ClassificationProfile(id="profile", version="1", label="Subject", description="Classification", dimensions=[{"id": "subject", "label": "Subject", "cardinality": "single", "vocabulary": [{"id": "science", "label": "Science"}]}])
-    classification, _ = pipeline._classify_source(built, profile, None)
-    reports, _ = pipeline._explanation_reports("project", [built], [], [], [], [], [], built["passages"], None)
+    relay = SimpleNamespace(model_id='test', context_window_tokens=13000, max_output_tokens=1000)
+    classification, _ = pipeline._classify_source(built, profile, relay)
+    reports, _ = pipeline._explanation_reports("project", [built], [], [], [], [], [], built["passages"], relay)
     expected = {span.id for span in built["passages"]}
     assert seen["source_classification"] == seen["knowledge_explanation"] == expected
     assert set(classification.assignments[0].evidence_ids) == expected
@@ -264,7 +267,7 @@ def test_classification_and_native_reports_visit_every_passage(tmp_path, monkeyp
 
 def test_indivisible_context_is_rejected_without_truncation():
     with pytest.raises(pipeline.SemanticArtifactError, match="indivisible"):
-        pipeline._context_batches({}, [("evidence", {"quote": "x" * 60_000})])
+        pipeline._context_batches({}, [("evidence", {"quote": "x" * 60_000})], 12000)
 
 
 def test_native_report_cannot_introduce_evidence_from_another_batch(monkeypatch):
@@ -278,7 +281,7 @@ def test_native_report_cannot_introduce_evidence_from_another_batch(monkeypatch)
     monkeypatch.setattr(pipeline, "_relay_json", respond)
     with pytest.raises(pipeline.SemanticArtifactError):
         pipeline._grounded_explanation({"target": {"id": "overview"}, "entities": [],
-            "assertions": [], "relations": [], "evidence": [{"id": "source-evidence", "quote": "Supported"}]}, SimpleNamespace(model_id="test", max_output_tokens=1024))
+            "assertions": [], "relations": [], "evidence": [{"id": "source-evidence", "quote": "Supported"}]}, SimpleNamespace(model_id="test", max_output_tokens=1024, context_window_tokens=500000))
     assert len(calls) == 1
 
 
