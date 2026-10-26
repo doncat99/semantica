@@ -784,6 +784,7 @@ class BaseProvider:
 
             except ValidationError as e:
                 last_error = e
+                self._reject_last_typed_attempt()
                 error_summary = str(e)
 
                 if attempt < max_retries - 1:
@@ -838,6 +839,7 @@ class BaseProvider:
 
             except Exception as e:
                 last_error = e
+                self._reject_last_typed_attempt()
                 if getattr(e, "retryable", None) is False:
                     break
                 if attempt < max_retries - 1:
@@ -859,6 +861,19 @@ class BaseProvider:
         while isinstance(cause, ProcessingError) and cause.__cause__ is not None:
             cause = cause.__cause__
         raise failure from cause
+
+    def _reject_last_typed_attempt(self) -> None:
+        """Discard a durable relay response that failed typed validation.
+
+        Most providers do not persist model responses and therefore have
+        nothing to reject.  Durable providers may expose ``reject_last``;
+        keeping this hook optional lets the native retry loop remain the sole
+        owner of validation/retry policy without making checkpoint storage a
+        requirement for every provider.
+        """
+        reject = getattr(self, "reject_last", None)
+        if callable(reject):
+            reject()
 
 
 class OpenAIProvider(BaseProvider):
