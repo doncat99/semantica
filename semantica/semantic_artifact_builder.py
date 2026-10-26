@@ -1637,11 +1637,15 @@ def _grounded_explanation(context: dict[str, Any], relay: Any):
     key = {"context": context}
     saved = checkpoint.read("grounded-explanation", key) if checkpoint else None
     if saved is not None:
-        reports = [_GroundedCommunityReport.model_validate(item, context=context) for item in saved["reports"]]
-        receipts = [ModelReceipt.model_validate(item) for item in saved["receipts"]]
-        return [ReportSection(title=item["summary"].strip(), text=item["explanation"].strip(),
-            evidence_ids=sorted({citation["evidence_id"] for citation in item["citations"]}))
-            for report in reports for item in report.findings], receipts
+        try:
+            reports = [_GroundedCommunityReport.model_validate(item, context=context) for item in saved["reports"]]
+        except ValidationError:
+            checkpoint.reject("grounded-explanation", key, saved)
+        else:
+            receipts = [ModelReceipt.model_validate(item) for item in saved["receipts"]]
+            return [ReportSection(title=item["summary"].strip(), text=item["explanation"].strip(),
+                evidence_ids=sorted({citation["evidence_id"] for citation in item["citations"]}))
+                for report in reports for item in report.findings], receipts
     instruction = (
         "Explain the supplied knowledge for a reader learning the subject. Return strict JSON "
         "{title,summary,findings:[{summary,explanation,citations:[{evidence_id}]}]}. Write substantive connected explanations: "
@@ -1687,7 +1691,8 @@ def _grounded_explanation(context: dict[str, Any], relay: Any):
         for report in reports for item in report.findings]
     if checkpoint:
         checkpoint.write("grounded-explanation", key, {
-            "reports": [report.model_dump(mode="json") for report in reports],
+            "reports": [_GroundedCommunityReport.model_validate(asdict(report), context=context).model_dump(mode="json")
+                        for report in reports],
             "receipts": [item.model_dump(mode="json", by_alias=True) for item in provider.receipts]})
     return sections, provider.receipts
 

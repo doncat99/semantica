@@ -435,6 +435,52 @@ def test_product_result_rejects_cached_invalid_schema_and_regenerates(monkeypatc
     assert len(checkpoint.rejected) == 1
 
 
+@pytest.mark.parametrize('citation', [5, {'evidence_id': 'evidence:foreign'}])
+def test_explanation_rejects_invalid_saved_result_and_reuses_replacement(tmp_path, monkeypatch, citation):
+    from semantica import semantic_artifact_builder as pipeline
+    from semantica.project_checkpoint import SnapshotCheckpoint, active_checkpoint
+    from semantica.semantic_artifact_schema import SourceBuildInput
+
+    source = tmp_path / 'source.txt'
+    source.write_text('Source quote')
+    checkpoint = SnapshotCheckpoint.for_source(SourceBuildInput(
+        source_id='source:1', name='source.txt', mime_type='text/plain',
+        file_path=str(source), material_revision=source_content_revision(source)),
+        output_dir=str(tmp_path / 'output'), scope_id='scope:1', recipe={}, created_at='2026-01-01T00:00:00Z')
+    context = {'target': {'id': 'source:1', 'type': 'source-scope'},
+               'entities': [], 'assertions': [], 'relations': [],
+               'evidence': [{'id': 'evidence:source', 'quote': 'Source quote'}]}
+    key = {'context': context}
+    report = {'title': 'Source', 'summary': 'Supported', 'findings': [
+        {'summary': 'Meaning', 'explanation': 'Explained from the source.', 'citations': [citation]}]}
+    checkpoint.write('grounded-explanation', key, {'reports': [report], 'receipts': []})
+    calls = []
+
+    def relay_response(relay, payload, operation, _checkpoint, _cache_key):
+        calls.append(payload)
+        valid = {**report, 'findings': [{**report['findings'][0],
+                 'citations': [{'evidence_id': 'evidence:source'}]}]}
+        return {'model': relay.model_id, 'choices': [{'finish_reason': 'stop',
+            'message': {'content': json.dumps(valid)}}]}, ModelReceipt(
+                id='receipt:fresh', operation=operation, provider='test', model=relay.model_id,
+                input_digest=H1, output_digest=H2)
+
+    monkeypatch.setattr(pipeline, '_relay_uncached', relay_response)
+    relay = SimpleNamespace(model_id='test', context_window_tokens=500000, max_output_tokens=32768)
+    token = active_checkpoint.set(checkpoint)
+    try:
+        sections, receipts = pipeline._grounded_explanation(context, relay)
+        restored_sections, restored_receipts = pipeline._grounded_explanation(context, relay)
+    finally:
+        active_checkpoint.reset(token)
+    assert len(calls) == 1
+    assert sections == restored_sections
+    assert sections[0].evidence_ids == ['evidence:source']
+    assert [item.id for item in receipts] == [item.id for item in restored_receipts] == ['receipt:fresh']
+    assert checkpoint.read('grounded-explanation', key)['reports'][0]['findings'][0]['citations'] == [
+        {'evidence_id': 'evidence:source'}]
+
+
 def test_product_output_uses_host_admitted_output_limit(monkeypatch):
     from types import SimpleNamespace
     from semantica import semantic_artifact_builder as pipeline
