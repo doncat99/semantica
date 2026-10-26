@@ -311,15 +311,16 @@ def test_product_output_rejects_citation_shape_through_native_typed_provider(mon
                                     model=relay.model_id, input_digest=H1, output_digest=H2)
 
     monkeypatch.setattr(pipeline, "_relay_json", relay_response)
-    with pytest.raises(pipeline.SemanticArtifactError):
-        pipeline._product_json(
+    result, receipts = pipeline._product_json(
             SimpleNamespace(model_id="model-1", binding_id="default", max_output_tokens=393216, context_window_tokens=500000),
             "source_classification",
             "Classify the source.",
             {"evidence": [{"id": "evidence:source", "quote": "Source quote"}]},
             pipeline._ClassificationOutput,
         )
-    assert len(outputs) == 1
+    assert result.assignments[0].citations[0].evidence_id == "evidence:source"
+    assert len(receipts) == 2
+    assert not outputs
 
 
 def test_typed_retry_rejects_cached_invalid_relay_response(monkeypatch):
@@ -354,7 +355,7 @@ def test_typed_retry_rejects_cached_invalid_relay_response(monkeypatch):
 
     def relay_response(relay, payload, operation, _checkpoint, _cache_key):
         calls.append(len(responses))
-        result = {"model": relay.model_id, "choices": [{"message": {"content": json.dumps(responses.pop(0))}}]}
+        result = {"model": relay.model_id, "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(responses.pop(0))}}]}
         return result, ModelReceipt(id=f"receipt:{len(calls)}", operation=operation, provider="test",
                                     model=relay.model_id, input_digest=H1, output_digest=H2)
 
@@ -427,15 +428,13 @@ def test_product_output_rejects_semantic_citation_and_vocabulary(monkeypatch):
         "profile": _classification_profile(),
         "evidence": [{"id": "evidence:source", "quote": "Source quote"}],
     }
-    with pytest.raises(pipeline.SemanticArtifactError):
-        pipeline._product_json(
+    result, receipts = pipeline._product_json(
             SimpleNamespace(model_id="model-1", binding_id="default", max_output_tokens=393216, context_window_tokens=500000),
-            "source_classification",
-            "Classify the source.",
-            context,
-            pipeline._ClassificationOutput,
+            "source_classification", "Classify the source.", context, pipeline._ClassificationOutput,
         )
-    assert len(outputs) == 1
+    assert result.assignments[0].item_id == "history"
+    assert len(receipts) == 2
+    assert not outputs
 
 
 def test_product_output_rejects_large_invalid_payload_without_repair(monkeypatch):
@@ -459,8 +458,7 @@ def test_product_output_rejects_large_invalid_payload_without_repair(monkeypatch
 
     monkeypatch.setenv("OPENAI_API_KEY", "test-token")
     monkeypatch.setattr("urllib.request.urlopen", lambda _request, timeout: Response())
-    with pytest.raises(pipeline.SemanticArtifactError):
-        pipeline._product_json(
+    result, receipts = pipeline._product_json(
             SimpleNamespace(model_id="model-1", binding_id="default", authorization_env="OPENAI_API_KEY",
                             base_url="http://127.0.0.1/v1/chat/completions", max_output_tokens=393216, context_window_tokens=500000),
             "source_classification",
@@ -468,7 +466,9 @@ def test_product_output_rejects_large_invalid_payload_without_repair(monkeypatch
             {"evidence": [{"id": "evidence:source", "quote": quote}]},
             pipeline._ClassificationOutput,
         )
-    assert len(outputs) == 1
+    assert result.assignments[0].citations[0].evidence_id == "evidence:source"
+    assert len(receipts) == 2
+    assert not outputs
 
 
 def test_source_relations_project_only_existing_multi_source_facts():
@@ -528,7 +528,7 @@ def test_semantic_classification_rejects_invalid_model_evidence(tmp_path, monkey
     with pytest.raises(SemanticArtifactError):
         _classify_source(built, ClassificationProfile.model_validate(_classification_profile()),
             SimpleNamespace(model_id="test", binding_id="default", max_output_tokens=32768, context_window_tokens=500000))
-    assert len(calls) == 1
+    assert len(calls) == 3
 
 
 def test_semantic_classification_preserves_source_offsets_and_unclassified_dimensions(tmp_path, monkeypatch):
@@ -630,7 +630,7 @@ def test_explanation_rejects_missing_or_hallucinated_citations(tmp_path, monkeyp
     monkeypatch.setattr("semantica.semantic_artifact_builder._relay_json", respond)
     with pytest.raises(SemanticArtifactError):
         _explanation_reports("project-1", [built], built["entities"], [], [], [], [], [*built["evidence"], *built["passages"]], __import__('types').SimpleNamespace(model_id="test", max_output_tokens=1024, context_window_tokens=500000))
-    assert len(calls) == 1
+    assert len(calls) == 3
 
 
 def _parsed_ref(params, source):
