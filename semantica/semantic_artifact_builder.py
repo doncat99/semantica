@@ -27,7 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from pydantic.json_schema import SkipJsonSchema
-from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, ValidationInfo, model_validator
+from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, ValidationError, ValidationInfo, model_validator
 
 from .source import source_processing_revision
 from .semantic_artifact_errors import DocumentQualityError, SemanticArtifactError, ModelOutputError
@@ -1245,7 +1245,14 @@ def _product_json(relay: Any, operation: str, instruction: str, context: dict[st
     key = {"operation": operation, "context": context}
     saved = checkpoint.read("product-result", key) if checkpoint else None
     if saved is not None:
-        return schema.model_validate(saved["result"], context=context), [ModelReceipt.model_validate(item) for item in saved["receipts"]]
+        try:
+            admitted = schema.model_validate(saved["result"], context=context)
+        except ValidationError:
+            if checkpoint is None:
+                raise
+            checkpoint.reject("product-result", key, saved)
+        else:
+            return admitted, [ModelReceipt.model_validate(item) for item in saved["receipts"]]
     provider = _project_model_provider(relay, operation)
     try:
         result = provider.generate_typed(

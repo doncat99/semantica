@@ -376,6 +376,65 @@ def test_typed_retry_rejects_cached_invalid_relay_response(monkeypatch):
     assert [receipt.id for receipt in receipts] == ["receipt:1", "receipt:2"]
 
 
+def test_product_result_rejects_cached_invalid_schema_and_regenerates(monkeypatch):
+    from types import SimpleNamespace
+    from semantica import semantic_artifact_builder as pipeline
+    from semantica.project_checkpoint import active_checkpoint
+
+    class Checkpoint:
+        def __init__(self):
+            self.created_at = "2026-01-01T00:00:00Z"
+            self.entries = {}
+            self.rejected = []
+
+        def _key(self, kind, key):
+            return kind, json.dumps(key, sort_keys=True, separators=(",", ":"))
+
+        def read(self, kind, key):
+            marker = self._key(kind, key)
+            rejected = any(self._key(rejected_kind, rejected_key) == marker
+                           for rejected_kind, rejected_key, _ in self.rejected)
+            return None if rejected else self.entries.get(marker)
+
+        def write(self, kind, key, payload):
+            self.entries[self._key(kind, key)] = payload
+
+        def reject(self, kind, key, payload):
+            self.rejected.append((kind, key, payload))
+
+    checkpoint = Checkpoint()
+    context = {"evidence": [{"id": "evidence:source", "quote": "Source quote"}]}
+    key = {"operation": "source_classification", "context": context}
+    checkpoint.write("product-result", key, {
+        "result": {"assignments": [{"dimension_id": "purpose", "item_id": "history", "confidence": 0.9,
+                                     "citations": [5]}]},
+        "receipts": [],
+    })
+    valid = {"assignments": [{"dimension_id": "purpose", "item_id": "history", "confidence": 0.9,
+                               "citations": [{"evidence_id": "evidence:source", "quote": "Source quote"}]}]}
+    calls = []
+
+    def relay_response(relay, payload, operation, *, business_context=None):
+        calls.append(payload)
+        result = {"model": relay.model_id, "choices": [{"finish_reason": "stop",
+            "message": {"content": json.dumps(valid)}}]}
+        return result, ModelReceipt(id="receipt:fresh", operation=operation, provider="test",
+                                    model=relay.model_id, input_digest=H1, output_digest=H2)
+
+    monkeypatch.setattr(pipeline, "_relay_json", relay_response)
+    relay = SimpleNamespace(model_id="model-1", binding_id="default", max_output_tokens=393216)
+    token = active_checkpoint.set(checkpoint)
+    try:
+        result, receipts = pipeline._product_json(relay, "source_classification", "Classify the source.", context,
+                                                   pipeline._ClassificationOutput)
+    finally:
+        active_checkpoint.reset(token)
+
+    assert result.model_dump(mode="json") == valid
+    assert len(calls) == 1
+    assert len(checkpoint.rejected) == 1
+
+
 def test_product_output_uses_host_admitted_output_limit(monkeypatch):
     from types import SimpleNamespace
     from semantica import semantic_artifact_builder as pipeline
