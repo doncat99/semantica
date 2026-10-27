@@ -1,5 +1,4 @@
 """Exercise installed model paths against a loopback-only deterministic relay."""
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -117,25 +116,20 @@ def verify_model_paths(root, destination):
             artifacts = {item["kind"]: {key: item[key] for key in ("path", "digest", "kind", "mediaType")}
                          for item in built["artifacts"]}
             graph = json.loads(Path(artifacts["semantic-graph"]["path"]).read_text())
-            snapshot = {key: value for key, value in graph.items() if key not in
-                ("protocol", "artifact_revision", "input_revision", "release_digest", "schema_digest")}
-            snapshot.update(protocol="semantica.semantic-artifact.v1", snapshot_id=graph["artifact_revision"],
-                project_id="native", base_snapshot_id=None)
-            admitted = SemanticArtifact.model_validate(snapshot)
+            admitted = SemanticArtifact.model_validate(graph)
+            assert admitted.project_id == "native"
+            assert admitted.id == built["semanticGraph"]["artifactRevision"]
             assert len(admitted.entities) == 2 and len(admitted.relations) == 1
             assert admitted.source_classifications[0].assignments[0].item_id == "history"
             sections, receipts = explain_evidence(admitted,
                 {"id": "native-source", "type": "source-scope", "title": "Historical role"},
                 [span.id for span in admitted.evidence_spans], RelayRef.model_validate(relays["model"]))
             assert sections and all(section.evidence_ids for section in sections) and receipts
-            snapshot_path = scratch / "snapshot.json"
-            snapshot_path.write_text(json.dumps(snapshot), encoding="utf-8")
-            snapshot_ref = {"path": str(snapshot_path), "digest": "sha256:" + hashlib.sha256(snapshot_path.read_bytes()).hexdigest(),
-                "kind": "semantic-graph", "mediaType": manifest["mediaTypes"]["semantic-graph"]}
+            snapshot_ref = artifacts["semantic-graph"]
             for mode in ("keyword", "semantic"):
                 queried = invoke("semantica.semantic_query_worker", {"protocol": "semantica.semantic-query.v1",
                     "id": "model-query", "method": "query", "params": {"projectId": "native",
-                    "snapshotId": graph["artifact_revision"], "snapshot": snapshot_ref,
+                    "snapshotId": admitted.id, "snapshot": snapshot_ref,
                     "retrieval": artifacts["retrieval-index"], "query": "Ada", "mode": mode, "limit": 5,
                     **({"embedding": {"bindingId": "native-acceptance", "modelId": "embedding-1",
                          "vector": [0.25, 0.5, 0.75]}} if mode == "semantic" else {})}})

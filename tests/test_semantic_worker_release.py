@@ -24,6 +24,34 @@ def test_release_tag_is_derived_from_full_revision():
     assert module.revision_tag("a" * 40) == "ontoscience-semantic-worker-aaaaaaaaaaaa"
 
 
+def test_model_acceptance_queries_the_worker_artifact(tmp_path, monkeypatch):
+    import subprocess
+
+    script = SCRIPT.with_name("semantic_worker_model_acceptance.py")
+    acceptance_spec = importlib.util.spec_from_file_location("model_acceptance", script)
+    acceptance = importlib.util.module_from_spec(acceptance_spec)
+    acceptance_spec.loader.exec_module(acceptance)
+    run = subprocess.run
+
+    def source_run(command, **kwargs):
+        # Local tests use source; release acceptance retains installed-only isolation.
+        return run([arg for arg in command if arg != "-I"], **kwargs)
+
+    monkeypatch.setattr(acceptance.subprocess, "run", source_run)
+    (tmp_path / "manifest.json").write_text(json.dumps({
+        "artifactDigest": "sha256:" + "2" * 64,
+        "schemaDigest": "sha256:" + "3" * 64,
+        "mediaTypes": {
+            "document-representation": "application/vnd.semantica.document-representation+json",
+            "retrieval-index": "application/vnd.semantica.retrieval+json",
+            "semantic-graph": "application/vnd.semantica.semantic-graph+json",
+        },
+    }))
+    result = acceptance.verify_model_paths(tmp_path, tmp_path / "acceptance.json")
+    assert result["queryModes"] == ["keyword", "semantic"]
+    assert result["modelReceipts"] > 0
+
+
 def test_release_config_declares_all_supported_targets():
     config = json.loads((Path(__file__).parents[1] / ".github/semantic-worker-release.json").read_text())
     assert set(config["targets"]) == {"darwin-arm64", "linux-x64", "win-x64"}

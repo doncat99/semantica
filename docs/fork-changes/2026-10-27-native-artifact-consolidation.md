@@ -153,3 +153,19 @@ database and vector index which no subsequent query consumed.
   retrieval; retain one owner, never stack compatibility implementations.
 - Recheck real build/query/explanation, receipt preservation, source isolation,
   cache/migration and consumer validation after every overlapping upstream merge.
+
+### Release harness correction on 2026-10-27
+
+- Release run 40528250308 reproduced the stale graph-envelope assertion on all
+  three CPU targets. The native worker had correctly emitted SemanticArtifact;
+  both release acceptance scripts still reconstructed a second snapshot.
+- Both scripts now validate SemanticArtifact directly and pass the exact build
+  artifact reference to keyword/semantic queries. The relocated acceptance also
+  checks retrieval manifest identity, source snapshot and digest. No compatibility
+  envelope or reserialized snapshot remains.
+- Existing owners: semantic_worker build output, SemanticArtifact validation,
+  semantic_query_worker admission. This repairs consumers only, with no new owner.
+- Release tests: 12 passed, including the actual loopback model acceptance with
+  fresh source workers, classification, extraction, embedding, explanation and
+  both query modes. Installed/relocated cross-platform acceptance remains the
+  release workflow gate; local source tests do not replace it.
