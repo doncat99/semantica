@@ -255,7 +255,7 @@ class SnapshotCheckpoint:
                     # opaque units cannot cross a business-input change safely.
                     if prior_business != inputs and not file.name.startswith((
                             "document-", "source-windows-", "window-contexts-", "extraction-", "extraction-origin-",
-                            "relay-", "product-result-", "grounded-explanation-", "remote-docling-", "rejected-", "recipe-provenance-")):
+                            "relay-", "product-result-", "grounded-explanation-", "remote-docling-", "rejected-", "recipe-provenance-", "project-stage-")):
                         raise ValueError("inputs changed; unscoped result belongs to different business content")
                     name, normalized = self._import_entry(file.name, entry, prior_inputs, prior_fence,
                         previous.get("entryIdentity") == "business-content-v1")

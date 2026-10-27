@@ -38,6 +38,15 @@ def test_native_projection_handles_empty_input():
     assert _resolve_native_entities([]) == ([], {}, [])
 
 
+def test_native_resolution_does_not_mutate_source_mentions():
+    mentions = [KnowledgeEntity(id=f'mention:{index}', canonical_name='Ada Lovelace',
+        type='PERSON', attributes={'key': '1'}, aliases=['Ada'],
+        metadata={'source_ids': [f'source:{index}']}) for index in range(2)]
+    before = [item.model_dump(mode='json') for item in mentions]
+    _resolve_native_entities(mentions)
+    assert [item.model_dump(mode='json') for item in mentions] == before
+
+
 def test_native_projection_preserves_native_alias_resolution():
     entities, remap, _ = _resolve_native_entities([
         KnowledgeEntity(id='long', canonical_name='International Business Machines',

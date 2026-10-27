@@ -9,6 +9,11 @@
 
 ## Reason and scope
 
+2026-10-27 follow-up: retain conflict protection and explicit exact aliases;
+remove fuzzy cross-alias scoring and identifier-positive candidate blocks.
+See [necessity assessment](2026-10-27-identity-extension-necessity.md). Historical
+results below are not a current full-scale or release acceptance claim.
+
 Offline probes reproduced type-conflicting entities merging through an untyped
 bridge, identifier strings receiving fuzzy similarity, and explicit aliases lost
 before native detection. Existing project identity/exact tests did not cover these

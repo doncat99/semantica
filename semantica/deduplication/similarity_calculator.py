@@ -339,9 +339,13 @@ class SimilarityCalculator:
                     tracking_id, message="Calculating string similarity..."
                 )
             
-            string_score = max((self.calculate_string_similarity(left, right)
-                                for left in self._entity_names(entity1)
-                                for right in self._entity_names(entity2)), default=0.0)
+            # Declared aliases support exact matching, not additional fuzzy scores.
+            names1 = {name.lower() for name in self._entity_names(entity1)}
+            names2 = {name.lower() for name in self._entity_names(entity2)}
+            string_score = (1.0 if names1 & names2 else
+                            self.calculate_string_similarity(
+                                entity1.get("_lower_name", entity1.get("name") or entity1.get("text") or ""),
+                                entity2.get("_lower_name", entity2.get("name") or entity2.get("text") or "")))
             components["string"] = string_score
 
             # Short-circuit if string similarity is too low
@@ -717,8 +721,6 @@ class SimilarityCalculator:
         strategy = options.get("candidate_strategy", "legacy")
         
         for idx, entity in enumerate(processed_entities):
-            for field, value in self._identity_values(entity).items():
-                blocks.setdefault(repr(("identity", field, value)), []).append(idx)
             for name in self._entity_names(entity):
                 blocks.setdefault("alias:" + name.lower(), []).append(idx)
             name = entity.get("_lower_name", "")

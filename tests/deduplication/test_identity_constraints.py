@@ -29,7 +29,7 @@ def test_declared_identifier_conflict_cannot_be_outweighed(strategy, field):
     assert resolver.duplicate_detector.incremental_detect(rows[:1], rows[1:], threshold=0) == []
 
 
-def test_shared_identifier_recalls_unrelated_names_without_model_or_network(monkeypatch):
+def test_declared_alias_recalls_unrelated_names_without_model_or_network(monkeypatch):
     import socket
     def forbidden(*args, **kwargs):
         pytest.fail("native identity must not call network or model")
@@ -44,11 +44,54 @@ def test_shared_identifier_recalls_unrelated_names_without_model_or_network(monk
     assert len(resolver.duplicate_detector.incremental_detect(rows[:1], rows[1:])) == 1
 
 
-def test_alias_recall_uses_existing_string_similarity():
+@pytest.mark.parametrize("alias", ["IBM", "ibm", " IBM "])
+def test_exact_declared_alias_recall(alias):
     rows = [entity("a", "International Business Machines"), entity("b", "IBM")]
-    rows[0]["aliases"] = ["IBM"]
+    rows[0]["aliases"] = [alias]
     assert len(EntityResolver().resolve_entities(rows)) == 1
     assert len(EntityResolver(deduplication=detector_config()).resolve_entities(rows)) == 1
+
+
+def test_exact_alias_cannot_override_identity_conflict():
+    rows = [entity("a", "International Business Machines", registry_number="1"),
+            entity("b", "IBM", registry_number="2")]
+    rows[0]["aliases"] = ["IBM"]
+    assert EntityResolver(deduplication=detector_config()).resolve_entities(rows) == rows
+
+
+def test_fuzzy_aliases_do_not_promote_unrelated_canonical_names():
+    rows = [entity("a", "AAAAAAA"), entity("b", "AZZZZZZ")]
+    native_score = SimilarityCalculator().calculate_similarity(*rows).score
+    rows[0]["aliases"] = ["Global Holdings"]
+    rows[1]["aliases"] = ["Global Holding"]
+    assert SimilarityCalculator().calculate_similarity(*rows).score == native_score
+    assert EntityResolver().resolve_entities(rows) == rows
+
+
+def test_aliases_do_not_multiply_fuzzy_comparisons(monkeypatch):
+    calculator = SimilarityCalculator()
+    calls = []
+    original = calculator.calculate_string_similarity
+
+    def counted(left, right, **kwargs):
+        calls.append((left, right))
+        return original(left, right, **kwargs)
+
+    monkeypatch.setattr(calculator, "calculate_string_similarity", counted)
+    rows = [entity("a", "AAAAAAA"), entity("b", "AZZZZZZ")]
+    rows[0]["aliases"] = ["Global Holdings", "Research Group"]
+    rows[1]["aliases"] = ["Global Holding", "Research Groups"]
+    calculator.calculate_similarity(*rows)
+    assert len(calls) == 1
+
+
+def test_conflict_declarations_do_not_expand_native_candidate_recall():
+    rows = [entity("a", "Acme Holdings", registry_number="1"),
+            entity("b", "Bcme Holdings", registry_number="1")]
+    assert SimilarityCalculator().batch_calculate_similarity(rows) == []
+    constrained = SimilarityCalculator(**detector_config()["similarity"])
+    assert constrained.batch_calculate_similarity(rows) == []
+    assert EntityResolver(deduplication=detector_config()).resolve_entities(rows) == rows
 
 
 @pytest.mark.parametrize("strategy", ["fuzzy", "exact"])

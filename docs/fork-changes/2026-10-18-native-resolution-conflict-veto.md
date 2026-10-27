@@ -10,6 +10,11 @@
 
 ## Reason and scope
 
+2026-10-27 correction: identity-based positive candidate blocks and fuzzy
+cross-alias scoring still exceeded the conflict-only scope described here.
+They are now removed; see [necessity review](2026-10-27-identity-extension-necessity.md)
+for current evidence, retained exact aliases and verification limits.
+
 The owner rejected mandatory identifier admission. Retain Semantica's native
 positive decision and add only explicit conflict vetoes. Missing identifiers are
 not conflicts; elimination alone never makes an otherwise rejected pair pass.
