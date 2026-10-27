@@ -1701,7 +1701,7 @@ def _grounded_explanation(context: dict[str, Any], relay: Any):
 def _resolve_native_entities(mentions: list[KnowledgeEntity], *, property_schema=None, resolver=None):
     """Project native resolution; declared conflicts can veto, never replace it."""
     if resolver is None:
-        resolver = EntityResolver(deduplication={"similarity": {
+        resolver = EntityResolver(strategy="exact", deduplication={"similarity": {
             "property_schema": property_schema or {}}})
     by_id = {item.id: item for item in mentions}
     # Native merging mutates nested properties/metadata; source mentions remain immutable evidence.
@@ -2484,7 +2484,11 @@ def build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=Non
 
 def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=None, *, persist_snapshot: bool = True) -> dict[str, Any]:
     # Validate caller-declared identity policy before extraction can spend model calls.
-    identity_resolver = EntityResolver(deduplication={"similarity": {
+    # Project identity must be deterministic: fuzzy transitive matching can
+    # connect unrelated ESG mentions across documents and is not an identity
+    # admission rule. Exact matching still preserves native remapping and
+    # reconciliation without the quadratic fuzzy scan.
+    identity_resolver = EntityResolver(strategy="exact", deduplication={"similarity": {
         "property_schema": request.identity_property_schema}})
     if request.recipe.id not in {"deterministic", "model"}:
         raise SemanticArtifactError(

@@ -11,7 +11,7 @@ def test_artifact_uses_native_resolution_ids_and_membership_without_model_calls(
     mentions = [KnowledgeEntity(id=f"mention:{index}", canonical_name=name, type="PERSON",
         evidence_ids=[f"evidence:{index}"], metadata={"source_ids": [f"source:{index}"]})
         for index, name in enumerate(["Ada Lovelace", "Ada Lovelace", "Charles Babbage"])]
-    native = EntityResolver().resolve_entities([
+    native = EntityResolver(strategy="exact").resolve_entities([
         {"id": item.id, "name": item.canonical_name, "type": item.type,
          "properties": item.attributes, "metadata": item.metadata} for item in mentions])
     entities, remap, registry = _resolve_native_entities(mentions)
@@ -66,7 +66,7 @@ def test_identity_cannot_bypass_native_detection_and_merging(monkeypatch):
     calls = {}
     for owner, method in [(EntityResolver, 'resolve_entities'),
                           (DuplicateDetector, 'detect_duplicate_groups'),
-                          (EntityMerger, 'merge_duplicates')]:
+                          (EntityMerger, 'merge_entity_group')]:
         original = getattr(owner, method)
         def tracked(self, *args, _original=original, _method=method, **kwargs):
             calls[_method] = calls.get(_method, 0) + 1
@@ -82,8 +82,8 @@ def test_identity_cannot_bypass_native_detection_and_merging(monkeypatch):
         for index in range(2)], property_schema={'external_key': {'identity': True}})
     assert len(entities) == 1
     assert len(set(remap.values())) == 1
-    assert calls['resolve_entities'] == calls['merge_duplicates'] == 1
-    assert calls['detect_duplicate_groups'] >= 1
+    assert calls['resolve_entities'] == calls['merge_entity_group'] == 1
+    assert calls.get('detect_duplicate_groups', 0) == 0
 
 
 def test_projection_scoped_conflict_veto_preserves_native_mapping_and_endpoints():
@@ -113,5 +113,15 @@ def test_projection_scoped_conflict_veto_preserves_native_mapping_and_endpoints(
 def test_artifact_delegates_to_supplied_native_threshold():
     mentions = [KnowledgeEntity(id=key, canonical_name=name, type='ORG')
                 for key, name in [('mention:a', 'Acme Holdings'), ('mention:b', 'Acne Holding')]]
-    assert len(_resolve_native_entities(mentions)[0]) == 1
+    assert len(_resolve_native_entities(mentions)[0]) == 2
     assert len(_resolve_native_entities(mentions, resolver=EntityResolver(similarity_threshold=0.99))[0]) == 2
+
+
+def test_project_default_identity_resolution_is_exact_not_fuzzy():
+    mentions = [
+        KnowledgeEntity(id="mention:one", canonical_name="Acme Holdings", type="ORG"),
+        KnowledgeEntity(id="mention:two", canonical_name="Acne Holding", type="ORG"),
+    ]
+    entities, remap, _ = _resolve_native_entities(mentions)
+    assert len(entities) == 2
+    assert remap["mention:one"] != remap["mention:two"]

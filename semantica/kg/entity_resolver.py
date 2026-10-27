@@ -229,18 +229,47 @@ class EntityResolver:
                 entities, threshold=self.similarity_threshold
             )
 
-        groups = {}
-        for entity in entities:
-            name = self._get_entity_name(entity)
-            normalized = str(name).strip() if name is not None else ""
-            if normalized:
-                groups.setdefault(normalized.casefold(), []).append(entity)
+        # Exact resolution still honors explicit aliases, but never compares
+        # every pair by fuzzy similarity. Build candidate edges from normalized
+        # canonical/alias keys, then retain only compatible connected components.
+        key_to_indexes = {}
+        for index, entity in enumerate(entities):
+            names = [self._get_entity_name(entity)]
+            aliases = entity.get("aliases", []) if isinstance(entity, dict) else getattr(entity, "aliases", [])
+            names.extend(aliases or [])
+            for name in names:
+                normalized = str(name).strip() if name is not None else ""
+                if normalized:
+                    key_to_indexes.setdefault(normalized.casefold(), set()).add(index)
 
-        return [
-            DuplicateGroup(entities=group, confidence=1.0)
-            for group in groups.values()
-            if len(group) > 1 and self.duplicate_detector.is_group_compatible(group)
-        ]
+        parent = list(range(len(entities)))
+
+        def find(index):
+            while parent[index] != index:
+                parent[index] = parent[parent[index]]
+                index = parent[index]
+            return index
+
+        def union(left, right):
+            left, right = find(left), find(right)
+            if left != right:
+                parent[right] = left
+
+        # A shared exact key is only a candidate. Identity/type constraints are
+        # checked on each edge so one conflicting mention cannot veto a valid
+        # compatible pair in the same name bucket.
+        for indexes in key_to_indexes.values():
+            ordered = sorted(indexes)
+            for offset, left in enumerate(ordered):
+                for right in ordered[offset + 1:]:
+                    if self.duplicate_detector.is_group_compatible([entities[left], entities[right]]):
+                        union(left, right)
+
+        components = {}
+        for index in range(len(entities)):
+            components.setdefault(find(index), []).append(entities[index])
+        return [DuplicateGroup(entities=group, confidence=1.0)
+                for group in components.values() if len(group) > 1]
 
     @staticmethod
     def _get_entity_id(entity: Any) -> Any:
