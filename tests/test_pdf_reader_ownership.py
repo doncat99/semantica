@@ -44,7 +44,9 @@ def _violations(source, path):
                     if Path(command[0]).name in COMMANDS and path != PDF_OWNER:
                         violations.append((node.lineno, command[0]))
         for module in modules:
-            if module.split(".")[0] in READERS and path != PDF_OWNER:
+            if module.split(".")[0] == "pdfplumber":
+                violations.append((node.lineno, module))
+            elif module.split(".")[0] in READERS and path != PDF_OWNER:
                 violations.append((node.lineno, module))
             if (module == "docling" or module.startswith(("docling.backend", "docling.document_converter"))) and path != DOCLING_OWNER:
                 violations.append((node.lineno, module))
@@ -82,3 +84,12 @@ def test_gate_allows_native_owners_and_unrelated_file_io():
     assert not _violations("import pymupdf; pymupdf.open('input.pdf')", PDF_OWNER)
     assert not _violations("from docling.document_converter import DocumentConverter", DOCLING_OWNER)
     assert not _violations("open('source.pdf', 'rb'); import pathlib", "semantica/source.py")
+
+
+@pytest.mark.parametrize("source", [
+    "import pdfplumber", "from pdfplumber import open",
+    "importlib.import_module('pdfplumber')", "__import__('pdfplumber')",
+    "safe_import('pdfplumber')",
+])
+def test_gate_rejects_pdfplumber_even_in_native_owner(source):
+    assert _violations(source, PDF_OWNER)

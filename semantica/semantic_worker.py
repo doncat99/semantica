@@ -1,8 +1,7 @@
 """JSONL worker for Semantica's generic semantic-artifact protocol.
 
 The build implementation is intentionally shared with the existing semantic
-pipeline.  This module owns the transport contract; product projections are
-created by the host from the semantic graph artifact.
+pipeline. This module transports one canonical SemanticArtifact to all consumers.
 """
 from __future__ import annotations
 
@@ -91,18 +90,7 @@ def _verified_snapshot(request: ReadingReportsRequest) -> SemanticArtifact:
     raw = path.read_bytes()
     if f"sha256:{sha256(raw).hexdigest()}" != request.snapshot_digest:
         raise SemanticArtifactError("explanation snapshot digest does not match")
-    document = json.loads(raw)
-    if document.get("protocol") != "semantica.semantic-graph.v1":
-        raise SemanticArtifactError("explanation requires a semantic graph artifact")
-    # The graph artifact is the transport representation; explanation consumes
-    # the same bytes as a validated semantic-artifact view with explicit
-    # identity fields. This is a format projection, not a second extraction path.
-    document["protocol"] = "semantica.semantic-artifact.v1"
-    document["snapshot_id"] = document.pop("artifact_revision")
-    document["project_id"] = request.project_id
-    for field in ("input_revision", "release_digest", "schema_digest"):
-        document.pop(field, None)
-    snapshot = SemanticArtifact.model_validate(document)
+    snapshot = SemanticArtifact.model_validate_json(raw)
     if snapshot.id != request.snapshot_id or snapshot.project_id != request.project_id:
         raise SemanticArtifactError("explanation snapshot identity does not match")
     if request.relay.capability != "knowledge.snapshot.generate":
@@ -275,29 +263,18 @@ def _dispatch(request: WorkerRequest, progress: Optional[Callable[[Dict[str, Any
         "sourceId": item["source"].source_id,
     } for item in built["representation_artifacts"]]
     graph = snapshot.model_dump(mode="json", by_alias=True)
-    graph.pop("protocol", None)
-    graph.pop("snapshot_id", None)
-    graph.pop("project_id", None)
-    graph.pop("base_snapshot_id", None)
-    graph = {
-        "protocol": "semantica.semantic-graph.v1",
-        "artifact_revision": snapshot.id,
-        "input_revision": build_request.input_revision,
-        "release_digest": build_request.release.artifact_digest,
-        "schema_digest": build_request.release.schema_digest,
-        **graph,
-    }
     graph_path = build_request.output_dir
     graph_file = os.path.join(graph_path, "semantic-graph.json")
     with open(graph_file, "w", encoding="utf-8") as stream:
         json.dump(graph, stream, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
         stream.write("\n")
     import hashlib
-    graph_digest = "sha256:" + hashlib.sha256(open(graph_file, "rb").read()).hexdigest()
+    with open(graph_file, "rb") as stream:
+        graph_digest = "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest()
     artifacts.extend([
         {"digest": built["retrieval_digest"], "kind": "retrieval-index",
          "mediaType": build_request.release.media_types["retrieval-index"],
-         "path": str(built["retrieval_path"]), "revision": f"retrieval:{snapshot.id}"},
+         "path": str(built["retrieval_path"]), "revision": "retrieval:graph"},
         {"digest": graph_digest, "kind": "semantic-graph",
          "mediaType": build_request.release.media_types["semantic-graph"],
          "path": graph_file, "revision": snapshot.id},

@@ -46,6 +46,10 @@ or fabricate a successful result.
 
 ## PDF parsing ownership
 
+- `PDFParser` uses PyMuPDF. Do not import, install as a direct project
+  dependency, or restore pdfplumber, including inside this owner. Historical
+  `use_text_flow` experiments do not authorize a backend rollback. Preserve
+  the established PyMuPDF `sort` default and its explicit caller override.
 - Direct PDF reader imports/calls (PyMuPDF/fitz, pdfplumber, pypdf, PDFium,
   pdfminer, Poppler and equivalent tools) belong only in
   `semantica/parse/pdf_parser.py::PDFParser`. Metadata and page counting are

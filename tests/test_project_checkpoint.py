@@ -17,6 +17,96 @@ from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest
 from tests.test_semantic_artifact import _request, _typed_prompt_context
 
 
+def test_native_parser_checkpoint_restarts_across_processing_profile_changes(tmp_path, monkeypatch):
+    from semantica.project_checkpoint import active_checkpoint
+    from semantica import semantic_source_artifact as parser
+    source = tmp_path / "source.txt"
+    source.write_text("Already parsed content")
+    request = SemanticArtifactBuildRequest.model_validate(_request(source, tmp_path / "work")["params"])
+    checkpoint = SnapshotCheckpoint(request)
+    token = active_checkpoint.set(checkpoint)
+    try:
+        saved = parser._parse_source(request.sources[0], False, {"processingRevision": "old"})
+    finally:
+        active_checkpoint.reset(token)
+    checkpoint = SnapshotCheckpoint(request)
+    monkeypatch.setattr(parser, "parse_source", lambda *a, **k: pytest.fail("paid document was reparsed"))
+    token = active_checkpoint.set(checkpoint)
+    try:
+        assert parser._parse_source(request.sources[0], False, {"processingRevision": "new"}) == saved
+    finally:
+        active_checkpoint.reset(token)
+
+
+@pytest.mark.parametrize("opaque", [True, False])
+def test_runtime_does_not_guess_historical_document_identity(tmp_path, opaque):
+    from semantica.project_checkpoint import _bytes
+    source = tmp_path / "source.txt"
+    source.write_text("Paid content")
+    request = SemanticArtifactBuildRequest.model_validate(_request(source, tmp_path / "output")["params"])
+    checkpoint = SnapshotCheckpoint(request)
+    key = {"sourceId": request.sources[0].source_id, "contentHash": request.sources[0].material_revision,
+           "forceOcr": False, "documentProcessing": {"mode": "native"}}
+    checkpoint.write("document", key, {"text": "Paid content"})
+    path = checkpoint._path("document", key)
+    if opaque:
+        entry = json.loads(path.read_bytes())
+        entry.pop("key")
+        path.write_bytes(_bytes(entry))
+    original = path.read_bytes()
+    with pytest.raises(SnapshotCheckpointError, match="offline document identity migration"):
+        SnapshotCheckpoint(request)
+    assert path.read_bytes() == original
+
+
+@pytest.mark.parametrize("identity", [None, "unknown-layout"])
+def test_runtime_requires_canonical_checkpoint_manifest_without_mutation(tmp_path, identity):
+    source = tmp_path / "source.txt"
+    source.write_text("Paid content")
+    request = SemanticArtifactBuildRequest.model_validate(_request(source, tmp_path / "output")["params"])
+    checkpoint = SnapshotCheckpoint(request)
+    checkpoint.write("completed", "paid", {"result": "unchanged"})
+    path = checkpoint.root / "manifest.json"
+    manifest = json.loads(path.read_bytes())
+    if identity is None:
+        manifest.pop("entryIdentity")
+    else:
+        manifest["entryIdentity"] = identity
+    path.write_text(json.dumps(manifest))
+    original = {p.name: p.read_bytes() for p in checkpoint.root.iterdir()}
+    with pytest.raises(SnapshotCheckpointError, match="offline checkpoint manifest migration required"):
+        SnapshotCheckpoint(request)
+    assert {p.name: p.read_bytes() for p in checkpoint.root.iterdir()} == original
+
+
+def test_checkpoint_recipe_provenance_matches_complete_artifact_lineage(tmp_path):
+    from semantica.semantic_artifact_builder import stable_digest
+    source = tmp_path / "source.txt"
+    source.write_text("Paid content")
+    request = SemanticArtifactBuildRequest.model_validate(_request(source, tmp_path / "output")["params"])
+    checkpoint = SnapshotCheckpoint(request)
+    historical_recipe = request.recipe.model_dump(mode="json", by_alias=True)
+    assert checkpoint.read("recipe-provenance", stable_digest(historical_recipe)) == historical_recipe
+
+
+def test_recipe_import_preserves_original_provenance_and_admits_complete_lineage(tmp_path, monkeypatch):
+    from semantica.semantic_artifact_builder import stable_digest
+    from semantica.semantic_artifact_schema import RecipeRef
+    source = tmp_path / "source.txt"
+    source.write_text("Paid content")
+    request = SemanticArtifactBuildRequest.model_validate(_request(source, tmp_path / "output")["params"])
+    original = request.recipe.model_dump(mode="json", by_alias=True, exclude={"formula_semantics_source_ids"})
+    with monkeypatch.context() as prior:
+        prior.setattr(RecipeRef, "lineage_payload", lambda self: original)
+        checkpoint = SnapshotCheckpoint(request)
+        checkpoint.write("completed", "paid", {"result": "unchanged"})
+    restored = SnapshotCheckpoint(request)
+    complete = request.recipe.lineage_payload()
+    assert restored.read("recipe-provenance", stable_digest(original)) == original
+    assert restored.read("recipe-provenance", stable_digest(complete)) == complete
+    assert restored.read("completed", "paid") == {"result": "unchanged"}
+
+
 @pytest.mark.parametrize("reverse", [False, True])
 def test_conflicting_completed_results_are_rejected_independent_of_directory_order(tmp_path, reverse):
     source = tmp_path / "source.txt"
@@ -548,7 +638,8 @@ def test_new_run_reuses_only_matching_verified_relay_entries(tmp_path):
     first = _request(source, tmp_path / "first")
     first_checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(first["params"]))
     first_checkpoint.write("relay", {"operation": "embedding", "input": ["Alpha"]}, {"response": "saved"})
-    first_checkpoint.write("document", {"source": "source-1"}, {"document": "old"})
+    document_key = {"sourceId": "source-1", "contentHash": first["params"]["sources"][0]["materialRevision"], "forceOcr": False}
+    first_checkpoint.write("document", document_key, {"document": "old"})
 
     second = _request(source, tmp_path / "second")
     second["params"]["resumeCheckpointDirs"] = [str(first_checkpoint.root)]
@@ -556,7 +647,7 @@ def test_new_run_reuses_only_matching_verified_relay_entries(tmp_path):
 
     assert second_checkpoint.read("relay", {"operation": "embedding", "input": ["Alpha"]}) == {"response": "saved"}
     assert second_checkpoint.read("relay", {"operation": "embedding", "input": ["Beta"]}) is None
-    assert second_checkpoint.read("document", {"source": "source-1"}) == {"document": "old"}
+    assert second_checkpoint.read("document", document_key) == {"document": "old"}
     assert len(list(second_checkpoint.root.glob("relay-*.json"))) == 1
     assert len(list(second_checkpoint.root.glob("document-*.json"))) == 1
 
@@ -582,7 +673,8 @@ def test_external_checkpoint_entry_must_match_its_manifest_fence(tmp_path):
     source.write_text("A source", encoding="utf-8")
     first = _request(source, tmp_path / "first")
     first_checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(first["params"]))
-    first_checkpoint.write("document", {"source": "source-1"}, {"document": "saved"})
+    key = {"sourceId": "source-1", "contentHash": first["params"]["sources"][0]["materialRevision"], "forceOcr": False}
+    first_checkpoint.write("document", key, {"document": "saved"})
     entry_path = next(first_checkpoint.root.glob("document-*.json"))
     entry = json.loads(entry_path.read_bytes())
     entry["fence"] = "sha256:" + "0" * 64

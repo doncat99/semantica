@@ -11,7 +11,6 @@ import mimetypes
 import math
 import os
 import re
-import tempfile
 import threading
 import time
 import urllib.error
@@ -73,7 +72,7 @@ from .semantic_artifact_schema import (
 )
 from .semantic_extract import NamedEntityRecognizer, extract_grounded_window
 from .semantic_extract.providers import BaseProvider
-from .semantic_extract.methods import _exact_occurrence, _grounded_qualifiers, _GENERATION_CACHE_KEYS
+from .semantic_extract.methods import _exact_occurrence, _grounded_qualifiers
 from .semantic_extract.types import Entity, Relation
 from .semantic_extract.cache import CacheBackend, ExtractionCache, _encode_value, _decode_value
 from .split.structural_chunker import StructuralChunker
@@ -496,7 +495,7 @@ def _extract_window_context(text, model_relay, extraction_spec, item, context, f
     provider = _project_model_provider(model_relay)
     checkpoint = active_checkpoint.get()
     if checkpoint:
-        provider.extraction_cache = _ProjectExtractionCache(ttl=None,
+        provider.extraction_cache = ExtractionCache(identity_policy="content", ttl=None,
             backend=_ExtractionCheckpointBackend(checkpoint, provider))
         provider.cache_scope = {
             "source": _source_digest.get() or _digest_bytes(text.encode("utf-8")), "window": [start, end],
@@ -809,7 +808,7 @@ def build_grounded_source_snapshot(source: SourceBuildInput, *, scope_id: str, m
             provider_instance.receipts = []
         if not hasattr(provider_instance, 'rejections'):
             provider_instance.rejections = []
-        provider_instance.extraction_cache = _ProjectExtractionCache(ttl=None,
+        provider_instance.extraction_cache = ExtractionCache(identity_policy="content", ttl=None,
             backend=_ExtractionCheckpointBackend(checkpoint, provider_instance))
         provider_instance.cache_scope = {'scope': scope_id}
         token = active_checkpoint.set(checkpoint)
@@ -1061,25 +1060,6 @@ def _safe_gateway_receipt(value: Any) -> dict[str, Any] | None:
     return receipt or None
 
 
-class _ProjectExtractionCache(ExtractionCache):
-    """Reuse admitted project work across execution selections, with one business key.
-
-    Text, grounding, extraction specification and window boundaries stay in the
-    key. Generic extraction caches retain their normal model-specific policy.
-    """
-
-    def _generate_key(self, text, **params):
-        params = dict(params)
-        for key in {"model", "provider", "max_text_length", "structured_output_mode", *_GENERATION_CACHE_KEYS}:
-            params.pop(key, None)
-        scope = params.get("provider_scope")
-        if isinstance(scope, dict):
-            params["provider_scope"] = {key: value for key, value in scope.items()
-                                        if key not in {"binding", "contextWindowTokens", "maxOutputTokens", "recipe"}}
-        return super()._generate_key(text, **params)
-
-
-
 class _ExtractionCheckpointBackend(CacheBackend):
     """Native cache persistence with the build's input fence and receipt provenance."""
 
@@ -1249,6 +1229,9 @@ def _product_json(relay: Any, operation: str, instruction: str, context: dict[st
         try:
             admitted = schema.model_validate(saved["result"], context=context)
         except ValidationError:
+            # A result written by an older producer is not allowed to bypass
+            # the current schema gate. Reject it atomically, then regenerate
+            # through the normal typed-output retry path below.
             if checkpoint is None:
                 raise
             checkpoint.reject("product-result", key, saved)
@@ -2093,7 +2076,7 @@ def extend_semantic_snapshot(base: Optional[SemanticArtifact], incoming: Semanti
 def _canonical_graph_projection(
     entities: list[KnowledgeEntity],
     relations: list[KnowledgeRelation],
-) -> tuple[list[dict[str, Any]], list[Any]]:
+) -> list[dict[str, Any]]:
     """Validate one snapshot graph through Semantica's canonical graph owners.
 
     The semantic artifact schema remains the stable interchange contract. The
@@ -2101,7 +2084,6 @@ def _canonical_graph_projection(
     they never receive source text and therefore cannot open a second
     extraction path or silently replace evidence IDs.
     """
-    from .context.context_graph import ContextEdge
     from .kg import GraphBuilder
 
     graph = GraphBuilder(
@@ -2143,88 +2125,7 @@ def _canonical_graph_projection(
     if actual_entity_ids != expected_entity_ids or actual_relation_ids != expected_relation_ids:
         raise SemanticArtifactError("Semantica graph components changed snapshot identities")
 
-    edges = [ContextEdge(source_id=item["source"], target_id=item["target"],
-                         edge_type=item.get("type", "related_to"), edge_id=item["id"],
-                         metadata=item.get("metadata", {})) for item in graph_relationships]
-    return graph_relationships, edges
-
-
-def _provenance_projection(
-    representations: list[DocumentRepresentation],
-    evidence: list[EvidenceSpan],
-    entities: list[KnowledgeEntity],
-    relations: list[KnowledgeRelation],
-) -> dict[str, Any]:
-    """Materialize source lineage with the canonical provenance manager."""
-    from .provenance import ProvenanceManager
-
-    checkpoint = active_checkpoint.get()
-    recorded_at = checkpoint.created_at if checkpoint else None
-    representation_by_id = {item.id: item for item in representations}
-    with tempfile.TemporaryDirectory(prefix="semantica-provenance-") as directory:
-        manager = ProvenanceManager(storage_path=str(Path(directory) / "provenance.db"))
-        for span in evidence:
-            representation = representation_by_id.get(span.representation_id)
-            if not representation:
-                raise SemanticArtifactError(f"evidence references unknown representation: {span.id}")
-            locator = span.locator
-            location = (
-                f"char:{locator.start_char}-{locator.end_char}"
-                if locator.start_char is not None and locator.end_char is not None
-                else f"page:{locator.page}"
-                if locator.page is not None
-                else "structural"
-            )
-            if manager.track_entity(
-                span.id,
-                representation.source_id,
-                timestamp=recorded_at,
-                entity_type="evidence",
-                source_location=location,
-                source_quote=span.quote,
-                confidence=span.confidence if span.confidence is not None else 1.0,
-                metadata={"origin": locator.origin, "evidence_kind": span.origin, "quality": locator.quality},
-            ) is None:
-                raise SemanticArtifactError(f"failed to persist provenance for evidence: {span.id}")
-        for entity in entities:
-            source_ids = entity.metadata.get("source_ids", [])
-            source = source_ids[0] if isinstance(source_ids, list) and source_ids and isinstance(source_ids[0], str) else "snapshot"
-            if manager.track_entity(entity.id, source, timestamp=recorded_at, entity_type=entity.type, used_entities=entity.evidence_ids,
-                                    metadata={"evidence_ids": entity.evidence_ids}) is None:
-                raise SemanticArtifactError(f"failed to persist provenance for entity: {entity.id}")
-        for relation in relations:
-            source = "snapshot"
-            if relation.evidence_ids:
-                evidence_entry = manager.get_lineage(relation.evidence_ids[0])
-                source_documents = evidence_entry.get("source_documents", []) if isinstance(evidence_entry, dict) else []
-                if source_documents and isinstance(source_documents[0], str):
-                    source = source_documents[0]
-            if manager.track_relationship(
-                relation.id,
-                source,
-                timestamp=recorded_at,
-                used_entities=relation.evidence_ids,
-                metadata={"evidence_ids": relation.evidence_ids},
-            ) is None:
-                raise SemanticArtifactError(f"failed to persist provenance for relation: {relation.id}")
-        return {
-            "evidence": {span.id: manager.get_lineage(span.id) for span in evidence},
-            "entities": {entity.id: manager.get_lineage(entity.id) for entity in entities},
-            "relations": {relation.id: manager.get_lineage(relation.id) for relation in relations},
-        }
-
-
-def _validate_embedding_projection(source_builds: list[dict[str, Any]]) -> None:
-    """Exercise the canonical vector runtime without replacing stable IDs."""
-    chunks = [(item, chunk) for item in source_builds for chunk in item.get("embeddings", [])]
-    vectors = [chunk["vector"] for _, chunk in chunks]
-    if not vectors:
-        return
-    from .vector_store.vector_store import VectorIndexer
-    try:
-        VectorIndexer(dimension=len(vectors[0])).create_index(vectors)
-    except (TypeError, ValueError) as error:
-        raise SemanticArtifactError("embedding projection contains invalid vectors") from error
+    return graph_relationships
 
 
 def _semantic_organization(
@@ -2240,7 +2141,7 @@ def _semantic_organization(
     entities, assertions, relations, and evidence produced above.
     """
     evidence_by_id = {item.id: item for item in evidence}
-    canonical_relationships, context_edges = _canonical_graph_projection(entities, relations)
+    canonical_relationships = _canonical_graph_projection(entities, relations)
     relation_by_id = {relation.id: relation for relation in relations}
     if {item.get("id") for item in canonical_relationships if isinstance(item, dict)} != set(relation_by_id):
         raise SemanticArtifactError("Semantica graph projection lost a relation candidate")
@@ -2258,11 +2159,10 @@ def _semantic_organization(
     for component in components:
         member_set = set(component)
         internal_relations = [
-            relation_by_id[edge.edge_id]
-            for edge in context_edges
-            if edge.edge_id in relation_by_id
-            and edge.source_id in member_set
-            and edge.target_id in member_set
+            relation_by_id[edge["id"]]
+            for edge in canonical_relationships
+            if edge["source"] in member_set
+            and edge["target"] in member_set
         ]
         member_assertions = [
             assertion
@@ -2620,8 +2520,6 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
     with _project_progress(progress, "artifact_writing", 90):
         conflicts = fact_conflicts
         model_receipts = list({receipt.id: receipt for receipt in model_receipts}.values())
-        _validate_embedding_projection(source_builds)
-        provenance = _provenance_projection(representations, evidence, entities, relations)
         retrieval_payload = {
             "format": "semantica.retrieval-reference.v1",
             "snapshot_id": snapshot_id,
@@ -2629,8 +2527,6 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
             "embedding_space": {"model_id": request.relays["embedding"].model_id,
                 "binding_id": request.relays["embedding"].binding_id,
                 "dimensions": len(source_builds[0]["embeddings"][0]["vector"])} if source_builds and source_builds[0].get("embeddings") else None,
-            "model_receipt_ids": [receipt.id for receipt in model_receipts],
-            "provenance": provenance,
         }
         retrieval_path = output_dir / "retrieval.json"
         retrieval_digest = _write_json(retrieval_path, retrieval_payload)

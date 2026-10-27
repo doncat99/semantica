@@ -33,10 +33,26 @@ def test_all_bundles_include_parse_pdf():
 
 def test_native_pdf_extras_use_one_reader():
     text = PYPROJECT.read_text(encoding="utf-8")
-    for extra in ("parse-pdf", "semantic-worker"):
-        match = re.search(r"^" + extra + r" = \[(.*?)^\]", text, re.MULTILINE | re.DOTALL)
-        assert match and "pymupdf" in match.group(1)
-        assert "pdfplumber" not in match.group(1)
+    def requirements(extra, seen=None):
+        seen = set() if seen is None else seen
+        if extra in seen:
+            return ""
+        seen.add(extra)
+        match = re.search(r"^" + re.escape(extra) + r" = \[(.*?)\]$", text, re.MULTILINE | re.DOTALL)
+        assert match, extra
+        block = match.group(1)
+        nested = re.findall(r"semantica\[([^\]]+)\]", block)
+        return block + "".join(requirements(name.strip(), seen)
+                              for group in nested for name in group.split(","))
+
+    for extra in ("parse-pdf", "semantic-worker", "semantic-worker-cuda", "semantic-worker-directml"):
+        assert "pymupdf" in requirements(extra)
+    assert "pdfplumber" not in text.lower()
+
+
+def test_ci_requirements_do_not_install_pdfplumber():
+    text = (PYPROJECT.parent / "requirements-ci.txt").read_text(encoding="utf-8")
+    assert not re.search(r"^pdfplumber(?:\[|[=<>!~ @])", text, re.MULTILINE | re.IGNORECASE)
 
 
 def test_all_bundle_extraction_finds_known_extra():

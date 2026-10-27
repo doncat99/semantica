@@ -628,6 +628,7 @@ class ExtractionCache:
         max_size: int = 1000,
         ttl: int = 3600,
         backend: Optional[CacheBackend] = None,
+        identity_policy: str = "execution",
     ):
         """
         Initialize the cache.
@@ -639,6 +640,9 @@ class ExtractionCache:
             backend: Storage backend. Defaults to :class:`InMemoryBackend`.
         """
         self.max_size = max_size
+        if identity_policy not in {"execution", "content"}:
+            raise ValueError("identity_policy must be execution or content")
+        self.identity_policy = identity_policy
         self.ttl = ttl
         self.logger = get_logger("extraction_cache")
         self.enabled = True
@@ -664,6 +668,15 @@ class ExtractionCache:
         Note: Sensitive parameters like 'api_key' are excluded from the cache key
         to prevent security risks and ensure cache sharing where appropriate.
         """
+        if self.identity_policy == "content":
+            from .methods import _GENERATION_CACHE_KEYS
+            params = dict(params)
+            for key in {"model", "provider", "max_text_length", "structured_output_mode", *_GENERATION_CACHE_KEYS}:
+                params.pop(key, None)
+            scope = params.get("provider_scope")
+            if isinstance(scope, dict):
+                params["provider_scope"] = {key: value for key, value in scope.items()
+                                            if key not in {"binding", "contextWindowTokens", "maxOutputTokens", "recipe"}}
         # Filter out sensitive keys. Exact-match (not substring) so legitimate
         # params such as "max_tokens" are never dropped.
         sensitive_keys = {

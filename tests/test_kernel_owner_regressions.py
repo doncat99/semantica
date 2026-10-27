@@ -1,8 +1,9 @@
 """Admission and native-owner regressions; no remote models are used."""
 import numpy as np
 import pytest
+from types import SimpleNamespace
 from semantica.semantic_artifact_schema import KnowledgeEntity, KnowledgeRelation
-from semantica.semantic_artifact_builder import _semantic_organization, _validate_embedding_projection
+from semantica.semantic_artifact_builder import _semantic_organization
 from semantica.vector_store.vector_store import VectorIndexer, VectorRetriever
 from semantica.kg import CommunityDetector
 
@@ -24,7 +25,7 @@ def test_grounded_report_preserves_assertion_state_and_long_conditions(monkeypat
         'assertions': [{'id': 'assertion', 'subject_id': 'entity', 'predicate': 'works',
             'qualifiers': {'polarity': 'negative', 'condition': condition},
             'status': 'contradicted', 'evidence_ids': ['e1']}],
-        'evidence': [{'id': 'e1', 'quote': 'Exact source'}]}, None)
+        'evidence': [{'id': 'e1', 'quote': 'Exact source'}]}, SimpleNamespace(model_id='test', context_window_tokens=500000, max_output_tokens=32768))
 
 
 def test_native_report_strict_schema_does_not_fallback_on_provider_failure():
@@ -102,7 +103,7 @@ def test_grounded_report_uses_native_packing_and_output(monkeypatch):
     monkeypatch.setattr(pipeline._GroundedFinding, 'model_validate', classmethod(validate))
     context = {'target': {'id': 'scope', 'title': 'Topic'}, 'entities': [],
                'assertions': [], 'relations': [], 'evidence': [{'id': 'e1', 'quote': 'Exact source'}]}
-    sections, _ = pipeline._grounded_explanation(context, SimpleNamespace())
+    sections, _ = pipeline._grounded_explanation(context, SimpleNamespace(model_id='test', context_window_tokens=500000, max_output_tokens=32768))
     assert len(validations) == 1
     assert seen == [[{'id': 'e1', 'text': 'Exact source'}]]
     assert sections[0].title == 'Native finding'
@@ -117,14 +118,6 @@ def test_native_index_rejects_invalid_vector_space(vectors):
 def test_native_query_rejects_dimension_coercion():
     with pytest.raises(ValueError):
         VectorRetriever().search_similar([1., 0.], [[1., 0., 1.]], ['one'])
-
-def test_embedding_admission_does_not_search_every_stored_vector(monkeypatch):
-    from semantica.vector_store import VectorStore
-    monkeypatch.setattr(VectorStore, 'search_vectors', lambda *_args, **_kwargs: pytest.fail('quadratic self-search'))
-    from types import SimpleNamespace
-    _validate_embedding_projection([{'source': SimpleNamespace(source_id='one'), 'embeddings': [
-        {'vector': [1., 0.], 'start_char': 0, 'end_char': 5},
-        {'vector': [0., 1.], 'start_char': 5, 'end_char': 10}]}])
 
 def test_organization_does_not_reinterpret_admitted_identity():
     entities = [KnowledgeEntity(id='person', canonical_name='Jordan', type='Person', metadata={'source_ids': ['one']}),
@@ -165,6 +158,21 @@ def test_query_uses_native_vector_ranking(monkeypatch, tmp_path):
     monkeypatch.setattr(VectorRetriever, 'search_similar', search)
     assert _serve(_semantic_request(tmp_path))['ok']
     assert calls
+
+def test_query_preserves_native_scores_and_order_without_reranking(monkeypatch, tmp_path):
+    from tests.test_semantic_query_worker import _semantic_request, _serve
+    def search(self, vector, vectors, ids, **options):
+        return [{'id': ids[0], 'score': -0.25}, {'id': ids[1], 'score': -0.75}]
+    monkeypatch.setattr(VectorRetriever, 'search_similar', search)
+    request = _semantic_request(tmp_path)
+    request['params']['limit'] = 1000
+    result = _serve(request)
+    assert result['ok']
+    hits = result['result']['contexts']
+    assert hits and hits[0]['sourceIds'] == ['source-1']
+    assert hits[0]['score'] == -0.25
+    assert hits[-1]['sourceIds'] == ['source-2']
+    assert hits[-1]['score'] == -0.75
 
 def test_query_uses_native_keyword_ranking_after_source_admission(monkeypatch, tmp_path):
     from semantica.context.context_retriever import ContextRetriever

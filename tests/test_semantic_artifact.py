@@ -43,13 +43,80 @@ def _worker_output(stdout):
 
 
 def _host_snapshot(graph_path, project_id="project-1"):
-    graph = json.loads(graph_path.read_bytes())
-    assert graph.pop("protocol") == "semantica.semantic-graph.v1"
-    snapshot_id = graph.pop("artifact_revision")
-    for field in ("input_revision", "release_digest", "schema_digest"):
-        graph.pop(field)
-    return SemanticArtifact.model_validate({**graph, "protocol": "semantica.semantic-artifact.v1",
-        "snapshot_id": snapshot_id, "project_id": project_id, "base_snapshot_id": None})
+    snapshot = SemanticArtifact.model_validate_json(graph_path.read_bytes())
+    assert snapshot.project_id == project_id
+    return snapshot
+
+
+def test_worker_publishes_one_canonical_snapshot_queryable_without_reconstruction(tmp_path):
+    from semantica.semantic_worker import handle_request
+    from semantica.semantic_query_worker import handle_request as query
+    source = tmp_path / "native.txt"
+    source.write_text("Ada Lovelace designed the Analytical Engine.")
+    response = handle_request(_request(source, tmp_path))
+    result = response["result"]
+    graph = next(item for item in result["artifacts"] if item["kind"] == "semantic-graph")
+    retrieval = next(item for item in result["artifacts"] if item["kind"] == "retrieval-index")
+    snapshot = SemanticArtifact.model_validate_json(Path(graph["path"]).read_bytes())
+    answer = query({"protocol": "semantica.semantic-query.v1", "id": "query:canonical", "method": "query",
+        "params": {"projectId": snapshot.project_id, "snapshotId": snapshot.id,
+            "snapshot": {k: graph[k] for k in ("digest", "path", "kind", "mediaType")},
+            "retrieval": {k: retrieval[k] for k in ("digest", "path", "kind", "mediaType")},
+            "query": "Ada", "limit": 5}})
+    assert answer["ok"] is True, answer
+    assert answer["result"]["contexts"]
+    assert answer["result"]["retrievalManifestId"] == retrieval["revision"]
+
+
+def test_worker_processes_parse_build_and_query_share_canonical_artifact(tmp_path):
+    import subprocess
+    import sys
+
+    def invoke(module, request):
+        completed = subprocess.run([sys.executable, '-m', module],
+            input=json.dumps(request) + '\n', text=True, capture_output=True, timeout=90,
+            env={**os.environ, 'PYTHONPATH': '', 'PYTHONHOME': '',
+                 'ONTOSCIENCE_ACCEPTANCE_NO_CREDENTIAL': ''})
+        assert completed.returncode == 0, completed.stderr
+        messages = [json.loads(line) for line in completed.stdout.splitlines() if line.strip()]
+        responses = [m for m in messages if m.get('id') == request['id'] and 'ok' in m]
+        assert len(responses) == 1 and responses[0]['ok'] is True, json.dumps(responses, indent=2)
+        assert responses[0]['protocol'] == request['protocol']
+        return responses[0]['result']
+
+    source = tmp_path / 'source.txt'
+    source.write_text('Ada Lovelace designed the Analytical Engine.')
+    request = _request(source, tmp_path / 'build', prepare=False)
+    params = request['params']
+    for name, relay in params['relays'].items():
+        relay['authorizationEnv'] = 'ONTOSCIENCE_ACCEPTANCE_NO_CREDENTIAL'
+        endpoint = 'embeddings' if name == 'embedding' else 'chat/completions'
+        relay['baseUrl'] = 'http://127.0.0.1:1/v1/' + endpoint
+    parsed = invoke('semantica.semantic_worker', {
+        'protocol': request['protocol'], 'id': 'parse', 'method': 'parse_source',
+        'params': {'source': params['sources'][0], 'outputDir': str(tmp_path / 'parsed'),
+                   'forceOcr': False, 'documentProcessing': {'mode': 'local'}}})
+    params['parsedSources'] = [{'sourceId': params['sources'][0]['sourceId'],
+        'artifactPath': parsed['artifactPath'], 'artifactDigest': parsed['artifactDigest']}]
+    params['checkpointDir'] = str(tmp_path / 'saved-progress')
+    built = invoke('semantica.semantic_worker', request)
+    graph = next(a for a in built['artifacts'] if a['kind'] == 'semantic-graph')
+    retrieval = next(a for a in built['artifacts'] if a['kind'] == 'retrieval-index')
+    snapshot = SemanticArtifact.model_validate_json(Path(graph['path']).read_bytes())
+    assert graph['revision'] == snapshot.id
+    manifest = next(m for m in snapshot.retrieval_manifests if m.retrieval_type == 'graph')
+    assert retrieval['revision'] == manifest.id
+    assert manifest.source_snapshot_id == snapshot.id
+    assert manifest.artifact_hash == retrieval['digest']
+    assert (tmp_path / 'saved-progress' / 'manifest.json').is_file()
+    answer = invoke('semantica.semantic_query_worker', {
+        'protocol': 'semantica.semantic-query.v1', 'id': 'query', 'method': 'query',
+        'params': {'projectId': snapshot.project_id, 'snapshotId': snapshot.id,
+            'snapshot': {k: graph[k] for k in ('digest', 'path', 'kind', 'mediaType')},
+            'retrieval': {k: retrieval[k] for k in ('digest', 'path', 'kind', 'mediaType')},
+            'query': 'Ada', 'limit': 5}})
+    assert answer['contexts']
+    assert answer['retrievalManifestId'] == retrieval['revision']
 
 
 def test_build_validates_native_identity_policy_before_model_calls(tmp_path, monkeypatch):
@@ -129,10 +196,6 @@ def test_explanation_reads_verified_semantic_artifact(tmp_path):
     from tests.test_semantic_artifact_contract import _snapshot_payload
 
     artifact = _snapshot_payload()
-    artifact["protocol"] = "semantica.semantic-graph.v1"
-    artifact["artifact_revision"] = artifact.pop("snapshot_id")
-    artifact.pop("project_id")
-    artifact.update(input_revision=H1, release_digest=H2, schema_digest=H3)
     raw = json.dumps(artifact).encode()
     path = tmp_path / "semantic-artifact.json"
     path.write_bytes(raw)
@@ -152,10 +215,6 @@ def test_semantic_worker_explains_verified_graph_and_returns_digest_and_receipt(
     from tests.test_semantic_artifact_contract import _snapshot_payload
 
     graph = _snapshot_payload()
-    graph["protocol"] = "semantica.semantic-graph.v1"
-    graph["artifact_revision"] = graph.pop("snapshot_id")
-    graph.pop("project_id")
-    graph.update(input_revision=H1, release_digest=H2, schema_digest=H3)
     raw = json.dumps(graph).encode()
     path = tmp_path / "semantic-graph.json"
     path.write_bytes(raw)
@@ -837,12 +896,11 @@ def test_canonical_graph_projection_preserves_snapshot_identity():
         )
     ]
 
-    graph_relationships, context_edges = _canonical_graph_projection(entities, relations)
+    graph_relationships = _canonical_graph_projection(entities, relations)
 
     assert {item["id"] for item in graph_relationships} == {relations[0].id}
-    assert {edge.edge_id for edge in context_edges} == {relations[0].id}
-    assert {edge.source_id for edge in context_edges} == {entities[0].id}
-    assert {edge.target_id for edge in context_edges} == {entities[1].id}
+    assert {edge["source"] for edge in graph_relationships} == {entities[0].id}
+    assert {edge["target"] for edge in graph_relationships} == {entities[1].id}
 
 
 def test_worker_fails_closed_for_unsupported_source_format(tmp_path):
@@ -1017,14 +1075,14 @@ def test_model_recipe_uses_bifrost_chat_and_embedding_and_records_receipts(tmp_p
     retrieval_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "retrieval-index")
     retrieval = json.loads(retrieval_path.read_text())
     assert retrieval["embeddings"] == [{"source_id": "source-1", "start_char": 0, "end_char": len(source.read_text()), "vector": [0.25, 0.5, 0.75]}]
-    assert retrieval["provenance"]["evidence"]
-    evidence_lineage = next(iter(retrieval["provenance"]["evidence"].values()))
-    assert evidence_lineage["source_documents"] == ["source-1"]
-    assert evidence_lineage["metadata"]["origin"] == "native"
-    assert evidence_lineage["lineage_chain"][0]["source_quote"] == "Ada Lovelace"
-    assert evidence_lineage["lineage_chain"][0]["source_location"] == "char:0-12"
-    relation_id = snapshot.relations[0].id
-    assert retrieval["provenance"]["relations"][relation_id]["source_documents"] == ["source-1"]
+    assert "provenance" not in retrieval
+    assert "model_receipt_ids" not in retrieval
+    evidence = {item.id: item for item in snapshot.evidence_spans}
+    representations = {item.id: item for item in snapshot.document_representations}
+    assert all(representations[evidence[ref].representation_id].source_id == "source-1"
+               for ref in snapshot.relations[0].evidence_ids)
+    assert any(item.quote == "Ada Lovelace" and item.locator.start_char == 0
+               and item.locator.end_char == 12 for item in snapshot.evidence_spans)
 
 
 def test_model_recipe_fails_closed_without_relay_token(tmp_path):
@@ -1188,5 +1246,8 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
     assert retrieval["format"] == "semantica.retrieval-reference.v1"
     assert "identity_decisions" not in retrieval and "conflicts" not in retrieval
     for entity in snapshot.entities:
-        assert set(retrieval["provenance"]["entities"][entity.id]["source_documents"]) == set(entity.metadata["source_ids"])
+        evidence = {item.id: item for item in snapshot.evidence_spans}
+        representations = {item.id: item for item in snapshot.document_representations}
+        assert {representations[evidence[ref].representation_id].source_id
+                for ref in entity.evidence_ids} == set(entity.metadata["source_ids"])
         assert len(entity.metadata["source_ids"]) == 2

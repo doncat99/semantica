@@ -15,7 +15,7 @@ from tests.test_semantic_artifact import _request
 @pytest.mark.parametrize('interrupted_owner,completed', [
     ('reconcile_qualified_facts', ['entity_resolution']),
     ('_semantic_organization', ['entity_resolution', 'fact_reconciliation']),
-    ('_provenance_projection', ['entity_resolution', 'fact_reconciliation', 'semantic_organization']),
+    ('_write_json', ['entity_resolution', 'fact_reconciliation', 'semantic_organization']),
 ])
 def test_restart_after_identity_reuses_completed_project_work(tmp_path, monkeypatch, interrupted_owner, completed):
     source = tmp_path / 'source.txt'
@@ -29,7 +29,10 @@ def test_restart_after_identity_reuses_completed_project_work(tmp_path, monkeypa
         calls.append('identity')
         return original(*args, **kwargs)
     monkeypatch.setattr(builder, '_resolve_native_entities', resolve)
+    interrupted = getattr(builder, interrupted_owner)
     def interrupt(*args):
+        if interrupted_owner == '_write_json' and args[0].name != 'retrieval.json':
+            return interrupted(*args)
         raise RuntimeError('interrupted after identity')
     monkeypatch.setattr(builder, interrupted_owner, interrupt)
     events = []

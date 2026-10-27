@@ -680,8 +680,7 @@ class RecipeRef(StrictModel):
     version: str
 
     def lineage_payload(self) -> Dict[str, Any]:
-        return self.model_dump(mode="json", by_alias=True,
-            exclude={"formula_semantics_source_ids"} if not self.formula_semantics_source_ids else None)
+        return self.model_dump(mode="json", by_alias=True)
 
 
 class RelayRef(StrictModel):

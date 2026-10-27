@@ -53,6 +53,19 @@ def test_different_params_produce_different_keys():
     assert cache.get("entities", "hi", model="gpt-4") == ["a"]
 
 
+def test_content_identity_reuses_models_but_not_business_inputs():
+    cache = ExtractionCache(identity_policy="content")
+    cache.set("entities", "hi", ["a"], model="first", provider="one",
+              provider_scope={"binding": "a", "project": "p"}, extraction_spec={"type": "company"})
+    assert cache.get("entities", "hi", model="second", provider="two",
+                     provider_scope={"binding": "b", "project": "p"},
+                     extraction_spec={"type": "company"}) == ["a"]
+    assert cache.get("entities", "hi", provider_scope={"project": "other"},
+                     extraction_spec={"type": "company"}) is None
+    assert cache.get("entities", "hi", provider_scope={"project": "p"},
+                     extraction_spec={"type": "person"}) is None
+
+
 def test_disabled_cache_is_noop():
     cache = ExtractionCache()
     cache.enabled = False

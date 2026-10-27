@@ -78,7 +78,7 @@ class QueryHit(StrictModel):
     kind: Literal["entity", "assertion", "relation", "conflict", "topic", "report", "evidence"]
     title: str
     text: str
-    score: float = Field(ge=0)
+    score: float = Field(allow_inf_nan=False)
     status: Optional[str] = None
     polarity: Optional[Literal["positive", "negative"]] = None
     evidence_ids: List[str] = Field(default_factory=list, alias="evidenceIds")

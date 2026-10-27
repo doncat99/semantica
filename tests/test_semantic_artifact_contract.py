@@ -229,7 +229,7 @@ def test_formula_semantics_requires_explicit_known_pdf_with_model_recipe():
     payload = _build_request_payload()
     default_recipe = SemanticArtifactBuildRequest.model_validate(payload).recipe
     assert default_recipe.formula_semantics_source_ids == []
-    assert default_recipe.lineage_payload() == default_recipe.model_dump(mode="json", by_alias=True, exclude={"formula_semantics_source_ids"})
+    assert default_recipe.lineage_payload() == default_recipe.model_dump(mode="json", by_alias=True)
     payload["recipe"]["formulaSemanticsSourceIds"] = ["source-1"]
     with pytest.raises(ValidationError, match="model recipe"):
         SemanticArtifactBuildRequest.model_validate(payload)

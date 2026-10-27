@@ -29,11 +29,9 @@ def _digest(value: bytes) -> str:
 def _canonical_inputs(inputs: dict[str, Any]) -> dict[str, Any]:
     """Return only business inputs that determine reusable output bytes.
 
-    Model/provider/build identity is provenance, not a validity fence.  Keeping
-    this projection in one place also lets an older manifest be migrated once
-    after its original fence and payload digests have been verified.
+    Model/provider/build identity is provenance, not a validity fence.
     """
-    recipe = inputs.get("recipe", inputs.get("provenance", {}).get("recipe", {}))
+    recipe = inputs.get("provenance", {}).get("recipe", {})
     if not isinstance(recipe, dict):
         recipe = {}
     result = {key: value for key, value in inputs.items()
@@ -73,6 +71,11 @@ def _sync_directory(path: Path) -> None:
             os.fsync(directory)
         finally:
             os.close(directory)
+
+
+def _regular_directory(path: Path) -> None:
+    if path.is_symlink() or (path.exists() and not path.is_dir()):
+        raise SnapshotCheckpointError(f'checkpoint path is not a regular directory: {path}')
 
 
 def _atomic_json(path: Path, value: Any, *, exclusive: bool = False) -> None:
@@ -156,29 +159,41 @@ class SnapshotCheckpoint:
         return instance
 
     def _initialize(self, output_dir, resume_dirs, inputs, checkpoint_dir=None):
-        self.root = Path(checkpoint_dir).resolve() if checkpoint_dir else Path(output_dir).resolve() / "checkpoint"
+        self.root = Path(checkpoint_dir).absolute() if checkpoint_dir else Path(output_dir).resolve() / "checkpoint"
         self.root.parent.mkdir(parents=True, exist_ok=True)
         with _directory_lock(self.root.parent / ".checkpoint.lock"):
             self._finish_migration()
             self._import(inputs, resume_dirs)
 
     def _finish_migration(self):
+        for directory in (self.root, self.root.parent / 'imports', self.root.parent / 'evidence'):
+            _regular_directory(directory)
         journal = self.root.parent / ".checkpoint-migration.json"
+        if journal.is_symlink():
+            raise SnapshotCheckpointError('checkpoint migration journal is not a regular file')
         if not journal.exists():
             return
         try:
             plan = json.loads(journal.read_bytes())
         except (ValueError, OSError) as exc:
             raise SnapshotCheckpointError("checkpoint migration journal is unreadable; preserve and repair it") from exc
-        if (not isinstance(plan, dict) or set(plan) != {"staging", "archive"} or not all(isinstance(v, str) for v in plan.values())
+        if (not isinstance(plan, dict) or set(plan) not in ({"staging", "archive"}, {"staging", "archive", "imports"})
+                or not all(isinstance(plan.get(k), str) for k in ("staging", "archive"))
                 or not plan["staging"].startswith(".checkpoint-next-")
                 or Path(plan["staging"]).name != plan["staging"]
                 or not plan["archive"].startswith("checkpoint-next-")
                 or Path(plan["archive"]).name != plan["archive"]):
             raise SnapshotCheckpointError("checkpoint migration journal is invalid")
+        imports = plan.get("imports", [])
+        if (not isinstance(imports, list) or any(not isinstance(name, str) or name in {"", ".", ".."}
+                or Path(name).name != name for name in imports)):
+            raise SnapshotCheckpointError("checkpoint migration cleanup journal is invalid")
         staging = self.root.parent / plan["staging"]
         archive = self.root.parent / "evidence" / plan["archive"]
+        _regular_directory(staging)
+        _regular_directory(archive)
         if staging.exists():
+            self._verify_dataset(staging)
             if self.root.exists():
                 archive.parent.mkdir(exist_ok=True)
                 if archive.exists():
@@ -190,17 +205,74 @@ class SnapshotCheckpoint:
             _sync_directory(self.root.parent)
         if not (self.root / "manifest.json").exists():
             raise SnapshotCheckpointError("checkpoint migration is incomplete")
+        self._verify_dataset(self.root)
+        if archive.exists():
+            if archive.is_symlink() or not archive.is_dir():
+                raise SnapshotCheckpointError("checkpoint archive is not a regular directory")
+            shutil.rmtree(archive)
+            _sync_directory(archive.parent)
+        for name in imports:
+            carrier = self.root.parent / "imports" / name
+            if carrier.exists() or carrier.is_symlink():
+                if carrier.is_symlink() or not carrier.is_dir():
+                    raise SnapshotCheckpointError("checkpoint cleanup carrier is not a regular directory")
+                shutil.rmtree(carrier)
+                _sync_directory(carrier.parent)
         journal.unlink()
         _sync_directory(journal.parent)
+
+    def _verify_dataset(self, root):
+        """Admit staged and installed bytes through the same runtime validator."""
+        try:
+            if root.is_symlink() or not root.is_dir():
+                raise ValueError("checkpoint is not a regular directory")
+            manifest_path = root / "manifest.json"
+            if manifest_path.is_symlink() or not manifest_path.is_file():
+                raise ValueError("checkpoint manifest is not a regular file")
+            manifest = json.loads(manifest_path.read_bytes())
+            if (manifest.get("entryIdentity") != "business-content-v1"
+                    or manifest["inputs"] != _canonical_inputs(manifest["inputs"])
+                    or manifest["fence"] != _digest(_bytes(manifest["inputs"]))):
+                raise ValueError("canonical checkpoint manifest failed verification")
+            datetime.fromisoformat(manifest["createdAt"])
+            verifier = self.__class__.__new__(self.__class__)
+            verifier.fence = manifest["fence"]
+            for item in root.iterdir():
+                if item.name == "manifest.json":
+                    continue
+                if item.is_symlink() or not item.is_file() or item.suffix != ".json":
+                    raise ValueError("unknown checkpoint file")
+                entry = json.loads(item.read_bytes())
+                name, normalized = verifier._import_entry(item.name, entry, manifest["fence"])
+                if name != item.name or normalized != entry:
+                    raise ValueError("checkpoint is not canonical")
+        except (ValueError, KeyError, TypeError, OSError) as exc:
+            raise SnapshotCheckpointError("canonical checkpoint dataset failed verification") from exc
+
+    def _install(self, manifest, entries, imports=()):
+        """One recoverable transaction for runtime imports and offline upgrades."""
+        staging = Path(tempfile.mkdtemp(prefix=".checkpoint-next-", dir=self.root.parent))
+        journal = self.root.parent / ".checkpoint-migration.json"
+        try:
+            for name, entry in entries.items():
+                if Path(name).name != name or name in {"", ".", "..", "manifest.json"}:
+                    raise SnapshotCheckpointError("invalid checkpoint entry locator")
+                _atomic_json(staging / name, entry)
+            _atomic_json(staging / "manifest.json", manifest)
+            self._verify_dataset(staging)
+            _atomic_json(journal, {"staging": staging.name,
+                "archive": staging.name.removeprefix("."), "imports": list(imports)})
+            self._finish_migration()
+        except BaseException:
+            if not journal.exists() and staging.exists():
+                shutil.rmtree(staging)
+            raise
 
     def _import(self, provenance, resume_dirs):
         inputs = _canonical_inputs(provenance)
         self.fence = _digest(_bytes(inputs))
         imports_dir = self.root.parent / "imports"
         pending = sorted(imports_dir.iterdir()) if imports_dir.exists() else []
-        for root in pending:
-            if (self.root.parent / "evidence" / root.name).exists():
-                raise SnapshotCheckpointError(f"checkpoint evidence destination already exists: {root.name}")
         roots = ([self.root] if self.root.exists() else [])
         for carrier in pending:
             roots.extend(self._carrier_roots(carrier))
@@ -212,7 +284,7 @@ class SnapshotCheckpoint:
         def remember_recipe(origin):
             if origin.get("protocol") != "semantica.project-checkpoint.v1":
                 return
-            recipe = origin.get("recipe", origin.get("provenance", {}).get("recipe"))
+            recipe = origin.get("provenance", {}).get("recipe")
             if recipe is None:
                 return
             if not isinstance(recipe, dict):
@@ -229,11 +301,15 @@ class SnapshotCheckpoint:
                 if root.is_symlink() or not root.is_dir():
                     raise ValueError("checkpoint directory is not a regular directory")
                 previous = json.loads((root / "manifest.json").read_bytes())
+                if previous.get("entryIdentity") != "business-content-v1":
+                    raise ValueError("offline checkpoint manifest migration required; refusing paid recomputation")
                 prior_inputs = previous["inputs"]
                 prior_fence = previous["fence"]
                 if prior_fence != _digest(_bytes(prior_inputs)):
                     raise ValueError("manifest failed verification")
                 prior_business = _canonical_inputs(prior_inputs)
+                if prior_business != prior_inputs:
+                    raise ValueError("offline checkpoint manifest migration required; refusing paid recomputation")
                 if {k: prior_business.get(k) for k in ("protocol", "projectId", "scopeId")} != {
                         k: inputs.get(k) for k in ("protocol", "projectId", "scopeId")}:
                     raise ValueError("inputs changed; explicit import belongs to different business content")
@@ -257,17 +333,14 @@ class SnapshotCheckpoint:
                             "document-", "source-windows-", "window-contexts-", "extraction-", "extraction-origin-",
                             "relay-", "product-result-", "grounded-explanation-", "remote-docling-", "rejected-", "recipe-provenance-", "project-stage-")):
                         raise ValueError("inputs changed; unscoped result belongs to different business content")
-                    name, normalized = self._import_entry(file.name, entry, prior_inputs, prior_fence,
-                        previous.get("entryIdentity") == "business-content-v1")
-                    if name != file.name and any(root.glob("rejected-" + file.stem + "-*.json")):
-                        raise ValueError("rejected historical document requires explicit identity recovery")
+                    name, normalized = self._import_entry(file.name, entry, prior_fence)
                     changed_entries |= name != file.name or normalized != entry
                     entry = normalized
                     if name in entries and entries[name] != entry:
                         raise ValueError(f"conflicting completed work: {name}")
                     entries[name] = entry
                 before = len(entries)
-                remember_recipe(previous.get("provenance", prior_inputs))
+                remember_recipe(previous["provenance"])
                 changed_entries |= len(entries) != before
                 # Remember prior source coverage even after removal/readdition.
                 # Missing plans must never silently repeat already-paid work.
@@ -284,31 +357,11 @@ class SnapshotCheckpoint:
         before = len(entries)
         remember_recipe(provenance)
         changed_entries |= len(entries) != before
-        if local_current and len(roots) == 1 and not changed_entries and previous.get("entryIdentity") == "business-content-v1":
+        if local_current and len(roots) == 1 and not changed_entries:
             return
-        # Commit a fully verified dataset in one recoverable directory transaction.
-        staging = Path(tempfile.mkdtemp(prefix=".checkpoint-next-", dir=self.root.parent))
-        try:
-            for name, entry in entries.items():
-                _atomic_json(staging / name, entry)
-            _atomic_json(staging / "manifest.json", {"fence": self.fence, "inputs": inputs,
-                "entryIdentity": "business-content-v1", "provenance": provenance, "createdAt": self.created_at})
-            _atomic_json(self.root.parent / ".checkpoint-migration.json",
-                {"staging": staging.name, "archive": staging.name.removeprefix(".")})
-            self._finish_migration()
-        except BaseException:
-            # Once journaled, the transaction is resumed by the next initialization.
-            if not (self.root.parent / ".checkpoint-migration.json").exists() and staging.exists():
-                shutil.rmtree(staging)
-            raise
-        for root in pending:
-            evidence = self.root.parent / "evidence" / root.name
-            evidence.parent.mkdir(exist_ok=True)
-            if evidence.exists():
-                raise SnapshotCheckpointError(f"checkpoint evidence destination already exists: {root.name}")
-            root.rename(evidence)
-            _sync_directory(evidence.parent)
-            _sync_directory(imports_dir)
+        self._install({"fence": self.fence, "inputs": inputs,
+            "entryIdentity": "business-content-v1", "provenance": provenance, "createdAt": self.created_at},
+            entries, [root.name for root in pending])
 
     def _carrier_roots(self, carrier):
         """Finish relocated dataset transactions before verified one-time import."""
@@ -328,7 +381,7 @@ class SnapshotCheckpoint:
             raise SnapshotCheckpointError("checkpoint dataset has no recoverable completed work")
         return roots
 
-    def _import_entry(self, name, entry, inputs, fence, business_keys):
+    def _import_entry(self, name, entry, fence):
         if name.startswith("rejected-"):
             if not isinstance(entry, dict) or set(entry) != {"kind", "keyDigest", "payloadDigest"}:
                 raise ValueError("invalid rejection marker")
@@ -346,28 +399,15 @@ class SnapshotCheckpoint:
             raise ValueError("recipe provenance identity mismatch")
         if key is not None and not name.endswith("-" + sha256(_bytes(key)).hexdigest() + ".json"):
             raise ValueError("entry key does not match its locator")
-        if name.startswith("extraction-") and (key is None or not business_keys):
+        if name.startswith("extraction-") and key is None:
             raise ValueError("opaque historical extraction key requires verified import; refusing paid recomputation")
         if name.startswith("relay-"):
             receipt = entry["payload"].get("receipt", {}) if isinstance(entry["payload"], dict) else {}
             if receipt.get("operation") not in (None, "embedding") and (not isinstance(key, dict) or "context" not in key):
                 raise ValueError("historical prompt-bound result requires verified business identity import; refusing paid recomputation")
         if name.startswith("document-"):
-            if key is None:
-                candidates = []
-                recipe = inputs.get("recipe", inputs.get("provenance", {}).get("recipe", {}))
-                for source in inputs.get("sources", [inputs.get("source", {})]):
-                    candidate = {"sourceId": source.get("sourceId"), "contentHash": source.get("materialRevision"),
-                                 "forceOcr": source.get("sourceId") in recipe.get("forceOcrSourceIds", []) if isinstance(recipe, dict) else False}
-                    for candidate_key in (candidate, {**candidate, "documentProcessing": inputs.get("documentProcessing")}):
-                        if name == "document-" + sha256(_bytes(candidate_key)).hexdigest() + ".json":
-                            candidates.append(candidate_key)
-                if len(candidates) != 1:
-                    raise ValueError("historical document identity cannot be recovered")
-                key = candidates[0]
-            key = {k: v for k, v in key.items() if k != "documentProcessing"}
-            name = "document-" + sha256(_bytes(key)).hexdigest() + ".json"
-            entry = {**entry, "key": key}
+            if not isinstance(key, dict) or set(key) != {"sourceId", "contentHash", "forceOcr"}:
+                raise ValueError("offline document identity migration required; refusing paid recomputation")
         return name, {**entry, "fence": self.fence}
 
     def has_prior_extraction(self, source_key) -> bool:

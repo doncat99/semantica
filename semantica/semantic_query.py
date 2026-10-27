@@ -106,20 +106,19 @@ def _semantic_evidence_scores(request, retrieval, evidence_by_id, representation
                                                    [str(index) for index in range(len(chunks))], k=len(chunks))
     except (ValueError, TypeError) as exc:
         raise QueryError(f"snapshot embedding space is invalid: {exc}") from exc
-    source_scores = {}
-    for hit in ranked:
-        chunk = chunks[int(hit["id"])]
-        score = (max(-1.0, min(1.0, hit["score"])) + 1.0) / 2.0
-        source_scores.setdefault(chunk.get("source_id"), []).append((chunk["start_char"], chunk["end_char"], score))
-    scores = {}
+    source_evidence = {}
     for evidence_id, evidence in evidence_by_id.items():
         representation = representations.get(evidence.get("representation_id"), {})
         locator = evidence.get("locator", {})
         start, end = locator.get("start_char"), locator.get("end_char")
         if isinstance(start, int) and isinstance(end, int):
-            matches = [score for lo, hi, score in source_scores.get(representation.get("source_id"), []) if lo < end and hi > start]
-            if matches:
-                scores[evidence_id] = max(matches)
+            source_evidence.setdefault(representation.get("source_id"), []).append((evidence_id, start, end))
+    scores = {}
+    for hit in ranked:
+        chunk = chunks[int(hit["id"])]
+        for evidence_id, start, end in source_evidence.get(chunk.get("source_id"), []):
+            if chunk["start_char"] < end and chunk["end_char"] > start:
+                scores.setdefault(evidence_id, hit["score"])
     return scores
 
 
@@ -188,23 +187,26 @@ def query_semantic_artifact(request: SemanticQueryRequest) -> SemanticQueryResul
         if allowed_sources is not None and not set(sources).issubset(allowed_sources):
             continue
         admitted.append((item_id, kind, text, evidence, status, polarity, sources))
-    lexical_scores = {}
+    by_id = {item[0]: item for item in admitted}
     if evidence_scores is None:
         ranked = ContextRetriever()._keyword_match_entities(
             [{"id": item[0], "name": item[2]} for item in admitted],
             request.query or "", len(admitted))
-        lexical_scores = {item["id"]: score for item, score in ranked}
+        ranked_items = [(by_id[item["id"]], score) for item, score in ranked]
+    else:
+        by_evidence = {}
+        for item in admitted:
+            for evidence_id in item[3]:
+                by_evidence.setdefault(evidence_id, []).append(item)
+        seen = set()
+        ranked_items = []
+        for evidence_id, score in evidence_scores.items():
+            for item in by_evidence.get(evidence_id, []):
+                if item[0] not in seen:
+                    seen.add(item[0])
+                    ranked_items.append((item, score))
     hits = []
-    for item_id, kind, text, evidence, status, polarity, sources in admitted:
-        if evidence_scores is not None:
-            matches = [evidence_scores[item] for item in evidence if item in evidence_scores]
-            if not matches:
-                continue
-            score = max(matches)
-        else:
-            score = lexical_scores.get(item_id, 0.0)
-            if score <= 0:
-                continue
+    for (item_id, kind, text, evidence, status, polarity, sources), score in ranked_items:
         hits.append(QueryHit(
             id=item_id,
             kind=kind,
@@ -216,7 +218,6 @@ def query_semantic_artifact(request: SemanticQueryRequest) -> SemanticQueryResul
             evidence_ids=evidence,
             source_ids=sources,
         ))
-    hits.sort(key=lambda item: (-item.score, item.kind, item.id))
     return SemanticQueryResult(
         project_id=snapshot.project_id,
         snapshot_id=snapshot.id,

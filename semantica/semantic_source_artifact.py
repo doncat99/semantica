@@ -33,6 +33,17 @@ def _write_json(path: Path, payload: Any) -> str:
     return _digest_bytes(encoded)
 
 
+def _validate_saved_source(cached, content_hash, mime_type):
+    """The parser and offline importer admit exactly the same saved representation."""
+    if (not isinstance(cached, (list, tuple)) or len(cached) != 6
+            or not isinstance(cached[0], str) or not isinstance(cached[1], dict)
+            or any(not isinstance(cached[index], str) for index in (2, 3, 4, 5))
+            or cached[3] != content_hash or cached[1].get('content_hash') != content_hash
+            or cached[1].get('mime_type') != mime_type or cached[1].get('text') != cached[0]):
+        raise SemanticArtifactError('saved parsed source has invalid content or structure')
+    return tuple(cached)
+
+
 def _parse_source(source: Any, force_ocr: bool, document_processing: dict | None = None,
                   *, admit_quality: bool = True,
                   progress_callback: Callable[[Any], None] | None = None) -> tuple[str, dict[str, Any], str, str, str, str]:
@@ -44,19 +55,11 @@ def _parse_source(source: Any, force_ocr: bool, document_processing: dict | None
         raise SemanticArtifactError(f"source material revision does not match immutable bytes: {source.source_id}")
     checkpoint = active_checkpoint.get()
     profile = document_processing or {"mode": "local"}
-    processing_revision = source_processing_revision(path, mime_type=source.mime_type,
-        force_ocr=force_ocr, document_processing=profile)
     cache_key = {"sourceId": source.source_id, "contentHash": content_hash,
-                 "forceOcr": force_ocr, "processingRevision": processing_revision}
+                 "forceOcr": force_ocr}
     cached = checkpoint.read("document", cache_key) if checkpoint else None
     if cached is not None:
-        if (not isinstance(cached, (list, tuple)) or len(cached) != 6
-                or not isinstance(cached[0], str) or not isinstance(cached[1], dict)
-                or any(not isinstance(cached[index], str) for index in (2, 3, 4, 5))
-                or cached[3] != content_hash or cached[1].get("content_hash") != content_hash
-                or cached[1].get("mime_type") != source.mime_type
-                or cached[1].get("text") != cached[0]):
-            raise SemanticArtifactError("saved parsed source has invalid content or structure")
+        _validate_saved_source(cached, content_hash, source.mime_type)
         if admit_quality:
             _admit_document_quality(cached[1], force_ocr)
         return tuple(cached)

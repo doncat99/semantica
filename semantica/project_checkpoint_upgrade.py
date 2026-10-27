@@ -5,10 +5,148 @@ can acquire the canonical business key. This module performs no parsing or model
 calls. Callers must commit and verify the canonical dataset before deleting inputs.
 """
 from datetime import datetime
+from copy import deepcopy
 from hashlib import sha256
 import json
+from pathlib import Path
 
 from .project_checkpoint import _bytes, _digest
+
+# Frozen historical layout before 34c995e8c; only offline hash reconstruction uses it.
+_HISTORICAL_CONTEXT_BYTES = 48_000
+
+
+def canonicalize_checkpoint(manifest, entries):
+    """Prepare one verified canonical dataset without writing or deleting files.
+
+    Historical extraction identities require verified parsed sources and exact
+    original hash reconstruction. Installation uses the native checkpoint owner.
+    """
+    from .project_checkpoint import SnapshotCheckpoint, _canonical_inputs
+    if manifest.get('entryIdentity') not in (None, 'business-content-v1'):
+        raise ValueError('unknown checkpoint entry identity')
+    inputs = manifest['inputs']
+    if manifest['fence'] != _digest(_bytes(inputs)):
+        raise ValueError('manifest digest mismatch')
+    datetime.fromisoformat(manifest['createdAt'])
+    origin = deepcopy(manifest.get('provenance', inputs))
+    business_origin = deepcopy(inputs)
+    # Old top-level recipe fields are interpreted only in this offline owner.
+    for value in (origin, business_origin):
+        if 'recipe' in value:
+            nested = value.setdefault('provenance', {})
+            if 'recipe' in nested and nested['recipe'] != value['recipe']:
+                raise ValueError('ambiguous historical recipe provenance')
+            nested['recipe'] = value['recipe']
+    canonical_inputs = _canonical_inputs(business_origin)
+    owner = SnapshotCheckpoint.__new__(SnapshotCheckpoint)
+    owner.fence = _digest(_bytes(canonical_inputs))
+    converted, renamed = {}, {}
+    def admit(name, entry):
+        if name in converted and converted[name] != entry:
+            raise ValueError(f'conflicting canonical completed work: {name}')
+        converted[name] = deepcopy(entry)
+    extraction = {name: entry for name, entry in entries.items() if name.startswith(
+        ('extraction-entities-', 'extraction-relations-', 'chunk-extraction-'))}
+    recover = bool(extraction) and (manifest.get('entryIdentity') is None
+        or any(entry.get('key') is None for entry in extraction.values())
+        or any(name.startswith('chunk-extraction-') for name in extraction))
+    parsed_sources = []
+    for name, entry in entries.items():
+        if name.startswith('rejected-'):
+            continue
+        if recover and name in extraction:
+            continue
+        if name.startswith('document-'):
+            canonical_name, canonical_entry = recover_document(inputs, name, entry)
+            canonical_entry = {**canonical_entry, 'fence': owner.fence}
+            kind, old_hash = name.removesuffix('.json').rsplit('-', 1)
+            renamed[(kind, 'sha256:' + old_hash)] = [(kind, _digest(_bytes(canonical_entry['key'])), canonical_entry['digest'], entry['digest'])]
+            from .semantic_source_artifact import _validate_saved_source
+            key = canonical_entry['key']
+            sources = inputs.get('sources', [inputs.get('source', {})])
+            source = next((s for s in sources if s['sourceId'] == key['sourceId']
+                           and s['materialRevision'] == key['contentHash']), None)
+            if source is None:
+                raise ValueError('document does not belong to original source inputs')
+            payload = _validate_saved_source(canonical_entry['payload'], source['materialRevision'], source['mimeType'])
+            if recover:
+                parsed_sources.append({'sourceId': source['sourceId'], 'materialRevision': source['materialRevision'],
+                                       'document': payload[1]})
+        else:
+            canonical_name, canonical_entry = owner._import_entry(name, entry, manifest['fence'])
+        # Use the same admission owner as runtime; never stamp a half-converted dataset.
+        owner._import_entry(canonical_name, canonical_entry, owner.fence)
+        admit(canonical_name, canonical_entry)
+    if recover:
+        native = {name: entry for name, entry in extraction.items() if not name.startswith('chunk-extraction-')}
+        recovered, plans = recover_extractions(inputs, native, parsed_sources)
+        chunks = {name: entry for name, entry in extraction.items() if name.startswith('chunk-extraction-')}
+        recovered_chunks = recover_chunks(inputs, chunks, parsed_sources)
+        def install_recovered(old_name, kind, entry):
+            normalized = {k: deepcopy(v) for k, v in entry.items()
+                          if k not in {'contextKey', 'contextBatches', 'entityKey', 'entityResultDigest'}}
+            normalized['fence'] = owner.fence
+            name = _locator(kind, entry['key'])
+            owner._import_entry(name, normalized, owner.fence)
+            admit(name, normalized)
+            old_kind, old_hash = old_name.removesuffix('.json').rsplit('-', 1)
+            renamed.setdefault((old_kind, 'sha256:' + old_hash), []).append(
+                (kind, _digest(_bytes(entry['key'])), normalized['digest'], entries[old_name]['digest']))
+            if 'contextKey' in entry:
+                key, payload = entry['contextKey'], entry['contextBatches']
+                admit(_locator('window-contexts', key), {'fence': owner.fence, 'key': key,
+                      'payload': payload, 'digest': _digest(_bytes(payload))})
+        for name, entry in recovered.items():
+            install_recovered(name, 'extraction-entities' if name.startswith('extraction-entities-') else 'extraction-relations', entry)
+        for name, values in recovered_chunks.items():
+            for kind, entry in values:
+                install_recovered(name, kind, entry)
+        for key, windows in plans:
+            for kind, payload in [('source-windows', windows), ('extraction-origin', True)]:
+                admit(_locator(kind, key), {'fence': owner.fence, 'key': key,
+                      'payload': payload, 'digest': _digest(_bytes(payload))})
+    for name, entry in entries.items():
+        if not name.startswith('rejected-'):
+            continue
+        owner._import_entry(name, entry, manifest['fence'])
+        targets = renamed.get((entry['kind'], entry['keyDigest']),
+                              [(entry['kind'], entry['keyDigest'], entry['payloadDigest'], entry['payloadDigest'])])
+        for kind, key_digest, payload_digest, original_digest in targets:
+            if kind == entry['kind']:
+                # Key migration does not change which completed result was rejected.
+                payload_digest = entry['payloadDigest']
+            elif entry['payloadDigest'] != original_digest:
+                raise ValueError('historical rejection cannot be mapped to a converted payload')
+            canonical_entry = {'kind': kind, 'keyDigest': key_digest, 'payloadDigest': payload_digest}
+            canonical_name = f'rejected-{kind}-{key_digest[7:]}-{payload_digest[7:]}.json'
+            owner._import_entry(canonical_name, canonical_entry, owner.fence)
+            admit(canonical_name, canonical_entry)
+    return {**deepcopy(manifest), 'inputs': canonical_inputs, 'fence': owner.fence,
+            'entryIdentity': 'business-content-v1', 'provenance': origin}, converted
+
+
+def upgrade_checkpoint(path):
+    """Offline all-or-nothing conversion; no runtime fallback or model execution."""
+    from .project_checkpoint import SnapshotCheckpoint, _directory_lock, _regular_directory
+    owner = SnapshotCheckpoint.__new__(SnapshotCheckpoint)
+    owner.root = Path(path).absolute()
+    _regular_directory(owner.root)
+    with _directory_lock(owner.root.parent / '.checkpoint.lock'):
+        owner._finish_migration()
+        manifest_path = owner.root / 'manifest.json'
+        if manifest_path.is_symlink() or not manifest_path.is_file():
+            raise ValueError('checkpoint manifest is not a regular file')
+        entries = {}
+        for file in owner.root.iterdir():
+            if file == manifest_path:
+                continue
+            if file.is_symlink() or not file.is_file() or file.suffix != '.json':
+                raise ValueError('unknown checkpoint file')
+            entries[file.name] = json.loads(file.read_bytes())
+        manifest, entries = canonicalize_checkpoint(json.loads(manifest_path.read_bytes()), entries)
+        owner._install(manifest, entries)
+    return manifest
 
 
 def select_latest(candidates):
@@ -24,6 +162,32 @@ def select_latest(candidates):
 
 def _locator(kind, key):
     return kind + '-' + sha256(_bytes(key)).hexdigest() + '.json'
+
+
+def recover_document(inputs, name, entry):
+    """Offline identity conversion, proved by original locator and payload digest."""
+    if entry.get('fence') != _digest(_bytes(inputs)) or entry.get('digest') != _digest(_bytes(entry['payload'])):
+        raise ValueError('document entry digest or fence mismatch')
+    key = entry.get('key')
+    if key is None:
+        recipe = inputs.get('recipe', inputs.get('provenance', {}).get('recipe', {}))
+        candidates = []
+        for source in inputs.get('sources', [inputs.get('source', {})]):
+            candidate = {'sourceId': source.get('sourceId'), 'contentHash': source.get('materialRevision'),
+                         'forceOcr': source.get('sourceId') in recipe.get('forceOcrSourceIds', [])}
+            for identity in (candidate, {**candidate, 'documentProcessing': inputs.get('documentProcessing')},
+                    {**candidate, 'processingRevision': inputs.get('documentProcessing', {}).get('processingRevision')}):
+                if name == _locator('document', identity):
+                    candidates.append(identity)
+        if len(candidates) != 1:
+            raise ValueError('historical document identity cannot be recovered')
+        key = candidates[0]
+    if not isinstance(key, dict) or name != _locator('document', key):
+        raise ValueError('document identity does not match original locator')
+    canonical = {k: v for k, v in key.items() if k not in {'documentProcessing', 'processingRevision'}}
+    if set(canonical) != {'sourceId', 'contentHash', 'forceOcr'}:
+        raise ValueError('unknown document identity')
+    return _locator('document', canonical), {**entry, 'key': canonical}
 
 
 def _params(text, start, end, context, relay, spec, formula):
@@ -48,14 +212,13 @@ def _relation_params(params, entities):
 
 def _historical_keys(text, params):
     from .semantic_extract.cache import ExtractionCache
-    from .semantic_artifact_builder import _ProjectExtractionCache
     cache = ExtractionCache()
     yield cache._generate_key(text, **params)
     intermediate = {k: v for k, v in params.items() if k != 'model'}
     intermediate['provider_scope'] = {k: v for k, v in params['provider_scope'].items()
         if k not in {'binding', 'contextWindowTokens', 'maxOutputTokens'}}
     yield cache._generate_key(text, **intermediate)
-    yield _ProjectExtractionCache()._generate_key(text, **params)
+    yield ExtractionCache(identity_policy="content")._generate_key(text, **params)
 
 
 def recover_extractions(inputs, entries, parsed_sources):
@@ -64,24 +227,27 @@ def recover_extractions(inputs, entries, parsed_sources):
     Unknown identities fail closed. Hash matching is the proof: different parsed
     text, window plans or grounding cannot accidentally admit an unrelated result.
     """
-    from .semantic_artifact_builder import (_ProjectExtractionCache, _docling_locations,
+    from .semantic_extract.cache import ExtractionCache
+    from .semantic_artifact_builder import (_docling_locations,
         _text_windows, _window_grounding_context, _extraction_context_batches, _decode_value, _window_context_key)
     from .semantic_extract.schema import ExtractionSpecification
     fence = _digest(_bytes(inputs))
     for entry in entries.values():
         if entry.get('fence') != fence or entry.get('digest') != _digest(_bytes(entry['payload'])):
             raise ValueError('extraction entry digest or fence mismatch')
-    provenance = inputs.get('provenance', inputs)
+    provenance = {**inputs, **inputs.get('provenance', {})}
     recipe = provenance.get('recipe', {})
     relay = provenance.get('relays', {}).get('model', {})
     spec = recipe.get('extractionSpec')
     spec = ExtractionSpecification.model_validate(spec).digest if spec else None
-    cache = _ProjectExtractionCache()
+    cache = ExtractionCache(identity_policy="content")
     recovered, plans = {}, []
     def admit(kind, window, params):
         for key in _historical_keys(window, params):
             name = _locator(kind, key)
             if name in entries:
+                if entries[name].get('key') not in (None, key):
+                    raise ValueError('extraction key does not match original locator')
                 entry = {**entries[name], 'key': cache._generate_key(window, **params)}
                 if name in recovered and recovered[name] != entry:
                     raise ValueError('ambiguous extraction identity')
@@ -99,7 +265,7 @@ def recover_extractions(inputs, entries, parsed_sources):
                        'forceOcr': source['sourceId'] in recipe.get('forceOcrSourceIds', [])}, windows))
         for start, end, window in windows:
             context = _window_grounding_context(locations, start, end)
-            batches = _extraction_context_batches(window, context)
+            batches = _extraction_context_batches(window, context, _HISTORICAL_CONTEXT_BYTES)
             for batch in batches:
                 params = _params(text, start, end, batch, relay, spec,
                     source['sourceId'] in recipe.get('formulaSemanticsSourceIds', []))
@@ -120,7 +286,8 @@ def recover_extractions(inputs, entries, parsed_sources):
 
 def recover_chunks(inputs, entries, parsed_sources, *, recorded_windows=()):
     """Convert completed window carriers into the same entity/relation cache format."""
-    from .semantic_artifact_builder import (_ProjectExtractionCache, _docling_locations,
+    from .semantic_extract.cache import ExtractionCache
+    from .semantic_artifact_builder import (_docling_locations,
         _text_windows, _window_grounding_context, _extraction_context_batches, stable_digest, _window_context_key)
     from .semantic_extract.cache import _encode_value
     from .semantic_extract.types import Entity
@@ -129,12 +296,12 @@ def recover_chunks(inputs, entries, parsed_sources, *, recorded_windows=()):
     for entry in entries.values():
         if entry.get('fence') != fence or entry.get('digest') != _digest(_bytes(entry['payload'])):
             raise ValueError('chunk entry digest or fence mismatch')
-    provenance = inputs.get('provenance', inputs)
+    provenance = {**inputs, **inputs.get('provenance', {})}
     recipe = provenance.get('recipe', {})
     if recipe.get('extractionSpec'):
         raise ValueError('chunk specification identity requires recovery')
     relay = provenance.get('relays', {}).get('model', {})
-    cache = _ProjectExtractionCache()
+    cache = ExtractionCache(identity_policy="content")
     recovered = {}
     for parsed in parsed_sources:
         if not any(s['sourceId'] == parsed['sourceId'] and s['materialRevision'] == parsed['materialRevision']
@@ -162,7 +329,7 @@ def recover_chunks(inputs, entries, parsed_sources, *, recorded_windows=()):
             contexts = [_window_grounding_context(locations, start, end), adjacent, [], *recorded]
             batches = {}
             for context in contexts:
-                plan = _extraction_context_batches(window, context)
+                plan = _extraction_context_batches(window, context, _HISTORICAL_CONTEXT_BYTES)
                 for batch in plan:
                     batches.setdefault(_bytes(batch), (batch, plan))
             for batch in recorded:
