@@ -58,7 +58,7 @@ try:
     from docling.datamodel.base_models import InputFormat
     from docling.datamodel.backend_options import PdfBackendOptions
     from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend
-    from docling.datamodel.pipeline_options import PdfPipelineOptions, RapidOcrOptions
+    from docling.datamodel.pipeline_options import PdfPipelineOptions, RapidOcrOptions, TableFormerMode
     DOCLING_AVAILABLE = True
     DOCLING_IMPORT_ERROR = None
 except (ImportError, OSError) as e:
@@ -203,6 +203,7 @@ class DoclingParser:
             # Lazy initialization of converter
             if self._converter is None:
                 pipeline_options = PdfPipelineOptions()
+                pipeline_options.table_structure_options.mode = TableFormerMode.ACCURATE
                 pipeline_options.do_ocr = self.enable_ocr or self.force_full_page_ocr
                 pipeline_options.ocr_options = RapidOcrOptions(backend="onnxruntime", force_full_page_ocr=self.force_full_page_ocr)
                 # Keep cell provenance from this conversion; no second parse is needed.

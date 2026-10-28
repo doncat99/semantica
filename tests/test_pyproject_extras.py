@@ -13,6 +13,31 @@ from pathlib import Path
 PYPROJECT = Path(__file__).resolve().parents[1] / "pyproject.toml"
 
 
+def test_worker_sdk_profiles_exclude_incompatible_llm_bundles():
+    import tomllib
+
+    config = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))
+    conflicts = {frozenset(item["extra"] for item in group)
+                 for group in config["tool"]["uv"]["conflicts"]}
+    for worker in ("semantic-worker-common", "semantic-worker", "semantic-worker-cuda", "semantic-worker-directml"):
+        for provider in ("llm-instructor", "llm-litellm", "llm-all", "all"):
+            assert frozenset((worker, provider)) in conflicts
+
+
+def test_optional_analytics_dependencies_belong_to_their_capabilities():
+    import tomllib
+    from packaging.requirements import Requirement
+
+    project = tomllib.loads(PYPROJECT.read_text(encoding="utf-8"))["project"]
+    names = lambda entries: {Requirement(entry).name for entry in entries}
+    assert not names(project["dependencies"]) & {"pyarrow", "grpcio", "scikit-learn"}
+    extras = project["optional-dependencies"]
+    for extra in ("viz", "explorer"):
+        assert "scikit-learn" in names(extras[extra])
+    for extra in ("db-arrow", "ingest-arrow", "ingest-parquet"):
+        assert "pyarrow" in names(extras[extra])
+
+
 def _extras_in_all_bundles():
     """Collect every extra name referenced inside the ``all = [...]`` block."""
     text = PYPROJECT.read_text(encoding="utf-8")

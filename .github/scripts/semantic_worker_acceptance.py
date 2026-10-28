@@ -8,6 +8,11 @@ import tempfile
 from zipfile import ZipFile
 from importlib.metadata import version
 
+root = Path(sys.argv[1]).resolve()
+destination = Path(sys.argv[2]).resolve()
+# Docling reads model settings during imports, before the first conversion.
+os.environ.update(DOCLING_ARTIFACTS_PATH=str(root / "models"), HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", DOCLING_DEVICE="cpu", ORT_DISABLE_TELEMETRY="1")
+
 from docx import Document
 from PIL import Image, ImageDraw, ImageFont
 from pptx import Presentation
@@ -17,8 +22,6 @@ from semantica.source import parse_source, UnsupportedSourceFormatError
 from semantica.project_document_quality import assess_document_quality
 
 
-root = Path(sys.argv[1]).resolve()
-destination = Path(sys.argv[2]).resolve()
 manifest = json.loads((root / "manifest.json").read_text())
 release = json.loads((root / "release.json").read_text())
 capabilities = acceleration_inventory()
@@ -58,7 +61,6 @@ assert transcribe_native_fraction(formula_cells) == r"\frac{\text{Exposure USD}}
 formula_cells[0].from_ocr = True
 assert transcribe_native_fraction(formula_cells) is None
 assert assess_document_quality("", {"document": {"texts": [{"label": "formula", "text": r"& \quad"}]}})["status"] == "needs_review"
-os.environ.update(DOCLING_ARTIFACTS_PATH=str(root / "models"), HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", DOCLING_DEVICE="cpu", ORT_DISABLE_TELEMETRY="1")
 
 
 def invoke(module, request):

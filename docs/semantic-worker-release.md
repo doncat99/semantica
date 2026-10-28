@@ -59,3 +59,10 @@ constraints using their recorded compile commands and run native relocation
 acceptance. The native acceptance checks both Docling distribution versions and
 the fork's formula API. A local environment check does not release a bundle or
 update OntoScience's immutable consumer pin.
+
+The worker profiles pin OpenAI 3.37.0. Instructor's current jiter requirement
+and LiteLLM's OpenAI version cap cannot coexist with that SDK. The uv conflict
+declarations cover those extras and their `llm-all`/`all` aggregates; install
+these integrations in a separate environment from the packaged worker. This
+records the existing dependency incompatibility instead of downgrading the
+worker SDK or overriding third-party version requirements.

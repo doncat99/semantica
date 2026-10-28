@@ -128,6 +128,32 @@ def remove_generated_bytecode(root: Path) -> None:
             path.unlink()
 
 
+def prune_worker_models(root: Path) -> None:
+    """Keep ACCURATE tables and one canonical copy of identical OCR weights."""
+    models = root / "models"
+    tableformer = models / "docling-project--docling-models/model_artifacts/tableformer"
+    ocr_names = (
+        "PP-OCRv6_det_small.onnx",
+        "PP-OCRv6_rec_small.onnx",
+        "ch_ppocr_mobile_v2.0_cls_mobile.onnx",
+    )
+    required = [tableformer / "accurate" / name for name in (
+        "tableformer_accurate.safetensors", "tm_config.json",
+    )] + [models / "RapidOcr" / name for name in ocr_names]
+    for path in required:
+        if not path.is_file():
+            raise ValueError(f"required offline model is absent: {path.relative_to(root)}")
+    fast = tableformer / "fast"
+    if fast.exists():
+        shutil.rmtree(fast)
+    for pattern in ("lib/python*/site-packages/rapidocr/models", "Lib/site-packages/rapidocr/models"):
+        for directory in (root / "python").glob(pattern):
+            for name in ocr_names:
+                duplicate = directory / name
+                if duplicate.is_file() and digest_file(duplicate) == digest_file(models / "RapidOcr" / name):
+                    duplicate.unlink()
+
+
 def verify_bundle_inventory(root: Path, manifest: dict, *, remove_untracked_bytecode: bool = False) -> None:
     """Verify that the bundle contains exactly the immutable manifest files."""
     expected = {item["path"]: item for item in manifest["files"]}
@@ -238,6 +264,7 @@ def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, output: P
     for name in model_names:
         shutil.copytree(models_root / name, output / "models" / name, symlinks=False,
                         ignore=shutil.ignore_patterns(".cache", ".git"))
+    prune_worker_models(output)
     # CPython -I removes ambient Python paths; -B keeps the immutable tree clean.
     probe = subprocess.run([str(python), "-I", "-B", "-c",
         "import json; from semantica.semantic_artifact_schema import semantic_artifact_json_schema; print(json.dumps(semantic_artifact_json_schema(), sort_keys=True, separators=(',', ':')))"],

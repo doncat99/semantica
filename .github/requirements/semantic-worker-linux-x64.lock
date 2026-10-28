@@ -57,10 +57,6 @@ click==8.5.0
     #   semantica (pyproject.toml)
     #   huggingface-hub
     #   python-oxmsg
-cloudpickle==3.1.2
-    # via
-    #   -c .github/requirements/semantic-worker-linux-x64.lock
-    #   joblib
 colorlog==6.12.0
     # via
     #   -c .github/requirements/semantic-worker-linux-x64.lock
@@ -127,10 +123,6 @@ fsspec==2026.9.0
     #   -c .github/requirements/semantic-worker-linux-x64.lock
     #   huggingface-hub
     #   torch
-grpcio==1.84.0
-    # via
-    #   -c .github/requirements/semantic-worker-linux-x64.lock
-    #   semantica (pyproject.toml)
 h11==0.16.0
     # via
     #   -c .github/requirements/semantic-worker-linux-x64.lock
@@ -145,7 +137,9 @@ httpcore==1.0.9
     #   -c .github/requirements/semantic-worker-linux-x64.lock
     #   httpx
 httpcore2==2.16.0
-    # via httpx2
+    # via
+    #   -c .github/requirements/semantic-worker-linux-x64.lock
+    #   httpx2
 httpx==0.28.1
     # via
     #   -c .github/requirements/semantic-worker-linux-x64.lock
@@ -153,7 +147,9 @@ httpx==0.28.1
     #   docling-slim
     #   huggingface-hub
 httpx2==2.16.0
-    # via openai
+    # via
+    #   -c .github/requirements/semantic-worker-linux-x64.lock
+    #   openai
 huggingface-hub==1.32.0
     # via
     #   -c .github/requirements/semantic-worker-linux-x64.lock
@@ -174,11 +170,9 @@ jinja2==3.1.6
     #   -c .github/requirements/semantic-worker-linux-x64.lock
     #   torch
 jiter==0.17.0
-    # via openai
-joblib==1.6.0
     # via
     #   -c .github/requirements/semantic-worker-linux-x64.lock
-    #   scikit-learn
+    #   openai
 jsonref==1.1.0
     # via
     #   -c .github/requirements/semantic-worker-linux-x64.lock
@@ -242,10 +236,6 @@ multiprocess==0.70.19
     # via
     #   -c .github/requirements/semantic-worker-linux-x64.lock
     #   mpire
-narwhals==2.26.0
-    # via
-    #   -c .github/requirements/semantic-worker-linux-x64.lock
-    #   scikit-learn
 networkx==3.7
     # via
     #   -c .github/requirements/semantic-worker-linux-x64.lock
@@ -263,7 +253,6 @@ numpy==2.5.3
     #   pandas
     #   rapidocr
     #   safetensors
-    #   scikit-learn
     #   scipy
     #   shapely
     #   torchvision
@@ -281,7 +270,9 @@ onnxruntime==1.30.0
     #   -c .github/requirements/semantic-worker-linux-x64.lock
     #   semantica (pyproject.toml)
 openai==3.37.0
-    # via semantica (pyproject.toml)
+    # via
+    #   -c .github/requirements/semantic-worker-linux-x64.lock
+    #   semantica (pyproject.toml)
 opencv-python==5.0.0.93
     # via
     #   -c .github/requirements/semantic-worker-linux-x64.lock
@@ -331,10 +322,6 @@ psutil==7.2.2
     # via
     #   -c .github/requirements/semantic-worker-linux-x64.lock
     #   accelerate
-pyarrow==25.0.1
-    # via
-    #   -c .github/requirements/semantic-worker-linux-x64.lock
-    #   semantica (pyproject.toml)
 pyclipper==1.4.0
     # via
     #   -c .github/requirements/semantic-worker-linux-x64.lock
@@ -456,16 +443,11 @@ safetensors==0.8.0
     #   accelerate
     #   docling-ibm-models
     #   transformers
-scikit-learn==1.9.1
-    # via
-    #   -c .github/requirements/semantic-worker-linux-x64.lock
-    #   semantica (pyproject.toml)
 scipy==1.18.1
     # via
     #   -c .github/requirements/semantic-worker-linux-x64.lock
     #   semantica (pyproject.toml)
     #   docling-slim
-    #   scikit-learn
 semchunk==3.2.5
     # via
     #   -c .github/requirements/semantic-worker-linux-x64.lock
@@ -488,7 +470,9 @@ six==1.17.0
     #   python-dateutil
     #   rapidocr
 sniffio==1.3.1
-    # via openai
+    # via
+    #   -c .github/requirements/semantic-worker-linux-x64.lock
+    #   openai
 soupsieve==2.9.2
     # via
     #   -c .github/requirements/semantic-worker-linux-x64.lock
@@ -505,10 +489,6 @@ tabulate==0.10.0
     # via
     #   -c .github/requirements/semantic-worker-linux-x64.lock
     #   docling-core
-threadpoolctl==3.7.0
-    # via
-    #   -c .github/requirements/semantic-worker-linux-x64.lock
-    #   scikit-learn
 tokenizers==0.23.2
     # via
     #   -c .github/requirements/semantic-worker-linux-x64.lock
@@ -567,6 +547,7 @@ tree-sitter-typescript==0.23.2
     #   docling-core
 truststore==0.10.5
     # via
+    #   -c .github/requirements/semantic-worker-linux-x64.lock
     #   httpcore2
     #   httpx2
 typer==0.26.8
@@ -582,7 +563,6 @@ typing-extensions==4.16.0
     #   anyio
     #   beautifulsoup4
     #   docling-core
-    #   grpcio
     #   httpx2
     #   huggingface-hub
     #   openai

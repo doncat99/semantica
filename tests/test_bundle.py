@@ -15,6 +15,53 @@ from semantica.bundle import (
 )
 
 
+@pytest.mark.parametrize("site_packages", ["lib/python3.12/site-packages", "Lib/site-packages"])
+def test_worker_model_pruning_removes_only_unused_and_identical_models(tmp_path, site_packages):
+    from semantica.bundle import prune_worker_models
+
+    model_root = tmp_path / "models"
+    table = model_root / "docling-project--docling-models/model_artifacts/tableformer"
+    files = {
+        table / "fast/tableformer_fast.safetensors": b"unused fast weights",
+        table / "accurate/tableformer_accurate.safetensors": b"accurate weights",
+        table / "accurate/tm_config.json": b"{}",
+        model_root / "RapidOcr/PP-OCRv6_det_small.onnx": b"detector",
+        model_root / "RapidOcr/PP-OCRv6_rec_small.onnx": b"recognizer",
+        model_root / "RapidOcr/ch_ppocr_mobile_v2.0_cls_mobile.onnx": b"classifier",
+        model_root / "RapidOcr/fonts/FZYTK.TTF": b"font",
+    }
+    package = tmp_path / "python" / site_packages / "rapidocr/models"
+    files.update({
+        package / "PP-OCRv6_det_small.onnx": b"detector",
+        package / "PP-OCRv6_rec_small.onnx": b"different recognizer",
+        package / "another_model.onnx": b"keep",
+        tmp_path / "python/include/header.h": b"keep header",
+        tmp_path / "python" / site_packages / "numpy/tests/test_sample.py": b"keep test",
+    })
+    for path, content in files.items():
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(content)
+
+    prune_worker_models(tmp_path)
+    prune_worker_models(tmp_path)  # Repeating the native step is harmless.
+    assert not (table / "fast").exists()
+    assert not (package / "PP-OCRv6_det_small.onnx").exists()
+    for path, content in files.items():
+        if path != package / "PP-OCRv6_det_small.onnx" and "fast" not in path.parts:
+            assert path.read_bytes() == content
+
+
+def test_worker_model_pruning_rejects_missing_canonical_weights_before_deletion(tmp_path):
+    from semantica.bundle import prune_worker_models
+
+    fast = tmp_path / "models/docling-project--docling-models/model_artifacts/tableformer/fast/model.bin"
+    fast.parent.mkdir(parents=True)
+    fast.write_bytes(b"keep until inputs are valid")
+    with pytest.raises(ValueError, match="required offline model"):
+        prune_worker_models(tmp_path)
+    assert fast.is_file()
+
+
 def test_parser_dependency_closure_tracks_selected_ort_without_rapidocr_requirement(tmp_path, monkeypatch):
     from importlib import metadata
     distributions = [SimpleNamespace(metadata={"Name": name}, requires=[],

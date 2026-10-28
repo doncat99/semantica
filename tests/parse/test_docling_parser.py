@@ -7,6 +7,18 @@ from pathlib import Path
 from semantica.parse.docling_parser import DoclingParser, DoclingMetadata
 
 class TestDoclingParser(unittest.TestCase):
+    def test_native_bundle_selects_accurate_tableformer_explicitly(self):
+        from docling.datamodel.pipeline_options import PdfPipelineOptions, TableFormerMode
+        from docling.datamodel.base_models import InputFormat
+
+        options = PdfPipelineOptions()
+        options.table_structure_options.mode = TableFormerMode.FAST
+        with patch('semantica.parse.docling_parser.PdfPipelineOptions', return_value=options):
+            with patch.object(Path, 'exists', return_value=True):
+                self.parser.parse('fixture.pdf')
+        pdf = self.mock_converter_cls.call_args.kwargs['format_options'][InputFormat.PDF]
+        self.assertEqual(pdf.pipeline_options.table_structure_options.mode, TableFormerMode.ACCURATE)
+
     def test_worker_streams_source_pages_before_artifact_without_finishing_on_last_page(self):
         import io
         import json
