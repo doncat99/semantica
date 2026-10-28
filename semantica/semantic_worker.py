@@ -15,7 +15,7 @@ from typing import Any, Callable, Dict, Optional, TextIO
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from .semantic_artifact_errors import SemanticArtifactError
+from .semantic_artifact_errors import SemanticArtifactError, model_output_cause
 from .semantic_source_artifact import bind_parsed_source_artifact, parse_source_artifact, upgrade_parsed_source_artifact
 from .semantic_artifact_schema import (
     ParseSourceRequest,
@@ -176,6 +176,9 @@ def _response(request_id: Optional[str], ok: bool, *, result: Optional[Dict[str,
         if validation_error:
             payload["error"]["diagnostic"] = {"origin": "protocol_error", "code": "SEMANTIC_WORKER_INTERNAL_ERROR",
                                                 **_safe_validation_details(error)}
+        output_error = model_output_cause(error) if error is not None else None
+        if output_error is not None:
+            error = output_error
         if isinstance(error, SemanticArtifactError):
             if error.status is not None:
                 payload["error"]["status"] = error.status

@@ -2212,7 +2212,7 @@ class CommunitySummarizer:
             level=int(comm.level),
             title=schema.title,
             summary=schema.summary,
-            findings=schema.findings,
+            findings=schema.model_dump()["findings"],
             impact_rating=schema.impact_rating,
             rating_explanation=schema.rating_explanation,
             member_entities=list(comm.entity_ids),

@@ -218,7 +218,7 @@ def test_batch_embedding_rejects_invalid_response(monkeypatch, data):
         pipeline._embed_texts(["one", "two"], SimpleNamespace(model_id="test"))
 
 
-def test_classification_and_native_reports_visit_every_passage(tmp_path, monkeypatch):
+def test_classification_reads_every_passage_but_report_admits_representative_source(tmp_path, monkeypatch):
     source = tmp_path / "long.txt"
     source.write_text("\n".join(f"Passage {index}: " + "fact " * 260 for index in range(90)))
     built = pipeline._build_source(SourceBuildInput(filePath=str(source), sourceId="long", materialRevision=source_content_revision(source), name=source.name, mimeType="text/plain"), False,
@@ -258,11 +258,12 @@ def test_classification_and_native_reports_visit_every_passage(tmp_path, monkeyp
     classification, _ = pipeline._classify_source(built, profile, relay)
     reports, _ = pipeline._explanation_reports("project", [built], [], [], [], [], [], built["passages"], relay)
     expected = {span.id for span in built["passages"]}
-    assert seen["source_classification"] == seen["knowledge_explanation"] == expected
+    assert seen["source_classification"] == expected
+    assert seen["knowledge_explanation"] == {built["passages"][0].id}
     assert set(classification.assignments[0].evidence_ids) == expected
-    assert set(reports[0].evidence_ids) == expected
-    assert calls.count("knowledge_explanation") > 1 and "knowledge_synthesis" not in calls
-    assert len(reports[0].sections) == calls.count("knowledge_explanation")
+    assert set(reports[0].evidence_ids) == seen["knowledge_explanation"]
+    assert calls.count("knowledge_explanation") == 1 and "knowledge_synthesis" not in calls
+    assert reports[0].metadata["coverage"] == "qualified-knowledge-and-representative-evidence-not-exhaustive-source-reading"
 
 
 def test_indivisible_context_is_rejected_without_truncation():

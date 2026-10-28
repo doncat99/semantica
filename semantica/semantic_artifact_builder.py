@@ -215,7 +215,7 @@ class _GroundedFinding(BaseModel):
 
 
 class _GroundedCommunityReport(CommunityReportLLMSchema):
-    findings: list[dict[str, Any]] = Field(min_length=1)
+    findings: list[_GroundedFinding] = Field(min_length=1)
 
     @model_validator(mode="after")
     def grounded_findings(self, info: ValidationInfo):
@@ -1542,6 +1542,113 @@ def _classify_source_batch(built: dict[str, Any], profile: Any, relay: Any) -> t
         assignments=assignments, unclassified_dimension_ids=[dimension.id for dimension in profile.dimensions if not any(item.dimension_id == dimension.id for item in assignments)], model_receipt_ids=[receipt.id for receipt in receipts]), receipts
 
 
+def _overview_knowledge(entities, assertions, relations, evidence_by_id):
+    """Overview admits four central proposition families per source, not a fact dump.
+
+    A family retains all values, qualifiers and statuses for its subject/predicate;
+    contradicted/retracted families are always included. Detailed target reports
+    retain their full selected knowledge. Ranking belongs to the native summarizer.
+    """
+    graph = {"entities": [{"id": item.id} for item in entities],
+             "relationships": [{"source": item.source_entity_id, "target": item.target_entity_id,
+                                "type": item.type} for item in relations]}
+    scores = CommunitySummarizer(cache_enabled=False)._compute_centrality(graph, [item.id for item in entities])
+    families, sources, required = {}, {}, set()
+    for kind, items in (("assertions", assertions), ("relations", relations)):
+        for item in items:
+            subject = item.subject_id if kind == "assertions" else item.source_entity_id
+            predicate = item.predicate if kind == "assertions" else item.type
+            key = (subject, predicate)
+            families.setdefault(key, []).append((kind, item))
+            sources.setdefault(key, set()).update(evidence_by_id[ref].representation_id for ref in item.evidence_ids)
+            if item.status in {"contradicted", "retracted", "rejected"}:
+                required.add(key)
+    ranked = sorted(families, key=lambda key: (-scores.get(key[0], 0), key))
+    counts, selected = {}, set(required)
+    for key in ranked:
+        if any(counts.get(source, 0) < 4 for source in sources[key]):
+            selected.add(key)
+            for source in sources[key]:
+                counts[source] = counts.get(source, 0) + 1
+    admitted = {kind: [] for kind in ("assertions", "relations")}
+    for key in ranked:
+        if key in selected:
+            for kind, item in families[key]:
+                admitted[kind].append(item)
+    endpoint_ids = {item.subject_id for item in admitted["assertions"]} | {
+        item.object_entity_id for item in admitted["assertions"]} | {
+        ref for item in admitted["relations"] for ref in (item.source_entity_id, item.target_entity_id)}
+    return [item for item in entities if item.id in endpoint_ids], admitted["assertions"], admitted["relations"]
+
+
+def _reading_report_context(target, entities, assertions, relations, evidence_by_id, source_builds):
+    """Admit knowledge once, with one located support per fact and source.
+
+    The snapshot retains every occurrence. Reading reports need the qualified
+    proposition and its grounding, not occurrence indexes or every raw passage.
+    """
+    spans = {}
+
+    def supports(refs):
+        by_source = {}
+        structural = {}
+        for ref in refs:
+            span = evidence_by_id[ref]
+            if span.metadata.get("structural_ref"):
+                # Headers, cells and notes jointly ground qualified table facts.
+                structural.setdefault((span.representation_id, span.quote), span)
+                continue
+            previous = by_source.get(span.representation_id)
+            if previous is None or (len(span.quote), span.id) < (len(previous.quote), previous.id):
+                by_source[span.representation_id] = span
+        selected = [*by_source.values(), *structural.values()]
+        for span in selected:
+            spans[span.id] = span
+        return [span.id for span in selected]
+
+    rows = {"entities": [], "assertions": [], "relations": []}
+    used_entities = set()
+    assertion_keys = {}
+    for item in assertions:
+        row = item.model_dump(mode="json", exclude={"metadata", "support_ids"})
+        row["evidence_ids"] = supports(item.evidence_ids)
+        rows["assertions"].append(row)
+        used_entities.update([item.subject_id, item.object_entity_id])
+        if item.object_entity_id:
+            assertion_keys[stable_digest([item.subject_id, item.predicate, item.object_entity_id,
+                                          item.qualifiers, item.status])] = row
+    for item in relations:
+        key = stable_digest([item.source_entity_id, item.type, item.target_entity_id, item.qualifiers, item.status])
+        refs = supports(item.evidence_ids)
+        if key in assertion_keys:
+            # Assertion and edge are two projections of the same qualified fact.
+            row = assertion_keys[key]
+            row["evidence_ids"] = sorted(set(row["evidence_ids"]) | set(refs))
+        else:
+            row = item.model_dump(mode="json", exclude={"metadata", "support_ids"})
+            row["evidence_ids"] = refs
+            rows["relations"].append(row)
+        used_entities.update([item.source_entity_id, item.target_entity_id])
+    endpoint_support = {}
+    for row in [*rows["assertions"], *rows["relations"]]:
+        for field in ("subject_id", "object_entity_id", "source_entity_id", "target_entity_id"):
+            if row.get(field) and row["evidence_ids"]:
+                endpoint_support.setdefault(row[field], row["evidence_ids"][:1])
+    for item in entities:
+        row = item.model_dump(mode="json", exclude={"metadata", "aliases"})
+        # Fact endpoints already have grounding; entity-only scopes still need it.
+        row["evidence_ids"] = endpoint_support.get(item.id, []) if item.id in used_entities else supports(item.evidence_ids)
+        rows["entities"].append(row)
+    covered_sources = {span.representation_id for span in spans.values()}
+    for built in source_builds:
+        for span in built["passages"]:
+            if target["type"] == "overview" and span.representation_id not in covered_sources:
+                spans[span.id] = span
+                covered_sources.add(span.representation_id)
+    return {"target": target, **rows,
+            "evidence": [{"id": span.id, "quote": span.quote} for span in spans.values()]}, spans
+
+
 def _explanation_reports(project_id: str, source_builds: list[dict[str, Any]], entities: list[KnowledgeEntity],
                          assertions: list[KnowledgeAssertion], relations: list[KnowledgeRelation],
                          communities: list[KnowledgeCommunity], topics: list[KnowledgeTopic],
@@ -1573,30 +1680,34 @@ def _explanation_reports(project_id: str, source_builds: list[dict[str, Any]], e
                              "depends_on": [*shared_report.metadata["depends_on"], target_id]},
             }))
             continue
-        selected_entities = [entity for entity in entities if entity.id in entity_ids]
         selected_assertions = [assertion for assertion in assertions if assertion.subject_id in entity_ids or assertion.object_entity_id in entity_ids]
         selected_relations = [relation for relation in relations if relation.source_entity_id in entity_ids or relation.target_entity_id in entity_ids]
-        seed_spans = [evidence_by_id[ref] for item in [*selected_entities, *selected_assertions, *selected_relations] for ref in item.evidence_ids]
-        spans = {span.id: span for built in source_builds for span in built["passages"] if kind == "overview" or any(
-            seed.representation_id == span.representation_id and seed.locator.start_char < span.locator.end_char and seed.locator.end_char > span.locator.start_char for seed in seed_spans)}
-        spans.update({span.id: span for span in seed_spans})
+        endpoint_ids = entity_ids | {ref for item in selected_assertions for ref in (item.subject_id, item.object_entity_id)} | {
+            ref for item in selected_relations for ref in (item.source_entity_id, item.target_entity_id)}
+        selected_entities = [entity for entity in entities if entity.id in endpoint_ids]
+        if kind == "overview" and (selected_assertions or selected_relations):
+            selected_entities, selected_assertions, selected_relations = _overview_knowledge(
+                selected_entities, selected_assertions, selected_relations, evidence_by_id)
+        context, spans = _reading_report_context(
+            {"id": target_id, "type": kind, "title": title}, selected_entities,
+            selected_assertions, selected_relations, evidence_by_id, source_builds)
         if not spans:
             continue
         dependencies = sorted(item.id for item in [*selected_entities, *selected_assertions, *selected_relations])
-        context = {"target": {"id": target_id, "type": kind, "title": title},
-            "entities": [item.model_dump(mode="json") for item in selected_entities],
-            "assertions": [item.model_dump(mode="json") for item in selected_assertions],
-            "relations": [item.model_dump(mode="json") for item in selected_relations],
-            "evidence": [{"id": span.id, "quote": span.quote} for span in spans.values()]}
         report_id = f"report:{kind}:{sha256(target_id.encode()).hexdigest()[:24]}"
-        input_digest = stable_digest({"context": context, "locators": [span.locator.model_dump(mode="json") for span in spans.values()], "model": relay.model_id if relay else None, "recipe": "native-community-report-v1"})
+        input_digest = stable_digest({"context": context, "locators": [span.locator.model_dump(mode="json") for span in spans.values()], "model": relay.model_id if relay else None, "recipe": "native-knowledge-report-v2"})
         sections, report_receipts = _grounded_explanation(context, relay)
         refs = sorted({ref for section in sections for ref in section.evidence_ids})
         reports.append(KnowledgeReport(id=report_id, report_type=kind, title=title, summary="\n\n".join(section.text for section in sections),
             sections=sections, evidence_ids=refs, model_receipt_ids=[receipt.id for receipt in report_receipts], **association,
             content_hash=stable_digest({"sections": [section.model_dump(mode="json") for section in sections], "evidence": [spans[ref].model_dump(mode="json") for ref in refs]}),
             metadata={"producer": "semantica", "depends_on": dependencies, "generation": "evidence-grounded-model", "input_digest": input_digest,
-                "model_requests": len(report_receipts), "composition": "native-community-reports-with-complete-grounded-sections"}))
+                "model_requests": len(report_receipts), "composition": "native-community-reports-with-complete-grounded-sections",
+                "input_admission": "qualified-knowledge-with-representative-source-support-v2",
+                "input_evidence_count": len(spans), "input_source_count": len({span.representation_id for span in spans.values()}),
+                "input_assertion_count": len(selected_assertions), "input_relation_count": len(selected_relations),
+                "overview_selection": "native-centrality-four-proposition-families-per-source-with-all-conflict-families" if kind == "overview" else None,
+                "coverage": "qualified-knowledge-and-representative-evidence-not-exhaustive-source-reading"}))
         receipts.extend(report_receipts)
     return reports, receipts
 
@@ -1618,7 +1729,7 @@ def explain_evidence(snapshot: SemanticArtifact, target: dict[str, str], evidenc
 
 def _grounded_explanation(context: dict[str, Any], relay: Any):
     checkpoint = active_checkpoint.get()
-    key = {"context": context}
+    key = {"context": context, "recipe": "compact-grounding-v2"}
     saved = checkpoint.read("grounded-explanation", key) if checkpoint else None
     if saved is not None:
         try:
@@ -1629,7 +1740,7 @@ def _grounded_explanation(context: dict[str, Any], relay: Any):
             receipts = [ModelReceipt.model_validate(item) for item in saved["receipts"]]
             return [ReportSection(title=item["summary"].strip(), text=item["explanation"].strip(),
                 evidence_ids=sorted({citation["evidence_id"] for citation in item["citations"]}))
-                for report in reports for item in report.findings], receipts
+                for report in reports for item in report.model_dump()["findings"]], receipts
     instruction = (
         "Explain the supplied knowledge for a reader learning the subject. Return strict JSON "
         "{title,summary,findings:[{summary,explanation,citations:[{evidence_id}]}]}. Write substantive connected explanations: "
@@ -1653,13 +1764,19 @@ def _grounded_explanation(context: dict[str, Any], relay: Any):
     graph = {"entities": [{"id": item["id"], "name": item["canonical_name"]} for item in context["entities"]],
              "relationships": [{"source": item["source_entity_id"], "target": item["target_entity_id"],
                                 "type": item["type"]} for item in context["relations"]]}
-    chunks = []
-    for span in context["evidence"]:
-        facts = {key: [{field: value for field, value in item.items() if field != "metadata"}
-                       for item in context[key] if span["id"] in item["evidence_ids"]]
-                 for key in ("entities", "assertions", "relations")}
-        facts = {key: value for key, value in facts.items() if value}
-        chunks.append({"id": span["id"], "text": span["quote"], **({"metadata": facts} if facts else {})})
+    chunks_by_id = {span["id"]: {"id": span["id"], "text": span["quote"]} for span in context["evidence"]}
+    names = {item["id"]: item["canonical_name"] for item in context["entities"]}
+    for kind in ("entities", "assertions", "relations"):
+        for item in context[kind]:
+            fact = {field: value for field, value in item.items()
+                    if field not in {"id", "metadata", "evidence_ids", "support_ids", "aliases"}}
+            for field in ("subject_id", "object_entity_id", "source_entity_id", "target_entity_id"):
+                if field in fact:
+                    fact[field] = names.get(fact[field], fact[field])
+            for ref in item["evidence_ids"]:
+                if ref in chunks_by_id:
+                    chunks_by_id[ref].setdefault("metadata", {}).setdefault(kind, []).append(fact)
+    chunks = list(chunks_by_id.values())
     try:
         reports = summarizer.summarize_evidence(
             {"id": context["target"]["id"], "entity_ids": [item["id"] for item in context["entities"]]},
@@ -2485,7 +2602,11 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
         path = output_dir / f"representation-{_safe_id(item['source'].source_id)}.json"
         item["artifact_digest"] = _write_json(path, item["document"])
         item["artifact_path"] = path
-    snapshot_id = f"snapshot:{_safe_id(request.project_id)}:{request.input_revision.split(':')[-1][:16]}"
+    # Publication identity includes its producer; paid-work reuse remains business-content scoped.
+    publication_digest = stable_digest({"format": "portable-manifest-v1",
+        "inputRevision": request.input_revision, "producer": request.release.artifact_digest,
+        "schema": request.release.schema_digest})
+    snapshot_id = f"snapshot:{_safe_id(request.project_id)}:{publication_digest.split(':')[-1]}"
     entities = list(entities_by_id.values())
     mentions = entities
     identity_registry = []
@@ -2531,12 +2652,12 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
         retrieval_path = output_dir / "retrieval.json"
         retrieval_digest = _write_json(retrieval_path, retrieval_payload)
         retrieval_artifact_id = "artifact:retrieval"
-        representation_artifacts = [ArtifactManifest(id=item["artifact_id"], artifact_type="representation", artifact_ref=str(item["artifact_path"]), artifact_hash=item["artifact_digest"]) for item in source_builds]
+        representation_artifacts = [ArtifactManifest(id=item["artifact_id"], artifact_type="representation", artifact_ref=item["artifact_digest"], artifact_hash=item["artifact_digest"]) for item in source_builds]
         # The snapshot bytes are self-referential: putting their own digest inside
         # the bytes would require a fixed-point hash. The external worker manifest
         # carries the snapshot artifact; this immutable in-snapshot manifest lists
         # only its upstream artifacts.
-        retrieval_artifact = ArtifactManifest(id=retrieval_artifact_id, artifact_type="retrieval", artifact_ref=str(retrieval_path), artifact_hash=retrieval_digest, depends_on=[item.id for item in representation_artifacts])
+        retrieval_artifact = ArtifactManifest(id=retrieval_artifact_id, artifact_type="retrieval", artifact_ref=retrieval_digest, artifact_hash=retrieval_digest, depends_on=[item.id for item in representation_artifacts])
         receipt_ids = [receipt.id for receipt in model_receipts]
         lineage = KernelLineage(schema_digest=request.release.schema_digest, recipe_id=request.recipe.id, recipe_digest=stable_digest(request.recipe.lineage_payload()), rule_version="semantica-semantic-artifact-v3", rule_digest=stable_digest({"pipeline": request.recipe.id, "identity_resolution": "native-conflict-veto-v1", "identity_property_schema": request.identity_property_schema}), ontology_version="semantica-default", ontology_digest=stable_digest({"ontology": "default"}), extraction_spec_digest=request.recipe.extraction_spec.digest if request.recipe.extraction_spec else None, model_receipt_ids=receipt_ids)
         retrieval_manifests = [

@@ -68,6 +68,24 @@ def test_worker_publishes_one_canonical_snapshot_queryable_without_reconstructio
     assert answer["result"]["retrievalManifestId"] == retrieval["revision"]
 
 
+def test_snapshot_publication_identity_separates_producer_from_business_input(tmp_path):
+    source = tmp_path / "native.txt"
+    source.write_text("Ada Lovelace designed the Analytical Engine.")
+    raw = _request(source, tmp_path / "first")["params"]
+    raw["checkpointDir"] = str(tmp_path / "checkpoint")
+    first = build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(raw))
+    raw["outputDir"] = str(tmp_path / "relocated")
+    repeated = build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(raw))
+    assert first["snapshot_digest"] == repeated["snapshot_digest"]
+    assert all(item.artifact_ref == item.artifact_hash for item in repeated["snapshot"].artifact_manifest)
+    raw["release"]["artifactDigest"] = H3
+    upgraded = build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(raw))
+    assert upgraded["snapshot"].id != first["snapshot"].id
+    assert upgraded["snapshot"].id != f"snapshot:project-1:{raw['inputRevision'].split(':')[-1][:16]}"
+    assert upgraded["snapshot"].entities == first["snapshot"].entities
+    assert upgraded["snapshot"].model_receipts == first["snapshot"].model_receipts
+
+
 def test_worker_processes_parse_build_and_query_share_canonical_artifact(tmp_path):
     import subprocess
     import sys
@@ -509,7 +527,7 @@ def test_explanation_rejects_invalid_saved_result_and_reuses_replacement(tmp_pat
     context = {'target': {'id': 'source:1', 'type': 'source-scope'},
                'entities': [], 'assertions': [], 'relations': [],
                'evidence': [{'id': 'evidence:source', 'quote': 'Source quote'}]}
-    key = {'context': context}
+    key = {'context': context, 'recipe': 'compact-grounding-v2'}
     report = {'title': 'Source', 'summary': 'Supported', 'findings': [
         {'summary': 'Meaning', 'explanation': 'Explained from the source.', 'citations': [citation]}]}
     checkpoint.write('grounded-explanation', key, {'reports': [report], 'receipts': []})
@@ -537,7 +555,7 @@ def test_explanation_rejects_invalid_saved_result_and_reuses_replacement(tmp_pat
     assert sections[0].evidence_ids == ['evidence:source']
     assert [item.id for item in receipts] == [item.id for item in restored_receipts] == ['receipt:fresh']
     assert checkpoint.read('grounded-explanation', key)['reports'][0]['findings'][0]['citations'] == [
-        {'evidence_id': 'evidence:source'}]
+        {'evidence_id': 'evidence:source', 'quote': 'Source quote'}]
 
 
 def test_product_output_uses_host_admitted_output_limit(monkeypatch):
