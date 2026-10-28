@@ -259,9 +259,9 @@ def test_classification_reads_every_passage_but_report_admits_representative_sou
     reports, _ = pipeline._explanation_reports("project", [built], [], [], [], [], [], built["passages"], relay)
     expected = {span.id for span in built["passages"]}
     assert seen["source_classification"] == expected
-    assert seen["knowledge_explanation"] == {built["passages"][0].id}
+    assert seen["knowledge_explanation"] == {"e1"}
     assert set(classification.assignments[0].evidence_ids) == expected
-    assert set(reports[0].evidence_ids) == seen["knowledge_explanation"]
+    assert set(reports[0].evidence_ids) == {built["passages"][0].id}
     assert calls.count("knowledge_explanation") == 1 and "knowledge_synthesis" not in calls
     assert reports[0].metadata["coverage"] == "qualified-knowledge-and-representative-evidence-not-exhaustive-source-reading"
 

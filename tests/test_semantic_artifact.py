@@ -169,7 +169,7 @@ def test_scoped_explanation_reuses_native_grounding_and_rejects_foreign_evidence
             assert span.quote in prompt
             return schema.model_validate({"title": "Meaning", "summary": "Supported",
                 "findings": [{"summary": "Meaning", "explanation": "Explained from the source.",
-                              "citations": [{"evidence_id": span.id}]}]}, context=context)
+                              "citations": [{"evidence_id": context["evidence"][0]["id"]}]}]}, context=context)
 
     monkeypatch.setattr(pipeline, "_project_model_provider", lambda *args: Provider())
     target = {"id": "chapter:1", "type": "source-scope", "title": "Foundations"}
@@ -527,7 +527,7 @@ def test_explanation_rejects_invalid_saved_result_and_reuses_replacement(tmp_pat
     context = {'target': {'id': 'source:1', 'type': 'source-scope'},
                'entities': [], 'assertions': [], 'relations': [],
                'evidence': [{'id': 'evidence:source', 'quote': 'Source quote'}]}
-    key = {'context': context, 'recipe': 'compact-grounding-v2'}
+    key = {'context': context, 'recipe': 'compact-grounding-v3'}
     report = {'title': 'Source', 'summary': 'Supported', 'findings': [
         {'summary': 'Meaning', 'explanation': 'Explained from the source.', 'citations': [citation]}]}
     checkpoint.write('grounded-explanation', key, {'reports': [report], 'receipts': []})
@@ -536,7 +536,7 @@ def test_explanation_rejects_invalid_saved_result_and_reuses_replacement(tmp_pat
     def relay_response(relay, payload, operation, _checkpoint, _cache_key):
         calls.append(payload)
         valid = {**report, 'findings': [{**report['findings'][0],
-                 'citations': [{'evidence_id': 'evidence:source'}]}]}
+                 'citations': [{'evidence_id': 'e1'}]}]}
         return {'model': relay.model_id, 'choices': [{'finish_reason': 'stop',
             'message': {'content': json.dumps(valid)}}]}, ModelReceipt(
                 id='receipt:fresh', operation=operation, provider='test', model=relay.model_id,

@@ -87,6 +87,37 @@ provider retry policy or weaken that test.
 
 ## Dated follow-ups
 
+- 2026-10-28: corrected the overview-only default introduced by the earlier
+  budget repair. Inspected revision 823048f; native owners remain
+  `_explanation_reports` and worker `_reading_reports`. The native default plan
+  now selects overview, up to six evidence-backed topics and six grounded core
+  concepts using CommunitySummarizer's existing centrality implementation.
+  This bounds initial reading scope; it is not a context-window increase or
+  exhaustive generation for all entities. Explicit scopes remain supported.
+  The worker accepts existing same-snapshot target IDs, returns plannedTargetIds,
+  and skips saved reports without calling a model. Host publication checks that
+  the complete plan is present after merging saved reports. Admission suite:
+  10 passed, including bounded grounding and no-paid-call reuse regressions.
+  Packaged real-data verification for this correction is pending. No change
+  to budgets, citation validation, retries or upstream merge disposition.
+
+- 2026-10-28: run 3f6bc786-5f48-4c73-9497-d4f69deac804 classified 39
+  rejected citations as citation_unknown_evidence. Native _grounded_explanation
+  now exposes request-local e1/e2 references instead of long storage identities,
+  keeps native per-batch strict validation, and maps validated references back
+  before sections/checkpoint publication. No fuzzy matching, grounding relaxation
+  or budget increase. The payload/remapping regression failed before this fix;
+  checkpoint and source-scope fixtures now reflect the model-facing contract.
+  Real-provider acceptance pending. Same native owner/revision as above.
+
+- 2026-10-28: real run 997159fd-fe9f-4d94-903c-b450c8fe47e5 rejected
+  41 citations with indistinguishable value_error diagnostics. The existing
+  _SemanticCitation owner now emits safe typed reasons for unknown evidence,
+  missing canonical quotes and quote mismatches, without emitting input values
+  or changing admission. Three red diagnostic regressions now pass, along with
+  the existing reading-report admission tests (12 passed). Actual cause and
+  real-provider acceptance remain pending; inspected fork revision 823048f.
+
 - 2026-10-28: record started before implementation.
 - 2026-10-28: packaged real-provider run b3859b5d-6ebf-4dc6-a791-6d3c04dbb6e4
   passed budget admission but failed typed-output validation. Inspection found
@@ -105,3 +136,22 @@ provider retry policy or weaken that test.
   provider input values. Combined native artifact/admission/context/grounding/
   worker/PDF ownership selection: 92 passed, one documented baseline retry-count
   assertion deselected. No retry policy, citation validation or budget changed.
+- 2026-10-28: packaged artifact sha256:2829e85b166f01f7965aa4d6a3dc2532071b9a127e97795847b09907b150c3cb
+  completed real-provider report run 5b0858e9-49d7-4c5b-8d22-6d2ea5e70c2d.
+  Report published against the existing adopted 38-source snapshot; 40 sections,
+  five model receipts, 218544 prompt tokens and 11588 completion tokens total.
+  No context/output budget increase (500000/32768) or grounding relaxation.
+  Native focused suite: 140 passed, one independently reproduced baseline
+  retry-count assertion deselected. Actual App rendered report prose and source
+  citation controls. Source preview opened; exact page/line navigation remains
+  a separate host acceptance gap. Report success does not certify all research
+  output quality or host Auto Test cases.
+### Scope admission correction, 2026-10-28
+
+Real adopted 38-source snapshot inspection showed that bounded target counts alone
+still selected 8,104 facts for one topic and 1,267 for one concept. The existing
+native `_overview_knowledge` admission now also applies inside topic/concept scopes:
+four central proposition families per source with complete qualifiers, variants,
+and conflict families. The canonical snapshot remains exhaustive. A regression
+first reproduced both scoped reports sending all 100 fixture facts. Packaged
+verification is pending; this is not a claim of real-provider acceptance.

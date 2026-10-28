@@ -76,6 +76,7 @@ class ReadingReportsRequest(BaseModel):
     output_dir: str = Field(alias="outputDir")
     relay: RelayRef
     target_ids: list[str] | None = Field(default=None, alias="targetIds", min_length=1)
+    existing_target_ids: list[str] = Field(default_factory=list, alias="existingTargetIds")
 
 
 class EvidenceExplanationRequest(ReadingReportsRequest):
@@ -126,7 +127,7 @@ def _explain_evidence(params: Dict[str, Any], progress: Optional[Callable[[Dict[
 
 
 def _reading_reports(params: Dict[str, Any], progress: Optional[Callable[[Dict[str, Any]], None]]) -> Dict[str, Any]:
-    from .semantic_artifact_builder import _explanation_reports, _report_support_sources
+    from .semantic_artifact_builder import _explanation_reports, _report_support_sources, _default_reading_report_targets
 
     request = ReadingReportsRequest.model_validate(params)
     snapshot = _verified_snapshot(request)
@@ -135,16 +136,23 @@ def _reading_reports(params: Dict[str, Any], progress: Optional[Callable[[Dict[s
     passages = [span for span in snapshot.evidence_spans if span.metadata.get("role") == "source-passage"]
     source_builds = [{"passages": [span for span in passages if span.representation_id == representation.id]}
                      for representation in snapshot.document_representations]
+    planned = request.target_ids if request.target_ids is not None else _default_reading_report_targets(
+        snapshot.project_id, snapshot.entities, snapshot.assertions, snapshot.relations, snapshot.topics)
+    known = {snapshot.project_id, *[item.id for item in snapshot.entities],
+             *[item.id for item in snapshot.communities], *[item.id for item in snapshot.topics]}
+    if len(planned) != len(set(planned)) or set(planned) - known:
+        raise SemanticArtifactError("reading report targets must be distinct known IDs")
+    missing = [ref for ref in planned if ref not in request.existing_target_ids]
     reports, receipts = _explanation_reports(snapshot.project_id, source_builds, snapshot.entities,
         snapshot.assertions, snapshot.relations, snapshot.communities, snapshot.topics,
-        snapshot.evidence_spans, request.relay, target_ids=request.target_ids)
+        snapshot.evidence_spans, request.relay, target_ids=missing) if missing else ([], [])
     _report_support_sources(snapshot.document_representations, snapshot.evidence_spans,
         snapshot.entities, snapshot.assertions, snapshot.relations, snapshot.communities,
         snapshot.topics, reports)
     if progress:
         progress({"stage": "reading_reports", "percent": 100, "detail": f"Generated {len(reports)} reading reports"})
     payload = {"protocol": "semantica.reading-reports.v1", "snapshotId": snapshot.id,
-            "snapshotDigest": request.snapshot_digest,
+            "snapshotDigest": request.snapshot_digest, "plannedTargetIds": planned,
             "reports": [report.model_dump(mode="json", by_alias=True) for report in reports],
             "modelReceipts": [receipt.model_dump(mode="json", by_alias=True) for receipt in receipts]}
     output_dir = Path(request.output_dir)

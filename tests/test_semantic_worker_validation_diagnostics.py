@@ -37,3 +37,25 @@ def test_wrapped_typed_output_failure_retains_safe_validation_diagnostic():
     assert diagnostic["validationErrorCount"] > 0
     assert {"location": ["projectId"], "type": "missing"} in diagnostic["validationErrors"]
     assert "private prompt" not in json.dumps(response)
+
+
+@pytest.mark.parametrize('citation,evidence,expected', [
+    ({'evidence_id': 'foreign'}, [{'id': 'known', 'quote': 'private text'}], 'citation_unknown_evidence'),
+    ({'evidence_id': 'known'}, [{'id': 'known', 'quote': ''}], 'citation_missing_quote'),
+    ({'evidence_id': 'known', 'quote': 'different'}, [{'id': 'known', 'quote': 'private text'}], 'citation_quote_mismatch'),
+])
+def test_citation_failure_identifies_safe_reason(citation, evidence, expected):
+    from semantica.semantic_artifact_builder import _ProjectModelProvider, _GroundedCommunityReport
+    from semantica.utils.exceptions import ProcessingError
+    from types import SimpleNamespace
+
+    provider = _ProjectModelProvider(SimpleNamespace(model_id='test'))
+    provider.generate = lambda *args, **kwargs: json.dumps({'title': 'Report', 'summary': 'Summary',
+        'findings': [{'summary': 'Finding', 'explanation': 'Explanation', 'citations': [citation]}]})
+    with pytest.raises(ProcessingError) as failure:
+        provider.generate_typed('private prompt', _GroundedCommunityReport, max_retries=1,
+                                validation_context={'evidence': evidence})
+    response = _response('typed', False, error=failure.value)
+    assert response['error']['diagnostic']['validationErrors'] == [
+        {'location': ['findings', 0, 'citations', 0], 'type': expected}]
+    assert 'private text' not in json.dumps(response)

@@ -6,6 +6,39 @@ from semantica import semantic_artifact_builder as pipeline
 from semantica.semantic_artifact_schema import EvidenceSpan, KnowledgeAssertion, KnowledgeEntity, KnowledgeRelation
 
 
+def test_default_reading_plan_includes_grounded_topics_and_core_concepts_only():
+    from semantica.semantic_artifact_schema import KnowledgeTopic
+    entities = [KnowledgeEntity(id=f"e{i}", canonical_name=f"Concept {i}", type="CONCEPT") for i in range(50)]
+    assertions = [KnowledgeAssertion(id=f"a{i}", subject_id=f"e{i}", predicate="has", object="evidence", qualifiers={"polarity": "positive"},
+                    evidence_ids=["support"]) for i in range(20)]
+    topics = [KnowledgeTopic(id=f"t{i}", title=f"Topic {i}", entity_ids=[f"e{i}"],
+                           assertion_ids=[f"a{i}"], evidence_ids=["support"]) for i in range(20)]
+    plan = pipeline._default_reading_report_targets("p", entities, assertions, [], topics)
+    assert plan[0] == "p"
+    assert len(plan) == len(set(plan)) == 13
+    assert sum(ref.startswith("t") for ref in plan) == 6
+    assert sum(ref.startswith("e") for ref in plan) == 6
+    assert "e49" not in plan
+
+
+def test_worker_reuses_existing_default_reports_without_model_calls(monkeypatch, tmp_path):
+    from semantica import semantic_worker as worker
+    snapshot = SimpleNamespace(id="snapshot", project_id="project", entities=[], assertions=[], relations=[],
+        topics=[], communities=[], evidence_spans=[], document_representations=[])
+    monkeypatch.setattr(worker, "_verified_snapshot", lambda request: snapshot)
+    monkeypatch.setattr(pipeline, "_report_support_sources", lambda *args: None)
+    monkeypatch.setattr(pipeline, "_explanation_reports", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("paid call")))
+    worker._reading_reports({"snapshotPath": "/unused", "snapshotDigest": "sha256:" + "1" * 64,
+        "snapshotId": "snapshot", "projectId": "project", "outputDir": str(tmp_path),
+        "existingTargetIds": ["project"], "relay": {"authorizationEnv": "OPENAI_API_KEY",
+            "baseUrl": "http://127.0.0.1:9999/v1/chat/completions", "bindingId": "binding:test",
+            "modelId": "test/model", "contextWindowTokens": 10000, "maxOutputTokens": 1000,
+            "capability": "knowledge.snapshot.generate", "receipts": "required"}}, None)
+    artifact = json.loads((tmp_path / "reading-reports.json").read_text())
+    assert artifact["plannedTargetIds"] == ["project"]
+    assert artifact["reports"] == artifact["modelReceipts"] == []
+
+
 def test_report_wire_schema_declares_required_finding_and_citation_fields():
     schema = pipeline._GroundedCommunityReport.model_json_schema()
     item = schema["properties"]["findings"]["items"]
@@ -60,18 +93,20 @@ def test_grounded_payload_never_repeats_storage_reference_arrays(monkeypatch):
         def generate_typed(self, prompt, schema, **kwargs):
             prompts.append(prompt)
             return schema.model_validate({"title": "Summary", "summary": "Grounded", "findings": [
-                {"summary": "Fact", "explanation": "Grounded", "citations": [{"evidence_id": "ev"}]}]},
+                {"summary": "Fact", "explanation": "Grounded", "citations": [{"evidence_id": "e1"}]}]},
                 context=kwargs["validation_context"])
     monkeypatch.setattr(pipeline, "_project_model_provider", lambda *args: Provider())
     entity = KnowledgeEntity(id="acme", canonical_name="Acme", type="ORG",
         evidence_ids=["ev", *[f"unused:{i}" for i in range(3000)]])
-    pipeline._grounded_explanation({"target": {"id": "project"},
+    sections, _ = pipeline._grounded_explanation({"target": {"id": "project"},
         "entities": [entity.model_dump(mode="json")], "assertions": [], "relations": [],
         "evidence": [{"id": "ev", "quote": "Acme"}]},
         SimpleNamespace(model_id="test", context_window_tokens=12000, max_output_tokens=1000))
     assert len(prompts) == 1
     assert "unused:" not in prompts[0]
     assert "evidence_ids" not in prompts[0]
+    assert "[e1]: Acme" in prompts[0]
+    assert sections[0].evidence_ids == ["ev"]
 
 
 def test_snapshot_bytes_do_not_depend_on_build_directory(tmp_path):
@@ -87,6 +122,25 @@ def test_snapshot_bytes_do_not_depend_on_build_directory(tmp_path):
     assert first["ok"] and second["ok"]
     graph = lambda result: next(item for item in result["result"]["artifacts"] if item["kind"] == "semantic-graph")
     assert graph(first)["digest"] == graph(second)["digest"]
+
+
+def test_short_reference_from_another_batch_is_rejected(monkeypatch):
+    import pytest
+    from pydantic import ValidationError
+    class Provider:
+        receipts = []
+        def generate_typed(self, prompt, schema, **kwargs):
+            assert [item['id'] for item in kwargs['validation_context']['evidence']] == ['e1']
+            return schema.model_validate({'title': 'Report', 'summary': 'Summary', 'findings': [
+                {'summary': 'Fact', 'explanation': 'Explanation', 'citations': [{'evidence_id': 'e2'}]}]},
+                context=kwargs['validation_context'])
+    monkeypatch.setattr(pipeline, '_project_model_provider', lambda *args: Provider())
+    with pytest.raises(ValidationError, match='supplied evidence_id'):
+        pipeline._grounded_explanation({'target': {'id': 'project'}, 'entities': [],
+            'assertions': [], 'relations': [], 'evidence': [
+                {'id': 'storage:first', 'quote': 'First source. ' * 35},
+                {'id': 'storage:second', 'quote': 'Second source. ' * 35}]},
+            SimpleNamespace(model_id='test', context_window_tokens=6500, max_output_tokens=1000))
 
 
 def test_report_preserves_structural_support_and_merges_duplicate_edge_projection():
@@ -134,3 +188,23 @@ def test_overview_selects_source_balanced_families_without_discarding_variants()
     assert {x.id for x in selected} >= {"claim:0", "variant", "claim:99", "conflict"}
     _, reversed_selection, _ = pipeline._overview_knowledge(entities, list(reversed(claims)), [], {x.id:x for x in evidence})
     assert {x.id for x in selected} == {x.id for x in reversed_selection}
+
+
+def test_concept_and_topic_reports_select_knowledge_before_prompting(monkeypatch):
+    from semantica.semantic_artifact_schema import KnowledgeTopic
+    evidence = [span(f"ev:{i}", f"Located support {i}") for i in range(100)]
+    entity = KnowledgeEntity(id="acme", canonical_name="Acme", type="ORG")
+    claims = [KnowledgeAssertion(id=f"claim:{i}", subject_id="acme", predicate=f"metric:{i}",
+        object=i, qualifiers={"polarity": "positive"}, evidence_ids=[f"ev:{i}"]) for i in range(100)]
+    topic = KnowledgeTopic(id="topic", title="Acme", entity_ids=["acme"],
+        assertion_ids=[item.id for item in claims], evidence_ids=[item.id for item in evidence])
+    contexts = []
+    def explain(context, _relay):
+        contexts.append(context)
+        return [pipeline.ReportSection(title="Summary", text="Grounded", evidence_ids=[context["evidence"][0]["id"]])], []
+    monkeypatch.setattr(pipeline, "_grounded_explanation", explain)
+    pipeline._explanation_reports("project", [], [entity], claims, [], [], [topic], evidence,
+                                  SimpleNamespace(model_id="test"), target_ids=["acme", "topic"])
+    assert {context["target"]["type"] for context in contexts} == {"concept", "topic"}
+    assert all(len(context["assertions"]) == 4 for context in contexts)
+    assert len(claims) == 100
