@@ -30,6 +30,8 @@ def run(command: list[str]) -> None:
 
 def build_wheel(output: Path) -> None:
     output.mkdir(parents=True, exist_ok=True)
+    run(["npm", "--prefix", "explorer", "ci", "--no-audit", "--no-fund"])
+    run(["npm", "--prefix", "explorer", "run", "build"])
     run(["uv", "build", "--wheel", "--out-dir", str(output)])
 
 

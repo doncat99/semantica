@@ -397,8 +397,8 @@ def _coerce_node_id(raw_node: Dict[str, Any]) -> Optional[str]:
 def _coerce_edge_endpoint(raw_edge: Dict[str, Any], prefix: str) -> Optional[str]:
     prefix = prefix.lower()
     candidates = {
-        "source": ["source_id", "source", "start", "start_id", "from", "src", "START_ID", ":START_ID"],
-        "target": ["target_id", "target", "end", "end_id", "to", "dst", "END_ID", ":END_ID"],
+        "source": ["source_id", "source_entity_id", "source", "start", "start_id", "from", "src", "START_ID", ":START_ID"],
+        "target": ["target_id", "target_entity_id", "target", "end", "end_id", "to", "dst", "END_ID", ":END_ID"],
     }[prefix]
     value = _pick_first(*(raw_edge.get(candidate) for candidate in candidates))
     if value is None:
@@ -1517,6 +1517,8 @@ class ContextGraph:
             self.add_nodes(nodes)
 
             edges = data.get("edges")
+            if edges is None:
+                edges = data.get("relations")
             if edges is None:
                 edges = data.get("relationships")
             if edges is None:

@@ -73,6 +73,18 @@ def invoke(module, request):
 
 with tempfile.TemporaryDirectory(prefix="semantica-native-acceptance-") as directory:
     scratch = Path(directory)
+    from fastapi.testclient import TestClient
+    from semantica.explorer.app import create_app
+    from semantica.explorer.session import GraphSession
+    explorer_graph = scratch / "explorer.json"
+    explorer_graph.write_text(json.dumps({"entities": [{"id": "a", "name": "Alpha"}, {"id": "b", "name": "Beta"}],
+        "relations": [{"id": "r", "source_entity_id": "a", "target_entity_id": "b", "type": "supports"}]}))
+    os.environ["SEMANTICA_API_KEY"] = "native-acceptance"
+    with TestClient(create_app(session=GraphSession.from_file(str(explorer_graph)))) as client:
+        index = client.get("/")
+        assert index.status_code == 200 and "/assets/" in index.text, "complete native Explorer UI is missing"
+        stats = client.get("/api/graph/stats", headers={"X-API-Key": "native-acceptance"}).json()
+        assert stats["node_count"] == 2 and stats["edge_count"] == 1, stats
     document = Document()
     document.add_paragraph("\u5317\u4eac\u5927\u5b66\u7814\u7a76\u62a5\u544a 73")
     document.save(scratch / "native.docx")
@@ -172,4 +184,5 @@ with tempfile.TemporaryDirectory(prefix="semantica-native-acceptance-") as direc
         "accelerationProfile": profile,
         "accelerationCapabilities": capabilities,
         "accelerationValidation": {"device": "cpu", "gpuInferenceValidated": False},
+        "nativeExplorer": {"completeUi": True, "nodes": 2, "edges": 1},
         "parserDependencyClosureVerified": True, "parserDependencyFiles": len(parser_files)}, indent=2) + "\n")
