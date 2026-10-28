@@ -705,12 +705,14 @@ class ContextGraph:
                 )
                 content = _pick_first(
                     raw_node.get("content"),
+                    raw_node.get("canonical_name"),
                     raw_node.get("text"),
                     raw_node.get("label"),
                     raw_node.get("name"),
                     raw_node.get("title"),
                     raw_node.get("pref_label"),
                     node_props.get("content"),
+                    node_props.get("canonical_name"),
                     node_props.get("text"),
                     node_props.get("label"),
                     node_props.get("name"),
