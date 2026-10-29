@@ -12,6 +12,7 @@ def test_binary_office_routes_once_to_dedicated_owner(tmp_path, monkeypatch):
         calls.append(path)
         return {"format": "flat-odf", "source": name, "text": "Ada"}, "26.2.6"
     monkeypatch.setattr("semantica.project_office.parse_office", parse)
+    (tmp_path / 'source.doc').write_bytes(b'fixture')
     result = parse_source(tmp_path / "source.doc", name="source.doc", mime_type="application/msword", force_ocr=False)
     assert result.text == "Ada" and result.parser == "semantica.libreoffice"
     assert len(calls) == 1
@@ -19,6 +20,7 @@ def test_binary_office_routes_once_to_dedicated_owner(tmp_path, monkeypatch):
 
 def test_binary_office_requires_explicit_optional_capability(tmp_path, monkeypatch):
     monkeypatch.delenv("SEMANTICA_OFFICE_ROOT", raising=False)
+    (tmp_path / 'source.doc').write_bytes(b'fixture')
     with pytest.raises(UnsupportedSourceFormatError, match="office-runtime-unavailable"):
         parse_source(tmp_path / "source.doc", name="source.doc", mime_type="application/msword", force_ocr=False)
 

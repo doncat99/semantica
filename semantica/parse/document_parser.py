@@ -34,9 +34,8 @@ from typing import Any, Dict, List, Optional, Union
 from ..utils.exceptions import ProcessingError, ValidationError
 from ..utils.logging import get_logger
 from ..utils.progress_tracker import get_progress_tracker
-from .docx_parser import DOCXParser
-from .html_parser import HTMLParser
-from .pdf_parser import PDFParser
+from .document_contract import (OFFICE_SUFFIXES, STRUCTURED_SUFFIXES, TEXT_SUFFIXES,
+                                SourceQualityError, UnsupportedSourceFormatError, admit_document)
 
 # DoclingParser is available as a standalone parser
 # Import it directly: from semantica.parse import DoclingParser
@@ -82,9 +81,7 @@ class DocumentParser:
         self.config.update(kwargs)
 
         # Initialize format-specific parsers
-        self.pdf_parser = PDFParser(**self.config.get("pdf", {}))
-        self.docx_parser = DOCXParser(**self.config.get("docx", {}))
-        self.html_parser = HTMLParser(**self.config.get("html", {}))
+        self._parsers = {}
 
         # Supported formats
         self.supported_formats = {
@@ -95,6 +92,11 @@ class DocumentParser:
             ".htm": "html",
             ".txt": "text",
             ".text": "text",
+            **{suffix: 'text' for suffix in TEXT_SUFFIXES},
+            **{suffix: suffix[1:] for suffix in STRUCTURED_SUFFIXES
+               if suffix not in {'.htm'}},
+            **{suffix: 'office' for suffix in OFFICE_SUFFIXES},
+            '.epub': 'epub',
         }
 
         # Initialize progress tracker
@@ -102,6 +104,26 @@ class DocumentParser:
         # Ensure progress tracker is enabled
         if not self.progress_tracker.enabled:
             self.progress_tracker.enabled = True
+
+    def _parser(self, kind, factory):
+        if kind not in self._parsers:
+            self._parsers[kind] = factory(**self.config.get(kind, {}))
+        return self._parsers[kind]
+
+    @property
+    def pdf_parser(self):
+        from .pdf_parser import PDFParser
+        return self._parser('pdf', PDFParser)
+
+    @property
+    def docx_parser(self):
+        from .docx_parser import DOCXParser
+        return self._parser('docx', DOCXParser)
+
+    @property
+    def html_parser(self):
+        from .html_parser import HTMLParser
+        return self._parser('html', HTMLParser)
 
     def parse(
         self,
@@ -160,6 +182,15 @@ class DocumentParser:
         """
         file_path = Path(file_path)
 
+        profile = options.pop('document_processing', None)
+        name = options.pop('name', file_path.name)
+        force_ocr = options.pop('force_ocr', False)
+        admit_document(file_path.suffix.lower(), options.pop('mime_type', None), force_ocr)
+        if profile is None and force_ocr:
+            profile = {'mode': 'local'}
+        if profile is not None and file_type is not None:
+            raise UnsupportedSourceFormatError('explicit processing profiles require detected document format')
+
         # Track document parsing
         tracking_id = self.progress_tracker.start_tracking(
             file=str(file_path),
@@ -182,16 +213,37 @@ class DocumentParser:
 
             # Route to appropriate parser
             try:
-                if file_type == "pdf":
+                if file_type == 'text':
+                    if profile is not None:
+                        options = {**options, 'errors': 'strict'}
+                    result = self._parse_text(file_path, **options)
+                    if profile is not None:
+                        text = result['text']
+                        result = dict(text=text, document={
+                            'format': 'markdown' if file_path.suffix.lower() == '.md' else 'plain-text',
+                            'text': text, 'source': name}, origin='native',
+                            parser='semantica.text', parser_version='1')
+                elif file_type == 'epub':
+                    from .epub_parser import parse_epub
+                    result = parse_epub(file_path, name)
+                elif file_type == 'office':
+                    from ..project_office import parse_office
+                    try:
+                        document, version = parse_office(file_path, name=name)
+                    except (OSError, ValueError) as error:
+                        raise UnsupportedSourceFormatError(f'dedicated Office adapter failed: {error}') from error
+                    result = dict(text=document['text'], document=document, origin='adapter',
+                                  parser='semantica.libreoffice', parser_version=version)
+                elif profile is not None and file_path.suffix.lower() in STRUCTURED_SUFFIXES:
+                    result = self._parse_conversion(file_path, name, force_ocr, profile, **options)
+                elif file_type == "pdf":
                     result = self.pdf_parser.parse(file_path, **options)
                 elif file_type == "docx":
                     result = self.docx_parser.parse(file_path, **options)
                 elif file_type == "html":
                     result = self.html_parser.parse(file_path, **options)
-                elif file_type == "text":
-                    result = self._parse_text(file_path, **options)
                 else:
-                    raise ValidationError(f"Unsupported document format: {file_type}")
+                    raise UnsupportedSourceFormatError(f"unsupported source format for Semantica: {name}")
 
                 self.progress_tracker.stop_tracking(
                     tracking_id,
@@ -205,13 +257,54 @@ class DocumentParser:
                     tracking_id, status="failed", message=str(e)
                 )
                 self.logger.error(f"Failed to parse document {file_path}: {e}")
-                raise ProcessingError(f"Failed to parse document: {e}")
+                if profile is not None or isinstance(e, (UnsupportedSourceFormatError, SourceQualityError)):
+                    raise
+                raise ProcessingError(f"Failed to parse document: {e}") from e
 
         except Exception as e:
             self.progress_tracker.stop_tracking(
                 tracking_id, status="failed", message=str(e)
             )
             raise
+
+    def _parse_conversion(self, path, name, force_ocr, profile, **options):
+        """Select one explicit conversion capability; failures never switch parsers."""
+        mode = profile.get('mode')
+        if mode == 'disabled':
+            raise UnsupportedSourceFormatError('Docling processing is disabled for this build')
+        if mode == 'native':
+            if path.suffix.lower() != '.pdf' or force_ocr:
+                raise UnsupportedSourceFormatError('native document processing supports text-layer PDFs without OCR')
+            result = self.pdf_parser.parse(path, extract_tables=False, extract_images=False,
+                extract_links=True, sort=profile.get('pdfTextOrder', 'coordinates') == 'coordinates')
+            return dict(text=result['full_text'], document={
+                'format': 'pdf-text', 'source': name, 'pages': result['pages'],
+                'metadata': result['metadata']}, origin='native',
+                parser='semantica.PDFParser', parser_version='1')
+        if mode == 'remote':
+            from ..project_remote_docling import parse_remote_docling
+            result = parse_remote_docling(path, name=name, force_ocr=force_ocr, profile=profile)
+            return dict(text=result['text'], document=result['document'], origin='external',
+                        parser='docling-serve', parser_version='v1')
+        if mode != 'local':
+            raise UnsupportedSourceFormatError(f'unsupported document processing mode: {mode}')
+        from .docling_parser import DoclingParser
+        callback = options.get('progress_callback')
+        with DoclingParser.lease(enable_ocr=force_ocr, force_full_page_ocr=force_ocr,
+                                 export_format='doctags') as parser:
+            result = parser.parse(path, export_format='doctags', include_document=True,
+                **({'progress_callback': callback} if callback is not None else {}))
+        if not result.get('plain_text', '').strip():
+            raise SourceQualityError(
+                'Docling conversion produced no usable text; explicit OCR repair or source correction required')
+        origin = result.get('origin')
+        if origin not in {'native', 'ocr', 'mixed'}:
+            raise UnsupportedSourceFormatError('Docling conversion did not retain text-cell provenance')
+        return dict(text=result['plain_text'], document={
+            'format': 'docling', 'document': result.get('document'), 'doctags': result.get('doctags'),
+            'pages': result.get('pages', []), 'conversion_status': result.get('conversion_status', 'unknown'),
+            'metadata': result.get('metadata', {}), 'source': name},
+            origin=origin, parser='docling', parser_version='2')
 
     def extract_text(self, file_path: Union[str, Path], **options) -> str:
         """
@@ -232,6 +325,9 @@ class DocumentParser:
             str: Extracted text content
         """
         file_path = Path(file_path)
+        if ('document_processing' in options or options.get('force_ocr') or
+                self._detect_file_type(file_path) in {'epub', 'office'}):
+            return self.parse_document(file_path, **options)['text']
         file_type = self._detect_file_type(file_path)
 
         if file_type == "pdf":
@@ -364,7 +460,7 @@ class DocumentParser:
         encoding = options.get("encoding", "utf-8")
 
         try:
-            with open(file_path, "r", encoding=encoding, errors="ignore") as f:
+            with open(file_path, "r", encoding=encoding, errors=options.get('errors', 'ignore')) as f:
                 text = f.read()
 
             return {
