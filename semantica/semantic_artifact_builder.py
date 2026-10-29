@@ -2494,213 +2494,262 @@ def build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=Non
 
 
 def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=None, *, persist_snapshot: bool = True) -> dict[str, Any]:
-    # Validate caller-declared identity policy before extraction can spend model calls.
-    # Project identity must be deterministic: fuzzy transitive matching can
-    # connect unrelated ESG mentions across documents and is not an identity
-    # admission rule. Exact matching still preserves native remapping and
-    # reconciliation without the quadratic fuzzy scan.
-    identity_resolver = EntityResolver(strategy="exact", deduplication={"similarity": {
-        "property_schema": request.identity_property_schema}})
-    if request.recipe.id not in {"deterministic", "model"}:
-        raise SemanticArtifactError(
-            f"unsupported semantic artifact recipe: {request.recipe.id}; "
-            "supported recipes are deterministic and model"
-        )
-    output_dir = Path(request.output_dir).resolve()
-    output_dir.mkdir(parents=True, exist_ok=True)
-    base_snapshot: SemanticArtifact | None = None
-    if request.base_snapshot:
-        base_path = Path(request.base_snapshot.snapshot_path).resolve()
-        if not base_path.is_file():
-            raise SemanticArtifactError("base snapshot is not a file")
-        if _digest_file(base_path) != request.base_snapshot.artifact_digest:
-            raise SemanticArtifactError("base snapshot digest does not match its reference")
-        try:
-            base_snapshot = SemanticArtifact.model_validate_json(base_path.read_bytes())
-        except Exception as exc:
-            raise SemanticArtifactError("base snapshot is not a valid Semantica snapshot") from exc
-        if base_snapshot.id != request.base_snapshot.snapshot_id:
-            raise SemanticArtifactError("base snapshot id does not match its reference")
-        if base_snapshot.project_id != request.project_id:
-            raise SemanticArtifactError("base snapshot project does not match the requested project")
+    """Assemble product contracts; native pipeline owns stage execution."""
+    from .pipeline import PipelineBuilder, ExecutionEngine
+
     source_builds = []
     model_receipts: list[ModelReceipt] = []
     source_classifications: list[SourceClassification] = []
     parsed_sources = []
-    parsed_refs = {ref.source_id: ref for ref in request.parsed_sources}
-    for source_index, source in enumerate(request.sources, start=1):
-        force_ocr = source.source_id in request.recipe.force_ocr_source_ids
-        parsed = _load_parsed_source(source, parsed_refs[source.source_id], force_ocr,
-            request.document_processing.model_dump(mode="json", by_alias=True))
-        document = parsed[1]
-        total_pages = len(document.get("pages") or []) or document.get("metadata", {}).get("page_count")
-        if progress:
-            progress({
-                "stage": "document_parsing",
-                "percent": max(2, round((source_index - 1) / max(1, len(request.sources)) * 20)),
-                "detail": f"Parsing document {source_index} / {len(request.sources)}",
-                **({"metadata": {"totalPages": total_pages}} if total_pages else {}),
-            })
-        parsed_sources.append((source, force_ocr, parsed))
-    completed_source_ids = set()
-    if base_snapshot and base_snapshot.extraction_spec == request.recipe.extraction_spec:
-        completed_source_ids = {source.source_id for source, force_ocr, parsed in parsed_sources
-            if any(rep.source_id == source.source_id and rep.recipe_id == "model"
-                   and rep.material_revision_id == source.material_revision
-                   and rep.content_hash == parsed[3]
-                   and rep.recipe_digest == stable_digest({"parser": rep.metadata.get("document", {}).get("format"), "ocr": force_ocr})
-                   for rep in base_snapshot.document_representations)}
-        if completed_source_ids:
-            checkpoint = active_checkpoint.get()
-            prior_recipe = checkpoint.read("recipe-provenance", base_snapshot.lineage.recipe_digest) if checkpoint else None
-            if not isinstance(prior_recipe, dict) or stable_digest(prior_recipe) != base_snapshot.lineage.recipe_digest:
-                raise SemanticArtifactError("completed work requirements are missing; restore verified checkpoint provenance",
-                                            code="COMPLETED_WORK_RECOVERY_GAP")
-            prior_formula_sources = set(prior_recipe.get("formulaSemanticsSourceIds", []))
-            formula_sources = set(request.recipe.formula_semantics_source_ids)
-            completed_source_ids = {source_id for source_id in completed_source_ids
-                if (source_id in prior_formula_sources) == (source_id in formula_sources)}
-    # A vector-only rebuild cannot implicitly buy missing project generation either.
-    _completed_generation_only.set(bool(base_snapshot) and bool(parsed_sources)
-        and len(completed_source_ids) == len(parsed_sources)
-        and base_snapshot.lineage.recipe_digest == stable_digest(request.recipe.lineage_payload()))
-    model_results = _extract_project_sources(parsed_sources, request, progress, completed_source_ids) if request.recipe.id == "model" else []
-    with _project_progress(progress, "source_projection", 90):
-        for source_index, (source, force_ocr, parsed) in enumerate(parsed_sources):
-            if request.recipe.id == "model":
-                model_result, embeddings, source_receipts = model_results[source_index]
-                built_source = _build_source(source, force_ocr, model_result, parsed)
-                built_source["embeddings"] = embeddings
-                model_receipts.extend(source_receipts)
-            else:
-                built_source = _build_source(source, force_ocr, parsed=parsed)
-            built_source["passages"] = _source_passages(built_source)
-            if not built_source["passages"]:
-                raise SemanticArtifactError(f"source has no located text for semantic production: {source.source_id}")
-            built_source["evidence"] = list({span.id: span for span in [
-                *built_source["evidence"], *built_source["passages"], *_docling_cell_evidence(built_source),
-            ]}.values())
-            source_builds.append(built_source)
-    if request.recipe.id == "model" and request.recipe.classification_profile:
-        with _project_progress(progress, "source_classification", 90):
-            for built_source in source_builds:
-                classification, receipts = _classify_source(built_source, request.recipe.classification_profile, request.relays["model"])
-                source_classifications.append(classification)
-                model_receipts.extend(receipts)
-    representations = [item["representation"] for item in source_builds]
-    evidence = [ev for item in source_builds for ev in item["evidence"]]
-    entities_by_id = {entity.id: entity for item in source_builds for entity in item["entities"]}
-    assertions = [assertion for item in source_builds for assertion in item["assertions"]]
-    relations = [relation for item in source_builds for relation in item["relations"]]
-    for item in source_builds:
-        path = output_dir / f"representation-{_safe_id(item['source'].source_id)}.json"
-        item["artifact_digest"] = _write_json(path, item["document"])
-        item["artifact_path"] = path
-    # Publication identity includes its producer; paid-work reuse remains business-content scoped.
-    publication_digest = stable_digest({"format": "portable-manifest-v1",
-        "inputRevision": request.input_revision, "producer": request.release.artifact_digest,
-        "schema": request.release.schema_digest})
-    snapshot_id = f"snapshot:{_safe_id(request.project_id)}:{publication_digest.split(':')[-1]}"
-    entities = list(entities_by_id.values())
-    mentions = entities
-    identity_registry = []
-    if request.recipe.id == "model":
-        entities, remap, identity_registry = _project_stage(
-            "entity_resolution", {"mentions": [item.model_dump(mode="json") for item in mentions],
-                                  "identityPropertySchema": request.identity_property_schema},
-            TypeAdapter(tuple[list[KnowledgeEntity], dict[str, str], list[IdentityRegistryEntry]]),
-            lambda: _resolve_native_entities(mentions, resolver=identity_resolver), progress, 90)
+    identity_resolver = output_dir = base_snapshot = None
+    completed_source_ids = model_results = None
+    representations = evidence = entities_by_id = assertions = relations = snapshot_id = None
+    entities = mentions = identity_registry = remap = fact_conflicts = source_relations = None
+    communities = topics = None
 
-        def reconcile():
-            remapped_assertions, remapped_relations = _remap_identity_facts(assertions, relations, remap, entities)
-            return reconcile_qualified_facts(request.project_id, remapped_assertions, remapped_relations)
+    def prepare(_):
+        nonlocal identity_resolver, output_dir, base_snapshot
+        # Validate caller-declared identity policy before extraction can spend model calls.
+        # Project identity must be deterministic: fuzzy transitive matching can
+        # connect unrelated ESG mentions across documents and is not an identity
+        # admission rule. Exact matching still preserves native remapping and
+        # reconciliation without the quadratic fuzzy scan.
+        identity_resolver = EntityResolver(strategy="exact", deduplication={"similarity": {
+            "property_schema": request.identity_property_schema}})
+        if request.recipe.id not in {"deterministic", "model"}:
+            raise SemanticArtifactError(
+                f"unsupported semantic artifact recipe: {request.recipe.id}; "
+                "supported recipes are deterministic and model"
+            )
+        output_dir = Path(request.output_dir).resolve()
+        output_dir.mkdir(parents=True, exist_ok=True)
+        base_snapshot = None
+        if request.base_snapshot:
+            base_path = Path(request.base_snapshot.snapshot_path).resolve()
+            if not base_path.is_file():
+                raise SemanticArtifactError("base snapshot is not a file")
+            if _digest_file(base_path) != request.base_snapshot.artifact_digest:
+                raise SemanticArtifactError("base snapshot digest does not match its reference")
+            try:
+                base_snapshot = SemanticArtifact.model_validate_json(base_path.read_bytes())
+            except Exception as exc:
+                raise SemanticArtifactError("base snapshot is not a valid Semantica snapshot") from exc
+            if base_snapshot.id != request.base_snapshot.snapshot_id:
+                raise SemanticArtifactError("base snapshot id does not match its reference")
+            if base_snapshot.project_id != request.project_id:
+                raise SemanticArtifactError("base snapshot project does not match the requested project")
 
-        assertions, relations, fact_conflicts = _project_stage(
-            "fact_reconciliation", {"projectId": request.project_id, "remap": remap,
-                "entities": [item.model_dump(mode="json") for item in entities],
+    def parsed_inputs(_):
+        nonlocal parsed_sources, completed_source_ids
+        parsed_refs = {ref.source_id: ref for ref in request.parsed_sources}
+        for source_index, source in enumerate(request.sources, start=1):
+            force_ocr = source.source_id in request.recipe.force_ocr_source_ids
+            parsed = _load_parsed_source(source, parsed_refs[source.source_id], force_ocr,
+                request.document_processing.model_dump(mode="json", by_alias=True))
+            document = parsed[1]
+            total_pages = len(document.get("pages") or []) or document.get("metadata", {}).get("page_count")
+            if progress:
+                progress({
+                    "stage": "document_parsing",
+                    "percent": max(2, round((source_index - 1) / max(1, len(request.sources)) * 20)),
+                    "detail": f"Parsing document {source_index} / {len(request.sources)}",
+                    **({"metadata": {"totalPages": total_pages}} if total_pages else {}),
+                })
+            parsed_sources.append((source, force_ocr, parsed))
+        completed_source_ids = set()
+        if base_snapshot and base_snapshot.extraction_spec == request.recipe.extraction_spec:
+            completed_source_ids = {source.source_id for source, force_ocr, parsed in parsed_sources
+                if any(rep.source_id == source.source_id and rep.recipe_id == "model"
+                       and rep.material_revision_id == source.material_revision
+                       and rep.content_hash == parsed[3]
+                       and rep.recipe_digest == stable_digest({"parser": rep.metadata.get("document", {}).get("format"), "ocr": force_ocr})
+                       for rep in base_snapshot.document_representations)}
+            if completed_source_ids:
+                checkpoint = active_checkpoint.get()
+                prior_recipe = checkpoint.read("recipe-provenance", base_snapshot.lineage.recipe_digest) if checkpoint else None
+                if not isinstance(prior_recipe, dict) or stable_digest(prior_recipe) != base_snapshot.lineage.recipe_digest:
+                    raise SemanticArtifactError("completed work requirements are missing; restore verified checkpoint provenance",
+                                                code="COMPLETED_WORK_RECOVERY_GAP")
+                prior_formula_sources = set(prior_recipe.get("formulaSemanticsSourceIds", []))
+                formula_sources = set(request.recipe.formula_semantics_source_ids)
+                completed_source_ids = {source_id for source_id in completed_source_ids
+                    if (source_id in prior_formula_sources) == (source_id in formula_sources)}
+        # A vector-only rebuild cannot implicitly buy missing project generation either.
+        _completed_generation_only.set(bool(base_snapshot) and bool(parsed_sources)
+            and len(completed_source_ids) == len(parsed_sources)
+            and base_snapshot.lineage.recipe_digest == stable_digest(request.recipe.lineage_payload()))
+
+    def extraction(_):
+        nonlocal model_results
+        model_results = _extract_project_sources(parsed_sources, request, progress, completed_source_ids) if request.recipe.id == "model" else []
+
+    def source_projection(_):
+        nonlocal representations, evidence, entities_by_id, assertions, relations, snapshot_id
+        with _project_progress(progress, "source_projection", 90):
+            for source_index, (source, force_ocr, parsed) in enumerate(parsed_sources):
+                if request.recipe.id == "model":
+                    model_result, embeddings, source_receipts = model_results[source_index]
+                    built_source = _build_source(source, force_ocr, model_result, parsed)
+                    built_source["embeddings"] = embeddings
+                    model_receipts.extend(source_receipts)
+                else:
+                    built_source = _build_source(source, force_ocr, parsed=parsed)
+                built_source["passages"] = _source_passages(built_source)
+                if not built_source["passages"]:
+                    raise SemanticArtifactError(f"source has no located text for semantic production: {source.source_id}")
+                built_source["evidence"] = list({span.id: span for span in [
+                    *built_source["evidence"], *built_source["passages"], *_docling_cell_evidence(built_source),
+                ]}.values())
+                source_builds.append(built_source)
+        representations = [item["representation"] for item in source_builds]
+        evidence = [ev for item in source_builds for ev in item["evidence"]]
+        entities_by_id = {entity.id: entity for item in source_builds for entity in item["entities"]}
+        assertions = [assertion for item in source_builds for assertion in item["assertions"]]
+        relations = [relation for item in source_builds for relation in item["relations"]]
+        for item in source_builds:
+            path = output_dir / f"representation-{_safe_id(item['source'].source_id)}.json"
+            item["artifact_digest"] = _write_json(path, item["document"])
+            item["artifact_path"] = path
+        # Publication identity includes its producer; paid-work reuse remains business-content scoped.
+        publication_digest = stable_digest({"format": "portable-manifest-v1",
+            "inputRevision": request.input_revision, "producer": request.release.artifact_digest,
+            "schema": request.release.schema_digest})
+        snapshot_id = f"snapshot:{_safe_id(request.project_id)}:{publication_digest.split(':')[-1]}"
+
+    def source_classification(_):
+        if request.recipe.id == "model" and request.recipe.classification_profile:
+            with _project_progress(progress, "source_classification", 90):
+                for built_source in source_builds:
+                    classification, receipts = _classify_source(built_source, request.recipe.classification_profile, request.relays["model"])
+                    source_classifications.append(classification)
+                    model_receipts.extend(receipts)
+
+    def entity_resolution(_):
+        nonlocal entities, mentions, identity_registry, remap
+        entities = list(entities_by_id.values())
+        mentions = entities
+        identity_registry = []
+        if request.recipe.id == "model":
+            entities, remap, identity_registry = _project_stage(
+                "entity_resolution", {"mentions": [item.model_dump(mode="json") for item in mentions],
+                                      "identityPropertySchema": request.identity_property_schema},
+                TypeAdapter(tuple[list[KnowledgeEntity], dict[str, str], list[IdentityRegistryEntry]]),
+                lambda: _resolve_native_entities(mentions, resolver=identity_resolver), progress, 90)
+
+    def fact_reconciliation(_):
+        nonlocal assertions, relations, fact_conflicts, source_relations
+        if request.recipe.id == "model":
+            def reconcile():
+                remapped_assertions, remapped_relations = _remap_identity_facts(assertions, relations, remap, entities)
+                return reconcile_qualified_facts(request.project_id, remapped_assertions, remapped_relations)
+
+            assertions, relations, fact_conflicts = _project_stage(
+                "fact_reconciliation", {"projectId": request.project_id, "remap": remap,
+                    "entities": [item.model_dump(mode="json") for item in entities],
+                    "assertions": [item.model_dump(mode="json") for item in assertions],
+                    "relations": [item.model_dump(mode="json") for item in relations]},
+                TypeAdapter(tuple[list[KnowledgeAssertion], list[KnowledgeRelation], list[KnowledgeConflict]]),
+                reconcile, progress, 90)
+        else:
+            fact_conflicts = []
+        source_relations = _source_relations(relations, evidence, representations)
+
+    def semantic_organization(_):
+        nonlocal communities, topics
+        communities, topics = _project_stage(
+            "semantic_organization", {"entities": [item.model_dump(mode="json") for item in entities],
                 "assertions": [item.model_dump(mode="json") for item in assertions],
-                "relations": [item.model_dump(mode="json") for item in relations]},
-            TypeAdapter(tuple[list[KnowledgeAssertion], list[KnowledgeRelation], list[KnowledgeConflict]]),
-            reconcile, progress, 90)
-    else:
-        fact_conflicts = []
-    source_relations = _source_relations(relations, evidence, representations)
-    communities, topics = _project_stage(
-        "semantic_organization", {"entities": [item.model_dump(mode="json") for item in entities],
-            "assertions": [item.model_dump(mode="json") for item in assertions],
-            "relations": [item.model_dump(mode="json") for item in relations],
-            "evidence": [item.model_dump(mode="json") for item in evidence]},
-        TypeAdapter(tuple[list[KnowledgeCommunity], list[KnowledgeTopic]]),
-        lambda: _semantic_organization(entities, assertions, relations, evidence), progress, 90)
-    with _project_progress(progress, "artifact_writing", 90):
-        conflicts = fact_conflicts
-        model_receipts = list({receipt.id: receipt for receipt in model_receipts}.values())
-        retrieval_payload = {
-            "format": "semantica.retrieval-reference.v1",
-            "snapshot_id": snapshot_id,
-            "embeddings": [{"source_id": item["source"].source_id, **chunk} for item in source_builds for chunk in item.get("embeddings", [])],
-            "embedding_space": {"model_id": request.relays["embedding"].model_id,
-                "binding_id": request.relays["embedding"].binding_id,
-                "dimensions": len(source_builds[0]["embeddings"][0]["vector"])} if source_builds and source_builds[0].get("embeddings") else None,
-        }
-        retrieval_path = output_dir / "retrieval.json"
-        retrieval_digest = _write_json(retrieval_path, retrieval_payload)
-        retrieval_artifact_id = "artifact:retrieval"
-        representation_artifacts = [ArtifactManifest(id=item["artifact_id"], artifact_type="representation", artifact_ref=item["artifact_digest"], artifact_hash=item["artifact_digest"]) for item in source_builds]
-        # The snapshot bytes are self-referential: putting their own digest inside
-        # the bytes would require a fixed-point hash. The external worker manifest
-        # carries the snapshot artifact; this immutable in-snapshot manifest lists
-        # only its upstream artifacts.
-        retrieval_artifact = ArtifactManifest(id=retrieval_artifact_id, artifact_type="retrieval", artifact_ref=retrieval_digest, artifact_hash=retrieval_digest, depends_on=[item.id for item in representation_artifacts])
-        receipt_ids = [receipt.id for receipt in model_receipts]
-        lineage = KernelLineage(schema_digest=request.release.schema_digest, recipe_id=request.recipe.id, recipe_digest=stable_digest(request.recipe.lineage_payload()), rule_version="semantica-semantic-artifact-v3", rule_digest=stable_digest({"pipeline": request.recipe.id, "identity_resolution": "native-conflict-veto-v1", "identity_property_schema": request.identity_property_schema}), ontology_version="semantica-default", ontology_digest=stable_digest({"ontology": "default"}), extraction_spec_digest=request.recipe.extraction_spec.digest if request.recipe.extraction_spec else None, model_receipt_ids=receipt_ids)
-        retrieval_manifests = [
-            RetrievalArtifactManifest(
-                id="retrieval:graph",
-                retrieval_type="graph",
-                artifact_hash=retrieval_digest,
-                artifact_ref_id=retrieval_artifact_id,
-                source_snapshot_id=snapshot_id,
-                record_count=len(entities) + len(assertions) + len(relations) + len(conflicts),
-                entity_ids=[entity.id for entity in entities],
-                relation_ids=[relation.id for relation in relations],
-                community_ids=[community.id for community in communities],
-                evidence_ids=[item.id for item in evidence],
-                model_receipt_ids=receipt_ids,
-            ),
-            RetrievalArtifactManifest(
-                id="retrieval:source",
-                retrieval_type="source",
-                artifact_hash=retrieval_digest,
-                artifact_ref_id=retrieval_artifact_id,
-                source_snapshot_id=snapshot_id,
-                record_count=len(representations) + len(evidence),
-                entity_ids=[],
-                relation_ids=[],
-                community_ids=[],
-                evidence_ids=[item.id for item in evidence],
-                model_receipt_ids=receipt_ids,
-            ),
-        ]
-        change_delta = _change_delta(
-            base_snapshot,
-            snapshot_id,
-            representations,
-            entities,
-            assertions,
-            relations,
-            communities,
-            topics,
-            [item.id for item in retrieval_manifests],
-            evidence,
-            source_classifications,
-            conflicts=conflicts, identity_registry=identity_registry,
-            source_relations=source_relations, entity_mentions=mentions,
-            classification_profile=request.recipe.classification_profile, extraction_spec=request.recipe.extraction_spec,
-        )
-        snapshot = SemanticArtifact(snapshot_id=snapshot_id, project_id=request.project_id, base_snapshot_id=request.base_snapshot.snapshot_id if request.base_snapshot else None, lineage=lineage, artifact_manifest=representation_artifacts + [retrieval_artifact], document_representations=representations, evidence_spans=evidence, entity_mentions=mentions, entities=entities, assertions=assertions, relations=relations, identity_registry=identity_registry, communities=communities, topics=topics, source_relations=source_relations, source_classifications=source_classifications, classification_profile=request.recipe.classification_profile, extraction_spec=request.recipe.extraction_spec, conflicts=conflicts, retrieval_manifests=retrieval_manifests, change_delta=change_delta, model_receipts=model_receipts, metadata={"pipeline": "semantica", "recipe": request.recipe.id, "source_count": len(source_builds), "stages": ["document", "evidence", "identity", "knowledge", "organization", "retrieval", "change"]})
-        result = {"snapshot": snapshot, "representation_artifacts": source_builds, "retrieval_path": retrieval_path, "retrieval_digest": retrieval_digest, "model_receipts": model_receipts}
-        if persist_snapshot:
-            snapshot_path = output_dir / "snapshot.json"
-            result.update(snapshot_path=snapshot_path, snapshot_digest=_write_json(snapshot_path, snapshot.model_dump(mode="json", by_alias=True)))
-        return result
+                "relations": [item.model_dump(mode="json") for item in relations],
+                "evidence": [item.model_dump(mode="json") for item in evidence]},
+            TypeAdapter(tuple[list[KnowledgeCommunity], list[KnowledgeTopic]]),
+            lambda: _semantic_organization(entities, assertions, relations, evidence), progress, 90)
+
+    def artifact_writing(_):
+        nonlocal model_receipts
+        with _project_progress(progress, "artifact_writing", 90):
+            conflicts = fact_conflicts
+            model_receipts = list({receipt.id: receipt for receipt in model_receipts}.values())
+            retrieval_payload = {
+                "format": "semantica.retrieval-reference.v1",
+                "snapshot_id": snapshot_id,
+                "embeddings": [{"source_id": item["source"].source_id, **chunk} for item in source_builds for chunk in item.get("embeddings", [])],
+                "embedding_space": {"model_id": request.relays["embedding"].model_id,
+                    "binding_id": request.relays["embedding"].binding_id,
+                    "dimensions": len(source_builds[0]["embeddings"][0]["vector"])} if source_builds and source_builds[0].get("embeddings") else None,
+            }
+            retrieval_path = output_dir / "retrieval.json"
+            retrieval_digest = _write_json(retrieval_path, retrieval_payload)
+            retrieval_artifact_id = "artifact:retrieval"
+            representation_artifacts = [ArtifactManifest(id=item["artifact_id"], artifact_type="representation", artifact_ref=item["artifact_digest"], artifact_hash=item["artifact_digest"]) for item in source_builds]
+            # The snapshot bytes are self-referential: putting their own digest inside
+            # the bytes would require a fixed-point hash. The external worker manifest
+            # carries the snapshot artifact; this immutable in-snapshot manifest lists
+            # only its upstream artifacts.
+            retrieval_artifact = ArtifactManifest(id=retrieval_artifact_id, artifact_type="retrieval", artifact_ref=retrieval_digest, artifact_hash=retrieval_digest, depends_on=[item.id for item in representation_artifacts])
+            receipt_ids = [receipt.id for receipt in model_receipts]
+            lineage = KernelLineage(schema_digest=request.release.schema_digest, recipe_id=request.recipe.id, recipe_digest=stable_digest(request.recipe.lineage_payload()), rule_version="semantica-semantic-artifact-v3", rule_digest=stable_digest({"pipeline": request.recipe.id, "identity_resolution": "native-conflict-veto-v1", "identity_property_schema": request.identity_property_schema}), ontology_version="semantica-default", ontology_digest=stable_digest({"ontology": "default"}), extraction_spec_digest=request.recipe.extraction_spec.digest if request.recipe.extraction_spec else None, model_receipt_ids=receipt_ids)
+            retrieval_manifests = [
+                RetrievalArtifactManifest(
+                    id="retrieval:graph",
+                    retrieval_type="graph",
+                    artifact_hash=retrieval_digest,
+                    artifact_ref_id=retrieval_artifact_id,
+                    source_snapshot_id=snapshot_id,
+                    record_count=len(entities) + len(assertions) + len(relations) + len(conflicts),
+                    entity_ids=[entity.id for entity in entities],
+                    relation_ids=[relation.id for relation in relations],
+                    community_ids=[community.id for community in communities],
+                    evidence_ids=[item.id for item in evidence],
+                    model_receipt_ids=receipt_ids,
+                ),
+                RetrievalArtifactManifest(
+                    id="retrieval:source",
+                    retrieval_type="source",
+                    artifact_hash=retrieval_digest,
+                    artifact_ref_id=retrieval_artifact_id,
+                    source_snapshot_id=snapshot_id,
+                    record_count=len(representations) + len(evidence),
+                    entity_ids=[],
+                    relation_ids=[],
+                    community_ids=[],
+                    evidence_ids=[item.id for item in evidence],
+                    model_receipt_ids=receipt_ids,
+                ),
+            ]
+            change_delta = _change_delta(
+                base_snapshot,
+                snapshot_id,
+                representations,
+                entities,
+                assertions,
+                relations,
+                communities,
+                topics,
+                [item.id for item in retrieval_manifests],
+                evidence,
+                source_classifications,
+                conflicts=conflicts, identity_registry=identity_registry,
+                source_relations=source_relations, entity_mentions=mentions,
+                classification_profile=request.recipe.classification_profile, extraction_spec=request.recipe.extraction_spec,
+            )
+            snapshot = SemanticArtifact(snapshot_id=snapshot_id, project_id=request.project_id, base_snapshot_id=request.base_snapshot.snapshot_id if request.base_snapshot else None, lineage=lineage, artifact_manifest=representation_artifacts + [retrieval_artifact], document_representations=representations, evidence_spans=evidence, entity_mentions=mentions, entities=entities, assertions=assertions, relations=relations, identity_registry=identity_registry, communities=communities, topics=topics, source_relations=source_relations, source_classifications=source_classifications, classification_profile=request.recipe.classification_profile, extraction_spec=request.recipe.extraction_spec, conflicts=conflicts, retrieval_manifests=retrieval_manifests, change_delta=change_delta, model_receipts=model_receipts, metadata={"pipeline": "semantica", "recipe": request.recipe.id, "source_count": len(source_builds), "stages": ["document", "evidence", "identity", "knowledge", "organization", "retrieval", "change"]})
+            result = {"snapshot": snapshot, "representation_artifacts": source_builds, "retrieval_path": retrieval_path, "retrieval_digest": retrieval_digest, "model_receipts": model_receipts}
+            if persist_snapshot:
+                snapshot_path = output_dir / "snapshot.json"
+                result.update(snapshot_path=snapshot_path, snapshot_digest=_write_json(snapshot_path, snapshot.model_dump(mode="json", by_alias=True)))
+            return result
+
+    pipeline_builder = PipelineBuilder()
+    previous = None
+    for handler in (prepare, parsed_inputs, extraction, source_projection, source_classification, entity_resolution, fact_reconciliation, semantic_organization, artifact_writing):
+        pipeline_builder.add_step(handler.__name__, handler.__name__, handler=handler,
+                                  dependencies=[previous] if previous else [])
+        previous = handler.__name__
+    pipeline = pipeline_builder.set_parallelism(1).build(name="semantic-artifact-build")
+    result = ExecutionEngine(default_max_retries=0).execute_pipeline(pipeline)
+    if not result.success:
+        for step in pipeline.steps:
+            if step.error is not None:
+                raise step.error
+        raise SemanticArtifactError("native pipeline failed: " + "; ".join(result.errors))
+    return result.output
