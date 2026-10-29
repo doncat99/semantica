@@ -353,7 +353,7 @@ def test_typed_relay_uses_json_object_and_local_schema_without_fallback(monkeypa
     else:
         with pytest.raises(ProcessingError):
             provider.generate_typed('Extract JSON', Output)
-    assert len(calls) == 1
+    assert len(calls) == (1 if valid else 3)
 
 
 def test_typed_provider_keeps_relay_failure_as_its_cause(monkeypatch):

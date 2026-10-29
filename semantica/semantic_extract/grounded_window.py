@@ -90,11 +90,11 @@ def extract_grounded_window(
             if local is not None and hasattr(current_provider, "rejections"):
                 current_provider.rejections.append({
                     "code": local.code, "stage": stage,
-                    "action": "skipped_relations" if stage == "relations" else "skipped_extraction",
+                    "action": "failed_extraction",
                     "diagnostic": local.diagnostic or {},
                 })
                 _record_rejections(current_provider)
-                return entities, [], current_provider
+                raise
             if attempt >= max(0, retries) or not _retryable_failure(exc):
                 raise
     raise last_error or ProcessingError("grounded extraction failed")

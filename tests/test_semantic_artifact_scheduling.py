@@ -125,12 +125,12 @@ def test_typed_retry_respects_gateway_delay_and_permanent_failure(monkeypatch):
         value: int
     class Provider(BaseProvider):
         def generate(self, prompt, **kwargs):
-            raise AssertionError('must not duplicate transport failure via plain fallback')
-        def generate_structured(self, prompt, **kwargs):
             self.calls += 1
             if self.calls == 1:
                 raise builder.SemanticArtifactError('cooldown', retryable=self.retryable, retry_after_ms=29845)
-            return {'value': 7}
+            return '{"value":7}'
+        def generate_structured(self, prompt, **kwargs):
+            raise AssertionError('typed generation must not add another structured retry loop')
     delays = []
     monkeypatch.setattr(providers.time, 'sleep', delays.append)
     provider = Provider()

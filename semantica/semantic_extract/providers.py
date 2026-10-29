@@ -652,209 +652,57 @@ class BaseProvider:
                     exc_info=True,
                 )
 
-        # Fallback: Manual repair loop
-        last_error = None
-        current_prompt = prompt
+        # A typed response must validate as received; never repair JSON locally.
+        from ..semantic_artifact_errors import ModelOutputError
 
+        attempts = max(1, int(max_retries))
+        current_prompt = prompt
         typed_kwargs = dict(kwargs)
         if hasattr(schema, "model_json_schema"):
             typed_kwargs["response_schema"] = schema.model_json_schema()
-        for attempt in range(max_retries):
-            json_result = None
+        typed_kwargs["business_context"] = validation_context
+        last_error = None
+        for attempt in range(attempts):
             try:
-                # 1. Generate JSON – try structured mode first, then fall back to
-                # plain generate() + parse.  Custom gateways that reject
-                # response_format=json_object would otherwise loop forever here.
-                try:
-                    json_result = self.generate_structured(
-                        current_prompt, max_retries=1, **typed_kwargs
-                    )
-                except Exception as struct_err:
-                    if self._is_permanent_failure(struct_err):
-                        setattr(struct_err, "retryable", False)
-                        raise
-                    if getattr(struct_err, "retryable", None) is False:
-                        raise
-                    if self._is_transport_failure(struct_err):
-                        raise
-                    self.logger.warning(
-                        "generate_structured failed (%s); retrying with plain generate() + JSON parse.",
-                        struct_err,
-                        exc_info=True,
-                    )
-                    raw_content = self.generate(current_prompt, **typed_kwargs)
-                    json_result = self._parse_json(raw_content)
-
-                # 2. Validate with Schema
-                # If the result is a list and schema expects a wrapper, or vice versa, we might need adjustment
-                # But we assume the prompt asks for the correct structure matching the schema.
-
-                # Special handling if schema is a wrapper but result is a list
-                if (
-                    isinstance(json_result, list)
-                    and hasattr(schema, "entities")
-                    and "entities" in schema.model_fields
-                ):
-                    # Auto-wrap for entities
-                    json_result = {"entities": json_result}
-
-                # Handle categorized dictionary input (e.g. {"PERSON": ["Name"], "ORG": ["Corp"]})
-                elif (
-                    isinstance(json_result, dict)
-                    and hasattr(schema, "entities")
-                    and "entities" in schema.model_fields
-                ):
-                    # Check if it's NOT already in the correct format (i.e., missing "entities" key)
-                    if "entities" not in json_result:
-                        # Check if values are lists, suggesting categorized output
-                        is_categorized = any(
-                            isinstance(v, list) for v in json_result.values()
-                        )
-                        if is_categorized:
-                            flat_entities = []
-                            for label, items in json_result.items():
-                                if isinstance(items, list):
-                                    for item in items:
-                                        if isinstance(item, str):
-                                            flat_entities.append(
-                                                {"text": item, "label": label}
-                                            )
-                                        elif isinstance(item, dict):
-                                            # If it's already a dict but nested under label
-                                            item["label"] = label
-                                            flat_entities.append(item)
-                            json_result = {"entities": flat_entities}
-
-                # Handle categorized dictionary input for relations (e.g. {"founded_by": [{"subject":..., "object":...}]})
-                elif (
-                    isinstance(json_result, dict)
-                    and hasattr(schema, "relations")
-                    and "relations" in schema.model_fields
-                ):
-                    if "relations" not in json_result:
-                        is_categorized = any(
-                            isinstance(v, list) for v in json_result.values()
-                        )
-                        if is_categorized:
-                            flat_relations = []
-                            for label, items in json_result.items():
-                                if isinstance(items, list):
-                                    for item in items:
-                                        if isinstance(item, dict):
-                                            # If predicate is missing, use the key as predicate
-                                            if "predicate" not in item:
-                                                item["predicate"] = label
-                                            flat_relations.append(item)
-                            json_result = {"relations": flat_relations}
-
-                # Handle categorized dictionary input for triplets
-                elif (
-                    isinstance(json_result, dict)
-                    and hasattr(schema, "triplets")
-                    and "triplets" in schema.model_fields
-                ):
-                    if "triplets" not in json_result:
-                        is_categorized = any(
-                            isinstance(v, list) for v in json_result.values()
-                        )
-                        if is_categorized:
-                            flat_triplets = []
-                            for label, items in json_result.items():
-                                if isinstance(items, list):
-                                    for item in items:
-                                        if isinstance(item, dict):
-                                            flat_triplets.append(item)
-                            json_result = {"triplets": flat_triplets}
-
-                elif (
-                    isinstance(json_result, list)
-                    and hasattr(schema, "relations")
-                    and "relations" in schema.model_fields
-                ):
-                    json_result = {"relations": json_result}
-                elif (
-                    isinstance(json_result, list)
-                    and hasattr(schema, "triplets")
-                    and "triplets" in schema.model_fields
-                ):
-                    json_result = {"triplets": json_result}
-
-                validated = schema.model_validate(json_result, context=validation_context)
-                return validated
-
-            except ValidationError as e:
-                last_error = e
-                self._reject_last_typed_attempt()
-                error_summary = str(e)
-
-                if attempt < max_retries - 1:
-                    wait_time = (attempt + 1) * 1
-                    self.logger.warning(
-                        f"Schema validation failed (attempt {attempt + 1}): {e}. Retrying with error feedback..."
-                    )
-
-                    schema_json = json.dumps(
-                        schema.model_json_schema(), ensure_ascii=False, separators=(",", ":")
-                    )
-                    previous_json = json.dumps(
-                        json_result, ensure_ascii=False, separators=(",", ":")
-                    )
-                    citation_repairs = []
-                    evidence = {
-                        item.get("id"): item.get("quote")
-                        for item in (validation_context or {}).get("evidence", [])
-                        if isinstance(item, dict)
-                    }
-                    for error in e.errors():
-                        current = json_result
-                        for part in error.get("loc", ()):
-                            if isinstance(current, dict) and part in current:
-                                current = current[part]
-                            elif isinstance(current, list) and isinstance(part, int) and part < len(current):
-                                current = current[part]
-                            else:
-                                current = None
-                                break
-                        evidence_id = current.get("evidence_id") if isinstance(current, dict) else None
-                        if isinstance(evidence_id, str) and evidence_id in evidence:
-                            citation_repairs.append({"evidence_id": evidence_id, "quote": evidence[evidence_id]})
-                    citation_hint = (
-                        "\nExact citation objects required at the reported citation locations:\n"
-                        + json.dumps(citation_repairs, ensure_ascii=False, separators=(",", ":"))
-                        + "\n"
-                        if citation_repairs else ""
-                    )
-                    current_prompt = (
-                        f"{prompt}\n\nThe previous JSON response failed validation. "
-                        "Preserve every valid value and repair only the invalid or missing fields.\n"
-                        f"Required JSON Schema:\n{schema_json}\n"
-                        f"Validation errors:\n{error_summary}\n"
-                        f"{citation_hint}"
-                        f"Previous JSON response:\n{previous_json}\n"
-                        "Return only the complete repaired JSON object."
-                    )
-                    time.sleep(wait_time)
-                else:
-                    self.logger.error(f"Typed generation failed validation: {e}")
-
-            except Exception as e:
-                last_error = e
-                self._reject_last_typed_attempt()
-                if getattr(e, "retryable", None) is False:
+                content = self.generate(current_prompt, **typed_kwargs)
+                return schema.model_validate_json(content, context=validation_context)
+            except ValidationError as error:
+                last_error = ModelOutputError(
+                    "Typed response failed schema validation",
+                    code="MODEL_OUTPUT_SCHEMA_INVALID",
+                    diagnostic={
+                        "validationErrorCount": error.error_count(),
+                        "validationErrors": [
+                            {"location": list(item.get("loc", ())), "type": item.get("type")}
+                            for item in error.errors()
+                        ],
+                    },
+                )
+            except ModelOutputError as error:
+                last_error = error
+            except Exception as error:
+                last_error = error
+                if self._is_permanent_failure(error):
+                    error.retryable = False
                     break
-                if attempt < max_retries - 1:
-                    retry_after_ms = getattr(e, "retry_after_ms", None)
-                    if not isinstance(retry_after_ms, int) or isinstance(retry_after_ms, bool) or retry_after_ms < 0:
-                        retry_after_ms = 1_000
-                    time.sleep(retry_after_ms / 1_000)
-                else:
-                    self.logger.error(f"Typed generation failed: {e}")
+                if not self._is_transport_failure(error) or attempt + 1 >= attempts:
+                    break
+                retry_after_ms = getattr(error, "retry_after_ms", None)
+                if not isinstance(retry_after_ms, int) or isinstance(retry_after_ms, bool) or retry_after_ms < 0:
+                    retry_after_ms = 1_000
+                time.sleep(retry_after_ms / 1_000)
+                continue
+            self._reject_last_typed_attempt()
+            if attempt + 1 < attempts:
+                feedback = json.dumps(last_error.diagnostic or {"code": last_error.code},
+                                      ensure_ascii=False, separators=(",", ":"))
+                current_prompt = (
+                    f"{prompt}\n\nThe previous JSON response was rejected. "
+                    "Return a complete JSON value matching the required schema.\n"
+                    f"Validation feedback: {feedback}"
+                )
 
-        failure = ProcessingError(
-            f"Failed to generate typed output after {max_retries} attempts: {last_error}"
-        )
-        if isinstance(last_error, ValidationError):
-            failure.previous_json = json_result
+        failure = ProcessingError(f"Failed to generate typed output after {attempt + 1} attempts: {last_error}")
         if hasattr(last_error, "retryable"):
             failure.retryable = last_error.retryable
         cause = last_error

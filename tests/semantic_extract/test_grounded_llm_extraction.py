@@ -390,21 +390,21 @@ def test_grounding_retry_does_not_grow_with_rejected_output():
     assert len(provider.prompts[1].encode()) - len(provider.prompts[0].encode()) < 4096
 
 
-def test_strict_grounding_delegates_semantic_repair_to_one_outer_retry():
+def test_strict_grounding_delegates_schema_repair_to_native_provider():
     text = "A affects B."
     entity_provider = TypedProvider(EntitiesResponse(entities=[
         EntityOut(text="A", label="concept", occurrence=0),
         EntityOut(text="B", label="concept", occurrence=0),
     ]))
     entities = extract_entities_llm(text, provider="bifrost", provider_instance=entity_provider, grounding="strict")
-    assert entity_provider.kwargs[0]["max_retries"] == 1
+    assert entity_provider.kwargs[0]["max_retries"] == 2
 
     relation_provider = TypedProvider(RelationsResponse(relations=[RelationOut(
         subject="A", subject_id="mention:0", predicate="affects", object="B", object_id="mention:1",
         evidence=text, evidence_occurrence=0, qualifiers={"polarity": "positive"},
     )]))
     extract_relations_llm(text, entities, provider="bifrost", provider_instance=relation_provider, grounding="strict")
-    assert relation_provider.kwargs[0]["max_retries"] == 1
+    assert relation_provider.kwargs[0]["max_retries"] == 2
 
 
 def test_grounded_relation_keeps_valid_facts_when_peer_is_invalid():

@@ -1120,47 +1120,6 @@ class _ProjectModelProvider(BaseProvider):
         self.rejections: list[dict[str, Any]] = []
         self.last_checkpoint_entry = None
 
-    def generate_typed(self, prompt, schema, max_retries=3, validation_context=None, **kwargs):
-        from pydantic import ValidationError
-        attempts = max(1, int(max_retries))
-        current_prompt = prompt
-        last_error = None
-        for attempt in range(attempts):
-            try:
-                content = self.generate(current_prompt, response_schema=schema.model_json_schema(),
-                                         business_context=validation_context, **kwargs)
-                return schema.model_validate_json(content, context=validation_context)
-            except ModelOutputError as error:
-                last_error = error
-                self.reject_last()
-            except ValidationError as error:
-                last_error = ModelOutputError(
-                    'Typed relay response failed schema validation',
-                    code='MODEL_OUTPUT_SCHEMA_INVALID',
-                    diagnostic={
-                        'validationErrorCount': error.error_count(),
-                        'validationErrors': [
-                            {'location': list(item.get('loc', ())), 'type': item.get('type')}
-                            for item in error.errors()
-                        ],
-                    },
-                )
-                self.reject_last()
-            except SemanticArtifactError as error:
-                raise ProcessingError(str(error)) from error
-            if attempt + 1 < attempts:
-                diagnostic = last_error.diagnostic if isinstance(last_error, ModelOutputError) else None
-                current_prompt = (
-                    f"{prompt}\n\nThe previous JSON response was rejected. "
-                    "Return a complete JSON object matching the required schema and repair only the reported fields.\n"
-                    f"Validation feedback: {json.dumps(diagnostic or {'code': getattr(last_error, 'code', None)}, ensure_ascii=False, separators=(',', ':'))}"
-                )
-
-        failure = ProcessingError(f"Failed to generate typed output after {attempts} attempts: {last_error}")
-        if isinstance(last_error, ModelOutputError):
-            failure.retryable = False
-        raise failure from last_error
-
     def generate(self, prompt: str, **kwargs) -> str:
         # A failed request must never reject a previous successful response.
         self.last_checkpoint_entry = None

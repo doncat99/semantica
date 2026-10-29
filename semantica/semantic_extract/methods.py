@@ -1491,7 +1491,9 @@ Grounding requirements:
 
         entities = []
         if grounding == "strict":
-            kwargs["max_retries"] = 1
+            # The provider owns whole-response schema repair; this loop owns
+            # source grounding only after a typed response has been accepted.
+            kwargs["max_retries"] = grounding_retries + 1
         original_prompt = prompt
         for attempt in range(grounding_retries + 1):
             active_schema = grounded_entities_wire(extraction_spec) if grounding == "strict" else EntitiesResponse
@@ -1572,7 +1574,7 @@ Grounding requirements:
                     ))
                 break
             except ProcessingError as exc:
-                if attempt >= grounding_retries or (result_obj is None and not hasattr(exc, "previous_json")):
+                if attempt >= grounding_retries or result_obj is None:
                     raise
                 # Rejected output is unbounded; retain all source evidence instead.
                 prompt = original_prompt + (
@@ -2478,7 +2480,7 @@ Do not guess ambiguous mathematical layout."""
         # generate_typed and the underlying provider API. max_retries is
         # always set from the explicit parameter.
         call_kwargs = kwargs.copy()
-        call_kwargs["max_retries"] = 1 if grounding == "strict" else max_retries
+        call_kwargs["max_retries"] = grounding_retries + 1 if grounding == "strict" else max_retries
 
         # Select schema based on whether temporal extraction is requested
         active_schema = GroundedRelationsWire if grounding == "strict" else (
@@ -2509,7 +2511,7 @@ Do not guess ambiguous mathematical layout."""
                     )
                 break
             except ProcessingError as exc:
-                if attempt >= grounding_retries or (result_obj is None and not hasattr(exc, "previous_json")):
+                if attempt >= grounding_retries or result_obj is None:
                     raise
                 # Rejected output is unbounded; retain all source evidence instead.
                 prompt = original_prompt + (
