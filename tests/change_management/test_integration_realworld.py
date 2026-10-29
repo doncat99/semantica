@@ -198,7 +198,7 @@ class TestHealthcareCompliance:
         assert manager.verify_checksum(snapshot)
         
         # Simulate tampering
-        snapshot["entities"][0]["ssn"] = "123-45-6789"  # Unauthorized modification
+        snapshot["nodes"][0]["ssn"] = "123-45-6789"  # Unauthorized modification
         
         # Should detect tampering
         assert not manager.verify_checksum(snapshot)
@@ -500,7 +500,7 @@ class TestLargeScaleProduction:
         for i in [0, 25, 50, 75, 99]:
             version = manager.get_version(f"v{i}")
             assert version is not None
-            assert len(version["entities"]) == i + 1
+            assert len(version["nodes"]) == i + 1
     
     def test_large_graph_performance(self):
         """Test performance with very large graphs"""
@@ -540,8 +540,8 @@ class TestLargeScaleProduction:
         duration = time.perf_counter() - start
         
         assert duration < 1.0, f"Large graph snapshot took {duration}s"
-        assert len(snapshot["entities"]) == 5000
-        assert len(snapshot["relationships"]) == 9997
+        assert len(snapshot["nodes"]) == 5000
+        assert len(snapshot["edges"]) == 9997
     
     def test_concurrent_write_load(self):
         """Test concurrent write operations under load"""
@@ -617,7 +617,7 @@ class TestDataCorruptionRecovery:
         assert manager.verify_checksum(snapshot)
         
         # Simulate corruption
-        snapshot["entities"][0]["value"] = "corrupted"
+        snapshot["nodes"][0]["value"] = "corrupted"
         
         # Should detect corruption
         assert not manager.verify_checksum(snapshot)
@@ -659,7 +659,7 @@ class TestDataCorruptionRecovery:
             v2 = manager.create_snapshot(graph, "v2", "user@company.com", "Good v2")
             
             # Simulate corruption in v2
-            v2["entities"][0]["status"] = "corrupted"
+            v2["nodes"][0]["status"] = "corrupted"
             
             # Detect corruption
             assert not manager.verify_checksum(v2)
@@ -667,7 +667,7 @@ class TestDataCorruptionRecovery:
             # Recover by retrieving v1
             recovered = manager.get_version("v1")
             assert manager.verify_checksum(recovered)
-            assert recovered["entities"][0]["status"] == "good"
+            assert recovered["nodes"][0]["status"] == "good"
             
         finally:
             if os.path.exists(db_path):
@@ -761,8 +761,8 @@ class TestEdgeCasesStress:
         )
         
         assert snapshot is not None
-        assert len(snapshot["entities"]) == 0
-        assert len(snapshot["relationships"]) == 0
+        assert len(snapshot["nodes"]) == 0
+        assert len(snapshot["edges"]) == 0
         assert manager.verify_checksum(snapshot)
     
     def test_unicode_and_special_characters(self):
@@ -791,8 +791,8 @@ class TestEdgeCasesStress:
         
         # Verify data is preserved
         retrieved = manager.get_version("unicode_v1")
-        assert retrieved["entities"][0]["name"] == "Test with 中文字符"
-        assert retrieved["entities"][0]["emoji"] == "🎉🚀💻"
+        assert retrieved["nodes"][0]["name"] == "Test with 中文字符"
+        assert retrieved["nodes"][0]["emoji"] == "🎉🚀💻"
         assert manager.verify_checksum(retrieved)
     
     def test_deeply_nested_structures(self):
@@ -827,7 +827,7 @@ class TestEdgeCasesStress:
         )
         
         retrieved = manager.get_version("nested_v1")
-        assert retrieved["entities"][0]["level1"]["level2"]["level3"]["level4"]["level5"]["value"] == "deep nested value"
+        assert retrieved["nodes"][0]["level1"]["level2"]["level3"]["level4"]["level5"]["value"] == "deep nested value"
         assert manager.verify_checksum(retrieved)
     
     def test_very_long_descriptions(self):
@@ -915,7 +915,7 @@ class TestLongRunningWorkflows:
         
         # Verify data accumulation
         final_version = manager.get_version(f"daily_20240130")
-        assert len(final_version["entities"]) == 30
+        assert len(final_version["nodes"]) == 30
     
     def test_version_retention_policy(self):
         """Test implementation of version retention policy"""

@@ -70,8 +70,8 @@ class TestTemporalVersionManager:
         assert snapshot["description"] == "Test snapshot creation"
         assert "checksum" in snapshot
         assert "timestamp" in snapshot
-        assert len(snapshot["entities"]) == 2
-        assert len(snapshot["relationships"]) == 1
+        assert "entities" not in snapshot
+        assert "relationships" not in snapshot
         assert len(snapshot["nodes"]) == 2
         assert len(snapshot["edges"]) == 1
 
@@ -97,8 +97,8 @@ class TestTemporalVersionManager:
 
         assert len(snapshot["nodes"]) == 2
         assert len(snapshot["edges"]) == 1
-        assert len(snapshot["entities"]) == 2
-        assert len(snapshot["relationships"]) == 1
+        assert "entities" not in snapshot
+        assert "relationships" not in snapshot
 
     def test_create_snapshot_requires_supported_schema(self):
         """Test schema validation for unsupported graph payloads."""
@@ -326,8 +326,8 @@ class TestTemporalVersionManager:
 
         assert len(snapshot["nodes"]) == 2
         assert len(snapshot["edges"]) == 1
-        assert len(snapshot["entities"]) == 2
-        assert len(snapshot["relationships"]) == 1
+        assert "entities" not in snapshot
+        assert "relationships" not in snapshot
 
     def test_compare_versions_supports_mixed_snapshot_schemas(self):
         """Test diff compatibility between legacy and node/edge snapshots."""

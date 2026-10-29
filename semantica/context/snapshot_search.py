@@ -86,16 +86,19 @@ def rank_evidence(embedding, retrieval, evidence_by_id, representations):
 
 def prepare_snapshot(snapshot):
     """Project admitted artifact records for the native retriever; never copy artifacts to disk."""
-    def records(items):
-        return [item.model_dump(mode="json", by_alias=True) for item in items]
-    evidence_records = records(snapshot.evidence_spans)
-    entity_records = records(snapshot.entities)
-    assertion_records = records(snapshot.assertions)
-    relation_records = records(snapshot.relations)
-    conflict_records = records(snapshot.conflicts)
-    topic_records = records(snapshot.topics)
+    def records(items, fields):
+        return [item.model_dump(mode="json", by_alias=True, include=fields) for item in items]
+    # Search consumes coordinates and display fields, never whole documents or metadata.
+    evidence_records = records(snapshot.evidence_spans, {
+        "id": True, "representation_id": True, "quote": True, "origin": True,
+        "locator": {"start_char", "end_char"}})
+    entity_records = records(snapshot.entities, {"id", "canonical_name", "type", "evidence_ids", "status"})
+    assertion_records = records(snapshot.assertions, {"id", "subject_id", "predicate", "object", "qualifiers", "evidence_ids", "status"})
+    relation_records = records(snapshot.relations, {"id", "source_entity_id", "target_entity_id", "type", "qualifiers", "evidence_ids", "status"})
+    conflict_records = records(snapshot.conflicts, {"id", "conflict_type", "status", "reason", "evidence_ids"})
+    topic_records = records(snapshot.topics, {"id", "title", "evidence_ids"})
     evidence_by_id = {item.get("id"): item for item in evidence_records if isinstance(item.get("id"), str)}
-    representation_by_id = {item.id: item.model_dump(mode="json", by_alias=True) for item in snapshot.document_representations}
+    representation_by_id = {item.id: {"source_id": item.source_id} for item in snapshot.document_representations}
     entity_by_id = {item.get("id"): item for item in entity_records if isinstance(item.get("id"), str)}
 
     candidates: list[tuple[str, str, str, list[str], str | None, str | None]] = []

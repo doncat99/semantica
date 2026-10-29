@@ -17,7 +17,7 @@ def test_representation_identity_ignores_producer(tmp_path):
     assert first == _representation_revision(source, False, "immutable", "new", "2", "remote", {"text": "content"})
 
 
-def test_document_checkpoint_rejects_legacy_key_after_profile_upgrade(tmp_path, monkeypatch):
+def test_document_checkpoint_requires_offline_migration_before_profile_upgrade(tmp_path, monkeypatch):
     from semantica.project_checkpoint import active_checkpoint
     from semantica.semantic_source_artifact import _parse_source
     source = tmp_path / "source.txt"
@@ -33,18 +33,18 @@ def test_document_checkpoint_rejects_legacy_key_after_profile_upgrade(tmp_path, 
     current = deepcopy(params)
     current["outputDir"] = str(tmp_path / "second")
     current["resumeCheckpointDirs"] = [str(checkpoint.root)]
-    resumed = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(current))
-    calls = []
     monkeypatch.setattr("semantica.semantic_source_artifact.parse_source",
-                        lambda *a, **k: calls.append(k) or type("Parsed", (), {
-                            "text": "A source", "document": {"text": "A source"},
-                            "origin": "remote", "parser": "new-parser", "parser_version": "2",
-                        })())
+                        lambda *a, **k: pytest.fail("must not reparse historical work"))
+    with pytest.raises(SnapshotCheckpointError, match="offline document identity migration required"):
+        SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(current))
+    from semantica.project_checkpoint_upgrade import upgrade_checkpoint
+    upgrade_checkpoint(checkpoint.root)
+    resumed = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(current))
     token = active_checkpoint.set(resumed)
     try:
         result = _parse_source(item, False, {"mode": "remote"})
         assert result[0] == "A source"
-        assert calls
+        assert result == tuple(saved)
     finally:
         active_checkpoint.reset(token)
 
@@ -69,6 +69,8 @@ def test_document_checkpoint_reuses_matching_processing_revision(tmp_path, monke
     current = deepcopy(params)
     current["outputDir"] = str(tmp_path / "second")
     current["resumeCheckpointDirs"] = [str(checkpoint.root)]
+    from semantica.project_checkpoint_upgrade import upgrade_checkpoint
+    upgrade_checkpoint(checkpoint.root)
     resumed = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(current))
     monkeypatch.setattr("semantica.semantic_source_artifact.parse_source", lambda *a, **k: pytest.fail("must reuse"))
     token = active_checkpoint.set(resumed)

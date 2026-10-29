@@ -596,11 +596,6 @@ class GraphStore:
             neptune_config.update(self.config)
             self._store_backend = AmazonNeptuneStore(**neptune_config)
 
-        elif self.backend == "typedb":
-            from .typedb_store import TypeDBStore
-
-            self._store_backend = TypeDBStore(**self.config)
-
         elif self.backend == "age" or self.backend == "apache_age":
             from .age_store import ApacheAgeStore
 
@@ -758,72 +753,6 @@ class GraphStore:
     ) -> Dict[str, Any]:
         """Execute a Cypher query."""
         return self._manager.query_engine.execute(query, parameters, **options)
-
-    # Analytics operations
-    def commit_snapshot(self, snapshot: Any) -> Dict[str, Any]:
-        """Commit a validated native artifact, atomically, against its base revision.
-
-        ``project_id`` identifies the caller-authorized knowledge scope, not an
-        execution run. Backend support is explicit; unversioned writes are never
-        used as a fallback for an authoritative commit.
-        """
-        from ..semantic_artifact_schema import SemanticArtifact
-
-        artifact = SemanticArtifact.model_validate(
-            snapshot.model_dump(mode="json") if isinstance(snapshot, SemanticArtifact) else snapshot
-        )
-        commit = getattr(self._store_backend, "commit_snapshot", None)
-        if not callable(commit):
-            raise NotImplementedError(f"Atomic semantic snapshots unsupported by {self.backend}")
-        result = commit(artifact.model_dump(mode="json"))
-        self._manager.query_engine.clear_cache()
-        return result
-
-    def append_snapshot(self, snapshot: Any, *, functional_predicates=(), retract_evidence_ids=()) -> Dict[str, Any]:
-        """Apply one observation with bounded CAS retry; no application-side merge."""
-        from .snapshot_operations import extend_semantic_snapshot
-        from ..semantic_artifact_schema import SemanticArtifact
-
-        incoming = SemanticArtifact.model_validate(
-            snapshot.model_dump(mode="json") if isinstance(snapshot, SemanticArtifact) else snapshot)
-        for attempt in range(3):
-            base = self.read_snapshot(incoming.project_id)
-            if base is not None and base.id == incoming.id and incoming.id not in base.metadata.get("applied_observations", {}):
-                if base != incoming:
-                    raise ValueError("immutable_observation_id_reused")
-                return self.commit_snapshot(base)
-            combined = extend_semantic_snapshot(base, incoming,
-                functional_predicates=functional_predicates, retract_evidence_ids=retract_evidence_ids)
-            try:
-                return self.commit_snapshot(combined)
-            except ValueError as error:
-                if str(error) != "stale_snapshot_head" or attempt == 2:
-                    raise
-
-    def read_snapshot(self, scope_id: str, snapshot_id: Optional[str] = None) -> Any:
-        """Read one authorized scope/revision; return the native validated model."""
-        from ..semantic_artifact_schema import SemanticArtifact
-
-        value = self.export_snapshot(scope_id, snapshot_id)
-        return SemanticArtifact.model_validate(value) if value is not None else None
-
-    def export_snapshot(self, scope_id: str, snapshot_id: Optional[str] = None) -> Any:
-        """Export a sealed, digest-checked payload for backup or explicit migration.
-
-        The caller authorizes scope. This is archival data, not validated current
-        semantic state; decision consumers must use ``read_snapshot``.
-        """
-        read = getattr(self._store_backend, "read_snapshot", None)
-        if not callable(read):
-            raise NotImplementedError(f"Atomic semantic snapshots unsupported by {self.backend}")
-        return read(scope_id, snapshot_id)
-
-    def initialize_snapshot_storage(self) -> None:
-        """Install native uniqueness constraints before enabling concurrent writers."""
-        initialize = getattr(self._store_backend, "initialize_snapshot_storage", None)
-        if not callable(initialize):
-            raise NotImplementedError(f"Atomic semantic snapshots unsupported by {self.backend}")
-        initialize()
 
     # Analytics operations
     def shortest_path(

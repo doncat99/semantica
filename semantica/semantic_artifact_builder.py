@@ -80,7 +80,6 @@ from .split.structural_chunker import StructuralChunker
 from .split.sliding_window_chunker import SlidingWindowChunker
 from .pipeline.parallelism_manager import ParallelismManager, Task
 from .utils.exceptions import ProcessingError
-from .graph_store.snapshot_operations import extend_semantic_snapshot
 from .conflicts.conflict_detector import ConflictDetector
 from .change_management.managers import TemporalVersionManager
 

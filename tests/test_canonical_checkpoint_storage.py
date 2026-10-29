@@ -27,13 +27,12 @@ def test_new_jobs_share_checkpoint_without_resume_candidates(tmp_path):
     assert not hasattr(second, "legacy_inputs")
 
 
-def test_import_is_verified_once_and_original_bytes_become_evidence(tmp_path):
+def test_import_is_verified_once_and_duplicate_carrier_is_removed(tmp_path):
     source = tmp_path / "source.txt"
     source.write_text("A source")
     params = _request(source, tmp_path / "job")["params"]
     historical = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(params))
     historical.write("completed", {"unit": "one"}, {"paid": "result"})
-    original = (historical.root / "manifest.json").read_bytes()
     dataset = tmp_path / "dataset"
     imported = dataset / "imports" / "old-job"
     imported.parent.mkdir(parents=True)
@@ -42,9 +41,8 @@ def test_import_is_verified_once_and_original_bytes_become_evidence(tmp_path):
     canonical = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(params))
     assert canonical.read("completed", {"unit": "one"}) == {"paid": "result"}
     assert not imported.exists()
-    assert (dataset / "evidence" / "old-job" / "manifest.json").read_bytes() == original
-    # Evidence is never queried as a runtime fallback.
-    (dataset / "evidence" / "old-job" / "manifest.json").write_text("broken")
+    assert not (dataset / "evidence" / "old-job").exists()
+    assert not list((dataset / "evidence").glob("checkpoint-next-*"))
     assert SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(params)).read("completed", {"unit": "one"}) == {"paid": "result"}
 
 
@@ -69,18 +67,20 @@ def test_opaque_old_work_stops_before_any_paid_call(tmp_path, has_key):
     entry_path.write_bytes(_bytes(entry))
     params["outputDir"] = str(tmp_path / "new-job")
     params["resumeCheckpointDirs"] = [str(historical.root)]
-    with pytest.raises(SnapshotCheckpointError, match="opaque historical extraction"):
+    with pytest.raises(SnapshotCheckpointError, match="offline checkpoint manifest migration required"):
         SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(params))
+    assert entry_path.read_bytes() == _bytes(entry)
+    assert not (tmp_path / "new-job" / "checkpoint").exists()
 
 
 @pytest.mark.parametrize("stage", ["journal", "archived", "published"])
-def test_interrupted_import_resumes_without_losing_original_bytes(tmp_path, monkeypatch, stage):
+def test_interrupted_import_resumes_and_cleans_verified_duplicate(tmp_path, stage):
     source = tmp_path / "source.txt"
     source.write_text("A source")
     params = _request(source, tmp_path / "job")["params"]
     first = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(params))
     first.write("completed", "one", {"paid": "result"})
-    original = (first.root / "manifest.json").read_bytes()
+    original = first._path("completed", "one").read_bytes()
     import shutil
     staging = first.root.parent / ".checkpoint-next-interrupted"
     shutil.copytree(first.root, staging)
@@ -94,7 +94,9 @@ def test_interrupted_import_resumes_without_losing_original_bytes(tmp_path, monk
         staging.rename(first.root)
     restored = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(params))
     assert restored.read("completed", "one") == {"paid": "result"}
-    assert (archive / "manifest.json").read_bytes() == original
+    assert restored._path("completed", "one").read_bytes() == original
+    assert not archive.exists()
+    assert not staging.exists()
     assert not (first.root.parent / ".checkpoint-migration.json").exists()
 
 
@@ -128,7 +130,7 @@ def test_corrupt_journal_preserves_completed_work_and_reports_repair(tmp_path, r
     assert checkpoint._path("completed", "one").read_bytes() == original
 
 
-def test_import_evidence_collision_is_rejected_before_publication(tmp_path):
+def test_import_preserves_unrelated_evidence_without_a_second_payload(tmp_path):
     source = tmp_path / "source.txt"
     source.write_text("A source")
     params = _request(source, tmp_path / "job")["params"]
@@ -138,13 +140,12 @@ def test_import_evidence_collision_is_rejected_before_publication(tmp_path):
     imported = dataset / "imports" / "job"
     imported.parent.mkdir(parents=True)
     checkpoint.root.rename(imported)
-    original = (imported / "manifest.json").read_bytes()
     evidence = dataset / "evidence" / "job"
     evidence.mkdir(parents=True)
     (evidence / "original.json").write_bytes(b"preserved")
     params["checkpointDir"] = str(dataset / "checkpoint")
-    with pytest.raises(SnapshotCheckpointError, match="destination already exists"):
-        SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(params))
-    assert not (dataset / "checkpoint").exists()
-    assert (imported / "manifest.json").read_bytes() == original
+    canonical = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(params))
+    assert canonical.read("completed", "one") == {"paid": "result"}
+    assert not imported.exists()
+    assert not (evidence / "manifest.json").exists()
     assert (evidence / "original.json").read_bytes() == b"preserved"

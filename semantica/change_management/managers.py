@@ -153,12 +153,8 @@ class TemporalVersionManager(BaseVersionManager):
             "timestamp": change_entry.timestamp,
             "author": change_entry.author,
             "description": change_entry.description,
-            # Store both key shapes during the migration window so older
-            # readers and newer ContextGraph restore paths both work.
             "nodes": entities.copy(),
             "edges": relationships.copy(),
-            "entities": entities.copy(),
-            "relationships": relationships.copy(),
             "metadata": options.get("metadata", {}),
         }
 
@@ -237,20 +233,31 @@ class TemporalVersionManager(BaseVersionManager):
         )
 
     @staticmethod
+    def _index_records(items, identity):
+        indexed = {identity(item, index): item for index, item in enumerate(items)}
+        if len(indexed) != len(items):
+            raise ValidationError("semantic collection contains duplicate IDs")
+        return indexed
+
+    @staticmethod
+    def _compare_records(before, after):
+        """Compare stable identities once for graph and typed-collection callers."""
+        return {
+            "added_ids": sorted(set(after) - set(before)),
+            "removed_ids": sorted(set(before) - set(after)),
+            "updated_ids": sorted(key for key in set(before) & set(after)
+                                  if before[key] != after[key]),
+        }
+
+    @staticmethod
     def compare_collections(previous, current):
         """Compare named semantic collections by stable ID, including non-graph state."""
         result = {"added_ids": [], "updated_ids": [], "removed_ids": []}
         for collection in sorted(set(previous) | set(current)):
-            def indexed(items):
-                mapped = {item["id"]: item for item in items}
-                if len(mapped) != len(items):
-                    raise ValidationError("semantic collection contains duplicate IDs")
-                return mapped
-            before = indexed(previous.get(collection, []))
-            after = indexed(current.get(collection, []))
-            result["added_ids"].extend(set(after) - set(before))
-            result["removed_ids"].extend(set(before) - set(after))
-            result["updated_ids"].extend(key for key in set(before) & set(after) if before[key] != after[key])
+            before = TemporalVersionManager._index_records(previous.get(collection, []), lambda item, _: item["id"])
+            after = TemporalVersionManager._index_records(current.get(collection, []), lambda item, _: item["id"])
+            for key, ids in TemporalVersionManager._compare_records(before, after).items():
+                result[key].extend(ids)
         return {key: sorted(set(ids)) for key, ids in result.items()}
 
     def compare_versions(
@@ -330,39 +337,20 @@ class TemporalVersionManager(BaseVersionManager):
             version2
         )
 
-        nodes1 = {n.get("id", str(i)): n for i, n in enumerate(version1_entities)}
-        nodes2 = {n.get("id", str(i)): n for i, n in enumerate(version2_entities)}
+        def details(before, after, identity, label):
+            old = self._index_records(before, identity)
+            new = self._index_records(after, identity)
+            diff = self._compare_records(old, new)
+            return ([new[key] for key in diff["added_ids"]],
+                    [old[key] for key in diff["removed_ids"]],
+                    [{label: key, "before": old[key], "after": new[key],
+                      "changes": self._compute_entity_changes(old[key], new[key])}
+                     for key in diff["updated_ids"]])
 
-        edges1 = {self._relationship_key(e): e for e in version1_relationships}
-        edges2 = {self._relationship_key(e): e for e in version2_relationships}
-
-
-        node_ids1 = set(nodes1.keys())
-        node_ids2 = set(nodes2.keys())
-
-        nodes_added = [nodes2[nid] for nid in node_ids2 - node_ids1]
-        nodes_removed = [nodes1[nid] for nid in node_ids1 - node_ids2]
-        nodes_modified = []
-        for nid in node_ids1 & node_ids2:
-            if nodes1[nid] != nodes2[nid]:
-                changes = self._compute_entity_changes(nodes1[nid], nodes2[nid])
-                nodes_modified.append({
-                    "id": nid, "before": nodes1[nid], "after": nodes2[nid], "changes": changes
-                })
-
-
-        edge_keys1 = set(edges1.keys())
-        edge_keys2 = set(edges2.keys())
-
-        edges_added = [edges2[k] for k in edge_keys2 - edge_keys1]
-        edges_removed = [edges1[k] for k in edge_keys1 - edge_keys2]
-        edges_modified = []
-        for k in edge_keys1 & edge_keys2:
-            if edges1[k] != edges2[k]:
-                changes = self._compute_relationship_changes(edges1[k], edges2[k])
-                edges_modified.append({
-                    "key": k, "before": edges1[k], "after": edges2[k], "changes": changes
-                })
+        nodes_added, nodes_removed, nodes_modified = details(
+            version1_entities, version2_entities, lambda item, index: item.get("id", str(index)), "id")
+        edges_added, edges_removed, edges_modified = details(
+            version1_relationships, version2_relationships, lambda item, _: self._relationship_key(item), "key")
 
         return {
             "entities_added": nodes_added,
@@ -382,6 +370,8 @@ class TemporalVersionManager(BaseVersionManager):
         
     def _relationship_key(self, relationship: Dict[str, Any]) -> str:
         """Generate a unique key for a relationship."""
+        if relationship.get("id") is not None:
+            return relationship["id"]
         source = relationship.get("source", "")
         target = relationship.get("target", "")
         rel_type = relationship.get("type", relationship.get("relationship", ""))
@@ -403,21 +393,6 @@ class TemporalVersionManager(BaseVersionManager):
 
         return changes
 
-    def _compute_relationship_changes(
-        self, rel1: Dict[str, Any], rel2: Dict[str, Any]
-    ) -> Dict[str, Any]:
-        """Compute changes between two relationship versions."""
-        changes = {}
-        all_keys = set(rel1.keys()) | set(rel2.keys())
-
-        for key in all_keys:
-            val1 = rel1.get(key)
-            val2 = rel2.get(key)
-
-            if val1 != val2:
-                changes[key] = {"from": val1, "to": val2}
-
-        return changes
     
     def prune_versions(self, keep_last_n: int = 5, triplet_store: Any = None) -> Dict [str, Any]:
         """

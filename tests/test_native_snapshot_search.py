@@ -6,6 +6,26 @@ from semantica.context.context_retriever import ContextRetriever, RetrievedConte
 from tests.test_semantic_query_worker import _build, _request, _serve
 
 
+def test_search_projection_ignores_unconsumed_document_and_entity_payloads():
+    from semantica.semantic_artifact_schema import KnowledgeEntity, EvidenceSpan, DocumentLocator, DocumentRepresentation
+
+    evidence = EvidenceSpan(id="ev", representation_id="rep", quote="ESG reporting",
+        locator=DocumentLocator(representation_id="rep", origin="native", quote="ESG reporting",
+                                start_char=0, end_char=13, quality="precise"),
+        metadata={"unused": object()})
+    entity = KnowledgeEntity(id="entity", canonical_name="ESG", type="Topic", evidence_ids=["ev"],
+                             metadata={"unused": object()})
+    representation = DocumentRepresentation.model_construct(id="rep", source_id="source",
+                                                            metadata={"document": object()})
+    artifact = SimpleNamespace(evidence_spans=[evidence], entities=[entity],
+        document_representations=[representation], assertions=[], relations=[], conflicts=[], topics=[])
+    prepared = ContextRetriever.prepare_snapshot_search(artifact)
+    assert prepared[1] == {"rep": {"source_id": "source"}}
+    hits = ContextRetriever().search_snapshot(prepared, query="ESG", mode="keyword", retrieval={}, max_results=1000)
+    assert {hit.source for hit in hits} == {"entity", "ev"}
+    assert all(hit.metadata["evidence_ids"] == ["ev"] for hit in hits)
+
+
 def test_wire_query_delegates_selection_and_score_to_native_search(tmp_path):
     built = _build(tmp_path)
     assert callable(getattr(ContextRetriever, "search_snapshot", None))

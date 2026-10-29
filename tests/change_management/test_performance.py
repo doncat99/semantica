@@ -69,6 +69,7 @@ class PerformanceTestSuite:
             source_idx = i % num_entities
             target_idx = (i + 1) % num_entities
             relationships.append({
+                "id": f"relationship_{i}",
                 "source": f"entity_{source_idx}",
                 "target": f"entity_{target_idx}",
                 "type": f"relation_type_{i % 5}",
