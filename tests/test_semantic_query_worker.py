@@ -125,11 +125,11 @@ def test_query_worker_returns_snapshot_bound_evidence(tmp_path):
 
 def test_warm_queries_reuse_preparation_but_recheck_source_scope(tmp_path, monkeypatch):
     from unittest.mock import Mock
-    from semantica import semantic_query
+    from semantica.context import snapshot_search
 
     built = _build(tmp_path, second_source=True)
-    source_ids = Mock(wraps=semantic_query._source_ids)
-    monkeypatch.setattr(semantic_query, "_source_ids", source_ids)
+    source_ids = Mock(wraps=snapshot_search._source_ids)
+    monkeypatch.setattr(snapshot_search, "_source_ids", source_ids)
     request = _request(built)
     first = _serve(request)
     assert first["ok"] is True

@@ -219,6 +219,47 @@ class ContextRetriever:
         self.tier_calculator = self.config.get("tier_calculator") or TierCalculator()
         self.provenance_manager = self.config.get("provenance_manager")
 
+    @staticmethod
+    def prepare_snapshot_search(snapshot):
+        """Prepare immutable grounded candidates once; request scope is never cached."""
+        from .snapshot_search import prepare_snapshot
+        return prepare_snapshot(snapshot)
+
+    def search_snapshot(self, prepared, *, query, mode, retrieval,
+                        embedding=None, source_ids=None, max_results=5):
+        """Explicit keyword/vector retrieval, without expansion, fallback or model calls."""
+        from .snapshot_search import rank_evidence
+        if mode not in {"keyword", "semantic"}:
+            raise ValueError("unsupported snapshot search mode")
+        evidence, representations, candidates = prepared
+        allowed = set(source_ids) if source_ids is not None else None
+        admitted = [item for item in candidates
+                    if allowed is None or set(item[6]).issubset(allowed)]
+        if mode == "keyword":
+            by_id = {item[0]: item for item in admitted}
+            ranked = self._keyword_match_entities(
+                [{"id": item[0], "name": item[2]} for item in admitted],
+                query, len(admitted))
+            ranked_items = [(by_id[item["id"]], score) for item, score in ranked]
+        else:
+            scores = rank_evidence(embedding, retrieval, evidence, representations)
+            by_evidence = {}
+            for item in admitted:
+                for evidence_id in item[3]:
+                    by_evidence.setdefault(evidence_id, []).append(item)
+            seen = set()
+            ranked_items = []
+            for evidence_id, score in scores.items():
+                for item in by_evidence.get(evidence_id, []):
+                    if item[0] not in seen:
+                        seen.add(item[0])
+                        ranked_items.append((item, score))
+        return [RetrievedContext(content=text, score=score, source=item_id,
+                    metadata={"id": item_id, "kind": kind, "evidence_ids": evidence_ids,
+                              "status": status, "polarity": polarity, "source_ids": sources})
+                for (item_id, kind, text, evidence_ids, status, polarity, sources), score
+                in ranked_items[:max_results]]
+
     def retrieve_snapshot_context(self, scope_id: str, entity_ids: List[str],
                                   snapshot_id: Optional[str] = None, *,
                                   max_facts: int = 500, max_bytes: int = 250000,
