@@ -104,6 +104,55 @@ class ConflictDetector:
     """
 
     @staticmethod
+    def reconcile_qualified_facts(project_id, assertions, relations, *, functional_predicates=()):
+        """One qualified fact identity; each located evidence span is an independent support."""
+        from ..deduplication.entity_merger import EntityMerger
+        from ..semantic_artifact_schema import KnowledgeAssertion, KnowledgeRelation, KnowledgeConflict, stable_digest
+        def identity(item, prefix):
+            semantic = ([item["subject_id"], item["predicate"], item.get("object_entity_id") or item["object"], item["qualifiers"]]
+                        if prefix == "assertion" else
+                        [item["source_entity_id"], item["type"], item["target_entity_id"], item["qualifiers"]])
+            return prefix + ":" + stable_digest([project_id, semantic]).split(":")[1][:32]
+        canonical_assertions = [KnowledgeAssertion.model_validate(item) for item in EntityMerger.merge_qualified_facts(
+            [item.model_dump() for item in assertions], identity=lambda item: identity(item, "assertion"))]
+        canonical_relations = [KnowledgeRelation.model_validate(item) for item in EntityMerger.merge_qualified_facts(
+            [item.model_dump() for item in relations], identity=lambda item: identity(item, "relation"))]
+        assertion_by_id = {item.id: item for item in canonical_assertions}
+        facts = [
+            {"id": item.id, "subject": item.subject_id, "predicate": item.predicate,
+             "object": item.object_entity_id or item.object, "qualifiers": item.qualifiers}
+            for item in canonical_assertions if item.status != "retracted"]
+        polarity_groups = ConflictDetector.qualified_polarity_groups(facts)
+        conflicts = []
+        for group in polarity_groups:
+            members = [assertion_by_id[item["id"]] for item in group]
+            sample = members[0]
+            key = stable_digest([sample.subject_id, sample.predicate, sample.object_entity_id or sample.object,
+                                 {key: value for key, value in sample.qualifiers.items() if key != "polarity"}])
+            for item in members:
+                item.status = "contradicted"
+            assertion_ids = sorted(item.id for item in members)
+            relation_ids = sorted(item.id for item in canonical_relations if any(
+                item.source_entity_id == assertion.subject_id and item.target_entity_id == assertion.object_entity_id
+                and item.type == assertion.predicate and item.qualifiers == assertion.qualifiers for assertion in members))
+            conflicts.append(KnowledgeConflict(id="conflict:assertion:" + key.split(":")[1][:32], conflict_type="assertion",
+                assertion_ids=assertion_ids, relation_ids=relation_ids,
+                entity_ids=sorted({ref for item in members for ref in [item.subject_id, item.object_entity_id] if ref}),
+                evidence_ids=sorted({ref for item in members for ref in item.evidence_ids}),
+                reason="Opposite explicit polarities for the same proposition under identical recorded conditions; neither support is discarded."))
+        for group in ConflictDetector.qualified_value_groups(facts, functional_predicates):
+            members = [assertion_by_id[item["id"]] for item in group]
+            for item in members:
+                item.status = "contradicted"
+            key = stable_digest([project_id, sorted(item.id for item in members)])
+            conflicts.append(KnowledgeConflict(id="conflict:value:" + key.split(":")[1][:32],
+                conflict_type="assertion", assertion_ids=sorted(item.id for item in members),
+                entity_ids=sorted({item.subject_id for item in members}),
+                evidence_ids=sorted({ref for item in members for ref in item.evidence_ids}),
+                reason="Different positive values for a declared functional predicate under identical recorded qualifiers; all supports retained."))
+        return canonical_assertions, canonical_relations, sorted(conflicts, key=lambda item: item.id)
+
+    @staticmethod
     def qualified_value_groups(facts, functional_predicates):
         """Conflicting positive values for declared single-valued, identically qualified facts.
 

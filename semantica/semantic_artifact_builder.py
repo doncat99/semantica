@@ -80,6 +80,13 @@ from .split.structural_chunker import StructuralChunker
 from .split.sliding_window_chunker import SlidingWindowChunker
 from .pipeline.parallelism_manager import ParallelismManager, Task
 from .utils.exceptions import ProcessingError
+from .graph_store.snapshot_operations import extend_semantic_snapshot
+from .conflicts.conflict_detector import ConflictDetector
+from .change_management.managers import TemporalVersionManager
+
+# Single-hop exports retained for existing callers; algorithms belong to native owners.
+reconcile_qualified_facts = ConflictDetector.reconcile_qualified_facts
+_change_delta = TemporalVersionManager.semantic_delta
 
 
 class _RelayCooldown:
@@ -2043,146 +2050,6 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
     return {"source": source, "text": text, "representation": representation, "evidence": list(evidence.values()), "entities": list(entities.values()), "assertions": assertions, "relations": relations, "artifact_id": representation_artifact_id, "document": document, "source_locations": source_locations}
 
 
-def reconcile_qualified_facts(project_id: str, assertions: list[KnowledgeAssertion],
-                              relations: list[KnowledgeRelation], *, functional_predicates=()):
-    """One qualified fact identity; each located evidence span is an independent support."""
-    from .deduplication.entity_merger import EntityMerger
-    from .conflicts import ConflictDetector
-    def identity(item, prefix):
-        semantic = ([item["subject_id"], item["predicate"], item.get("object_entity_id") or item["object"], item["qualifiers"]]
-                    if prefix == "assertion" else
-                    [item["source_entity_id"], item["type"], item["target_entity_id"], item["qualifiers"]])
-        return prefix + ":" + stable_digest([project_id, semantic]).split(":")[1][:32]
-    canonical_assertions = [KnowledgeAssertion.model_validate(item) for item in EntityMerger.merge_qualified_facts(
-        [item.model_dump() for item in assertions], identity=lambda item: identity(item, "assertion"))]
-    canonical_relations = [KnowledgeRelation.model_validate(item) for item in EntityMerger.merge_qualified_facts(
-        [item.model_dump() for item in relations], identity=lambda item: identity(item, "relation"))]
-    assertion_by_id = {item.id: item for item in canonical_assertions}
-    facts = [
-        {"id": item.id, "subject": item.subject_id, "predicate": item.predicate,
-         "object": item.object_entity_id or item.object, "qualifiers": item.qualifiers}
-        for item in canonical_assertions if item.status != "retracted"]
-    polarity_groups = ConflictDetector.qualified_polarity_groups(facts)
-    conflicts = []
-    for group in polarity_groups:
-        members = [assertion_by_id[item["id"]] for item in group]
-        sample = members[0]
-        key = stable_digest([sample.subject_id, sample.predicate, sample.object_entity_id or sample.object,
-                             {key: value for key, value in sample.qualifiers.items() if key != "polarity"}])
-        for item in members:
-            item.status = "contradicted"
-        assertion_ids = sorted(item.id for item in members)
-        relation_ids = sorted(item.id for item in canonical_relations if any(
-            item.source_entity_id == assertion.subject_id and item.target_entity_id == assertion.object_entity_id
-            and item.type == assertion.predicate and item.qualifiers == assertion.qualifiers for assertion in members))
-        conflicts.append(KnowledgeConflict(id="conflict:assertion:" + key.split(":")[1][:32], conflict_type="assertion",
-            assertion_ids=assertion_ids, relation_ids=relation_ids,
-            entity_ids=sorted({ref for item in members for ref in [item.subject_id, item.object_entity_id] if ref}),
-            evidence_ids=sorted({ref for item in members for ref in item.evidence_ids}),
-            reason="Opposite explicit polarities for the same proposition under identical recorded conditions; neither support is discarded."))
-    for group in ConflictDetector.qualified_value_groups(facts, functional_predicates):
-        members = [assertion_by_id[item["id"]] for item in group]
-        for item in members:
-            item.status = "contradicted"
-        key = stable_digest([project_id, sorted(item.id for item in members)])
-        conflicts.append(KnowledgeConflict(id="conflict:value:" + key.split(":")[1][:32],
-            conflict_type="assertion", assertion_ids=sorted(item.id for item in members),
-            entity_ids=sorted({item.subject_id for item in members}),
-            evidence_ids=sorted({ref for item in members for ref in item.evidence_ids}),
-            reason="Different positive values for a declared functional predicate under identical recorded qualifiers; all supports retained."))
-    return canonical_assertions, canonical_relations, sorted(conflicts, key=lambda item: item.id)
-
-
-def extend_semantic_snapshot(base: Optional[SemanticArtifact], incoming: SemanticArtifact, *,
-                             functional_predicates=(), retract_evidence_ids=()) -> SemanticArtifact:
-    """Append validated observations through native fact and change owners.
-
-    Located records are immutable. Explicitly withdrawing support retains its
-    evidence and original observation. Entity IDs retain their type; incoming
-    entity projections may change across revisions, never across identities.
-    Storage still checks the base revision atomically when committing the result.
-    """
-    incoming = SemanticArtifact.model_validate(incoming.model_dump(mode="json"))
-    withdrawn = set(retract_evidence_ids)
-    operation_digest = stable_digest([incoming.model_dump(mode="json"), sorted(withdrawn),
-                                      sorted(functional_predicates)])
-    if base is None:
-        if withdrawn:
-            raise ValueError("withdrawn_evidence_not_found")
-        incoming.metadata = {**incoming.metadata, "applied_observations": {incoming.id: {
-            "digest": operation_digest, "retract_evidence_ids": [],
-            "functional_predicates": sorted(functional_predicates)}}, "withdrawn_evidence_ids": []}
-        return incoming
-    base = SemanticArtifact.model_validate(base.model_dump(mode="json"))
-    if base.project_id != incoming.project_id:
-        raise ValueError("semantic_snapshot_scope_mismatch")
-    if (base.classification_profile != incoming.classification_profile or
-            base.extraction_spec != incoming.extraction_spec):
-        raise ValueError("semantic_snapshot_contract_mismatch")
-    applied = dict(base.metadata.get("applied_observations", {}))
-    if incoming.id in applied:
-        if applied[incoming.id]["digest"] != operation_digest:
-            raise ValueError("immutable_observation_id_reused")
-        return base
-    if not withdrawn <= {item.id for item in base.evidence_spans}:
-        raise ValueError("withdrawn_evidence_not_found")
-    all_withdrawn = set(base.metadata.get("withdrawn_evidence_ids", [])) | withdrawn
-    if all_withdrawn.intersection(item.id for item in incoming.evidence_spans):
-        raise ValueError("withdrawn_evidence_reintroduced")
-    data = base.model_dump(mode="json")
-    for field in ("artifact_manifest", "document_representations", "evidence_spans", "entity_mentions",
-                  "entities", "identity_registry", "communities", "topics",
-                  "source_relations", "source_classifications", "retrieval_manifests", "model_receipts"):
-        key = "mention_id" if field == "identity_registry" else "source_id" if field == "source_classifications" else "id"
-        records = {getattr(item, key): item for item in getattr(base, field)}
-        for item in getattr(incoming, field):
-            identifier = getattr(item, key)
-            if field == "entities" and identifier in records:
-                if records[identifier].type != item.type:
-                    raise ValueError("semantic_entity_type_changed:" + identifier)
-            elif identifier in records and records[identifier] != item:
-                raise ValueError("immutable_semantic_record_reused:" + field + ":" + identifier)
-            records[identifier] = item
-        data[field] = [records[key].model_dump(mode="json") for key in sorted(records)]
-    def observations(items):
-        for item in items:
-            for original in item.metadata.get("support_observations", [item.model_dump(mode="json")]):
-                original = dict(original)
-                if withdrawn.intersection(original.get("evidence_ids", [])):
-                    original["status"] = "retracted"
-                yield type(item).model_validate(original)
-    assertions, relations, conflicts = reconcile_qualified_facts(base.project_id,
-        list(observations(base.assertions)) + incoming.assertions,
-        list(observations(base.relations)) + incoming.relations,
-        functional_predicates=functional_predicates)
-    # Preserve externally supplied conflicts; native derived conflicts are recomputed.
-    retained_conflicts = {item.id: item for item in [*base.conflicts, *incoming.conflicts]
-                          if not item.id.startswith(("conflict:assertion:", "conflict:value:"))}
-    retained_conflicts.update({item.id: item for item in conflicts})
-    data.update(assertions=[item.model_dump(mode="json") for item in assertions],
-                relations=[item.model_dump(mode="json") for item in relations],
-                conflicts=[retained_conflicts[key].model_dump(mode="json") for key in sorted(retained_conflicts)])
-    lineage = incoming.lineage.model_dump(mode="json")
-    lineage["model_receipt_ids"] = sorted(set(base.lineage.model_receipt_ids + incoming.lineage.model_receipt_ids))
-    data.update(snapshot_id="snapshot:" + stable_digest([base.id, operation_digest]).split(":")[1],
-                base_snapshot_id=base.id, snapshot_version=base.snapshot_version + 1,
-                created_at=incoming.created_at, lineage=lineage,
-                metadata={**base.metadata, "applied_observations": {**applied, incoming.id: {
-                    "digest": operation_digest, "retract_evidence_ids": sorted(withdrawn),
-                    "functional_predicates": sorted(functional_predicates)}},
-                          "withdrawn_evidence_ids": sorted(all_withdrawn),
-                          "last_observation_metadata": incoming.metadata})
-    data["change_delta"] = {}
-    result = SemanticArtifact.model_validate(data)
-    result.change_delta = _change_delta(base, result.id, result.document_representations,
-        result.entities, result.assertions, result.relations, result.communities, result.topics,
-        [item.id for item in result.retrieval_manifests], result.evidence_spans,
-        result.source_classifications, conflicts=result.conflicts, identity_registry=result.identity_registry,
-        source_relations=result.source_relations, entity_mentions=result.entity_mentions,
-        classification_profile=result.classification_profile, extraction_spec=result.extraction_spec)
-    return SemanticArtifact.model_validate(result.model_dump(mode="json"))
-
-
 def _canonical_graph_projection(
     entities: list[KnowledgeEntity],
     relations: list[KnowledgeRelation],
@@ -2364,59 +2231,6 @@ def _report_support_sources(representations, evidence, entities, assertions, rel
             for field in ("subject_id", "object_entity_id", "source_entity_id", "target_entity_id"):
                 pending.append(getattr(item, field, None))
         report.metadata["source_ids"] = sorted(sources)
-
-
-def _change_delta(
-    base_snapshot: SemanticArtifact | None,
-    snapshot_id: str,
-    representations: list[DocumentRepresentation],
-    entities: list[KnowledgeEntity],
-    assertions: list[KnowledgeAssertion],
-    relations: list[KnowledgeRelation],
-    communities: list[KnowledgeCommunity],
-    topics: list[KnowledgeTopic],
-    retrieval_manifest_ids: list[str],
-    evidence: list[EvidenceSpan],
-    source_classifications: list[SourceClassification] | None = None,
-    *, conflicts=None, identity_registry=None,
-    source_relations=None, entity_mentions=None, classification_profile=None, extraction_spec=None,
-) -> ChangeDelta:
-    from .change_management.managers import TemporalVersionManager
-    current_items = {
-        "document_representations": representations, "evidence_spans": evidence,
-        "entities": entities, "assertions": assertions, "relations": relations,
-        "communities": communities, "topics": topics, "source_classifications": source_classifications or [],
-        "conflicts": conflicts or [],
-        "identity_registry": identity_registry or [], "source_relations": source_relations or [],
-        "entity_mentions": entity_mentions or [],
-    }
-    def records(kind, items):
-        result = []
-        for item in items:
-            data = item.model_dump(mode="json", by_alias=True,
-                                   exclude={"created_at", "decided_at", "model_receipt_ids"})
-            if kind == "source_classifications":
-                data["id"] = "classification:" + item.source_id
-            elif kind == "identity_registry":
-                data["id"] = "identity-registry:" + item.mention_id
-            result.append(data)
-        return result
-    current = {kind: records(kind, items) for kind, items in current_items.items()}
-    previous = {kind: records(kind, getattr(base_snapshot, kind, [])) for kind in current_items} if base_snapshot else {}
-    for kind, value in (("classification_profile", classification_profile), ("extraction_spec", extraction_spec)):
-        current[kind] = [{"id": kind, "value": value.model_dump(mode="json")}] if value else []
-        old = getattr(base_snapshot, kind, None)
-        previous[kind] = [{"id": kind, "value": old.model_dump(mode="json")}] if old else []
-    diff = TemporalVersionManager.compare_collections(previous, current)
-    changed = set(diff["added_ids"] + diff["updated_ids"] + diff["removed_ids"])
-    representation_ids = {item["id"] for item in current["document_representations"] + previous.get("document_representations", [])}
-    return ChangeDelta(
-        base_snapshot_id=base_snapshot.id if base_snapshot else None,
-        changed_representation_ids=sorted(changed & representation_ids),
-        added_ids=diff["added_ids"], updated_ids=diff["updated_ids"], retracted_ids=diff["removed_ids"],
-        affected_retrieval_manifest_ids=retrieval_manifest_ids if changed else [],
-        reason=f"diff from Semantica snapshot {base_snapshot.id} to {snapshot_id}" if base_snapshot else "initial Semantica project build",
-    )
 
 
 @contextmanager

@@ -781,7 +781,7 @@ class GraphStore:
 
     def append_snapshot(self, snapshot: Any, *, functional_predicates=(), retract_evidence_ids=()) -> Dict[str, Any]:
         """Apply one observation with bounded CAS retry; no application-side merge."""
-        from ..semantic_artifact_builder import extend_semantic_snapshot
+        from .snapshot_operations import extend_semantic_snapshot
         from ..semantic_artifact_schema import SemanticArtifact
 
         incoming = SemanticArtifact.model_validate(
