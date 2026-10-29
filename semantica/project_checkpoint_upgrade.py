@@ -57,6 +57,34 @@ def canonicalize_checkpoint(manifest, entries, *, saved_sources=()):
             continue
         if recover and name in extraction:
             continue
+        if name.removesuffix('.json').rsplit('-', 1)[0] == 'remote-docling':
+            from .project_remote_docling import validate_remote_document
+            key, payload = entry.get('key'), entry.get('payload')
+            if (entry.get('fence') != manifest['fence'] or not isinstance(key, dict)
+                    or entry.get('digest') != _digest(_bytes(payload))
+                    or name != _locator('remote-docling', key)):
+                raise ValueError('remote Docling legacy entry identity mismatch')
+            if not isinstance(payload, dict) or payload.get('phase') not in {'submitting', 'running', 'complete'}:
+                raise ValueError('remote Docling legacy phase is invalid')
+            if any(marker.get('kind') == 'remote-docling' and marker.get('keyDigest') == _digest(_bytes(key))
+                   for marker_name, marker in entries.items() if marker_name.startswith('rejected-')):
+                raise ValueError('rejected remote Docling legacy state requires reconciliation')
+            stages = [('remote-docling-submission', {'phase': 'submitting', 'remoteCancellation': 'unsupported'})]
+            if payload['phase'] != 'submitting':
+                task_id = payload.get('taskId')
+                if not isinstance(task_id, str) or not task_id.strip():
+                    raise ValueError('remote Docling legacy checkpoint has no task identity')
+                task = {'phase': 'running', 'taskId': task_id, 'remoteCancellation': 'unsupported'}
+                stages.append(('remote-docling-task', task))
+                if payload['phase'] == 'complete':
+                    validate_remote_document(payload.get('result'))
+                    stages.append(('remote-docling-result', {**task, 'phase': 'complete', 'result': payload['result']}))
+            for kind, value in stages:
+                canonical_name = _locator(kind, key)
+                canonical_entry = {'key': key, 'payload': value, 'digest': _digest(_bytes(value)), 'fence': owner.fence}
+                owner._import_entry(canonical_name, canonical_entry, owner.fence)
+                admit(canonical_name, canonical_entry)
+            continue
         if name.startswith('document-'):
             canonical_name, canonical_entry = recover_document(inputs, name, entry)
             canonical_entry = {**canonical_entry, 'fence': owner.fence}

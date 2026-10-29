@@ -409,6 +409,8 @@ class SnapshotCheckpoint:
             raise ValueError("recipe provenance identity mismatch")
         if key is not None and not name.endswith("-" + sha256(_bytes(key)).hexdigest() + ".json"):
             raise ValueError("entry key does not match its locator")
+        if name.removesuffix(".json").rsplit("-", 1)[0] == "remote-docling":
+            raise ValueError("offline remote Docling stage migration required")
         if name.startswith("extraction-") and key is None:
             raise ValueError("opaque historical extraction key requires verified import; refusing paid recomputation")
         if name.startswith("relay-"):

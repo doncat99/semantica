@@ -201,7 +201,7 @@ def test_missing_auth_and_uncertain_submit_fail_closed(tmp_path, gateway, monkey
             parse_remote_docling(source, name=source.name, force_ocr=False, profile=profile)
         assert calls == []
         document_processing_authorization.set("fixture")
-        monkeypatch.setattr(checkpoint, "read", lambda *args: {"phase": "submitting"})
+        monkeypatch.setattr(checkpoint, "read", lambda kind, key: {"phase": "submitting"} if kind == "remote-docling-submission" else None)
         with pytest.raises(RemoteDoclingError, match="outcome unknown"):
             parse_remote_docling(source, name=source.name, force_ocr=False, profile=profile)
         assert calls == []
@@ -222,9 +222,50 @@ def test_partial_result_is_not_adopted(tmp_path, gateway, monkeypatch):
     try:
         with pytest.raises(RemoteDoclingError, match="not a successful"):
             parse_remote_docling(source, name=source.name, force_ocr=False, profile=profile)
+        assert not list(active_checkpoint.get().root.glob("remote-docling-result-*.json"))
     finally:
         document_processing_authorization.reset(authorization)
         active_checkpoint.reset(token)
+
+
+def test_concurrent_remote_callers_submit_only_once(tmp_path, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import io
+    from semantica import project_remote_docling as module
+
+    source = tmp_path / "source.pdf"
+    source.write_bytes(b"fixture")
+    checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(
+        _remote_request(source, tmp_path / "output")))
+    calls = []
+    barrier = threading.Barrier(4)
+    result = {"status": "success", "document": {
+        "json_content": {}, "text_content": "evidence", "doctags_content": "<text>evidence</text>"}}
+
+    class Opener:
+        def open(self, request, timeout):
+            calls.append(request.full_url)
+            payload = ({"task_id": "task-1"} if request.data else
+                       {"task_id": "task-1", "task_status": "success"} if "/status/" in request.full_url else result)
+            return io.BytesIO(json.dumps(payload).encode())
+
+    monkeypatch.setattr(module, "build_opener", lambda *_: Opener())
+
+    def convert():
+        token = active_checkpoint.set(checkpoint)
+        authorization = document_processing_authorization.set("fixture")
+        try:
+            barrier.wait(timeout=10)
+            return parse_remote_docling(source, name=source.name, force_ocr=False,
+                                        profile={"endpoint": "http://localhost/docling"})
+        finally:
+            active_checkpoint.reset(token)
+            document_processing_authorization.reset(authorization)
+
+    with ThreadPoolExecutor(max_workers=4) as executor:
+        results = list(executor.map(lambda _: convert(), range(4)))
+    assert all(value["text"] == "evidence" for value in results)
+    assert sum("/convert/" in url for url in calls) == 1
 
 
 @pytest.mark.parametrize("status", [401, 302])

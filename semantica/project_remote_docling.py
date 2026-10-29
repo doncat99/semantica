@@ -12,7 +12,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlsplit
 from urllib.request import HTTPRedirectHandler, Request, build_opener
 
-from .project_checkpoint import active_checkpoint
+from .project_checkpoint import active_checkpoint, _directory_lock, _bytes
 from .semantic_worker_context import document_processing_token
 
 
@@ -23,6 +23,16 @@ class RemoteDoclingError(ValueError):
 class _NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
         return None
+
+
+def validate_remote_document(result: dict) -> dict:
+    """Only complete Serve documents can become accepted immutable results."""
+    document = result.get("document") if isinstance(result, dict) else None
+    if not isinstance(result, dict) or result.get("status") != "success" or not isinstance(document, dict):
+        raise RemoteDoclingError("remote Docling result is not a successful document")
+    if not isinstance(document.get("json_content"), dict) or not isinstance(document.get("text_content"), str) or not isinstance(document.get("doctags_content"), str):
+        raise RemoteDoclingError("remote Docling result omitted full document, text or DocTags")
+    return document
 
 
 def parse_remote_docling(path: Path, *, name: str, force_ocr: bool, profile: dict,
@@ -43,7 +53,7 @@ def parse_remote_docling(path: Path, *, name: str, force_ocr: bool, profile: dic
         raise RemoteDoclingError("remote Docling requires a durable snapshot checkpoint")
     content = path.read_bytes()
     key = {"contentHash": sha256(content).hexdigest(), "name": name, "forceOcr": force_ocr, "profile": profile}
-    state = checkpoint.read("remote-docling", key)
+    state = None
     opener = build_opener(_NoRedirect())
 
     def remaining() -> float:
@@ -70,24 +80,36 @@ def parse_remote_docling(path: Path, *, name: str, force_ocr: bool, profile: dic
             raise RemoteDoclingError("remote Docling returned a non-object response")
         return result
 
-    if state is None:
-        # Serve has no idempotency key. A lost submit response must never create
-        # a second conversion on restart.
-        checkpoint.write("remote-docling", key, {"phase": "submitting", "remoteCancellation": "unsupported"})
-        submitted = request("/v1/convert/source/async", {
-            "sources": [{"kind": "file", "filename": name, "base64_string": base64.b64encode(content).decode("ascii")}],
-            "options": {"to_formats": ["json", "text", "doctags"], "pipeline": "standard", "do_ocr": True, "force_ocr": force_ocr, "abort_on_error": True},
-            "target": {"kind": "inbody"},
-        })
-        task_id = submitted.get("task_id")
-        if not isinstance(task_id, str) or not task_id.strip():
-            raise RemoteDoclingError("remote Docling submit outcome unknown: response omitted task_id")
-        state = {"phase": "running", "taskId": task_id, "remoteCancellation": "unsupported"}
-        checkpoint.write("remote-docling", key, state)
-    if state.get("phase") == "submitting":
-        raise RemoteDoclingError("remote Docling submit outcome unknown; reconcile the server task before starting a new build")
-    if state.get("phase") == "complete":
-        result = state["result"]
+    # Serve has no idempotency key. Serialize submission across processes and
+    # retain an uncertain outcome instead of ever submitting it a second time.
+    lock = checkpoint.root.parent / (".remote-docling-" + sha256(_bytes(key)).hexdigest() + ".lock")
+    with _directory_lock(lock):
+        state = checkpoint.read("remote-docling-task", key)
+        completed = checkpoint.read("remote-docling-result", key)
+        if state is None:
+            if completed is not None:
+                raise RemoteDoclingError("remote Docling completed checkpoint has no task identity; reconcile before submitting")
+            if checkpoint.read("remote-docling-submission", key) is not None:
+                raise RemoteDoclingError("remote Docling submit outcome unknown; reconcile the server task before starting a new build")
+            remaining()
+            checkpoint.write("remote-docling-submission", key, {"phase": "submitting", "remoteCancellation": "unsupported"})
+            submitted = request("/v1/convert/source/async", {
+                "sources": [{"kind": "file", "filename": name, "base64_string": base64.b64encode(content).decode("ascii")}],
+                "options": {"to_formats": ["json", "text", "doctags"], "pipeline": "standard", "do_ocr": True, "force_ocr": force_ocr, "abort_on_error": True},
+                "target": {"kind": "inbody"},
+            })
+            task_id = submitted.get("task_id")
+            if not isinstance(task_id, str) or not task_id.strip():
+                raise RemoteDoclingError("remote Docling submit outcome unknown: response omitted task_id")
+            state = {"phase": "running", "taskId": task_id, "remoteCancellation": "unsupported"}
+            checkpoint.write("remote-docling-task", key, state)
+    task_id = state.get("taskId")
+    if not isinstance(task_id, str) or not task_id.strip():
+        raise RemoteDoclingError("remote Docling checkpoint has no task identity")
+    if completed is not None:
+        if completed.get("taskId") != task_id:
+            raise RemoteDoclingError("remote Docling task identity changed")
+        result = completed["result"]
     else:
         task_id = state.get("taskId")
         if not isinstance(task_id, str) or not task_id:
@@ -103,12 +125,9 @@ def parse_remote_docling(path: Path, *, name: str, force_ocr: bool, profile: dic
             if value not in {"pending", "started"}:
                 raise RemoteDoclingError(f"remote Docling task ended without complete conversion: {value}")
         result = request(f"/v1/result/{encoded_id}")
-        checkpoint.write("remote-docling", key, {**state, "phase": "complete", "result": result})
-    document = result.get("document")
-    if result.get("status") != "success" or not isinstance(document, dict):
-        raise RemoteDoclingError("remote Docling result is not a successful document")
-    if not isinstance(document.get("json_content"), dict) or not isinstance(document.get("text_content"), str) or not isinstance(document.get("doctags_content"), str):
-        raise RemoteDoclingError("remote Docling result omitted full document, text or DocTags")
+        validate_remote_document(result)
+        checkpoint.write("remote-docling-result", key, {**state, "phase": "complete", "result": result})
+    document = validate_remote_document(result)
     return {"text": document["text_content"], "document": {
         "format": "docling", "document": document["json_content"], "doctags": document["doctags_content"],
         "pages": [], "conversion_status": "success", "source": name,
