@@ -1,12 +1,6 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { BrainCircuit, Play, RotateCcw, CheckCircle2, AlertCircle, Zap, GitBranch, Info } from "lucide-react";
-
-const SAMPLE_FACTS = `inhibits(Metformin, mTOR)
-causes(mTOR, Neurodegeneration)
-treats(Metformin, Diabetes)`;
-
-const SAMPLE_RULE = `IF inhibits(Metformin, mTOR) AND causes(mTOR, Neurodegeneration) THEN candidate(Metformin, Alzheimer's)`;
 
 const TEMPLATES = [
   {
@@ -28,9 +22,12 @@ const TEMPLATES = [
 
 export function ReasoningWorkspace() {
   const queryClient = useQueryClient();
-  const [facts, setFacts] = useState(SAMPLE_FACTS);
-  const [rules, setRules] = useState(SAMPLE_RULE);
-  const [applyToGraph, setApplyToGraph] = useState(true);
+  const [facts, setFacts] = useState("");
+  const [graphFacts, setGraphFacts] = useState("");
+  const [rules, setRules] = useState("");
+  const [applyToGraph, setApplyToGraph] = useState(false);
+  const [factsLoading, setFactsLoading] = useState(true);
+  const [factsNotice, setFactsNotice] = useState("");
   const [result, setResult] = useState<{
     inferred_facts?: string[];
     rules_fired?: number;
@@ -39,6 +36,24 @@ export function ReasoningWorkspace() {
   } | null>(null);
   const [isRunning, setIsRunning] = useState(false);
   const [error, setError] = useState("");
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    fetch("/api/reason/facts", { signal: ctrl.signal }).then(async response => {
+      if (!response.ok) throw new Error(`Unable to load graph facts: HTTP ${response.status}`);
+      const data = await response.json();
+      if (ctrl.signal.aborted) return;
+      const text = data.facts.join("\n");
+      setGraphFacts(text);
+      setFacts(text);
+      setFactsNotice(data.skipped_edges ? `${data.skipped_edges} edges cannot be represented by the reasoning syntax.` : "");
+    }).catch(error => {
+      if (!ctrl.signal.aborted) setError(String(error));
+    }).finally(() => {
+      if (!ctrl.signal.aborted) setFactsLoading(false);
+    });
+    return () => ctrl.abort();
+  }, []);
 
   async function handleRun() {
     setIsRunning(true);
@@ -75,8 +90,8 @@ export function ReasoningWorkspace() {
   }
 
   function handleReset() {
-    setFacts(SAMPLE_FACTS);
-    setRules(SAMPLE_RULE);
+    setFacts(graphFacts);
+    setRules("");
     setResult(null);
     setError("");
   }
@@ -100,7 +115,7 @@ export function ReasoningWorkspace() {
 
         {/* Templates */}
         <div style={{ padding: "12px 16px 10px", borderBottom: "1px solid var(--ws-border)", flexShrink: 0 }}>
-          <div className="ws-eyebrow" style={{ marginBottom: 8 }}>Quick Templates</div>
+          <div className="ws-eyebrow" style={{ marginBottom: 8 }}>Optional examples — replaces current inputs</div>
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
             {TEMPLATES.map((t) => (
               <button key={t.label} className="ws-btn ws-btn--ghost" style={{ padding: "5px 10px", fontSize: 11 }} onClick={() => loadTemplate(t)}>
@@ -113,10 +128,14 @@ export function ReasoningWorkspace() {
         {/* Input area */}
         <div className="ws-scroll ws-padded" style={{ display: "flex", flexDirection: "column", gap: 16 }}>
           <div>
-            <label className="ws-label">Facts</label>
+            <label className="ws-label" htmlFor="reasoning-facts">Current graph facts</label>
+            {factsNotice && <p role="status">{factsNotice}</p>}
+            {!factsLoading && !graphFacts && <p>No supported relationships in this graph. Import a graph with relationships or enter facts.</p>}
             <div className="ws-body" style={{ marginBottom: 8 }}>One fact per line using <code style={{ color: "var(--ws-accent)", fontSize: 11 }}>predicate(subject, object)</code> form.</div>
             <textarea
               className="ws-textarea"
+              id="reasoning-facts"
+              disabled={factsLoading}
               value={facts}
               onChange={(e) => setFacts(e.target.value)}
               rows={6}
@@ -125,10 +144,11 @@ export function ReasoningWorkspace() {
           </div>
 
           <div>
-            <label className="ws-label">Rules</label>
+            <label className="ws-label" htmlFor="reasoning-rules">Rules</label>
             <div className="ws-body" style={{ marginBottom: 8 }}>Use <code style={{ color: "var(--ws-amber)", fontSize: 11 }}>IF … AND … THEN …</code> syntax. Falls back to internal matcher if the reasoning server is unavailable.</div>
             <textarea
               className="ws-textarea"
+              id="reasoning-rules"
               value={rules}
               onChange={(e) => setRules(e.target.value)}
               rows={5}
@@ -159,14 +179,14 @@ export function ReasoningWorkspace() {
             <button
               className="ws-btn ws-btn--primary"
               onClick={handleRun}
-              disabled={isRunning}
+              disabled={isRunning || factsLoading || !facts.trim() || !rules.trim()}
               style={{ flex: 1, justifyContent: "center" }}
             >
               {isRunning
                 ? <><span className="ws-spin" style={{ display: "inline-block" }}><Zap size={15} /></span>Running…</>
                 : <><Play size={14} />Run Reasoning</>}
             </button>
-            <button className="ws-btn ws-btn--ghost" onClick={handleReset} title="Reset to defaults">
+            <button className="ws-btn ws-btn--ghost" onClick={handleReset} title="Reset to current graph">
               <RotateCcw size={14} />
             </button>
           </div>

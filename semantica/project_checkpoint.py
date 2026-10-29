@@ -12,10 +12,14 @@ from contextlib import contextmanager
 from pathlib import Path
 import tempfile
 from typing import Any
+from .semantic_artifact_errors import SemanticArtifactError
 
 
-class SnapshotCheckpointError(ValueError):
+class SnapshotCheckpointError(SemanticArtifactError, ValueError):
     """A checkpoint is corrupt or belongs to different immutable inputs."""
+
+    def __init__(self, message):
+        super().__init__(message, code="COMPLETED_WORK_RECOVERY_GAP")
 
 
 def _bytes(value: Any) -> bytes:
@@ -118,7 +122,7 @@ def _directory_lock(path):
 
 
 class SnapshotCheckpoint:
-    def __init__(self, request: Any):
+    def __init__(self, request: Any, *, offline_conversion=None):
         sources = []
         for source in request.sources:
             with Path(source.file_path).open("rb") as stream:
@@ -142,7 +146,7 @@ class SnapshotCheckpoint:
                 **({"maxOutputTokens": relay.max_output_tokens}
                    if relay.max_output_tokens is not None else {}),
             } for name, relay in request.relays.items()}}}
-        self._initialize(request.output_dir, request.resume_checkpoint_dirs, inputs, request.checkpoint_dir)
+        self._initialize(request.output_dir, request.resume_checkpoint_dirs, inputs, request.checkpoint_dir, offline_conversion=offline_conversion)
 
     @classmethod
     def for_source(cls, source, *, output_dir, scope_id, recipe, created_at):
@@ -158,12 +162,12 @@ class SnapshotCheckpoint:
                        "actualDigest": digest}})
         return instance
 
-    def _initialize(self, output_dir, resume_dirs, inputs, checkpoint_dir=None):
+    def _initialize(self, output_dir, resume_dirs, inputs, checkpoint_dir=None, *, offline_conversion=None):
         self.root = Path(checkpoint_dir).absolute() if checkpoint_dir else Path(output_dir).resolve() / "checkpoint"
         self.root.parent.mkdir(parents=True, exist_ok=True)
         with _directory_lock(self.root.parent / ".checkpoint.lock"):
             self._finish_migration()
-            self._import(inputs, resume_dirs)
+            self._import(inputs, resume_dirs, offline_conversion=offline_conversion)
 
     def _finish_migration(self):
         for directory in (self.root, self.root.parent / 'imports', self.root.parent / 'evidence'):
@@ -268,7 +272,7 @@ class SnapshotCheckpoint:
                 shutil.rmtree(staging)
             raise
 
-    def _import(self, provenance, resume_dirs):
+    def _import(self, provenance, resume_dirs, *, offline_conversion=None):
         inputs = _canonical_inputs(provenance)
         self.fence = _digest(_bytes(inputs))
         imports_dir = self.root.parent / "imports"
@@ -301,6 +305,10 @@ class SnapshotCheckpoint:
                 if root.is_symlink() or not root.is_dir():
                     raise ValueError("checkpoint directory is not a regular directory")
                 previous = json.loads((root / "manifest.json").read_bytes())
+                converted = None
+                if offline_conversion is not None:
+                    previous, converted = offline_conversion(root, previous)
+                    changed_entries |= converted is not None
                 if previous.get("entryIdentity") != "business-content-v1":
                     raise ValueError("offline checkpoint manifest migration required; refusing paid recomputation")
                 prior_inputs = previous["inputs"]
@@ -317,16 +325,17 @@ class SnapshotCheckpoint:
                 if root == self.root or roots[0] == root:
                     self.created_at = previous["createdAt"]
                 local_current = root == self.root and prior_inputs == inputs
-                for file in root.iterdir():
+                files = [root / name for name in converted] if converted is not None else root.iterdir()
+                for file in files:
                     if file.name == "manifest.json":
                         continue
                     # Atomic writers never publish these files as completed work.
                     if file.name.startswith(".pending-") and file.is_file() and not file.is_symlink():
                         file.unlink()
                         continue
-                    if file.is_symlink() or not file.is_file() or file.suffix != ".json":
+                    if converted is None and (file.is_symlink() or not file.is_file() or file.suffix != ".json"):
                         raise ValueError(f"unknown completed work carrier: {file.name}")
-                    entry = json.loads(file.read_bytes())
+                    entry = converted[file.name] if converted is not None else json.loads(file.read_bytes())
                     # Native production keys carry their own dependencies. Unknown
                     # opaque units cannot cross a business-input change safely.
                     if prior_business != inputs and not file.name.startswith((
@@ -344,7 +353,8 @@ class SnapshotCheckpoint:
                 changed_entries |= len(entries) != before
                 # Remember prior source coverage even after removal/readdition.
                 # Missing plans must never silently repeat already-paid work.
-                if any(root.glob("extraction-entities-*.json")) or any(root.glob("extraction-relations-*.json")):
+                if any(name.startswith(("extraction-entities-", "extraction-relations-")) for name in
+                       (converted if converted is not None else (file.name for file in root.iterdir()))):
                     for source in prior_business.get("sources", []):
                         key = {"sourceId": source["sourceId"], "materialRevision": source["materialRevision"],
                                "forceOcr": source["sourceId"] in prior_business["requirements"]["forceOcrSourceIds"]}

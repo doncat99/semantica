@@ -9,6 +9,7 @@ import threading
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 import networkx as nx
@@ -46,6 +47,7 @@ class GraphSession:
         provenance_storage_path: Optional[str] = None,
     ) -> None:
         self.graph = graph
+        self._workspace_path: Optional[Path] = None
         self._provenance_storage_path = provenance_storage_path
         self._lock = threading.RLock()
         self._search_index = GraphSearchIndex()
@@ -70,8 +72,23 @@ class GraphSession:
     @classmethod
     def from_file(cls, path: str) -> "GraphSession":
         graph = ContextGraph()
-        graph.load_from_file(path)
-        return cls(graph)
+        workspace = Path(str(path) + ".explorer.json")
+        graph.load_from_file(workspace if workspace.exists() else path)
+        session = cls(graph)
+        session._workspace_path = workspace
+        return session
+
+    def record_decision(self, **fields: Any) -> Dict[str, Any]:
+        """Record through ContextGraph and durably save the Explorer working copy."""
+        with self._lock:
+            missing = [entity for entity in fields.get("entities", []) if self.graph.find_node(entity) is None]
+            if missing:
+                raise ValueError("Related entities must exist in the current graph")
+            decision_id = self.graph.record_decision(**fields)
+            if self._workspace_path is not None:
+                self.graph.save_to_file(self._workspace_path)
+            self.rebuild_search_index()
+            return self.get_node(decision_id)
 
     @staticmethod
     def _encode_cursor(value: str) -> str:

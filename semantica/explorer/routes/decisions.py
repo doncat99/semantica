@@ -6,12 +6,31 @@ import asyncio
 from typing import Optional
 
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 
 from ..dependencies import get_session
 from ..schemas import CausalChainResponse, CausalDistanceReport, ComplianceResponse, DecisionResponse
 from ..session import GraphSession
 
 router = APIRouter(prefix="/api/decisions", tags=["Decisions"])
+
+
+class RecordDecisionRequest(BaseModel):
+    category: str = Field(min_length=1, max_length=100)
+    scenario: str = Field(min_length=1, max_length=5000)
+    reasoning: str = Field(min_length=1, max_length=10000)
+    outcome: str = Field(min_length=1, max_length=1000)
+    confidence: float = Field(ge=0, le=1)
+    entities: list[str] = Field(default_factory=list, max_length=100)
+
+
+@router.post("", response_model=DecisionResponse, status_code=201)
+async def record_decision(body: RecordDecisionRequest, session: GraphSession = Depends(get_session)):
+    try:
+        node = await asyncio.to_thread(session.record_decision, **body.model_dump())
+    except ValueError as exc:
+        raise HTTPException(status_code=422, detail=str(exc)) from exc
+    return _node_to_decision(node)
 
 
 def _node_to_decision(node: dict) -> DecisionResponse:

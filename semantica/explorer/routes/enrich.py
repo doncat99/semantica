@@ -333,6 +333,22 @@ async def detect_duplicates(
         raise HTTPException(status_code=422, detail=f"Dedup scan failed: {exc}")
 
 
+@router.get("/api/reason/facts")
+async def graph_reasoning_facts(session: GraphSession = Depends(get_session)):
+    def collect():
+        facts = []
+        skipped = 0
+        for edge in session.iter_edges():
+            fact = f"{edge['type']}({edge['source']}, {edge['target']})"
+            parsed = _parse_fact(fact)
+            if parsed != (edge["type"], [edge["source"], edge["target"]]):
+                skipped += 1
+                continue
+            facts.append(fact)
+        return {"facts": list(dict.fromkeys(facts)), "skipped_edges": skipped}
+    return await asyncio.to_thread(collect)
+
+
 @router.post("/api/reason", response_model=ReasoningResponse)
 async def run_reasoning(
     body: ReasoningRequest,

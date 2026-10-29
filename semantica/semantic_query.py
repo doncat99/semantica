@@ -122,28 +122,10 @@ def _semantic_evidence_scores(request, retrieval, evidence_by_id, representation
     return scores
 
 
-def query_semantic_artifact(request: SemanticQueryRequest) -> SemanticQueryResult:
-    if request.method != "query":
-        raise QueryError("query_semantic_artifact requires method=query")
-    retrieval_payload = _load_json(Path(request.retrieval.path), request.retrieval.digest)
-    stat = Path(request.snapshot.path).stat()
-    snapshot = _load_snapshot(Path(request.snapshot.path).resolve(), request.snapshot.digest,
-        (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
-    if snapshot.project_id != request.project_id or snapshot.id != request.snapshot_id:
-        raise QueryError("query artifacts do not match the requested semantic artifact")
-    if not isinstance(retrieval_payload, dict) or retrieval_payload.get("snapshot_id") != snapshot.id:
-        raise QueryError("retrieval artifact does not belong to the requested snapshot")
-    manifest_id = "retrieval:graph"
-    manifests = {item.id: item for item in snapshot.retrieval_manifests}
-    graph_manifest = manifests.get(manifest_id)
-    if graph_manifest is None or graph_manifest.artifact_hash != request.retrieval.digest:
-        raise QueryError("retrieval artifact is not the snapshot graph manifest")
-
-    if retrieval_payload.get("format") != "semantica.retrieval-reference.v1":
-        raise QueryError("unsupported retrieval artifact format; rebuild is required")
-    duplicate_fields = {"entities", "assertions", "relations", "identity_decisions", "conflicts", "topics", "evidence"}
-    if duplicate_fields.intersection(retrieval_payload):
-        raise QueryError("reference retrieval artifact cannot duplicate snapshot records")
+@lru_cache(maxsize=2)
+def _prepare_query_snapshot(path: Path, digest: str, identity: tuple[int, ...]):
+    """Reuse immutable candidate/source preparation; scope and ranking remain per request."""
+    snapshot = _load_snapshot(path, digest, identity)
     def records(items):
         return [item.model_dump(mode="json", by_alias=True) for item in items]
     evidence_records = records(snapshot.evidence_spans)
@@ -177,16 +159,44 @@ def query_semantic_artifact(request: SemanticQueryRequest) -> SemanticQueryResul
     for evidence in evidence_records:
         candidates.append((str(evidence["id"]), "evidence", str(evidence.get("quote", "")), [str(evidence["id"])], evidence.get("origin"), None))
 
-    allowed_sources = set(request.source_ids) if request.source_ids is not None else None
-    evidence_scores = _semantic_evidence_scores(request, retrieval_payload, evidence_by_id, representation_by_id) if request.mode == "semantic" else None
-    admitted = []
+    prepared = []
     for item_id, kind, text, evidence, status, polarity in candidates:
         sources = _source_ids(evidence, evidence_by_id, representation_by_id)
-        if not evidence or not sources:
-            continue
-        if allowed_sources is not None and not set(sources).issubset(allowed_sources):
-            continue
-        admitted.append((item_id, kind, text, evidence, status, polarity, sources))
+        if evidence and sources:
+            prepared.append((item_id, kind, text, evidence, status, polarity, sources))
+    return evidence_by_id, representation_by_id, prepared
+
+
+def query_semantic_artifact(request: SemanticQueryRequest) -> SemanticQueryResult:
+    if request.method != "query":
+        raise QueryError("query_semantic_artifact requires method=query")
+    retrieval_payload = _load_json(Path(request.retrieval.path), request.retrieval.digest)
+    stat = Path(request.snapshot.path).stat()
+    snapshot = _load_snapshot(Path(request.snapshot.path).resolve(), request.snapshot.digest,
+        (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+    if snapshot.project_id != request.project_id or snapshot.id != request.snapshot_id:
+        raise QueryError("query artifacts do not match the requested semantic artifact")
+    if not isinstance(retrieval_payload, dict) or retrieval_payload.get("snapshot_id") != snapshot.id:
+        raise QueryError("retrieval artifact does not belong to the requested snapshot")
+    manifest_id = "retrieval:graph"
+    manifests = {item.id: item for item in snapshot.retrieval_manifests}
+    graph_manifest = manifests.get(manifest_id)
+    if graph_manifest is None or graph_manifest.artifact_hash != request.retrieval.digest:
+        raise QueryError("retrieval artifact is not the snapshot graph manifest")
+
+    if retrieval_payload.get("format") != "semantica.retrieval-reference.v1":
+        raise QueryError("unsupported retrieval artifact format; rebuild is required")
+    duplicate_fields = {"entities", "assertions", "relations", "identity_decisions", "conflicts", "topics", "evidence"}
+    if duplicate_fields.intersection(retrieval_payload):
+        raise QueryError("reference retrieval artifact cannot duplicate snapshot records")
+    evidence_by_id, representation_by_id, candidates = _prepare_query_snapshot(
+        Path(request.snapshot.path).resolve(), request.snapshot.digest,
+        (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+
+    allowed_sources = set(request.source_ids) if request.source_ids is not None else None
+    evidence_scores = _semantic_evidence_scores(request, retrieval_payload, evidence_by_id, representation_by_id) if request.mode == "semantic" else None
+    admitted = [item for item in candidates
+                if allowed_sources is None or set(item[6]).issubset(allowed_sources)]
     by_id = {item[0]: item for item in admitted}
     if evidence_scores is None:
         ranked = ContextRetriever()._keyword_match_entities(
@@ -206,7 +216,7 @@ def query_semantic_artifact(request: SemanticQueryRequest) -> SemanticQueryResul
                     seen.add(item[0])
                     ranked_items.append((item, score))
     hits = []
-    for (item_id, kind, text, evidence, status, polarity, sources), score in ranked_items:
+    for (item_id, kind, text, evidence, status, polarity, sources), score in ranked_items[:request.limit]:
         hits.append(QueryHit(
             id=item_id,
             kind=kind,

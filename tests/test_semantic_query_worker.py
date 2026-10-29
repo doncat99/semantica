@@ -123,6 +123,30 @@ def test_query_worker_returns_snapshot_bound_evidence(tmp_path):
     assert any(context["kind"] == "evidence" and "Ada Lovelace" in context["text"] for context in result["contexts"])
 
 
+def test_warm_queries_reuse_preparation_but_recheck_source_scope(tmp_path, monkeypatch):
+    from unittest.mock import Mock
+    from semantica import semantic_query
+
+    built = _build(tmp_path, second_source=True)
+    source_ids = Mock(wraps=semantic_query._source_ids)
+    monkeypatch.setattr(semantic_query, "_source_ids", source_ids)
+    request = _request(built)
+    first = _serve(request)
+    assert first["ok"] is True
+    prepared_calls = source_ids.call_count
+    assert prepared_calls > 0
+    request["params"].update({"sourceIds": ["source-2"], "query": "machines"})
+    second = _serve(request)
+    assert second["ok"] is True
+    assert second["result"]["contexts"]
+    assert all(hit["sourceIds"] == ["source-2"] for hit in second["result"]["contexts"])
+    assert source_ids.call_count == prepared_calls
+    request["params"]["sourceIds"] = []
+    assert _serve(request)["result"]["contexts"] == []
+    built["snapshot_path"].write_text("{}")
+    assert _serve(request)["ok"] is False
+
+
 def test_query_worker_returns_grounded_conflicts(tmp_path):
     built = _build(tmp_path)
     snapshot = json.loads(built["snapshot_path"].read_text())

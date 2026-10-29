@@ -2522,7 +2522,8 @@ def _project_stage(stage, inputs, adapter, compute, progress, percent):
 
 def build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=None, *, persist_snapshot: bool = True) -> dict[str, Any]:
     """Build, validate, and materialize Semantica's generic semantic artifacts."""
-    token = active_checkpoint.set(SnapshotCheckpoint(request))
+    from .project_checkpoint_upgrade import prepare_project_checkpoints
+    token = active_checkpoint.set(prepare_project_checkpoints(request))
     gate_token = _active_relay_gates.set((threading.Lock(), {}))
     reuse_token = _completed_generation_only.set(False)
     try:

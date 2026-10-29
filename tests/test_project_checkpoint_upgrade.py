@@ -220,7 +220,8 @@ def test_selection_uses_original_receipt_time_and_whole_payload():
 
 
 @pytest.mark.parametrize('rejected', [False, True])
-def test_offline_install_is_consumed_by_native_parser_and_extractor_after_restart(tmp_path, monkeypatch, rejected):
+@pytest.mark.parametrize('preflight', [False, True])
+def test_offline_install_is_consumed_by_native_parser_and_extractor_after_restart(tmp_path, monkeypatch, rejected, preflight):
     import json
     import subprocess
     import sys
@@ -272,7 +273,13 @@ def test_offline_install_is_consumed_by_native_parser_and_extractor_after_restar
     monkeypatch.setattr('urllib.request.urlopen', lambda *a, **k: pytest.fail('unexpected network'))
     monkeypatch.setattr('semantica.semantic_source_artifact.parse_source', lambda *a, **k: pytest.fail('reparsed content'))
     monkeypatch.setattr(builder._ProjectModelProvider, 'generate', lambda *a, **k: pytest.fail('paid cache missed'))
-    upgrade_checkpoint(owner.root)
+    if preflight:
+        from semantica.project_checkpoint_upgrade import prepare_project_checkpoints
+        monkeypatch.setattr('semantica.semantic_source_artifact._load_parsed_source',
+                            lambda *a, **k: pytest.fail('checkpoint parse already exists'))
+        prepare_project_checkpoints(request)
+    else:
+        upgrade_checkpoint(owner.root)
     request.relays['model'].model_id = 'different-model'
     for _ in range(2):
         owner = SnapshotCheckpoint(request)

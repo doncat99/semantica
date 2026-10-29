@@ -1,4 +1,4 @@
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import Editor, { useMonaco } from "@monaco-editor/react";
 import { Play, Copy, Download, Table2, AlertCircle, FileCode2 } from "lucide-react";
 
@@ -16,6 +16,24 @@ export function SparqlWorkspace() {
   const [result, setResult] = useState<{ columns?: string[]; rows?: Record<string, string>[]; error?: string; error_line?: number } | null>(null);
   const [isLoading, setIsLoading] = useState(false);
   const [copyState, setCopyState] = useState(false);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    setIsLoading(true);
+    fetch("/api/sparql", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ query: TEMPLATES[0].query }), signal: ctrl.signal,
+    }).then(async response => {
+      if (!response.ok) throw new Error(`Unable to query graph: HTTP ${response.status}`);
+      const data = await response.json();
+      if (!ctrl.signal.aborted) setResult(data);
+    }).catch(error => {
+      if (!ctrl.signal.aborted) setResult({ error: String(error) });
+    }).finally(() => {
+      if (!ctrl.signal.aborted) setIsLoading(false);
+    });
+    return () => ctrl.abort();
+  }, []);
 
   function handleEditorWillMount(monacoIns: { languages: { getLanguages(): { id: string }[]; register(opts: { id: string }): void; setMonarchTokensProvider(id: string, p: unknown): void }; editor: { defineTheme(id: string, t: unknown): void } }) {
     if (!monacoIns.languages.getLanguages().some((l) => l.id === "sparql")) {

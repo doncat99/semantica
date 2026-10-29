@@ -34,6 +34,24 @@ export function LineageDiagram() {
   const [searchId, setSearchId] = useState("");
   const [activeId, setActiveId] = useState("");
   const [error, setError] = useState("");
+  const [graphNodes, setGraphNodes] = useState<{ id: string; content?: string }[]>([]);
+
+  useEffect(() => {
+    const ctrl = new AbortController();
+    fetch("/api/graph/nodes?limit=100", { signal: ctrl.signal }).then(async response => {
+      if (!response.ok) throw new Error(`Unable to load graph nodes: HTTP ${response.status}`);
+      const data = await response.json();
+      if (ctrl.signal.aborted) return;
+      setGraphNodes(data.nodes);
+      if (data.nodes.length) {
+        setSearchId(data.nodes[0].id);
+        setActiveId(data.nodes[0].id);
+      }
+    }).catch(error => {
+      if (!ctrl.signal.aborted) setError(String(error));
+    });
+    return () => ctrl.abort();
+  }, []);
 
   const downloadReport = async (format: "json" | "markdown") => {
     if (!activeId) return;
@@ -135,6 +153,8 @@ export function LineageDiagram() {
         <span className="ws-eyebrow" style={{ color: "var(--ws-accent, #4aa3ff)", marginRight: 4 }}>PROV-O Lineage</span>
         <input
           className="ws-input"
+          aria-label="Lineage node"
+          list="lineage-graph-nodes"
           type="text"
           placeholder="Enter Node ID…"
           value={searchId}
@@ -142,6 +162,9 @@ export function LineageDiagram() {
           onKeyDown={(e) => { if (e.key === "Enter") setActiveId(searchId); }}
           style={{ width: 200, padding: "6px 10px", fontSize: 12 }}
         />
+        <datalist id="lineage-graph-nodes">
+          {graphNodes.map(node => <option key={node.id} value={node.id}>{node.content || node.id}</option>)}
+        </datalist>
         <button className="ws-btn ws-btn--primary" style={{ padding: "6px 12px" }} onClick={() => setActiveId(searchId)}>
           Trace
         </button>

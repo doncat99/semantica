@@ -16,7 +16,7 @@ from .project_checkpoint import _bytes, _digest
 _HISTORICAL_CONTEXT_BYTES = 48_000
 
 
-def canonicalize_checkpoint(manifest, entries):
+def canonicalize_checkpoint(manifest, entries, *, saved_sources=()):
     """Prepare one verified canonical dataset without writing or deleting files.
 
     Historical extraction identities require verified parsed sources and exact
@@ -51,7 +51,7 @@ def canonicalize_checkpoint(manifest, entries):
     recover = bool(extraction) and (manifest.get('entryIdentity') is None
         or any(entry.get('key') is None for entry in extraction.values())
         or any(name.startswith('chunk-extraction-') for name in extraction))
-    parsed_sources = []
+    parsed_sources = list(saved_sources)
     for name, entry in entries.items():
         if name.startswith('rejected-'):
             continue
@@ -79,6 +79,7 @@ def canonicalize_checkpoint(manifest, entries):
         owner._import_entry(canonical_name, canonical_entry, owner.fence)
         admit(canonical_name, canonical_entry)
     if recover:
+        parsed_sources = list({_bytes(source): source for source in parsed_sources}.values())
         native = {name: entry for name, entry in extraction.items() if not name.startswith('chunk-extraction-')}
         recovered, plans = recover_extractions(inputs, native, parsed_sources)
         chunks = {name: entry for name, entry in extraction.items() if name.startswith('chunk-extraction-')}
@@ -147,6 +148,61 @@ def upgrade_checkpoint(path):
         manifest, entries = canonicalize_checkpoint(json.loads(manifest_path.read_bytes()), entries)
         owner._install(manifest, entries)
     return manifest
+
+
+def prepare_project_checkpoints(request):
+    """Run verified offline conversion before the strict build reader starts.
+
+    This entry performs no parsing or generation. Historical opaque identities
+    still require an exact reconstructed locator; incomplete proof blocks builds.
+    """
+    from .project_checkpoint import SnapshotCheckpoint, SnapshotCheckpointError
+    from .semantic_source_artifact import _load_parsed_source
+    saved_sources = {}
+    def convert(root, manifest):
+        if manifest['inputs'].get('projectId') != request.project_id:
+            raise ValueError('checkpoint belongs to a different project')
+        try:
+            SnapshotCheckpoint.__new__(SnapshotCheckpoint)._verify_dataset(root)
+            return manifest, None
+        except SnapshotCheckpointError:
+            pass
+        entries = {}
+        for file in root.iterdir():
+            if file.name == 'manifest.json':
+                continue
+            if file.name.startswith('.pending-') and file.is_file() and not file.is_symlink():
+                continue
+            if file.is_symlink() or not file.is_file() or file.suffix != '.json':
+                raise ValueError('unknown checkpoint file')
+            entries[file.name] = json.loads(file.read_bytes())
+        if any(name.startswith(('chunk-extraction-', 'extraction-entities-', 'extraction-relations-'))
+               for name in entries):
+            covered = set()
+            for name, entry in entries.items():
+                if name.startswith('document-'):
+                    _, document = recover_document(manifest['inputs'], name, entry)
+                    covered.add((document['key']['sourceId'], document['key']['contentHash']))
+            old_sources = manifest['inputs'].get('sources', [manifest['inputs'].get('source', {})])
+            needed = {(s['sourceId'], s['materialRevision']) for s in old_sources} - covered
+            refs = {ref.source_id: ref for ref in request.parsed_sources}
+            for source in request.sources:
+                identity = (source.source_id, source.material_revision)
+                if identity not in needed or identity in saved_sources or source.source_id not in refs:
+                    continue
+                parsed = _load_parsed_source(source, refs[source.source_id],
+                    source.source_id in request.recipe.force_ocr_source_ids,
+                    request.document_processing.model_dump(mode='json', by_alias=True))
+                saved_sources[identity] = {'sourceId': source.source_id,
+                    'materialRevision': source.material_revision, 'document': parsed[1]}
+        relevant = [s for s in saved_sources.values() if any(
+            s['sourceId'] == old['sourceId'] and s['materialRevision'] == old['materialRevision']
+            for old in manifest['inputs'].get('sources', [manifest['inputs'].get('source', {})]))]
+        return canonicalize_checkpoint(manifest, entries, saved_sources=relevant)
+    try:
+        return SnapshotCheckpoint(request, offline_conversion=convert)
+    except (ValueError, KeyError, TypeError, OSError) as exc:
+        raise SnapshotCheckpointError(f'Checkpoint recovery could not verify saved work; original data retained: {exc}') from exc
 
 
 def select_latest(candidates):
