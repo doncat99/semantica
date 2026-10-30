@@ -21,7 +21,7 @@ def test_relay_inherits_native_typed_owner():
 
 def test_identity_wire_schema_explains_exact_evidence_constraints():
     from semantica.semantic_extract.schemas import grounded_entities_wire
-    fields = grounded_entities_wire().model_json_schema()['$defs']['IdentityProfileOut']['properties']
+    fields = grounded_entities_wire().model_json_schema()['$defs']['IdentityProfileWire']['properties']
     for name in ('owner', 'instance'):
         assert 'exact, case-sensitive substring' in fields[name]['description']
         assert 'null' in fields[name]['description']

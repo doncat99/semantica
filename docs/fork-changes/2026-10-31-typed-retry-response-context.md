@@ -50,6 +50,40 @@ Four additional red specifications reproduce missing schema descriptions and
 missing corrective explanations. Focused native/identity/extraction/diagnostic
 regressions pass after repair. Real packaged ESG completion remains unverified.
 
+### Candidate admission correction after 67e8b498 (2026-10-31)
+
+Packaged runs 58528240 and 820f0ece still failed during extraction; run dadbf752
+was cancelled after collecting the same evidence. Actual responses inferred a
+company owner from "our" in committee/report quotes without naming that company.
+Rejecting those identity facts is correct. The defect is that semantic profile
+grounding ran inside the whole-response transport schema, aborting all independently
+grounded entity mentions instead of using the existing per-profile rejection owner.
+
+Inspected native owners at 67e8b498: schemas.IdentityProfileOut,
+grounded_entities_wire and methods.extract_entities_llm. Existing exact-quote
+admission already rejects invalid profiles while retaining located mentions and
+recording rejected_candidates. Split the same profile fields into IdentityProfileWire
+and its validated IdentityProfileOut subclass. Strict extraction validates semantic
+identity constraints in its existing profile-admission block, alongside exact source
+location. Field types/lengths/closed shapes still use whole-response admission.
+No inferred fact is repaired or admitted, no alternate extraction exists, and no
+retry limits increase. Non-strict EntityOut retains its original validation.
+
+Three red regressions reproduce absent owner, absent edition and empty identity
+facts through BaseProvider.generate_typed. After repair all grounded mentions
+remain, all invalid profiles have rejection receipts and only one model call occurs.
+The 83 focused native extraction/wire/identity/diagnostic tests pass. Existing
+checkpoint regressions cover restoration of rejected_candidates and model receipts.
+These results do not establish successful packaged ESG completion or zero-token
+warm rebuilding; both remain required product acceptance.
+
+Expanded native artifact/cache/checkpoint/extraction regressions: 147 passed,
+including profile rejection and receipt restoration without model calls. The
+separate offline-upgrade suite has two existing failures (paid cache missed on
+non-preflight old-format conversion); the False-False case also fails with HEAD
+schemas/methods loaded before this correction. These are not product passes and
+are not bypassed by deleting or regenerating paid checkpoints.
+
 ## Upstream merge assessment
 
 Pending: reuse the upstream retry owner if it supplies equivalent corrective

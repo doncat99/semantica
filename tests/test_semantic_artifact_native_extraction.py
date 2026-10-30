@@ -413,6 +413,43 @@ def test_native_empty_result_cache_restores_rejections_and_receipts(tmp_path, mo
     assert not list(checkpoint.root.glob("relay-*.json"))
 
 
+def test_native_checkpoint_restores_identity_rejection_and_grounded_mention(tmp_path, monkeypatch):
+    from tests.artifact_helpers import stub_native_provider
+    from tests.test_semantic_artifact import _request
+    from semantica.project_checkpoint import SnapshotCheckpoint, active_checkpoint
+    from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest
+
+    text = 'Our ESG Committee supervises reporting.'
+    path = tmp_path / 'source.txt'
+    path.write_text(text)
+    checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(
+        _request(path, tmp_path / 'output')['params']))
+    calls = []
+
+    def respond(stage, prompt):
+        calls.append(stage)
+        if stage == 'relations':
+            return {'relations': []}
+        return {'entities': [dict(text='ESG Committee', label='ORG', occurrence=0,
+            confidence=.9, attributes={}, identity_profile=dict(
+                owner='Acme', evidence=text, evidence_occurrence=0))]}
+
+    stub_native_provider(monkeypatch, respond)
+    token = active_checkpoint.set(checkpoint)
+    try:
+        args = (text, SimpleNamespace(model_id='test'), None, (0, len(text), text), [])
+        first, first_receipts, reused = semantic_artifact_builder._extract_window_context(*args)
+        second, receipts, restored = semantic_artifact_builder._extract_window_context(*args)
+    finally:
+        active_checkpoint.reset(token)
+    assert first == second
+    assert len(first['entities']) == 1
+    assert 'identity_profile' not in first['entities'][0].metadata
+    assert calls == ['entities', 'relations'] and not reused and restored
+    assert [receipt.id for receipt in receipts] == [receipt.id for receipt in first_receipts]
+    assert receipts[-1].metadata['rejected_candidates'][0]['kind'] == 'grounding'
+
+
 def test_source_assembly_preserves_relations_when_distinct_refs_share_identity(tmp_path):
     from semantica.semantic_artifact_schema import SourceBuildInput
     from semantica.source import source_content_revision

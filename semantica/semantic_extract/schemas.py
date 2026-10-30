@@ -16,8 +16,8 @@ def validate_fact_qualifiers(value: dict) -> dict:
     return value
 
 
-class IdentityProfileOut(BaseModel):
-    """Readable description with its separately located source support."""
+class IdentityProfileWire(BaseModel):
+    """Profile field shape; source support is admitted per candidate."""
     model_config = ConfigDict(extra="forbid")
     description: Optional[str] = Field(default=None, min_length=1, max_length=512)
     evidence: str = Field(min_length=1, max_length=1600,
@@ -28,6 +28,9 @@ class IdentityProfileOut(BaseModel):
                                 description="Owning company/institution name as an exact, case-sensitive substring of this profile's evidence, including whitespace. Use null if not explicitly named there; do not expand aliases or infer ownership.")
     instance: Optional[str] = Field(default=None, min_length=1, max_length=128,
                                    description="Identifying year/edition/version as an exact, case-sensitive substring of this profile's evidence, including whitespace. Use null if not explicitly stated there; do not infer an edition.")
+
+class IdentityProfileOut(IdentityProfileWire):
+    """Identity facts admitted only with their separately located source support."""
 
     @model_validator(mode="after")
     def grounded_owner(self):
@@ -158,6 +161,7 @@ class EntitiesResponse(BaseModel):
 class GroundedEntityOut(EntityOut):
     """Entity output whose exact source occurrence is mandatory."""
     occurrence: int = Field(..., ge=0, description="Zero-based exact text occurrence")
+    identity_profile: Optional[IdentityProfileWire] = None
 
 
 class GroundedEntitiesResponse(BaseModel):
@@ -258,7 +262,7 @@ def grounded_entities_wire(specification=None):
         entities.append(create_model(f"GroundedEntityWire{index}", __config__=ConfigDict(extra="forbid"),
             text=(str, ...), label=(Literal[entity_type.name] if entity_type else str, ...),
             occurrence=(int, Field(ge=0)), confidence=(float, Field(ge=0, le=1)),
-            attributes=(attributes, ...), identity_profile=(Optional[IdentityProfileOut], None)))
+            attributes=(attributes, ...), identity_profile=(Optional[IdentityProfileWire], None)))
     item = entities[0] if len(entities) == 1 else Union[tuple(entities)]
     return create_model("GroundedEntitiesWire", __config__=ConfigDict(extra="forbid"), entities=(List[item], ...))
 

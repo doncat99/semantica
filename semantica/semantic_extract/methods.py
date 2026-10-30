@@ -138,6 +138,7 @@ from .types import (
 try:
     from .schemas import (
         EntitiesResponse,
+        IdentityProfileOut,
         validate_fact_qualifiers,
         GroundedEntityOut,
         GroundedEntitiesResponse,
@@ -1582,12 +1583,13 @@ Grounding requirements:
                         profile = e_out.identity_profile
                         if profile is not None:
                             try:
+                                profile = IdentityProfileOut.model_validate(profile.model_dump())
                                 begin, finish, _ = _exact_occurrence(text, profile.evidence, profile.evidence_occurrence)
                                 if not begin <= start < end <= finish:
                                     raise ProcessingError("profile quote does not contain this located entity mention")
                                 metadata['identity_profile'] = {
                                     **profile.model_dump(), 'evidence_start': begin, 'evidence_end': finish}
-                            except ProcessingError:
+                            except (ProcessingError, ValidationError):
                                 if rejection_receipts is not None:
                                     rejection_receipts.append({'candidate_index': index, 'kind': 'grounding',
                                         'reason': 'identity profile is not grounded; entity mention retained'})

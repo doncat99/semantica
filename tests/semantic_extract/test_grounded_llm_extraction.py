@@ -33,6 +33,33 @@ class TypedProvider:
         return self.responses.pop(0)
 
 
+@pytest.mark.parametrize('fact', [dict(owner='Acme'), dict(instance='2025'), {}])
+def test_invalid_identity_fact_is_rejected_without_losing_grounded_mentions(fact):
+    import json
+    from semantica.semantic_extract.providers import BaseProvider
+
+    text = 'Our ESG Committee reviews our ESG Report.'
+
+    class Provider(BaseProvider):
+        calls = 0
+
+        def generate(self, prompt, **kwargs):
+            self.calls += 1
+            return json.dumps({'entities': [dict(text=name, label='ORG', occurrence=0,
+                confidence=.9, attributes={}, identity_profile=dict(
+                    evidence=text, evidence_occurrence=0, **fact))
+                for name in ('ESG Committee', 'ESG Report')]})
+
+    provider, receipts = Provider(), []
+    entities = extract_entities_llm(text, provider='bifrost', provider_instance=provider,
+        grounding='strict', rejection_receipts=receipts)
+    assert [entity.text for entity in entities] == ['ESG Committee', 'ESG Report']
+    assert all('identity_profile' not in entity.metadata for entity in entities)
+    assert len(receipts) == 2
+    assert all(receipt['kind'] == 'grounding' for receipt in receipts)
+    assert provider.calls == 1
+
+
 def test_grounded_description_has_separate_source_quote_and_no_extra_model_call():
     text = 'Acme manufactures medical instruments.'
     from semantica.semantic_extract.schemas import grounded_entities_wire
