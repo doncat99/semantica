@@ -381,7 +381,6 @@ class SemanticArtifact(KernelModel):
     snapshot_version: int = Field(default=1, ge=1)
     id: str = Field(alias="snapshot_id")
     project_id: str
-    base_snapshot_id: Optional[str] = None
     created_at: str = Field(default_factory=utc_now_iso)
     lineage: KernelLineage
     artifact_manifest: List[ArtifactManifest]
