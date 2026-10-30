@@ -56,8 +56,8 @@ def query_semantic_artifact(request: SemanticQueryRequest) -> SemanticQueryResul
         (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
     if snapshot.project_id != request.project_id or snapshot.id != request.snapshot_id:
         raise QueryError("query artifacts do not match the requested semantic artifact")
-    if not isinstance(retrieval_payload, dict) or retrieval_payload.get("snapshot_id") != snapshot.id:
-        raise QueryError("retrieval artifact does not belong to the requested snapshot")
+    if not isinstance(retrieval_payload, dict):
+        raise QueryError("retrieval artifact must be a JSON object")
     manifest_id = "retrieval:graph"
     manifests = {item.id: item for item in snapshot.retrieval_manifests}
     graph_manifest = manifests.get(manifest_id)

@@ -2491,7 +2491,6 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
             model_receipts = list({receipt.id: receipt for receipt in model_receipts}.values())
             retrieval_payload = {
                 "format": "semantica.retrieval-reference.v1",
-                "snapshot_id": snapshot_id,
                 "embeddings": [{"source_id": item["source"].source_id, **chunk} for item in source_builds for chunk in item.get("embeddings", [])],
                 "embedding_space": {"model_id": request.relays["embedding"].model_id,
                     "binding_id": request.relays["embedding"].binding_id,

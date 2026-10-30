@@ -970,6 +970,7 @@ def test_cross_source_same_name_stays_unresolved(tmp_path):
     retrieval_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "retrieval-index")
     retrieval = json.loads(retrieval_path.read_text())
     assert retrieval["format"] == "semantica.retrieval-reference.v1"
+    assert "snapshot_id" not in retrieval
     assert "identity_decisions" not in retrieval and "conflicts" not in retrieval
 
 
@@ -1221,6 +1222,7 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
     retrieval_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "retrieval-index")
     retrieval = json.loads(retrieval_path.read_text())
     assert retrieval["format"] == "semantica.retrieval-reference.v1"
+    assert "snapshot_id" not in retrieval
     assert "identity_decisions" not in retrieval and "conflicts" not in retrieval
     for entity in snapshot.entities:
         evidence = {item.id: item for item in snapshot.evidence_spans}

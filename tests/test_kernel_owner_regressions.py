@@ -287,6 +287,7 @@ def test_retrieval_index_references_canonical_snapshot_without_copying_records(t
     built = _build(tmp_path)
     retrieval = json.loads(built['retrieval_path'].read_text())
     assert retrieval['format'] == 'semantica.retrieval-reference.v1'
+    assert 'snapshot_id' not in retrieval
     assert not set(retrieval).intersection({'entities', 'relations', 'assertions', 'evidence', 'conflicts', 'topics'})
     assert _serve(_request(built))['ok']
 
