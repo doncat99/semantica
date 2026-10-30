@@ -158,7 +158,7 @@ with tempfile.TemporaryDirectory(prefix="semantica-native-acceptance-") as direc
     assert snapshot["project_id"] == "native"
     retrieval = next(item for item in built["artifacts"] if item["kind"] == "retrieval-index")
     graph_manifest = next(item for item in snapshot["retrieval_manifests"] if item["id"] == "retrieval:graph")
-    assert graph_manifest["source_snapshot_id"] == snapshot["snapshot_id"]
+    assert "source_snapshot_id" not in graph_manifest
     assert graph_manifest["artifact_hash"] == retrieval["digest"]
     assert retrieval["revision"] == graph_manifest["id"]
     queried = invoke("semantica.semantic_query_worker", {"protocol": "semantica.semantic-query.v1", "id": "native-query", "method": "query", "params": {
