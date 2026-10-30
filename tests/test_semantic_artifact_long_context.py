@@ -227,7 +227,7 @@ def test_classification_reads_every_passage_but_report_admits_representative_sou
     seen = {"source_classification": set(), "knowledge_explanation": set()}
     calls = []
 
-    def model(relay, operation, instruction, context, schema):
+    def model(relay, operation, instruction, context, schema, **kwargs):
         assert pipeline._context_size(context) <= 12000
         calls.append(operation)
         assert operation == "source_classification"

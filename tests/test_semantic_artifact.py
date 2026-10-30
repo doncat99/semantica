@@ -692,7 +692,7 @@ def test_semantic_classification_rejects_invalid_model_evidence(tmp_path, monkey
     source.write_text("Ada Lovelace designed the Analytical Engine.")
     built = _build_source(SourceBuildInput(filePath=str(source), sourceId="source-1", materialRevision=source_content_revision(source), mimeType="text/plain", name="source.txt"), False)
     built["passages"] = _source_passages(built)
-    citation = {"evidence_id": built["passages"][0].id, "quote": built["passages"][0].quote}
+    citation = {"evidence_id": "e1", "quote": built["passages"][0].quote}
     assignment = {"dimension_id": "purpose", "item_id": "history", "confidence": 0.9, "citations": [citation]}
     if corruption == "unknown-id":
         citation["evidence_id"] = "evidence:invented"
@@ -728,9 +728,13 @@ def test_semantic_classification_preserves_source_offsets_and_unclassified_dimen
     built["passages"] = _source_passages(built)
     span = built["passages"][0]
     receipt = ModelReceipt(id="receipt:test", operation="source_classification", provider="test", model="test", input_digest=H1, output_digest=H2)
-    output = {"assignments": [{"dimension_id": "purpose", "item_id": "history", "confidence": 0.9, "citations": [{"evidence_id": span.id, "quote": span.quote}]}]}
-    monkeypatch.setattr(pipeline, "_relay_json", lambda *args, **kwargs: (
-        {"model": "test", "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(output)}}]}, receipt))
+    output = {"assignments": [{"dimension_id": "purpose", "item_id": "history", "confidence": 0.9, "citations": [{"evidence_id": "e1", "quote": span.quote}]}]}
+    def respond(relay, payload, operation, **kwargs):
+        context = json.loads(payload["messages"][0]["content"].split("Input JSON:\n", 1)[1].split("\nReturn one JSON", 1)[0])
+        assert context["evidence"] == [{"id": "e1", "quote": span.quote}]
+        assert span.id not in payload["messages"][0]["content"]
+        return {"model": "test", "choices": [{"finish_reason": "stop", "message": {"content": json.dumps(output)}}]}, receipt
+    monkeypatch.setattr(pipeline, "_relay_json", respond)
     validations = []
     native_validate = pipeline._ClassificationOutput.model_validate_json
     def validate(cls, value, **kwargs):
@@ -743,6 +747,43 @@ def test_semantic_classification_preserves_source_offsets_and_unclassified_dimen
     assert classification.assignments[0].evidence_ids == [span.id]
     assert classification.unclassified_dimension_ids == ["topic"]
     assert built["text"][span.locator.start_char:span.locator.end_char] == span.quote
+
+
+def test_classification_short_refs_persist_canonical_and_restore_without_model(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from semantica import semantic_artifact_builder as pipeline
+    from semantica.project_checkpoint import SnapshotCheckpoint, active_checkpoint
+
+    context = {"evidence": [{"id": "evidence:canonical:23213:23231", "quote": "ENERGY & EMISSIONS"}]}
+    receipt = ModelReceipt(id="receipt:short", operation="source_classification", provider="test",
+        model="test", input_digest=H1, output_digest=H2)
+    calls = []
+    def respond(*args, **kwargs):
+        calls.append(args)
+        return {"model": "test", "choices": [{"finish_reason": "stop", "message": {"content": json.dumps({
+            "assignments": [{"dimension_id": "purpose", "item_id": "history", "confidence": 0.9,
+                "citations": [{"evidence_id": "e1"}]}]})}}]}, receipt
+    monkeypatch.setattr(pipeline, "_relay_json", respond)
+    relay = SimpleNamespace(model_id="test", max_output_tokens=1024)
+    from semantica.semantic_artifact_schema import SourceBuildInput
+    source = tmp_path / "source.txt"
+    source.write_text("ENERGY & EMISSIONS")
+    checkpoint = SnapshotCheckpoint.for_source(SourceBuildInput(
+        source_id="source:1", name="source.txt", mime_type="text/plain", file_path=str(source),
+        material_revision=source_content_revision(source)), output_dir=str(tmp_path / "output"),
+        scope_id="scope:1", recipe={}, created_at="2026-01-01T00:00:00Z")
+    token = active_checkpoint.set(checkpoint)
+    try:
+        for _ in range(2):
+            result, receipts = pipeline._product_json(relay, "source_classification", "Classify.", context,
+                pipeline._ClassificationOutput, short_evidence_refs=True)
+            assert result.assignments[0].citations[0].evidence_id == context["evidence"][0]["id"]
+            assert receipts[0].id == receipt.id
+        saved = checkpoint.read("product-result", {"operation": "source_classification", "context": context})
+        assert saved["result"]["assignments"][0]["citations"][0]["evidence_id"] == context["evidence"][0]["id"]
+        assert len(calls) == 1
+    finally:
+        active_checkpoint.reset(token)
 
 
 def test_docling_evidence_preserves_reading_order_and_physical_locators(tmp_path):
