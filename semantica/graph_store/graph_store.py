@@ -532,7 +532,7 @@ class GraphStore:
     Main graph store interface.
 
     Provides a unified interface for working with property graph databases,
-    supporting Neo4j and FalkorDB backends.
+    supporting Neo4j, FalkorDB, Neptune, and Apache AGE backends.
     """
 
     def __init__(

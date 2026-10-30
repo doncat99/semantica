@@ -132,6 +132,18 @@ def create_app(
 
     app.state.explorer_settings = settings
 
+    @app.middleware("http")
+    async def protect_published_graph(request: Request, call_next):
+        if active_session.read_only and request.method not in {"GET", "HEAD", "OPTIONS"}:
+            # The viewer's POST queries do not modify the loaded graph.
+            if request.method != "POST" or request.url.path not in {
+                "/api/graph/search", "/api/graph/distance-matrix",
+                "/api/export", "/api/export/distance-enriched", "/api/sparql",
+                "/api/ontology/preview", "/api/ontology/skos/search",
+            }:
+                return JSONResponse(status_code=403, content={"detail": "Published graph is read-only"})
+        return await call_next(request)
+
     # allow_credentials lets browsers send cookies/auth headers cross-origin.
     # Credentials aren't needed for the X-API-Key auth scheme below, and
     # enabling them when origins are broadened creates cross-site request

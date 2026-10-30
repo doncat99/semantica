@@ -19,8 +19,8 @@ TemporalVersionManager.compare_versions and compare_collections both implement
 indexed collection differences. They must share one core. Stable edge IDs must
 survive parallel qualified facts; duplicate IDs must fail closed.
 
-OntoScience launches semantic_worker, which builds with persist_snapshot=False
-and writes one semantic-graph.json. The host stores references to that artifact,
+OntoScience launches semantic_worker, which builds once and publishes the
+builder-owned semantic-graph.json. The host stores references to that artifact,
 not a second snapshot payload. Query, Research and reports consume that artifact.
 No OntoScience caller uses GraphStore.append_snapshot/commit_snapshot/read_snapshot,
 Neo4jStore snapshot persistence, TypeDBStore, or retrieve_snapshot_context.

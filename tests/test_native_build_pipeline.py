@@ -27,7 +27,9 @@ def test_build_executes_real_native_dependency_stages(tmp_path, monkeypatch):
     monkeypatch.setattr(ExecutionEngine, 'execute_pipeline', observe)
     result = builder.build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(
         _request(source, tmp_path / 'out')['params']))
-    assert result['snapshot_path'].is_file()
+    assert result['graph_path'] == tmp_path / 'out' / 'semantic-graph.json'
+    assert result['graph_path'].is_file()
+    assert not (tmp_path / 'out' / 'snapshot.json').exists()
     assert len(captured) == 1
     assert all(step.status == StepStatus.COMPLETED for step in captured[0].steps)
 
@@ -54,4 +56,5 @@ def test_stage_failure_preserves_cause_and_never_publishes_or_retries(tmp_path, 
     assert len(captured) == 1
     assert captured[0].steps[-2].status == StepStatus.FAILED
     assert captured[0].steps[-1].status == StepStatus.PENDING
+    assert not (tmp_path / 'out' / 'semantic-graph.json').exists()
     assert not (tmp_path / 'out' / 'snapshot.json').exists()

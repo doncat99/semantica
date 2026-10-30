@@ -28,6 +28,8 @@ class RecordDecisionRequest(BaseModel):
 async def record_decision(body: RecordDecisionRequest, session: GraphSession = Depends(get_session)):
     try:
         node = await asyncio.to_thread(session.record_decision, **body.model_dump())
+    except PermissionError as exc:
+        raise HTTPException(status_code=403, detail=str(exc)) from exc
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from exc
     return _node_to_decision(node)

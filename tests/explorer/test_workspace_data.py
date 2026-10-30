@@ -5,12 +5,11 @@ from semantica.explorer.app import create_app
 from semantica.explorer.session import GraphSession
 
 
-def test_record_decision_survives_session_restart_without_overwriting_input(tmp_path):
+def test_record_decision_persists_to_the_single_native_graph(tmp_path):
     path = tmp_path / "graph.json"
     graph = ContextGraph(advanced_analytics=False)
     graph.add_node("source", "document", content="Source report")
     graph.save_to_file(path)
-    original = path.read_bytes()
     with TestClient(create_app(session=GraphSession.from_file(str(path)))) as client:
         response = client.post("/api/decisions", json={
             "category": "research", "scenario": "Review evidence",
@@ -19,11 +18,42 @@ def test_record_decision_survives_session_restart_without_overwriting_input(tmp_
         })
         assert response.status_code == 201, response.text
         decision_id = response.json()["decision_id"]
-    assert path.read_bytes() == original
+    assert not path.with_name(path.name + ".explorer.json").exists()
     with TestClient(create_app(session=GraphSession.from_file(str(path)))) as client:
         decisions = client.get("/api/decisions").json()
         assert decisions[0]["decision_id"] == decision_id
         assert decisions[0]["reasoning"] == "The source supports this conclusion"
+
+
+def test_read_only_graph_ignores_shadow_file_and_rejects_persistent_mutation(tmp_path):
+    path = tmp_path / "graph.json"
+    graph = ContextGraph(advanced_analytics=False)
+    graph.add_node("source", "document", content="Source report")
+    graph.save_to_file(path)
+    original = path.read_bytes()
+    shadow = path.with_name(path.name + ".explorer.json")
+    shadow.write_text('{"nodes": [], "edges": []}')
+    session = GraphSession.from_file(str(path), read_only=True)
+    with TestClient(create_app(session=session)) as client:
+        assert session.graph.find_node("source") is not None
+        response = client.post("/api/decisions", json={
+            "category": "research", "scenario": "Review evidence",
+            "reasoning": "The source supports this conclusion", "outcome": "accepted",
+            "confidence": 0.8, "entities": ["source"],
+        })
+        assert response.status_code == 403, response.text
+        assert client.post("/api/import", json={}).status_code == 403
+        assert client.post("/api/enrich/merge", json={}).status_code == 403
+        assert client.put("/api/markdown/source", json={}).status_code == 403
+        assert client.post("/api/graph/search", json={"query": "Source"}).status_code == 200
+        exported = client.post("/api/export", json={"format": "json"})
+        assert exported.status_code == 200, exported.text
+        queried = client.post("/api/sparql", json={"query": "SELECT ?s WHERE { ?s ?p ?o } LIMIT 1"})
+        assert queried.status_code == 200, queried.text
+        assert queried.json()["error"] is None
+        assert client.get("/api/decisions").json() == []
+    assert path.read_bytes() == original
+    assert shadow.read_text() == '{"nodes": [], "edges": []}'
 
 
 def test_reasoning_facts_are_current_graph_ids():

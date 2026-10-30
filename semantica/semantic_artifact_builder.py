@@ -2397,21 +2397,21 @@ def _project_stage(stage, inputs, adapter, compute, progress, percent):
         return result
 
 
-def build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=None, *, persist_snapshot: bool = True) -> dict[str, Any]:
+def build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=None) -> dict[str, Any]:
     """Build, validate, and materialize Semantica's generic semantic artifacts."""
     from .project_checkpoint_upgrade import prepare_project_checkpoints
     token = active_checkpoint.set(prepare_project_checkpoints(request))
     gate_token = _active_relay_gates.set((threading.Lock(), {}))
     reuse_token = _completed_generation_only.set(False)
     try:
-        return _build_semantic_artifacts(request, progress=progress, persist_snapshot=persist_snapshot)
+        return _build_semantic_artifacts(request, progress=progress)
     finally:
         _completed_generation_only.reset(reuse_token)
         _active_relay_gates.reset(gate_token)
         active_checkpoint.reset(token)
 
 
-def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=None, *, persist_snapshot: bool = True) -> dict[str, Any]:
+def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=None) -> dict[str, Any]:
     """Assemble product contracts; native pipeline owns stage execution."""
     from .pipeline import PipelineBuilder, ExecutionEngine
 
@@ -2652,11 +2652,11 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                 classification_profile=request.recipe.classification_profile, extraction_spec=request.recipe.extraction_spec,
             )
             snapshot = SemanticArtifact(snapshot_id=snapshot_id, project_id=request.project_id, base_snapshot_id=request.base_snapshot.snapshot_id if request.base_snapshot else None, lineage=lineage, artifact_manifest=representation_artifacts + [retrieval_artifact], document_representations=representations, evidence_spans=evidence, entity_mentions=mentions, entities=entities, assertions=assertions, relations=relations, identity_registry=identity_registry, communities=communities, topics=topics, source_relations=source_relations, source_classifications=source_classifications, classification_profile=request.recipe.classification_profile, extraction_spec=request.recipe.extraction_spec, conflicts=conflicts, retrieval_manifests=retrieval_manifests, change_delta=change_delta, model_receipts=model_receipts, metadata={"pipeline": "semantica", "recipe": request.recipe.id, "source_count": len(source_builds), "stages": ["document", "evidence", "identity", "knowledge", "organization", "retrieval", "change"]})
-            result = {"snapshot": snapshot, "representation_artifacts": source_builds, "retrieval_path": retrieval_path, "retrieval_digest": retrieval_digest, "model_receipts": model_receipts}
-            if persist_snapshot:
-                snapshot_path = output_dir / "snapshot.json"
-                result.update(snapshot_path=snapshot_path, snapshot_digest=_write_json(snapshot_path, snapshot.model_dump(mode="json", by_alias=True)))
-            return result
+            graph_path = output_dir / "semantic-graph.json"
+            graph_digest = _write_json(graph_path, snapshot.model_dump(mode="json", by_alias=True))
+            return {"snapshot": snapshot, "graph_path": graph_path, "graph_digest": graph_digest,
+                    "representation_artifacts": source_builds, "retrieval_path": retrieval_path,
+                    "retrieval_digest": retrieval_digest, "model_receipts": model_receipts}
 
     pipeline_builder = PipelineBuilder()
     previous = None

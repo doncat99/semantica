@@ -494,7 +494,7 @@ def test_new_run_reuses_extraction_windows(tmp_path, monkeypatch, switch_model, 
         second["params"]["recipe"]["formulaSemanticsSourceIds"] = ["source-1"] if formula_change == "enable" else []
     if completed:
         second["params"]["baseSnapshot"] = {"snapshotId": first_result["snapshot"].id,
-            "snapshotPath": str(first_result["snapshot_path"]), "artifactDigest": first_result["snapshot_digest"],
+            "snapshotPath": str(first_result["graph_path"]), "artifactDigest": first_result["graph_digest"],
             "schemaDigest": first["params"]["release"]["schemaDigest"]}
     if material_change == "remove":
         second["params"]["sources"] = second["params"]["sources"][:1]
@@ -549,7 +549,7 @@ def test_new_run_reuses_extraction_windows(tmp_path, monkeypatch, switch_model, 
     third["params"]["outputDir"] = str(tmp_path / "third")
     third["params"]["resumeCheckpointDirs"] = [str(second_checkpoint)]
     third["params"]["baseSnapshot"] = {"snapshotId": result["snapshot"].id,
-        "snapshotPath": str(result["snapshot_path"]), "artifactDigest": result["snapshot_digest"],
+        "snapshotPath": str(result["graph_path"]), "artifactDigest": result["graph_digest"],
         "schemaDigest": second["params"]["release"]["schemaDigest"]}
     third["params"]["relays"]["embedding"].update({"modelId": "new-vector-model", "bindingId": "new-vector-binding"})
     third["params"]["release"]["schemaDigest"] = "sha256:" + "e" * 64

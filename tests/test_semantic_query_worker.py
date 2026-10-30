@@ -67,8 +67,8 @@ def _request(built, query="Ada"):
             "projectId": built["snapshot"].project_id,
             "snapshotId": built["snapshot"].id,
             "snapshot": {
-                "path": str(built["snapshot_path"]),
-                "digest": built["snapshot_digest"],
+                "path": str(built["graph_path"]),
+                "digest": built["graph_digest"],
                 "kind": "semantic-graph",
                 "mediaType": "application/vnd.semantica.semantic-graph+json",
             },
@@ -85,7 +85,7 @@ def _request(built, query="Ada"):
 
 
 def _rewrite_artifacts(built, *, snapshot_change=None, retrieval_change=None):
-    snapshot = json.loads(built["snapshot_path"].read_text())
+    snapshot = json.loads(built["graph_path"].read_text())
     retrieval = json.loads(built["retrieval_path"].read_text())
     if snapshot_change:
         snapshot_change(snapshot)
@@ -99,8 +99,8 @@ def _rewrite_artifacts(built, *, snapshot_change=None, retrieval_change=None):
     for artifact in snapshot["artifact_manifest"]:
         if artifact["artifact_type"] == "retrieval":
             artifact["artifact_hash"] = built["retrieval_digest"]
-    built["snapshot_path"].write_text(json.dumps(snapshot), encoding="utf-8")
-    built["snapshot_digest"] = _digest(built["snapshot_path"])
+    built["graph_path"].write_text(json.dumps(snapshot), encoding="utf-8")
+    built["graph_digest"] = _digest(built["graph_path"])
 
 
 def _serve(request):
@@ -143,13 +143,13 @@ def test_warm_queries_reuse_preparation_but_recheck_source_scope(tmp_path, monke
     assert source_ids.call_count == prepared_calls
     request["params"]["sourceIds"] = []
     assert _serve(request)["result"]["contexts"] == []
-    built["snapshot_path"].write_text("{}")
+    built["graph_path"].write_text("{}")
     assert _serve(request)["ok"] is False
 
 
 def test_query_worker_returns_grounded_conflicts(tmp_path):
     built = _build(tmp_path)
-    snapshot = json.loads(built["snapshot_path"].read_text())
+    snapshot = json.loads(built["graph_path"].read_text())
     entity_id = snapshot["entities"][0]["id"]
     evidence_id = snapshot["evidence_spans"][0]["id"]
     conflict = {
@@ -175,7 +175,7 @@ def test_query_worker_returns_grounded_conflicts(tmp_path):
 
 def test_query_worker_preserves_positive_negative_and_contradicted_fact_semantics(tmp_path):
     built = _build(tmp_path)
-    snapshot = json.loads(built["snapshot_path"].read_text())
+    snapshot = json.loads(built["graph_path"].read_text())
     subject, object_entity = snapshot["entities"][:2]
     evidence_id = subject["evidence_ids"][0]
     original = {
@@ -304,15 +304,15 @@ def _semantic_request(tmp_path):
     ]
     built["retrieval_path"].write_text(json.dumps(retrieval))
     built["retrieval_digest"] = _digest(built["retrieval_path"])
-    snapshot = json.loads(built["snapshot_path"].read_text())
+    snapshot = json.loads(built["graph_path"].read_text())
     for manifest in snapshot["retrieval_manifests"]:
         if manifest["id"] == "retrieval:graph":
             manifest["artifact_hash"] = built["retrieval_digest"]
     for artifact in snapshot["artifact_manifest"]:
         if artifact["artifact_type"] == "retrieval":
             artifact["artifact_hash"] = built["retrieval_digest"]
-    built["snapshot_path"].write_text(json.dumps(snapshot))
-    built["snapshot_digest"] = _digest(built["snapshot_path"])
+    built["graph_path"].write_text(json.dumps(snapshot))
+    built["graph_digest"] = _digest(built["graph_path"])
     request = _request(built, "mathematical innovation")
     request["params"].update({"mode": "semantic", "limit": 1,
         "embedding": {"bindingId": "binding-1", "modelId": "embedding-1", "vector": [1.0, 0.0]}})

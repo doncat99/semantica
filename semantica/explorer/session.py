@@ -47,7 +47,8 @@ class GraphSession:
         provenance_storage_path: Optional[str] = None,
     ) -> None:
         self.graph = graph
-        self._workspace_path: Optional[Path] = None
+        self._source_path: Optional[Path] = None
+        self._read_only = False
         self._provenance_storage_path = provenance_storage_path
         self._lock = threading.RLock()
         self._search_index = GraphSearchIndex()
@@ -70,23 +71,29 @@ class GraphSession:
         self.rebuild_search_index()
 
     @classmethod
-    def from_file(cls, path: str) -> "GraphSession":
+    def from_file(cls, path: str, *, read_only: bool = False) -> "GraphSession":
         graph = ContextGraph()
-        workspace = Path(str(path) + ".explorer.json")
-        graph.load_from_file(workspace if workspace.exists() else path)
+        graph.load_from_file(path)
         session = cls(graph)
-        session._workspace_path = workspace
+        session._source_path = Path(path)
+        session._read_only = read_only
         return session
 
+    @property
+    def read_only(self) -> bool:
+        return self._read_only
+
     def record_decision(self, **fields: Any) -> Dict[str, Any]:
-        """Record through ContextGraph and durably save the Explorer working copy."""
+        """Persist native decisions to the single editable source graph."""
         with self._lock:
+            if self._read_only:
+                raise PermissionError("Published graph is read-only")
             missing = [entity for entity in fields.get("entities", []) if self.graph.find_node(entity) is None]
             if missing:
                 raise ValueError("Related entities must exist in the current graph")
             decision_id = self.graph.record_decision(**fields)
-            if self._workspace_path is not None:
-                self.graph.save_to_file(self._workspace_path)
+            if self._source_path is not None:
+                self.graph.save_to_file(self._source_path)
             self.rebuild_search_index()
             return self.get_node(decision_id)
 

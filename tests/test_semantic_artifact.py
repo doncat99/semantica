@@ -76,7 +76,7 @@ def test_snapshot_publication_identity_separates_producer_from_business_input(tm
     first = build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(raw))
     raw["outputDir"] = str(tmp_path / "relocated")
     repeated = build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(raw))
-    assert first["snapshot_digest"] == repeated["snapshot_digest"]
+    assert first["graph_digest"] == repeated["graph_digest"]
     assert all(item.artifact_ref == item.artifact_hash for item in repeated["snapshot"].artifact_manifest)
     raw["release"]["artifactDigest"] = H3
     upgraded = build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(raw))
@@ -894,8 +894,8 @@ def test_build_rejects_base_snapshot_from_another_project(tmp_path):
     request["projectId"] = "project-2"
     request["baseSnapshot"] = {
         "snapshotId": initial["snapshot"].id,
-        "snapshotPath": str(initial["snapshot_path"]),
-        "artifactDigest": initial["snapshot_digest"],
+        "snapshotPath": str(initial["graph_path"]),
+        "artifactDigest": initial["graph_digest"],
         "schemaDigest": H3,
     }
     with pytest.raises(Exception, match="project"):
@@ -1133,7 +1133,7 @@ def test_incremental_delta_ignores_audit_time_and_tracks_changed_knowledge(tmp_p
     request["sources"].append({"filePath": str(second), "materialRevision": source_content_revision(second), "mimeType": "text/plain", "name": second.name, "sourceId": "source-2"})
     request["parsedSources"].append(_parsed_ref(request, request["sources"][-1]))
     initial = build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(request))
-    request["baseSnapshot"] = {"snapshotId": initial["snapshot"].id, "snapshotPath": str(initial["snapshot_path"]), "artifactDigest": initial["snapshot_digest"], "schemaDigest": H3}
+    request["baseSnapshot"] = {"snapshotId": initial["snapshot"].id, "snapshotPath": str(initial["graph_path"]), "artifactDigest": initial["graph_digest"], "schemaDigest": H3}
     request["inputRevision"] = H2
     request["outputDir"] = str(tmp_path / "identical-build")
     identical = build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(request))["snapshot"]

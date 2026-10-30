@@ -263,7 +263,7 @@ def _dispatch(request: WorkerRequest, progress: Optional[Callable[[Dict[str, Any
     build_request = SemanticArtifactBuildRequest.model_validate(request.params)
     from .semantic_artifact_builder import build_semantic_artifacts
 
-    built = build_semantic_artifacts(build_request, progress=progress, persist_snapshot=False)
+    built = build_semantic_artifacts(build_request, progress=progress)
     snapshot: SemanticArtifact = built["snapshot"]
     artifacts = [{
         "digest": item["artifact_digest"],
@@ -273,22 +273,13 @@ def _dispatch(request: WorkerRequest, progress: Optional[Callable[[Dict[str, Any
         "revision": item["representation"].metadata["representation_revision"],
         "sourceId": item["source"].source_id,
     } for item in built["representation_artifacts"]]
-    graph = snapshot.model_dump(mode="json", by_alias=True)
-    graph_path = build_request.output_dir
-    graph_file = os.path.join(graph_path, "semantic-graph.json")
-    with open(graph_file, "w", encoding="utf-8") as stream:
-        json.dump(graph, stream, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        stream.write("\n")
-    import hashlib
-    with open(graph_file, "rb") as stream:
-        graph_digest = "sha256:" + hashlib.file_digest(stream, "sha256").hexdigest()
     artifacts.extend([
         {"digest": built["retrieval_digest"], "kind": "retrieval-index",
          "mediaType": build_request.release.media_types["retrieval-index"],
          "path": str(built["retrieval_path"]), "revision": "retrieval:graph"},
-        {"digest": graph_digest, "kind": "semantic-graph",
+        {"digest": built["graph_digest"], "kind": "semantic-graph",
          "mediaType": build_request.release.media_types["semantic-graph"],
-         "path": graph_file, "revision": snapshot.id},
+         "path": str(built["graph_path"]), "revision": snapshot.id},
     ])
     return _response(request.id, True, result={
         "artifacts": artifacts,

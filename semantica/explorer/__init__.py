@@ -75,6 +75,11 @@ def main(argv=None):
         action="store_true",
         help="Do not open the browser automatically.",
     )
+    parser.add_argument(
+        "--read-only",
+        action="store_true",
+        help="Open a published graph without allowing persistent changes.",
+    )
     args = parser.parse_args(argv)
 
     import os
@@ -95,7 +100,7 @@ def main(argv=None):
     from .app import create_app
 
     with _out.status("[dim]Loading graph…[/dim]", spinner="dots"):
-        session = GraphSession.from_file(args.graph)
+        session = GraphSession.from_file(args.graph, read_only=args.read_only)
     stats = session.get_stats()
     _out.print(
         f"[bold green]✓[/bold green] Graph loaded — "
