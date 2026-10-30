@@ -128,7 +128,7 @@ def test_worker_processes_parse_build_and_query_share_canonical_artifact(tmp_pat
     assert graph['revision'] == snapshot.id
     manifest = next(m for m in snapshot.retrieval_manifests if m.retrieval_type == 'graph')
     assert retrieval['revision'] == manifest.id
-    assert manifest.source_snapshot_id == snapshot.id
+    assert "source_snapshot_id" not in manifest.model_dump()
     assert manifest.artifact_hash == retrieval['digest']
     assert (tmp_path / 'saved-progress' / 'manifest.json').is_file()
     answer = invoke('semantica.semantic_query_worker', {
@@ -877,7 +877,7 @@ def test_worker_builds_complete_snapshot_from_real_text_file(tmp_path):
     assert len(snapshot.topics) == len(snapshot.communities)
     assert "reports" not in json.loads(snapshot_path.read_text())
     assert snapshot.retrieval_manifests[0].community_ids
-    assert snapshot.change_delta.added_ids
+    assert "change_delta" not in snapshot.model_dump()
     assert snapshot.evidence_spans
     assert snapshot.model_receipts == []
     assert all(span.quote == span.locator.quote for span in snapshot.evidence_spans)
@@ -1088,7 +1088,7 @@ def test_model_recipe_uses_bifrost_chat_and_embedding_and_records_receipts(tmp_p
     assert {receipt.metadata["extraction_stage"] for receipt in extraction_receipts} == {"entities", "relations"}
     assert snapshot.source_classifications[0].assignments[0].item_id == "history"
     assert snapshot.classification_profile.id == "profile:test"
-    assert "classification:source-1" in snapshot.change_delta.added_ids
+    assert "change_delta" not in snapshot.model_dump()
     assert "reports" not in json.loads(snapshot_path.read_text())
     assert all(receipt.input_digest.startswith("sha256:") and receipt.output_digest.startswith("sha256:") for receipt in snapshot.model_receipts)
     assert snapshot.relations[0].status == "candidate"
@@ -1122,53 +1122,6 @@ def test_model_recipe_fails_closed_without_relay_token(tmp_path):
     assert response["ok"] is False
     assert response["error"]["type"] == "SemanticArtifactError"
     assert "authorization" in response["error"]["message"]
-
-
-def test_incremental_delta_ignores_audit_time_and_tracks_changed_knowledge(tmp_path):
-    first = tmp_path / "first.txt"
-    second = tmp_path / "second.txt"
-    first.write_text("Ada Lovelace studied mathematics.", encoding="utf-8")
-    second.write_text("Charles Babbage designed machines.", encoding="utf-8")
-    request = _request(first, tmp_path / "first-build")["params"]
-    request["sources"].append({"filePath": str(second), "materialRevision": source_content_revision(second), "mimeType": "text/plain", "name": second.name, "sourceId": "source-2"})
-    request["parsedSources"].append(_parsed_ref(request, request["sources"][-1]))
-    initial = build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(request))
-    request["baseSnapshot"] = {"snapshotId": initial["snapshot"].id, "snapshotPath": str(initial["graph_path"]), "artifactDigest": initial["graph_digest"], "schemaDigest": H3}
-    request["inputRevision"] = H2
-    request["outputDir"] = str(tmp_path / "identical-build")
-    identical = build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(request))["snapshot"]
-    assert identical.change_delta.updated_ids == []
-    assert identical.change_delta.added_ids == []
-
-    first.write_text("Grace Hopper studied mathematics.", encoding="utf-8")
-    request["sources"][0]["materialRevision"] = source_content_revision(first)
-    request["outputDir"] = str(tmp_path / "changed-build")
-    request["parsedSources"][0] = _parsed_ref(request, request["sources"][0])
-    updated = build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(request))["snapshot"]
-    unchanged_entities = {entity.id for entity in initial["snapshot"].entities if "Charles Babbage" in entity.canonical_name}
-    assert unchanged_entities
-    changed_representations = {item.id for snapshot in [initial["snapshot"], updated] for item in snapshot.document_representations if item.source_id == "source-1"}
-    assert set(updated.change_delta.changed_representation_ids) == changed_representations
-    assert len(changed_representations) == 2
-    assert not unchanged_entities.intersection(updated.change_delta.updated_ids + updated.change_delta.retracted_ids)
-    removed_entities = {entity.id for entity in initial["snapshot"].entities if "Ada Lovelace" in entity.canonical_name}
-    assert removed_entities.issubset(set(updated.change_delta.retracted_ids))
-
-
-def test_community_and_topic_deltas_update_knowledge_without_embedded_reports(tmp_path):
-    from semantica.semantic_artifact_builder import _change_delta
-
-    source = tmp_path / "source.txt"
-    source.write_text("Ada Lovelace studied mathematics.", encoding="utf-8")
-    base = build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(_request(source, tmp_path / "build")["params"]))["snapshot"]
-    revised = base.model_copy(deep=True)
-    revised.communities[0].title += " revised"
-    revised.topics[0].title += " revised"
-    delta = _change_delta(base, "next-snapshot", revised.document_representations, revised.entities,
-        revised.assertions, revised.relations, revised.communities, revised.topics,
-        [item.id for item in revised.retrieval_manifests], revised.evidence_spans, revised.source_classifications)
-    assert {revised.communities[0].id, revised.topics[0].id}.issubset(delta.updated_ids)
-    assert not any(value.startswith("report:") for value in [*delta.added_ids, *delta.updated_ids, *delta.retracted_ids])
 
 
 @pytest.mark.parametrize("declared_identity", [False, True])
@@ -1260,7 +1213,7 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
     repeated = build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(request["params"]))["snapshot"]
     assert operations.count("structured_extraction") == 4
     assert operations.count("knowledge_explanation") == 0
-    assert repeated.change_delta.updated_ids == []
+    assert "change_delta" not in repeated.model_dump()
     canonical_ids = {entity.id for entity in snapshot.entities}
     assert {relation.source_entity_id for relation in snapshot.relations}.issubset(canonical_ids)
     assert {relation.target_entity_id for relation in snapshot.relations}.issubset(canonical_ids)

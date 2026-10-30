@@ -190,49 +190,6 @@ class TemporalVersionManager(BaseVersionManager):
         return list(entities or []), list(relationships or [])
 
     @staticmethod
-    def semantic_delta(base_snapshot, snapshot_id, representations, entities, assertions,
-                       relations, communities, topics, retrieval_manifest_ids, evidence,
-                       source_classifications=None, *, conflicts=None, identity_registry=None,
-                       source_relations=None, entity_mentions=None, classification_profile=None,
-                       extraction_spec=None):
-        from ..semantic_artifact_schema import ChangeDelta
-        current_items = {
-            "document_representations": representations, "evidence_spans": evidence,
-            "entities": entities, "assertions": assertions, "relations": relations,
-            "communities": communities, "topics": topics, "source_classifications": source_classifications or [],
-            "conflicts": conflicts or [],
-            "identity_registry": identity_registry or [], "source_relations": source_relations or [],
-            "entity_mentions": entity_mentions or [],
-        }
-        def records(kind, items):
-            result = []
-            for item in items:
-                data = item.model_dump(mode="json", by_alias=True,
-                                       exclude={"created_at", "decided_at", "model_receipt_ids"})
-                if kind == "source_classifications":
-                    data["id"] = "classification:" + item.source_id
-                elif kind == "identity_registry":
-                    data["id"] = "identity-registry:" + item.mention_id
-                result.append(data)
-            return result
-        current = {kind: records(kind, items) for kind, items in current_items.items()}
-        previous = {kind: records(kind, getattr(base_snapshot, kind, [])) for kind in current_items} if base_snapshot else {}
-        for kind, value in (("classification_profile", classification_profile), ("extraction_spec", extraction_spec)):
-            current[kind] = [{"id": kind, "value": value.model_dump(mode="json")}] if value else []
-            old = getattr(base_snapshot, kind, None)
-            previous[kind] = [{"id": kind, "value": old.model_dump(mode="json")}] if old else []
-        diff = TemporalVersionManager.compare_collections(previous, current)
-        changed = set(diff["added_ids"] + diff["updated_ids"] + diff["removed_ids"])
-        representation_ids = {item["id"] for item in current["document_representations"] + previous.get("document_representations", [])}
-        return ChangeDelta(
-            base_snapshot_id=base_snapshot.id if base_snapshot else None,
-            changed_representation_ids=sorted(changed & representation_ids),
-            added_ids=diff["added_ids"], updated_ids=diff["updated_ids"], retracted_ids=diff["removed_ids"],
-            affected_retrieval_manifest_ids=retrieval_manifest_ids if changed else [],
-            reason=f"diff from Semantica snapshot {base_snapshot.id} to {snapshot_id}" if base_snapshot else "initial Semantica project build",
-        )
-
-    @staticmethod
     def _index_records(items, identity):
         indexed = {identity(item, index): item for index, item in enumerate(items)}
         if len(indexed) != len(items):

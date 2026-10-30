@@ -324,7 +324,6 @@ class RetrievalArtifactManifest(KernelModel, DigestModel):
     artifact_hash: str
     artifact_ref_id: str
     index_id: Optional[str] = None
-    source_snapshot_id: Optional[str] = None
     record_count: int = Field(ge=0)
     entity_ids: List[str] = Field(default_factory=list)
     relation_ids: List[str] = Field(default_factory=list)
@@ -332,16 +331,6 @@ class RetrievalArtifactManifest(KernelModel, DigestModel):
     evidence_ids: List[str] = Field(default_factory=list)
     model_receipt_ids: List[str] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
-
-
-class ChangeDelta(StrictModel):
-    base_snapshot_id: Optional[str] = None
-    changed_representation_ids: List[str] = Field(default_factory=list)
-    added_ids: List[str] = Field(default_factory=list)
-    updated_ids: List[str] = Field(default_factory=list)
-    retracted_ids: List[str] = Field(default_factory=list)
-    affected_retrieval_manifest_ids: List[str] = Field(default_factory=list)
-    reason: Optional[str] = None
 
 
 class ModelReceipt(KernelModel, DigestModel):
@@ -411,7 +400,6 @@ class SemanticArtifact(KernelModel):
     extraction_spec: Optional[ExtractionSpecification] = None
     conflicts: List[KnowledgeConflict] = Field(default_factory=list)
     retrieval_manifests: List[RetrievalArtifactManifest] = Field(default_factory=list)
-    change_delta: ChangeDelta = Field(default_factory=ChangeDelta)
     model_receipts: List[ModelReceipt] = Field(default_factory=list)
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
@@ -583,13 +571,6 @@ class SemanticArtifact(KernelModel):
                 missing = _missing(values, known)
                 if missing:
                     raise ValueError(f"retrieval {retrieval.id} references unknown {label} ids: {missing}")
-        for label, values, known in (
-            ("changed representation", self.change_delta.changed_representation_ids, representation_ids),
-            ("affected retrieval manifest", self.change_delta.affected_retrieval_manifest_ids, retrieval_ids),
-        ):
-            missing = _missing(values, known | set(self.change_delta.retracted_ids))
-            if missing:
-                raise ValueError(f"change_delta references unknown {label} ids: {missing}")
         return self
 
 

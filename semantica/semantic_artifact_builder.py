@@ -43,7 +43,6 @@ from .kg.community_summarizer import CommunitySummarizer, EvidenceBudgetError, C
 from .deduplication.similarity_calculator import SimilarityCalculator
 from .semantic_artifact_schema import (
     ArtifactManifest,
-    ChangeDelta,
     ClassificationAssignment,
     DocumentLocator,
     DocumentRepresentation,
@@ -81,11 +80,9 @@ from .split.sliding_window_chunker import SlidingWindowChunker
 from .pipeline.parallelism_manager import ParallelismManager, Task
 from .utils.exceptions import ProcessingError
 from .conflicts.conflict_detector import ConflictDetector
-from .change_management.managers import TemporalVersionManager
 
 # Single-hop exports retained for existing callers; algorithms belong to native owners.
 reconcile_qualified_facts = ConflictDetector.reconcile_qualified_facts
-_change_delta = TemporalVersionManager.semantic_delta
 
 
 class _RelayCooldown:
@@ -2613,7 +2610,6 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                     retrieval_type="graph",
                     artifact_hash=retrieval_digest,
                     artifact_ref_id=retrieval_artifact_id,
-                    source_snapshot_id=snapshot_id,
                     record_count=len(entities) + len(assertions) + len(relations) + len(conflicts),
                     entity_ids=[entity.id for entity in entities],
                     relation_ids=[relation.id for relation in relations],
@@ -2626,7 +2622,6 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                     retrieval_type="source",
                     artifact_hash=retrieval_digest,
                     artifact_ref_id=retrieval_artifact_id,
-                    source_snapshot_id=snapshot_id,
                     record_count=len(representations) + len(evidence),
                     entity_ids=[],
                     relation_ids=[],
@@ -2635,23 +2630,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                     model_receipt_ids=receipt_ids,
                 ),
             ]
-            change_delta = _change_delta(
-                base_snapshot,
-                snapshot_id,
-                representations,
-                entities,
-                assertions,
-                relations,
-                communities,
-                topics,
-                [item.id for item in retrieval_manifests],
-                evidence,
-                source_classifications,
-                conflicts=conflicts, identity_registry=identity_registry,
-                source_relations=source_relations, entity_mentions=mentions,
-                classification_profile=request.recipe.classification_profile, extraction_spec=request.recipe.extraction_spec,
-            )
-            snapshot = SemanticArtifact(snapshot_id=snapshot_id, project_id=request.project_id, base_snapshot_id=request.base_snapshot.snapshot_id if request.base_snapshot else None, lineage=lineage, artifact_manifest=representation_artifacts + [retrieval_artifact], document_representations=representations, evidence_spans=evidence, entity_mentions=mentions, entities=entities, assertions=assertions, relations=relations, identity_registry=identity_registry, communities=communities, topics=topics, source_relations=source_relations, source_classifications=source_classifications, classification_profile=request.recipe.classification_profile, extraction_spec=request.recipe.extraction_spec, conflicts=conflicts, retrieval_manifests=retrieval_manifests, change_delta=change_delta, model_receipts=model_receipts, metadata={"pipeline": "semantica", "recipe": request.recipe.id, "source_count": len(source_builds), "stages": ["document", "evidence", "identity", "knowledge", "organization", "retrieval", "change"]})
+            snapshot = SemanticArtifact(snapshot_id=snapshot_id, project_id=request.project_id, base_snapshot_id=request.base_snapshot.snapshot_id if request.base_snapshot else None, lineage=lineage, artifact_manifest=representation_artifacts + [retrieval_artifact], document_representations=representations, evidence_spans=evidence, entity_mentions=mentions, entities=entities, assertions=assertions, relations=relations, identity_registry=identity_registry, communities=communities, topics=topics, source_relations=source_relations, source_classifications=source_classifications, classification_profile=request.recipe.classification_profile, extraction_spec=request.recipe.extraction_spec, conflicts=conflicts, retrieval_manifests=retrieval_manifests, model_receipts=model_receipts, metadata={"pipeline": "semantica", "recipe": request.recipe.id, "source_count": len(source_builds), "stages": ["document", "evidence", "identity", "knowledge", "organization", "retrieval"]})
             graph_path = output_dir / "semantic-graph.json"
             graph_digest = _write_json(graph_path, snapshot.model_dump(mode="json", by_alias=True))
             return {"snapshot": snapshot, "graph_path": graph_path, "graph_digest": graph_digest,

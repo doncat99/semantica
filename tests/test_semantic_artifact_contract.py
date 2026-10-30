@@ -118,7 +118,6 @@ def _snapshot_payload():
         "retrieval_manifests": [
             {"id": "retrieval-1", "retrieval_type": "graph", "artifact_hash": H8, "artifact_ref_id": "artifact-retrieval", "record_count": 1, "entity_ids": ["entity-ada"], "relation_ids": ["relation-1"], "community_ids": ["community-1"], "evidence_ids": ["ev-1"], "model_receipt_ids": ["model-1"]}
         ],
-        "change_delta": {"base_snapshot_id": "snapshot-base", "changed_representation_ids": ["repr-1"], "added_ids": ["entity-ada"], "affected_retrieval_manifest_ids": ["retrieval-1"], "reason": "initial import"},
     }
 
 
@@ -141,8 +140,9 @@ def _build_request_payload():
 
 def test_semantic_artifact_contract_covers_kernel_sections():
     props = semantic_artifact_json_schema()["properties"]
-    for key in ["lineage", "artifact_manifest", "document_representations", "evidence_spans", "entities", "assertions", "relations", "communities", "topics", "conflicts", "retrieval_manifests", "change_delta", "model_receipts"]:
+    for key in ["lineage", "artifact_manifest", "document_representations", "evidence_spans", "entities", "assertions", "relations", "communities", "topics", "conflicts", "retrieval_manifests", "model_receipts"]:
         assert key in props
+    assert "change_delta" not in props
     assert "reports" not in props
 
 
@@ -154,14 +154,14 @@ def test_semantic_artifact_validates_complete_cross_references():
     assert "reports" not in snapshot.model_dump()
 
 
-def test_snapshot_rejects_embedded_reports_and_report_delta():
+def test_snapshot_rejects_embedded_reports_and_change_delta():
     payload = _snapshot_payload()
     payload["reports"] = []
     with pytest.raises(ValidationError, match="reports"):
         SemanticArtifact.model_validate(payload)
     payload = _snapshot_payload()
-    payload["change_delta"]["affected_report_ids"] = []
-    with pytest.raises(ValidationError, match="affected_report_ids"):
+    payload["change_delta"] = {}
+    with pytest.raises(ValidationError, match="change_delta"):
         SemanticArtifact.model_validate(payload)
 
 
@@ -333,7 +333,7 @@ def test_jsonl_worker_build_requires_a_real_source_file():
     assert serve(stdin, stdout) == 0
     response = json.loads(stdout.getvalue())
     assert response["ok"] is False
-    assert response["error"]["type"] in {"SemanticArtifactError", "FileNotFoundError"}
+    assert response["error"]["type"] in {"SemanticArtifactError", "FileNotFoundError", "SnapshotCheckpointError"}
 
 
 def test_jsonl_worker_validate_artifact_method():
