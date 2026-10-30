@@ -37,7 +37,7 @@ def build_wheel(output: Path) -> None:
 
 def release_matrix(include_gpu: bool) -> dict:
     config = load_config()
-    runners = {"darwin-arm64": "macos-14", "linux-x64": "ubuntu-24.04", "win-x64": "windows-2022"}
+    runners = {"darwin-arm64": "macos-15", "linux-x64": "ubuntu-24.04", "win-x64": "windows-2022"}
     return {"include": [
         {"runner": runners[target], "target": target,
          "python": config["targets"][target]["python"], "acceleration": profile}
