@@ -3,19 +3,27 @@ from semantica.semantic_artifact_builder import _resolve_native_entities, _remap
 from semantica.semantic_artifact_schema import KnowledgeEntity, KnowledgeAssertion, KnowledgeRelation
 
 
-def test_profile_offsets_survive_window_assembly_and_source_projection(tmp_path):
+import pytest
+
+
+@pytest.mark.parametrize('quote,owner', [
+    ('Acme manufactures medical instruments.', 'Acme'),
+    (' Acme manufactures medical instruments. ', 'Acme'),
+    ('Acme manufactures medical instruments.', 'Acme manufactures'),
+])
+def test_profile_offsets_survive_window_assembly_and_source_projection(tmp_path, quote, owner):
     from types import SimpleNamespace
     from semantica.semantic_artifact_builder import _assemble_grounded_windows, _build_source
     from semantica.semantic_extract.methods import extract_entities_llm
     from semantica.semantic_extract.schemas import EntitiesResponse, EntityOut
     from tests.semantic_extract.test_grounded_llm_extraction import TypedProvider
     prefix = 'Previous section.\n'
-    window = 'Acme manufactures medical instruments.'
+    window = 'Acme manufactures\nmedical instruments.'
     text = prefix + window
     provider = TypedProvider(EntitiesResponse(entities=[EntityOut(text='Acme', label='ORG', occurrence=0,
-        identity_profile={'description': 'A medical instrument manufacturer', 'evidence': window,
+        identity_profile={'description': 'A medical instrument manufacturer', 'evidence': quote,
                           'evidence_occurrence': 0, 'referent_kind': 'named_entity',
-                          'owner': 'Acme'})]))
+                          'owner': owner})]))
     mentions = extract_entities_llm(window, provider='bifrost', provider_instance=provider, grounding='strict')
     result, _ = _assemble_grounded_windows([(len(prefix), len(text), window)],
         [({'entities': mentions, 'relations': []}, [], False)])
@@ -27,12 +35,28 @@ def test_profile_offsets_survive_window_assembly_and_source_projection(tmp_path)
     support, = entity.metadata['description_evidence_ids']
     span = next(item for item in built['evidence'] if item.id == support)
     assert entity.description == 'A medical instrument manufacturer'
-    assert entity.metadata['identity_profile']['owner'] == 'Acme'
+    assert entity.metadata['identity_profile']['owner'] == owner
     assert entity.metadata['identity_profile']['referent_kind'] == 'named_entity'
     assert span.locator.start_char == len(prefix)
     assert span.locator.end_char == len(text)
     assert text[span.locator.start_char:span.locator.end_char] == span.quote == window
     assert len(provider.prompts) == 1
+
+
+@pytest.mark.parametrize('stored_start,stored_quote', [(1, 'Acme reports.'), (0, 'Acme invents.')])
+def test_window_assembly_rejects_incorrect_profile_support(stored_start, stored_quote):
+    from semantica.semantic_artifact_builder import _assemble_grounded_windows
+    from semantica.semantic_artifact_errors import SemanticArtifactError
+    from semantica.semantic_extract.types import Entity
+    from semantica.utils.exceptions import ProcessingError
+    window = 'Acme reports.'
+    entity = Entity(text='Acme', label='ORG', start_char=0, end_char=4,
+        metadata={'mention_id': 'mention:0', 'identity_profile': {
+            'description': 'Company', 'evidence': stored_quote, 'evidence_occurrence': 0,
+            'evidence_start': stored_start, 'evidence_end': len(window)}})
+    with pytest.raises((SemanticArtifactError, ProcessingError)):
+        _assemble_grounded_windows([(0, len(window), window)],
+            [({'entities': [entity], 'relations': []}, [], True)])
 
 
 def test_source_keeps_paraphrased_description_with_separately_located_support(tmp_path):

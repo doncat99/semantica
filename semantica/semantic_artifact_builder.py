@@ -743,9 +743,17 @@ def _assemble_grounded_windows(windows, extracted_windows):
             profile = entity.metadata.get('identity_profile')
             if profile:
                 begin, finish = profile['evidence_start'], profile['evidence_end']
-                if not 0 <= begin < finish <= len(window) or window[begin:finish] != profile['evidence']:
+                located_start, located_end, _ = _exact_occurrence(
+                    window, profile['evidence'], profile['evidence_occurrence'])
+                if (type(begin) is not int or type(finish) is not int
+                        or (begin, finish) != (located_start, located_end)):
                     raise SemanticArtifactError('identity profile offsets do not locate its source quote')
-                item['identity_profile'] = {**profile, 'evidence_start': start + begin, 'evidence_end': start + finish}
+                item['identity_profile'] = {**profile, 'evidence': window[begin:finish],
+                    'evidence_start': start + begin, 'evidence_end': start + finish}
+                for field in ('owner', 'instance'):
+                    if profile.get(field):
+                        field_start, field_end, _ = _exact_occurrence(window[begin:finish], profile[field], 0)
+                        item['identity_profile'][field] = window[begin:finish][field_start:field_end]
             key = stable_digest(item)
             if key not in seen_entities:
                 seen_entities.add(key)
