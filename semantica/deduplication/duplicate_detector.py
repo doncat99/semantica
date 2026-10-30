@@ -47,6 +47,7 @@ from ..utils.exceptions import ProcessingError
 from ..utils.logging import get_logger
 from ..utils.progress_tracker import get_progress_tracker
 from .similarity_calculator import SimilarityCalculator, SimilarityResult
+from ..normalize.entity_normalizer import EntityDisambiguator
 
 
 @dataclass
@@ -141,6 +142,10 @@ class DuplicateDetector:
         # Initialize similarity calculator
         similarity_config = self.config.get("similarity", {})
         self.similarity_calculator = SimilarityCalculator(**similarity_config)
+        self.contextual_identity = self.config.get("contextual_identity", False)
+        self.disambiguator = EntityDisambiguator()
+        self.identity_reviews = {}
+        self._identity_review_ids = []
 
         # Detection thresholds
         self.similarity_threshold = similarity_threshold
@@ -382,9 +387,8 @@ class DuplicateDetector:
             )
 
             # Detect duplicate candidates
-            candidates = self.detect_duplicates(
-                entities, threshold=threshold, **options
-            )
+            candidates = (self._contextual_candidates(entities) if self.contextual_identity
+                          else self.detect_duplicates(entities, threshold=threshold, **options))
 
             self.progress_tracker.update_tracking(
                 tracking_id, message="Building duplicate groups..."
@@ -782,7 +786,7 @@ class DuplicateDetector:
         # explicit types are not duplicates, whatever their similarity.
         entity_type1 = self._get_entity_value(entity1, "type")
         entity_type2 = self._get_entity_value(entity2, "type")
-        if entity_type1 and entity_type2 and entity_type1 != entity_type2:
+        if not self.contextual_identity and entity_type1 and entity_type2 and entity_type1 != entity_type2:
             return DuplicateCandidate(
                 entity1=entity1,
                 entity2=entity2,
@@ -807,7 +811,16 @@ class DuplicateDetector:
             return DuplicateCandidate(entity1=entity1, entity2=entity2,
                 similarity_score=similarity_score, confidence=0.0,
                 reasons=["identity_conflict"],
-                metadata={**identity, "merge_allowed": False})
+                metadata={**identity, "decision": "different", "merge_allowed": False})
+
+        if self.contextual_identity:
+            decision = self.disambiguator.disambiguate(
+                self._get_entity_value(entity1, "name", ""), entity=entity1,
+                candidate=entity2, identity=identity)
+            return DuplicateCandidate(entity1=entity1, entity2=entity2,
+                similarity_score=similarity_score, confidence=decision["confidence"],
+                reasons=[decision["reason"]], metadata={**identity, **decision,
+                    "merge_allowed": decision["decision"] == "same"})
 
         # Check for exact name match (strong indicator)
         name1 = str(self._get_entity_value(entity1, "name", "")).lower().strip()
@@ -915,6 +928,9 @@ class DuplicateDetector:
         # Connectedness is not identity: an unknown bridge cannot erase a conflict.
         compatible = []
         for group in groups:
+            if self.contextual_identity:
+                compatible.extend(self._partition_contextual_group(group))
+                continue
             if self.is_group_compatible(group.entities):
                 compatible.append(group)
             else:
@@ -922,8 +938,115 @@ class DuplicateDetector:
                                     [self._normalize_entity_id(e) for e in group.entities])
         return compatible
 
+    @staticmethod
+    def _blocks_identity(metadata):
+        # An unresolved contextual contradiction must not be bypassed through
+        # a bare mention, even though it is not proof of different identities.
+        return metadata.get('decision') == 'different' or metadata.get('reason') in {
+            'context_requires_disambiguation', 'descriptions_require_disambiguation'}
+
+    def _partition_contextual_group(self, group):
+        """Retain supported subgroups without propagating a local conflict globally."""
+        rows = sorted(group.entities, key=self._normalize_entity_id)
+        neighbors = {i: set() for i in range(len(rows))}
+        blocked = set()
+        for i, left in enumerate(rows):
+            for j in range(i + 1, len(rows)):
+                metadata = self._create_duplicate_candidate(left, rows[j], 1.0).metadata
+                if metadata.get('decision') == 'same':
+                    neighbors[i].add(j)
+                    neighbors[j].add(i)
+                elif self._blocks_identity(metadata):
+                    blocked.add((i, j))
+        if not blocked:
+            return [group]
+        # A mention directly supported by both conflicting sides remains alone.
+        ambiguous = {i for i, adjacent in neighbors.items() if any(
+            a in adjacent and b in adjacent for a, b in blocked)}
+        memberships = {i: {i} for i in range(len(rows)) if i not in ambiguous}
+        for i, j in sorted((i, j) for i, adjacent in neighbors.items() for j in adjacent if i < j):
+            if i in ambiguous or j in ambiguous:
+                continue
+            neighborhood = (neighbors[i] | neighbors[j] | {i, j}) - ambiguous
+            if any(a in neighborhood and b in neighborhood for a, b in blocked):
+                continue
+            left, right = memberships[i], memberships[j]
+            if left is right or any((a in left and b in right) or (b in left and a in right)
+                                    for a, b in blocked):
+                continue
+            joined = left | right
+            for index in joined:
+                memberships[index] = joined
+        groups = {tuple(sorted(members)) for members in memberships.values() if len(members) > 1}
+        return [DuplicateGroup(entities=[rows[i] for i in members],
+                    similarity_scores={(self._normalize_entity_id(rows[i]), self._normalize_entity_id(rows[j])): 1.
+                        for i in members for j in members if i < j and j in neighbors[i]})
+                for members in sorted(groups)]
+
+    def _contextual_candidates(self, entities):
+        """Retrieve by names/definitions and scoped identifiers, never all pairs."""
+        self.disambiguator.prepare(entities)
+        self.identity_reviews = {}
+        self._identity_review_ids = [self._normalize_entity_id(row) for row in entities]
+        buckets = {}
+        candidates = []
+        for index, entity in enumerate(entities):
+            keys = self.disambiguator.candidate_keys(entity)
+            keys.update(("identity", name, value) for name, value in
+                        self.similarity_calculator._identity_values(entity).items())
+            previous = set()
+            for key in keys:
+                previous.update(buckets.get(key, []))
+            for other in sorted(previous):
+                candidate = self._create_duplicate_candidate(entities[other], entity, 1.0)
+                if candidate.metadata["merge_allowed"]:
+                    candidates.append(candidate)
+                elif candidate.metadata.get('decision') == 'unknown':
+                    reason = candidate.metadata['reason']
+                    for left, right in ((index, other), (other, index)):
+                        reasons = self.identity_reviews.setdefault(left, {})
+                        reasons[reason] = reasons.get(reason, 0) | (1 << right)
+            for key in keys:
+                buckets.setdefault(key, []).append(index)
+        return candidates
+
+    def iter_identity_review_summaries(self, remap):
+        """Expand compact diagnostic bitsets one mention at a time, after merging."""
+        from heapq import nsmallest
+
+        for index, reasons in self.identity_reviews.items():
+            mention_id = self._identity_review_ids[index]
+            own_entity = remap[mention_id]
+            candidates = set()
+            for reason, bits in reasons.items():
+                while bits:
+                    bit = bits & -bits
+                    candidate_id = remap[self._identity_review_ids[bit.bit_length() - 1]]
+                    if candidate_id != own_entity:
+                        candidates.add((candidate_id, reason))
+                    bits ^= bit
+            yield mention_id, len(candidates), nsmallest(8, candidates)
+
     def is_group_compatible(self, entities: List[Dict[str, Any]]) -> bool:
         """Check native constraints without rescoring or choosing an arbitrary side."""
+        if self.contextual_identity:
+            neighbors = {i: set() for i in range(len(entities))}
+            for i, left in enumerate(entities):
+                for j in range(i + 1, len(entities)):
+                    metadata = self._create_duplicate_candidate(left, entities[j], 1.0).metadata
+                    decision = metadata.get('decision')
+                    if self._blocks_identity(metadata):
+                        return False
+                    if decision == "same":
+                        neighbors[i].add(j)
+                        neighbors[j].add(i)
+            reached, pending = set(), [0] if entities else []
+            while pending:
+                index = pending.pop()
+                if index not in reached:
+                    reached.add(index)
+                    pending.extend(neighbors[index] - reached)
+            return len(reached) == len(entities)
         return all(self._create_duplicate_candidate(left, right, 1.0).metadata.get("merge_allowed", True)
                    for index, left in enumerate(entities) for right in entities[index + 1:])
 

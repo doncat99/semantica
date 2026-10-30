@@ -68,7 +68,7 @@ def test_worker_publishes_one_canonical_snapshot_queryable_without_reconstructio
     assert answer["result"]["retrievalManifestId"] == retrieval["revision"]
 
 
-def test_snapshot_publication_identity_separates_producer_from_business_input(tmp_path):
+def test_snapshot_publication_identity_separates_producer_from_business_input(tmp_path, monkeypatch):
     source = tmp_path / "native.txt"
     source.write_text("Ada Lovelace designed the Analytical Engine.")
     raw = _request(source, tmp_path / "first")["params"]
@@ -84,6 +84,10 @@ def test_snapshot_publication_identity_separates_producer_from_business_input(tm
     assert upgraded["snapshot"].id != f"snapshot:project-1:{raw['inputRevision'].split(':')[-1][:16]}"
     assert upgraded["snapshot"].entities == first["snapshot"].entities
     assert upgraded["snapshot"].model_receipts == first["snapshot"].model_receipts
+    assert upgraded['snapshot'].lineage.rule_version == 'semantica-semantic-artifact-v6'
+    monkeypatch.setattr('semantica.semantic_artifact_builder.PROJECT_PROCESSING_VERSION', 'next-policy')
+    changed_policy = build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(raw))
+    assert changed_policy['snapshot'].id != upgraded['snapshot'].id
 
 
 def test_worker_processes_parse_build_and_query_share_canonical_artifact(tmp_path):
@@ -527,7 +531,7 @@ def test_explanation_rejects_invalid_saved_result_and_reuses_replacement(tmp_pat
     context = {'target': {'id': 'source:1', 'type': 'source-scope'},
                'entities': [], 'assertions': [], 'relations': [],
                'evidence': [{'id': 'evidence:source', 'quote': 'Source quote'}]}
-    key = {'context': context, 'recipe': 'compact-grounding-v3'}
+    key = {'context': context, 'recipe': 'scoped-reader-grounding-v4'}
     report = {'title': 'Source', 'summary': 'Supported', 'findings': [
         {'summary': 'Meaning', 'explanation': 'Explained from the source.', 'citations': [citation]}]}
     checkpoint.write('grounded-explanation', key, {'reports': [report], 'receipts': []})
@@ -994,7 +998,7 @@ def test_epub_adapter_preserves_adapter_locator_origin(tmp_path):
     assert snapshot.evidence_spans
     assert {item.locator.origin for item in snapshot.evidence_spans} == {"adapter"}
     representation_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "document-representation")
-    persisted = json.loads(representation_path.read_text())
+    persisted = json.loads(representation_path.read_text())["document"]
     assert "Ada Lovelace" in persisted["text"]
     assert all(persisted["text"][span.locator.start_char:span.locator.end_char] == span.quote for span in snapshot.evidence_spans)
 
@@ -1194,9 +1198,9 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
                 }]} if "Extract source-grounded relations" in prompt else {
                     "entities": [
                         {"text": "Ada Lovelace", "label": "PERSON", "occurrence": 0,
-                         "attributes": {"fixture_key": "person-1"}, "confidence": 0.9},
+                         "attributes": {"fixture_key": "person-1", "description": text}, "confidence": 0.9},
                         {"text": "Analytical Engine", "label": "CONCEPT", "occurrence": 0,
-                         "attributes": {"fixture_key": "concept-1"}, "confidence": 0.9},
+                         "attributes": {"fixture_key": "concept-1", "description": text}, "confidence": 0.9},
                     ],
                 })
             elif operation == "knowledge_explanation":
@@ -1213,7 +1217,8 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
     request["params"]["recipe"]["extractionSpec"] = {
         "id": "fixture", "version": "1", "entity_types": [
             {"name": kind, "description": kind, "attributes": {
-                "fixture_key": {"type": "string", "description": "Fixture identity"}}}
+                "fixture_key": {"type": "string", "description": "Fixture identity"},
+                "description": {"type": "string", "description": "Verbatim source description"}}}
             for kind in ("PERSON", "CONCEPT")],
         "relation_types": [{"name": "designed", "description": "Designed",
                             "domain": ["PERSON"], "range": ["CONCEPT"]}],
@@ -1235,16 +1240,17 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
     snapshot_path = next(Path(item["path"]) for item in response["result"]["artifacts"] if item["kind"] == "semantic-graph")
     snapshot = _host_snapshot(snapshot_path)
     assert len(snapshot.entity_mentions) == 4
-    # Declaring nonconflicting fields must not change native positive resolution.
-    assert len(snapshot.entities) == 2
+    # A grounded same-name concept is reusable across sources. A person still
+    # needs stronger evidence, supplied here only by the declared identifier.
+    assert len(snapshot.entities) == (2 if declared_identity else 3)
     assert all('status' not in item.model_dump() for item in snapshot.identity_registry)
     assert snapshot.conflicts == []
     assert "identity_decisions" not in snapshot.model_dump()
     assert "identity_resolution" not in operations
     assert "relationship_discovery" not in operations
     assert operations.count("structured_extraction") == 4
-    assert [item.type for item in snapshot.source_relations] == ["designed"]
-    assert len(snapshot.relations) == 1
+    assert [item.type for item in snapshot.source_relations] == (["designed"] if declared_identity else [])
+    assert len(snapshot.relations) == (1 if declared_identity else 2)
     assert operations.count("knowledge_explanation") == 0
     base_path = tmp_path / "base-snapshot.json"
     base_path.write_text(snapshot.model_dump_json(by_alias=True))
@@ -1268,4 +1274,5 @@ def test_model_identity_remaps_graph_and_keeps_all_source_provenance(tmp_path, m
         representations = {item.id: item for item in snapshot.document_representations}
         assert {representations[evidence[ref].representation_id].source_id
                 for ref in entity.evidence_ids} == set(entity.metadata["source_ids"])
-        assert len(entity.metadata["source_ids"]) == 2
+        assert len(entity.metadata["source_ids"]) == (
+            2 if declared_identity or entity.type == 'CONCEPT' else 1)

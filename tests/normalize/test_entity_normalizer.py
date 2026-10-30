@@ -27,10 +27,11 @@ class TestEntityNormalizer(unittest.TestCase):
         self.assertIsNone(self.normalizer.resolve_aliases("Unknown Person"))
 
     def test_disambiguate_entity(self):
-        # Basic mock test since disambiguation is placeholder
+        # A name without pairwise evidence cannot establish identity.
         result = self.normalizer.disambiguate_entity("Apple", context="tech")
         self.assertEqual(result["entity_name"], "Apple")
-        self.assertEqual(result["confidence"], 0.8)
+        self.assertEqual(result["confidence"], 0.0)
+        self.assertEqual(result["decision"], "unknown")
 
     def test_link_entities(self):
         entities = ["J. Doe", "Bill Gates"]

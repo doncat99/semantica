@@ -133,7 +133,8 @@ def test_invalid_completed_stage_is_rejected_without_recomputation(tmp_path):
     request = SemanticArtifactBuildRequest.model_validate(_request(source, tmp_path / 'output')['params'])
     checkpoint = SnapshotCheckpoint(request)
     inputs = {'mentions': ['a']}
-    checkpoint.write('project-stage', {'stage': 'entity_resolution', 'inputsDigest': stable_digest(inputs)},
+    checkpoint.write('project-stage', {'stage': 'entity_resolution', 'inputsDigest': stable_digest(inputs),
+                                      'processingVersion': builder.PROJECT_PROCESSING_VERSION},
                      {'invalid': 'result with a valid content digest'})
     token = active_checkpoint.set(checkpoint)
     def forbidden():
@@ -145,3 +146,30 @@ def test_invalid_completed_stage_is_rejected_without_recomputation(tmp_path):
     finally:
         active_checkpoint.reset(token)
     assert events[-1]['metadata']['state'] == 'failed'
+
+
+@pytest.mark.parametrize('stage', ['entity_resolution', 'fact_reconciliation', 'semantic_organization'])
+@pytest.mark.parametrize('legacy_version', [None, 'scoped-contextual-identity-v2', 'project-contextual-identity-v3', 'project-contextual-identity-v4'])
+def test_legacy_processing_results_never_seed_current_identity(tmp_path, stage, legacy_version):
+    from pydantic import TypeAdapter
+    from semantica.semantic_artifact_schema import stable_digest
+    source = tmp_path / 'source.txt'
+    source.write_text('A source')
+    request = SemanticArtifactBuildRequest.model_validate(_request(source, tmp_path / 'output')['params'])
+    checkpoint = SnapshotCheckpoint(request)
+    inputs = {'mentions': ['raw mention']}
+    key = {'stage': stage, 'inputsDigest': stable_digest(inputs)}
+    if legacy_version is not None:
+        key['processingVersion'] = legacy_version
+    checkpoint.write('project-stage', key, ['polluted'])
+    token = active_checkpoint.set(checkpoint)
+    calls = []
+    def rebuild():
+        calls.append(1)
+        return ['rebuilt']
+    try:
+        for _ in range(2):
+            assert builder._project_stage(stage, inputs, TypeAdapter(list[str]), rebuild, None, 90) == ['rebuilt']
+        assert calls == [1]
+    finally:
+        active_checkpoint.reset(token)

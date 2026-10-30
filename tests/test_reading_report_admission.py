@@ -1,5 +1,6 @@
 """Reading reports consume knowledge, not the snapshot's storage indexes."""
 import json
+import pytest
 from types import SimpleNamespace
 
 from semantica import semantic_artifact_builder as pipeline
@@ -208,3 +209,77 @@ def test_concept_and_topic_reports_select_knowledge_before_prompting(monkeypatch
     assert {context["target"]["type"] for context in contexts} == {"concept", "topic"}
     assert all(len(context["assertions"]) == 4 for context in contexts)
     assert len(claims) == 100
+
+
+@pytest.mark.parametrize("legacy_membership", [False, True])
+def test_topic_and_community_reports_respect_membership_before_shared_entity_expansion(monkeypatch, legacy_membership):
+    from semantica.semantic_artifact_schema import KnowledgeCommunity, KnowledgeTopic
+    evidence = [span("inside", "Acme operates Plant"), span("outside", "Acme funds unrelated research", "source:2")]
+    entities = [KnowledgeEntity(id=ref, canonical_name=ref, type="ORG", evidence_ids=["inside", "outside"])
+                for ref in ("acme", "plant", "outside")]
+    claims = [KnowledgeAssertion(id="member", subject_id="acme", predicate="operates", object="Plant",
+        object_entity_id="plant", qualifiers={"polarity": "positive"}, evidence_ids=["inside", "outside"]),
+        KnowledgeAssertion(id="other", subject_id="acme", predicate="funds", object="research",
+        object_entity_id="outside", qualifiers={"polarity": "positive"}, evidence_ids=["outside"])]
+    relations = [KnowledgeRelation(id="member-edge", source_entity_id="acme", target_entity_id="plant",
+        type="operates", qualifiers={"polarity": "positive"}, evidence_ids=["inside"]),
+        KnowledgeRelation(id="boundary-edge", source_entity_id="acme", target_entity_id="outside",
+        type="funds", qualifiers={"polarity": "positive"}, evidence_ids=["outside"])]
+    community = KnowledgeCommunity(id="community", level=0, title="Operations",
+        entity_ids=["acme", "plant"], relation_ids=["member-edge"])
+    topic = KnowledgeTopic(id="topic", title="Operations", entity_ids=["acme", "plant"],
+        assertion_ids=["member", "other"] if legacy_membership else ["member"],
+        evidence_ids=["inside", "outside"] if legacy_membership else ["inside"], community_ids=["community"])
+    contexts = []
+    def explain(context, _relay):
+        contexts.append(context)
+        return [pipeline.ReportSection(title="Support", text="Grounded", evidence_ids=["inside"])], []
+    monkeypatch.setattr(pipeline, "_grounded_explanation", explain)
+    pipeline._explanation_reports("project", [], entities, claims, relations, [community], [topic],
+        evidence, SimpleNamespace(model_id="test"), target_ids=["topic", "community"])
+    assert len(contexts) == 2
+    for context in contexts:
+        assert {item["id"] for item in context["assertions"]} == {"member"}
+        assert all(item["id"] != "boundary-edge" for item in context["relations"])
+        assert {item["id"] for item in context["entities"]} == {"acme", "plant"}
+    topic_context = next(item for item in contexts if item["target"]["type"] == "topic")
+    assert {item["id"] for item in topic_context["assertions"]} == {"member"}
+    if not legacy_membership:
+        assert {item["id"] for item in topic_context["evidence"]} == {"inside"}
+    assert claims[0].evidence_ids == ["inside", "outside"]
+
+
+def test_topic_organization_does_not_admit_cross_community_assertions(monkeypatch):
+    from semantica.kg import CommunityDetector
+    monkeypatch.setattr(CommunityDetector, "detect_communities", lambda *args, **kwargs:
+        {"communities": [["acme", "plant"], ["outside"]]})
+    entities = [KnowledgeEntity(id=ref, canonical_name=ref, type="ORG") for ref in ("acme", "plant", "outside")]
+    claims = [KnowledgeAssertion(id="inside", subject_id="acme", predicate="operates", object="plant",
+        object_entity_id="plant", qualifiers={"polarity": "positive"}, evidence_ids=["in"]),
+        KnowledgeAssertion(id="boundary", subject_id="acme", predicate="funds", object="outside",
+        object_entity_id="outside", qualifiers={"polarity": "positive"}, evidence_ids=["out"])]
+    _, topics = pipeline._semantic_organization(entities, claims, [], [span("in", "Operations"), span("out", "Research")])
+    topic = next(item for item in topics if "plant" in item.entity_ids)
+    assert topic.assertion_ids == ["inside"]
+    assert topic.evidence_ids == ["in"]
+
+
+def test_reader_roles_use_distinct_native_instructions_without_diagnostic_questions(monkeypatch):
+    prompts = []
+    class Provider:
+        receipts = []
+        def generate_typed(self, prompt, schema, **kwargs):
+            prompts.append(prompt)
+            return schema.model_validate({"title": "Report", "summary": "Grounded", "findings": [
+                {"summary": "Meaning", "explanation": "Grounded", "citations": [{"evidence_id": "e1"}]}]},
+                context=kwargs["validation_context"])
+    monkeypatch.setattr(pipeline, "_project_model_provider", lambda *args: Provider())
+    for kind in ("overview", "topic", "concept"):
+        pipeline._grounded_explanation({"target": {"id": kind, "type": kind, "title": "Subject"},
+            "entities": [], "assertions": [], "relations": [],
+            "evidence": [{"id": "support", "quote": "The subject has a source-backed meaning."}]},
+            SimpleNamespace(model_id="test", context_window_tokens=12000, max_output_tokens=1000))
+    assert "Orient the reader" in prompts[0]
+    assert "Explain only the named topic" in prompts[1]
+    assert "Explain the named concept" in prompts[2]
+    assert all("Do not turn extraction diagnostics" in prompt for prompt in prompts)

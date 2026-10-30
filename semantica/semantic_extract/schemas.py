@@ -15,6 +15,27 @@ def validate_fact_qualifiers(value: dict) -> dict:
     return value
 
 
+class IdentityProfileOut(BaseModel):
+    """Readable description with its separately located source support."""
+    model_config = ConfigDict(extra="forbid")
+    description: Optional[str] = Field(default=None, min_length=1, max_length=512)
+    evidence: str = Field(min_length=1, max_length=1600)
+    evidence_occurrence: int = Field(ge=0)
+    referent_kind: Optional[Literal["named_entity", "institution", "dependent_entity", "concept", "role", "framework", "standard", "report", "index"]] = None
+    owner: Optional[str] = Field(default=None, min_length=1, max_length=256)
+    instance: Optional[str] = Field(default=None, min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def grounded_owner(self):
+        if self.owner and self.owner not in self.evidence:
+            raise ValueError("identity owner must occur exactly in profile evidence")
+        if self.instance and self.instance not in self.evidence:
+            raise ValueError("identity instance must occur exactly in profile evidence")
+        if not any((self.description, self.owner, self.referent_kind, self.instance)):
+            raise ValueError("identity profile requires an identifying fact")
+        return self
+
+
 class EntityOut(BaseModel):
     """Canonical schema for entity extraction output."""
     model_config = ConfigDict(populate_by_name=True, extra="ignore")
@@ -26,6 +47,7 @@ class EntityOut(BaseModel):
     confidence: float = Field(0.9, description="Confidence score between 0 and 1")
     occurrence: Optional[int] = Field(None, ge=0, description="Zero-based exact text occurrence")
     attributes: dict = Field(default_factory=dict, description="Typed attributes defined by the extraction specification")
+    identity_profile: Optional[IdentityProfileOut] = None
     metadata: dict = Field(default_factory=dict, description="Additional metadata including provenance")
 
     @field_validator("text", mode="before")
@@ -232,7 +254,7 @@ def grounded_entities_wire(specification=None):
         entities.append(create_model(f"GroundedEntityWire{index}", __config__=ConfigDict(extra="forbid"),
             text=(str, ...), label=(Literal[entity_type.name] if entity_type else str, ...),
             occurrence=(int, Field(ge=0)), confidence=(float, Field(ge=0, le=1)),
-            attributes=(attributes, ...)))
+            attributes=(attributes, ...), identity_profile=(Optional[IdentityProfileOut], None)))
     item = entities[0] if len(entities) == 1 else Union[tuple(entities)]
     return create_model("GroundedEntitiesWire", __config__=ConfigDict(extra="forbid"), entities=(List[item], ...))
 

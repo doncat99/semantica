@@ -43,7 +43,10 @@ def test_missing_properties_keep_native_score():
 
 
 def test_artifact_name_resolution_is_native_not_identifier_gated():
-    mentions = [KnowledgeEntity(id=f"mention:{key}", canonical_name="Same organization", type="ORG")
+    mentions = [KnowledgeEntity(id=f"mention:{key}", canonical_name="Same organization", type="ORG",
+                               description="manufactures precision medical instruments",
+                               context="Same organization manufactures precision medical instruments.",
+                               metadata={"identity_scope": "representation:one"})
                 for key in ("a", "b")]
     entities, remap, registry = _resolve_native_entities(mentions)
     assert len(entities) == 1

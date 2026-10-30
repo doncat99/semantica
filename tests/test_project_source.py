@@ -35,7 +35,7 @@ def test_worker_preserves_material_identity_in_representation(tmp_path):
     request = SourceBuildInput(filePath=str(source), sourceId="s1", materialRevision=revision, name=source.name, mimeType="text/plain")
     representation = _build_source(request, False)["representation"]
     assert representation.content_hash == representation.material_revision_id == revision
-    assert representation.metadata["document"]["content_hash"] == revision
+    assert "document" not in representation.metadata
 
 
 def test_text_source_uses_the_canonical_adapter_contract(tmp_path: Path):

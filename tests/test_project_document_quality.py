@@ -95,7 +95,7 @@ def test_quality_findings_survive_cached_parse_and_snapshot_loading(tmp_path, mo
 
     def parse(*args, **kwargs):
         calls.append(kwargs["force_ocr"])
-        return SourceDocument("Broken \ufffd\ufffd text", {"format": "docling"}, "native", "docling", "2")
+        return SourceDocument("Broken \ufffd\ufffd text", {"format": "docling", "source": kwargs["name"]}, "native", "docling", "2")
 
     from semantica import semantic_source_artifact
     monkeypatch.setattr(semantic_source_artifact, "parse_source", parse)
@@ -118,7 +118,8 @@ def test_quality_findings_survive_cached_parse_and_snapshot_loading(tmp_path, mo
     assert parsed[0] == "Broken \ufffd\ufffd text"
     assert parsed[1]["quality"]["status"] == "needs_review"
     built = _build_source(source_input, False, parsed=parsed)
-    assert built["representation"].metadata["document"]["quality"] == parsed[1]["quality"]
+    assert built["document"]["quality"] == parsed[1]["quality"]
+    assert "document" not in built["representation"].metadata
     Path(first["artifactPath"]).write_text("tampered")
     with pytest.raises(Exception, match="artifact digest is invalid"):
         semantic_source_artifact._load_parsed_source(source_input, ref, False, profile)

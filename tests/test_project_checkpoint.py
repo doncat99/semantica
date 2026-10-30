@@ -387,7 +387,7 @@ def test_worker_process_restart_reuses_durable_parse_and_model_calls(tmp_path):
 @pytest.mark.parametrize("switch_model", [False, True])
 @pytest.mark.parametrize("material_change", ["none", "add", "remove", "revision"])
 @pytest.mark.parametrize("completed", [False, True])
-def test_new_run_reuses_extraction_windows(tmp_path, monkeypatch, switch_model, material_change, completed, formula_change=None):
+def test_new_run_reuses_extraction_windows(tmp_path, monkeypatch, switch_model, material_change, completed, formula_change=None, contract_change=False):
     source = tmp_path / "source.txt"
     # Keep two substantive native windows so the test exercises checkpoint
     # reuse without relying on a trailing whitespace-only chunk.
@@ -472,6 +472,9 @@ def test_new_run_reuses_extraction_windows(tmp_path, monkeypatch, switch_model, 
     monkeypatch.setenv("OPENAI_API_KEY", "fixture")
     monkeypatch.setattr("urllib.request.urlopen", relay)
     from semantica import semantic_artifact_builder as builder
+    current_contract = builder.EXTRACTION_CONTRACT_VERSION
+    if contract_change:
+        monkeypatch.setattr(builder, 'EXTRACTION_CONTRACT_VERSION', 'legacy-no-identity-profile')
     if completed:
         first_result = build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(first["params"]))
     else:
@@ -513,6 +516,13 @@ def test_new_run_reuses_extraction_windows(tmp_path, monkeypatch, switch_model, 
         })
     second["params"]["resumeCheckpointDirs"] = [str(checkpoint)]
     quota_exhausted = False
+    if contract_change:
+        monkeypatch.setattr(builder, 'EXTRACTION_CONTRACT_VERSION', current_contract)
+        with pytest.raises(SemanticArtifactError) as gap:
+            build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(second['params']))
+        assert gap.value.code == 'COMPLETED_WORK_RECOVERY_GAP'
+        assert len(calls) == first_call_count, 'contract migration must not silently purchase new extraction'
+        return
     result = build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(second["params"]))
     assert result["snapshot"] is not None
     if switch_model:
@@ -582,6 +592,10 @@ def test_new_run_reuses_extraction_windows(tmp_path, monkeypatch, switch_model, 
         build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(missing["params"]))
     assert gap.value.code == "COMPLETED_WORK_RECOVERY_GAP"
     assert len(calls) == completed_calls
+
+
+def test_description_contract_change_does_not_reuse_legacy_results_or_silently_buy_new_work(tmp_path, monkeypatch):
+    test_new_run_reuses_extraction_windows(tmp_path, monkeypatch, False, 'keep', True, contract_change=True)
 
 
 @pytest.mark.parametrize("change", ["enable", "disable"])

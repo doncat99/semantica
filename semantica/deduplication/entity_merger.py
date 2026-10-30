@@ -399,6 +399,26 @@ class EntityMerger:
             entities, strategy=strategy, **options
         )
 
+        if self.duplicate_detector.contextual_identity:
+            profiles = [entity for entity in entities if entity.get('metadata', {}).get('identity_profile')]
+            if profiles:
+                merge_result.merged_entity.setdefault('metadata', {})['identity_profile'] = profiles[0]['metadata']['identity_profile']
+            # A representative without a description must not erase grounded support.
+            for entity in entities:
+                description = str(entity.get("description", "")).strip()
+                source_metadata = entity.get('metadata', {})
+                supported = source_metadata.get('description_evidence_ids')
+                if description and (supported or description.casefold() in str(entity.get("context", "")).casefold()):
+                    merge_result.merged_entity["description"] = description
+                    merge_result.merged_entity["context"] = entity["context"]
+                    metadata = merge_result.merged_entity.setdefault("metadata", {})
+                    metadata["description_mention_id"] = get_entity_id(entity)
+                    metadata["description_evidence_ids"] = list(supported or entity.get("evidence_ids", []))
+                    if source_metadata.get('identity_profile'):
+                        metadata['identity_profile'] = source_metadata['identity_profile']
+                    metadata["identity_context_evidence_id"] = entity.get("metadata", {}).get("identity_context_evidence_id")
+                    break
+
         # Add provenance information if enabled
         if self.preserve_provenance:
             merge_result.merged_entity = self._add_provenance(

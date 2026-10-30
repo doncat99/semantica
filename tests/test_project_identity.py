@@ -3,17 +3,110 @@ from semantica.semantic_artifact_builder import _resolve_native_entities, _remap
 from semantica.semantic_artifact_schema import KnowledgeEntity, KnowledgeAssertion, KnowledgeRelation
 
 
+def test_profile_offsets_survive_window_assembly_and_source_projection(tmp_path):
+    from types import SimpleNamespace
+    from semantica.semantic_artifact_builder import _assemble_grounded_windows, _build_source
+    from semantica.semantic_extract.methods import extract_entities_llm
+    from semantica.semantic_extract.schemas import EntitiesResponse, EntityOut
+    from tests.semantic_extract.test_grounded_llm_extraction import TypedProvider
+    prefix = 'Previous section.\n'
+    window = 'Acme manufactures medical instruments.'
+    text = prefix + window
+    provider = TypedProvider(EntitiesResponse(entities=[EntityOut(text='Acme', label='ORG', occurrence=0,
+        identity_profile={'description': 'A medical instrument manufacturer', 'evidence': window,
+                          'evidence_occurrence': 0, 'referent_kind': 'named_entity',
+                          'owner': 'Acme'})]))
+    mentions = extract_entities_llm(window, provider='bifrost', provider_instance=provider, grounding='strict')
+    result, _ = _assemble_grounded_windows([(len(prefix), len(text), window)],
+        [({'entities': mentions, 'relations': []}, [], False)])
+    source = SimpleNamespace(source_id='source:acme', name='Acme', file_path=str(tmp_path / 'source.txt'),
+                             material_revision='b3-' + '1' * 64, mime_type='text/plain')
+    built = _build_source(source, False, result,
+        (text, {'text': text}, 'native', 'b3-' + '1' * 64, 'text', '1'))
+    entity, = built['entities']
+    support, = entity.metadata['description_evidence_ids']
+    span = next(item for item in built['evidence'] if item.id == support)
+    assert entity.description == 'A medical instrument manufacturer'
+    assert entity.metadata['identity_profile']['owner'] == 'Acme'
+    assert entity.metadata['identity_profile']['referent_kind'] == 'named_entity'
+    assert span.locator.start_char == len(prefix)
+    assert span.locator.end_char == len(text)
+    assert text[span.locator.start_char:span.locator.end_char] == span.quote == window
+    assert len(provider.prompts) == 1
+
+
+def test_source_keeps_paraphrased_description_with_separately_located_support(tmp_path):
+    from types import SimpleNamespace
+    from semantica.semantic_artifact_builder import _build_source
+    text = 'Acme reports.\nAcme manufactures medical instruments.'
+    quote = text
+    profile = {'description': 'A medical instrument manufacturer', 'evidence': quote,
+               'evidence_start': text.index(quote), 'evidence_end': len(text), 'evidence_occurrence': 0}
+    result = {'entities': [dict(id='a', name='Acme', type='ORG', occurrence=0,
+                               attributes={}, identity_profile=profile)], 'relations': []}
+    source = SimpleNamespace(source_id='source:acme', name='Acme', file_path=str(tmp_path / 'source.txt'),
+                             material_revision='b3-' + '1' * 64, mime_type='text/plain')
+    parsed = (text, {'text': text}, 'native', 'b3-' + '1' * 64, 'text', '1')
+    built = _build_source(source, False, result, parsed)
+    entity, = built['entities']
+    assert entity.description == profile['description']
+    assert entity.context == 'Acme reports.\n'
+    support, = entity.metadata['description_evidence_ids']
+    assert next(span.quote for span in built['evidence'] if span.id == support) == quote
+    assert support in entity.evidence_ids
+    without_profile = {key: value for key, value in result['entities'][0].items() if key != 'identity_profile'}
+    without_profile['id'] = 'overlapping-window-mention'
+    overlapped = _build_source(source, False,
+        {'entities': [without_profile, result['entities'][0]], 'relations': []}, parsed)
+    assert len(overlapped['entities']) == 1
+    assert overlapped['entities'][0].description == profile['description']
+    assert overlapped['entities'][0].metadata['description_evidence_ids'] == [support]
+    repeated = entity.model_copy(deep=True)
+    repeated.id = 'repeated'
+    repeated.description = ''
+    repeated.metadata.pop('description_evidence_ids')
+    repeated.metadata.pop('identity_profile')
+    canonical, _, _ = _resolve_native_entities([repeated, entity])
+    assert len(canonical) == 1
+    assert canonical[0].description == profile['description']
+    assert canonical[0].metadata['description_evidence_ids'] == [support]
+
+
+def test_source_identity_context_is_located_and_description_must_be_grounded(tmp_path):
+    from types import SimpleNamespace
+    from semantica.semantic_artifact_builder import _build_source
+    text = 'Earlier sentence. Acme is a manufacturer of precision medical instruments. Next sentence.'
+    result = {'entities': [dict(id='acme', name='Acme', type='ORG', occurrence=0,
+                               attributes={'description': 'manufacturer of precision medical instruments'})],
+              'relations': []}
+    source = SimpleNamespace(source_id='source:acme', name='Acme', file_path=str(tmp_path / 'source.txt'),
+                             material_revision='b3-' + '1' * 64, mime_type='text/plain')
+    parsed = (text, {'text': text}, 'native', 'b3-' + '1' * 64, 'text', '1')
+    built = _build_source(source, False, result, parsed)
+    entity = built['entities'][0]
+    assert entity.context.strip() == 'Acme is a manufacturer of precision medical instruments.'
+    spans = {span.id: span for span in built['evidence']}
+    located = spans[entity.metadata['identity_context_evidence_id']]
+    assert located.quote == entity.context
+    assert text[located.locator.start_char:located.locator.end_char] == entity.context
+    assert located.id in entity.evidence_ids
+    assert entity.description == result['entities'][0]['attributes']['description']
+    result['entities'][0]['attributes']['description'] = 'An ungrounded generated description'
+    assert _build_source(source, False, result, parsed)['entities'][0].description == ''
+
+
 def test_artifact_uses_native_resolution_ids_and_membership_without_model_calls(monkeypatch):
     def unexpected(*args, **kwargs):
         raise AssertionError("native identity resolution must not call a model")
     monkeypatch.setattr("semantica.semantic_artifact_builder._relay_json", unexpected)
     monkeypatch.setattr("semantica.semantic_artifact_builder._product_json", unexpected)
     mentions = [KnowledgeEntity(id=f"mention:{index}", canonical_name=name, type="PERSON",
+        context=f"{name} worked on mechanical computation and mathematics.",
         evidence_ids=[f"evidence:{index}"], metadata={"source_ids": [f"source:{index}"]})
         for index, name in enumerate(["Ada Lovelace", "Ada Lovelace", "Charles Babbage"])]
-    native = EntityResolver(strategy="exact").resolve_entities([
+    native = EntityResolver(strategy="contextual").resolve_entities([
         {"id": item.id, "name": item.canonical_name, "type": item.type,
-         "properties": item.attributes, "metadata": item.metadata} for item in mentions])
+         "properties": item.attributes, "metadata": item.metadata, "context": item.context} for item in mentions])
     entities, remap, registry = _resolve_native_entities(mentions)
     assert [item.id for item in entities] == [item["id"] for item in native]
     for entity, row in zip(entities, native):
@@ -50,8 +143,10 @@ def test_native_resolution_does_not_mutate_source_mentions():
 def test_native_projection_preserves_native_alias_resolution():
     entities, remap, _ = _resolve_native_entities([
         KnowledgeEntity(id='long', canonical_name='International Business Machines',
-                        type='ORGANIZATION', aliases=['IBM']),
-        KnowledgeEntity(id='short', canonical_name='IBM', type='ORGANIZATION')])
+                        type='ORGANIZATION', aliases=['IBM'],
+                        context='International Business Machines (IBM) manufactures computers.'),
+        KnowledgeEntity(id='short', canonical_name='IBM', type='ORGANIZATION',
+                        context='International Business Machines (IBM) manufactures computers.')])
     assert len(entities) == 1
     assert remap['long'] == remap['short']
     assert {entities[0].canonical_name, *entities[0].aliases} == {
@@ -83,7 +178,7 @@ def test_identity_cannot_bypass_native_detection_and_merging(monkeypatch):
     assert len(entities) == 1
     assert len(set(remap.values())) == 1
     assert calls['resolve_entities'] == calls['merge_entity_group'] == 1
-    assert calls.get('detect_duplicate_groups', 0) == 0
+    assert calls['detect_duplicate_groups'] == 1
 
 
 def test_projection_scoped_conflict_veto_preserves_native_mapping_and_endpoints():
@@ -93,8 +188,8 @@ def test_projection_scoped_conflict_veto_preserves_native_mapping_and_endpoints(
                                    ('b', {'key': '1', 'scope': 'X'}),
                                    ('c', {'key': '2', 'scope': 'X'}),
                                    ('d', {})]]
-    # Without conflict semantics, native positive resolution is unchanged.
-    assert len(_resolve_native_entities(mentions)[0]) == 2
+    # Undeclared properties are not trusted identity evidence.
+    assert len(_resolve_native_entities(mentions)[0]) == 4
     entities, remap, registry = _resolve_native_entities(
         mentions, property_schema={'key': {'identity': True, 'scope': ['scope']}})
     assert len(entities) == 3
@@ -117,7 +212,7 @@ def test_artifact_delegates_to_supplied_native_threshold():
     assert len(_resolve_native_entities(mentions, resolver=EntityResolver(similarity_threshold=0.99))[0]) == 2
 
 
-def test_project_default_identity_resolution_is_exact_not_fuzzy():
+def test_project_default_identity_resolution_does_not_merge_fuzzy_names():
     mentions = [
         KnowledgeEntity(id="mention:one", canonical_name="Acme Holdings", type="ORG"),
         KnowledgeEntity(id="mention:two", canonical_name="Acne Holding", type="ORG"),
@@ -125,3 +220,37 @@ def test_project_default_identity_resolution_is_exact_not_fuzzy():
     entities, remap, _ = _resolve_native_entities(mentions)
     assert len(entities) == 2
     assert remap["mention:one"] != remap["mention:two"]
+
+
+def test_source_scope_and_description_are_reused_by_native_projection(tmp_path):
+    from types import SimpleNamespace
+    from semantica.semantic_artifact_builder import _build_source
+    description = "manufacturer of precision medical instruments"
+    text = "Acme reports results. Acme is a " + description + ". Acme publishes accounts."
+    source = SimpleNamespace(source_id="source:acme", name="Acme", material_revision="b3-" + "1" * 64,
+                             mime_type="text/plain")
+    result = {"entities": [dict(id=str(index), name="Acme", type="ORG", occurrence=index,
+        attributes={"description": description} if index == 1 else {}) for index in range(3)], "relations": []}
+    built = _build_source(source, False, result, (text, {"text": text}, "native", "b3-" + "1" * 64, "text", "1"))
+    assert {item.metadata["identity_scope"] for item in built["entities"]} == {built["representation"].id}
+    before = [item.model_dump(mode="json") for item in built["entities"]]
+    entities, remap, registry = _resolve_native_entities(built["entities"])
+    entity, = entities
+    assert len(set(remap.values())) == 1 and len(registry) == 3
+    assert entity.description == description and description in entity.context
+    assert entity.metadata["description_mention_id"] in entity.metadata["mention_ids"]
+    assert set(entity.metadata["description_evidence_ids"]) <= set(entity.evidence_ids)
+    spans = {item.id: item for item in built["evidence"]}
+    assert spans[entity.metadata["identity_context_evidence_id"]].quote == entity.context
+    assert [item.model_dump(mode="json") for item in built["entities"]] == before
+
+
+def test_representation_revision_is_an_identity_scope_boundary():
+    from types import SimpleNamespace
+    from semantica.semantic_artifact_builder import _build_source
+    source = SimpleNamespace(source_id="source:acme", name="Acme", material_revision="b3-" + "1" * 64,
+                             mime_type="text/plain")
+    result = {"entities": [dict(id="a", name="Acme", type="ORG", occurrence=0, attributes={})], "relations": []}
+    builds = [_build_source(source, False, result, (text, {"text": text}, "native", "b3-" + char * 64, "text", "1"))
+              for char, text in [("1", "Acme reports results."), ("2", "Acme publishes accounts.")]]
+    assert builds[0]["entities"][0].metadata["identity_scope"] != builds[1]["entities"][0].metadata["identity_scope"]

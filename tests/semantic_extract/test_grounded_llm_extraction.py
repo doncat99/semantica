@@ -33,6 +33,60 @@ class TypedProvider:
         return self.responses.pop(0)
 
 
+def test_grounded_description_has_separate_source_quote_and_no_extra_model_call():
+    text = 'Acme manufactures medical instruments.'
+    from semantica.semantic_extract.schemas import grounded_entities_wire
+    schema = grounded_entities_wire()
+    response = schema.model_validate({'entities': [{'text': 'Acme', 'label': 'ORG',
+        'occurrence': 0, 'confidence': .9, 'attributes': {}, 'identity_profile': {
+            'description': 'A medical instrument manufacturer', 'evidence': text,
+            'evidence_occurrence': 0}}]})
+    provider = TypedProvider(response)
+    entity, = extract_entities_llm(text, provider='bifrost', provider_instance=provider, grounding='strict')
+    assert entity.attributes == {}
+    assert entity.metadata['identity_profile']['description'] == 'A medical instrument manufacturer'
+    assert entity.metadata['identity_profile']['evidence_start'] == 0
+    assert entity.metadata['identity_profile']['evidence_end'] == len(text)
+    assert len(provider.prompts) == 1
+
+
+@pytest.mark.parametrize('name,text,fact', [
+    ('Audit Committee', 'Acme Audit Committee reviewed the report.',
+     dict(owner='Acme', referent_kind='dependent_entity')),
+    ('Annual Report', 'Acme Annual Report covers fiscal year 2024.',
+     dict(instance='2024', referent_kind='report')),
+    ('Sustainability Accounting Standards Board',
+     'Sustainability Accounting Standards Board is a standard-setting institution.',
+     dict(referent_kind='institution'))])
+def test_independent_identity_fact_survives_native_extraction_without_description(name, text, fact):
+    from semantica.semantic_extract.schemas import grounded_entities_wire
+    schema = grounded_entities_wire()
+    response = schema.model_validate({'entities': [dict(text=name, label='ORG',
+        occurrence=0, confidence=.9, attributes={}, identity_profile=dict(
+            description=None, evidence=text, evidence_occurrence=0, **fact))]})
+    provider = TypedProvider(response)
+    entity, = extract_entities_llm(text, provider='bifrost', provider_instance=provider, grounding='strict')
+    profile = entity.metadata['identity_profile']
+    assert profile['description'] is None
+    assert all(profile[key] == value for key, value in fact.items())
+    assert text[profile['evidence_start']:profile['evidence_end']] == text
+    assert len(provider.prompts) == 1
+
+
+@pytest.mark.parametrize('quote', ['Acme invented a warp drive.', 'Another manufactures medical instruments.',
+                                  'Acme publishes newspapers.'])
+def test_invalid_profile_keeps_the_located_mention_without_fabricated_support(quote):
+    text = 'Acme reports. Another manufactures medical instruments. Acme publishes newspapers.'
+    provider = TypedProvider(EntitiesResponse(entities=[EntityOut(text='Acme', label='ORG', occurrence=0,
+        identity_profile={'description': 'A manufacturer', 'evidence': quote, 'evidence_occurrence': 0})]))
+    receipts = []
+    entity, = extract_entities_llm(text, provider='bifrost', provider_instance=provider,
+        grounding='strict', rejection_receipts=receipts)
+    assert 'identity_profile' not in entity.metadata
+    assert receipts[0]['kind'] == 'grounding'
+    assert len(provider.prompts) == 1
+
+
 def test_native_grounded_extractors_apply_typed_spec_and_examples(monkeypatch):
     from semantica.semantic_extract import methods
     def forbidden_cache(*args, **kwargs):

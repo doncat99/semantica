@@ -297,9 +297,9 @@ def test_retrieval_index_references_canonical_snapshot_without_copying_records(t
     (['entity'], ['concept'], 1),
     (['community'], ['community'], 1),
     (['topic'], ['topic'], 1),
-    (['community', 'topic'], ['community'], 2),
+    (['community', 'topic'], ['community', 'topic'], 2),
 ])
-def test_report_targets_bound_calls_and_reuse_community_report(
+def test_report_targets_bound_calls_and_respect_reader_scope(
         monkeypatch, target_ids, expected_calls, expected_reports):
     from types import SimpleNamespace
     from semantica import semantic_artifact_builder as pipeline
@@ -319,8 +319,7 @@ def test_report_targets_bound_calls_and_reuse_community_report(
     assert calls == expected_calls
     assert len(reports) == expected_reports
     if target_ids == ['community', 'topic']:
-        assert reports[-1].sections == reports[-2].sections
-        assert reports[-1].metadata['derived_from_report_id'] == reports[-2].id
+        assert 'derived_from_report_id' not in reports[-1].metadata
 
 
 def test_query_process_cache_reuses_admitted_bytes_and_rejects_file_changes(tmp_path, monkeypatch):

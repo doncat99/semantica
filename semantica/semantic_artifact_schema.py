@@ -177,6 +177,8 @@ class KnowledgeEntity(KernelModel):
     id: str
     canonical_name: str
     type: str
+    description: str = ""
+    context: str = ""
     attributes: Dict[str, Any] = Field(default_factory=dict)
     aliases: List[str] = Field(default_factory=list)
     evidence_ids: List[str] = Field(default_factory=list)
@@ -238,12 +240,28 @@ class SourceRelation(KernelModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
+class IdentityCandidateReview(StrictModel):
+    entity_id: str
+    reason: str = Field(min_length=1)
+
+
 class IdentityRegistryEntry(StrictModel):
     mention_id: str
     entity_id: str
     canonical_name: str
     type: str
     source_ids: List[str] = Field(default_factory=list)
+    unresolved_candidate_count: int = Field(default=0, ge=0)
+    unresolved_candidates: List[IdentityCandidateReview] = Field(default_factory=list, max_length=8)
+
+    @model_validator(mode="after")
+    def validate_unresolved_candidates(self):
+        pairs = [(item.entity_id, item.reason) for item in self.unresolved_candidates]
+        if self.unresolved_candidate_count < len(pairs) or len(set(pairs)) != len(pairs):
+            raise ValueError('identity review count must cover its unique sampled candidates')
+        if any(entity_id == self.entity_id for entity_id, _ in pairs):
+            raise ValueError('identity review must refer to another canonical entity')
+        return self
 
 
 class KnowledgeCommunity(KernelModel):
@@ -447,6 +465,9 @@ class SemanticArtifact(KernelModel):
         registry_mentions = [item.mention_id for item in self.identity_registry]
         if len(registry_mentions) != len(set(registry_mentions)):
             raise ValueError("duplicate identity registry mention_id")
+        for entry in self.identity_registry:
+            if any(item.entity_id not in entity_ids for item in entry.unresolved_candidates):
+                raise ValueError('identity review references unknown canonical entity')
 
         missing = _missing(self.lineage.model_receipt_ids, model_receipt_ids)
         if missing:

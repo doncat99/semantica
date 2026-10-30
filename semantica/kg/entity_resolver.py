@@ -7,7 +7,7 @@ maintain entity consistency.
 
 Key Features:
     - Entity deduplication and merging
-    - Multiple resolution strategies (fuzzy, exact, semantic)
+    - Multiple resolution strategies (fuzzy, exact, semantic, contextual)
     - Similarity-based entity matching
     - Entity ID normalization and tracking
 
@@ -41,6 +41,7 @@ class EntityResolver:
         - "fuzzy": Fuzzy string matching (default)
         - "exact": Exact string matching
         - "semantic": Semantic similarity matching
+        - "contextual": Grounded identity decisions; ambiguous candidates stay separate
 
     Example Usage:
         >>> resolver = EntityResolver(strategy="fuzzy", similarity_threshold=0.8)
@@ -58,7 +59,7 @@ class EntityResolver:
         components configured according to the specified strategy.
 
         Args:
-            strategy: Resolution strategy - "fuzzy", "exact", or "semantic" (default: "fuzzy")
+            strategy: "fuzzy", "exact", "semantic", or "contextual" (default: "fuzzy")
             similarity_threshold: Minimum similarity score for considering entities as duplicates
                                  (0.0 to 1.0, default: 0.7)
             **config: Additional configuration:
@@ -85,6 +86,8 @@ class EntityResolver:
             if key in deduplication_config and deduplication_config[key] != value:
                 raise ValueError("Conflicting resolver and merger detector configuration")
             deduplication_config[key] = value
+        if strategy == "contextual":
+            deduplication_config["contextual_identity"] = True
         self.entity_merger = EntityMerger(**{**merger_config, "detector": deduplication_config})
         # Resolution and materialization share one detector and identity policy.
         self.duplicate_detector = self.entity_merger.duplicate_detector
@@ -126,6 +129,10 @@ class EntityResolver:
 
         # Handle empty input
         if not entities:
+            self.duplicate_detector.identity_reviews = {}
+            self.duplicate_detector._identity_review_ids = []
+            if self.duplicate_detector.contextual_identity:
+                self.duplicate_detector.disambiguator.prepare([])
             self.logger.debug("No entities to resolve")
             return []
 
@@ -161,7 +168,7 @@ class EntityResolver:
                     continue
 
                 # Merge the duplicate group into a single canonical entity
-                if self.resolution_strategy == "exact":
+                if self.resolution_strategy in ("exact", "contextual"):
                     merge_operations = [
                         self.entity_merger.merge_entity_group(
                             group.entities, **self.config
@@ -303,6 +310,8 @@ class EntityResolver:
         """
         self.logger.info(f"Merging duplicates from {len(entities)} entities")
 
+        if self.resolution_strategy == "contextual":
+            return self.resolve_entities(entities)
         merge_operations = self.entity_merger.merge_duplicates(
             entities, **{**self.config, "threshold": self.similarity_threshold})
 

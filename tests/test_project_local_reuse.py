@@ -180,12 +180,9 @@ def test_relocated_dataset_finishes_transaction_and_nested_import_once(tmp_path,
         assert restored.read("source-windows", key) == [[0, 14, "Durable source"]]
         assert restored.read("extraction-entities", "a" * 64) == {"paid": True}
     assert not carrier.exists()
-    evidence = canonical / "evidence" / "dataset-old"
-    assert (evidence / "checkpoint" / first._path("source-windows", key).name).read_bytes() == original
-    assert (evidence / "evidence" / archive.name / first._path("source-windows", key).name).read_bytes() == original
-    assert not (evidence / ".checkpoint-migration.json").exists()
-    # An archived carrier is never a runtime fallback.
-    (evidence / "checkpoint" / "manifest.json").write_text("broken")
+    assert restored._path("source-windows", key).read_bytes() == original
+    assert not (canonical / "evidence" / "dataset-old").exists()
+    assert not (canonical / ".checkpoint-migration.json").exists()
     assert SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(params)).read("extraction-entities", "a" * 64) == {"paid": True}
 
 

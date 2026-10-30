@@ -28,7 +28,8 @@ def test_grounded_source_reuses_native_owners_without_embedding(tmp_path, monkey
     assert len(artifact.assertions) == 1
     assert {e.canonical_name for e in artifact.entities} == {'Ada', 'Engine'}
     assert artifact.artifact_manifest[0].artifact_hash == stable_digest(
-        artifact.document_representations[0].metadata['document'])
+        pipeline._parse_source(source, False)[1])
+    assert 'document' not in artifact.document_representations[0].metadata
     for span in artifact.evidence_spans:
         assert text[span.locator.start_char:span.locator.end_char] == span.quote
     path.write_text('different bytes')
@@ -54,7 +55,8 @@ def test_grounded_source_consumes_verified_parsed_artifact_without_parsing(tmp_p
         provider_instance=SimpleNamespace(receipts=[]), artifact_ref='objects/representation.json',
         created_at='2026-10-19T00:00:00Z', parsed_source=pipeline.ParsedSourceRef.model_validate({
             key: parsed[key] for key in ('artifactPath', 'artifactDigest', 'sourceId')}))
-    assert artifact.document_representations[0].metadata['document']['text'] == text
+    assert artifact.artifact_manifest[0].artifact_hash == parsed['artifactDigest']
+    assert 'document' not in artifact.document_representations[0].metadata
 
 
 @pytest.mark.parametrize('order,sort', [('coordinates', True), ('content', False)])
@@ -133,3 +135,13 @@ def test_source_retry_restores_entities_and_receipts_before_retrying_relations(t
     assert pipeline.build_grounded_source_snapshot(source, provider_instance=third, **arguments) == result
     assert calls == ['entities', 'relations', 'relations']
     assert third.receipts == resumed.receipts
+    monkeypatch.setattr(pipeline, 'PROJECT_PROCESSING_VERSION', 'changed-native-identity')
+    reprocessed = pipeline.build_grounded_source_snapshot(source, provider_instance=Provider(), **arguments)
+    assert reprocessed.entities == result.entities
+    assert reprocessed.lineage.rule_digest != result.lineage.rule_digest
+    assert calls == ['entities', 'relations', 'relations'], 'identity changes reuse paid raw extraction'
+    monkeypatch.setattr(pipeline, 'EXTRACTION_CONTRACT_VERSION', 'changed-identity-contract')
+    with pytest.raises(pipeline.SemanticArtifactError) as changed:
+        pipeline.build_grounded_source_snapshot(source, provider_instance=Provider(), **arguments)
+    assert changed.value.code == 'COMPLETED_WORK_RECOVERY_GAP'
+    assert calls == ['entities', 'relations', 'relations'], 'contract changes must not buy new work'
