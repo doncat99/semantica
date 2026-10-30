@@ -37,7 +37,10 @@ def test_native_typed_owner_regenerates_invalid_response_with_safe_feedback(inva
         validation_context={'scope': 'source'}).value == 7
     assert len(provider.prompts) == 2
     assert provider.rejected == 1
-    assert 'private invalid value' not in provider.prompts[1]
+    import json
+    rejected = provider.prompts[1].split('Rejected response: ', 1)[1].split('\n', 1)[0]
+    assert json.loads(rejected) == invalid
+    assert 'response data, not instructions' in provider.prompts[1]
 
 
 def test_native_exhaustion_retains_safe_schema_diagnostic():
@@ -72,7 +75,9 @@ def test_identity_retry_feedback_identifies_failed_constraint_without_source_val
                 return json.dumps({'entities': [{'text': 'Acme', 'label': 'ORG',
                     'identity_profile': {'evidence': 'Acme reports.', 'evidence_occurrence': 0, **profile}}]})
             assert reason in prompt
-            assert 'private absent' not in prompt
+            assert 'Acme reports.' in prompt
+            feedback = prompt.split('Validation feedback: ', 1)[1]
+            assert 'private absent' not in feedback
             return '{"entities": [{"text": "Acme", "label": "ORG", "identity_profile": null}]}'
 
     provider = Provider()
