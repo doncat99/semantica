@@ -664,10 +664,13 @@ class BaseProvider:
         last_error = None
         for attempt in range(attempts):
             content = None
+            validation_feedback = None
             try:
                 content = self.generate(current_prompt, **typed_kwargs)
                 return schema.model_validate_json(content, context=validation_context)
             except ValidationError as error:
+                # Validator explanations belong in model context, never durable diagnostics.
+                validation_feedback = error.errors(include_input=False, include_context=False, include_url=False)
                 last_error = ModelOutputError(
                     "Typed response failed schema validation",
                     code="MODEL_OUTPUT_SCHEMA_INVALID",
@@ -695,7 +698,7 @@ class BaseProvider:
                 continue
             self._reject_last_typed_attempt()
             if attempt + 1 < attempts:
-                feedback = json.dumps(last_error.diagnostic or {"code": last_error.code},
+                feedback = json.dumps(validation_feedback or last_error.diagnostic or {"code": last_error.code},
                                       ensure_ascii=False, separators=(",", ":"))
                 current_prompt = (
                     f"{prompt}\n\nThe previous JSON response was rejected. "

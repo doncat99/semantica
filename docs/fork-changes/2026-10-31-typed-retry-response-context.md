@@ -32,6 +32,24 @@ identity/extraction/worker diagnostic regressions are run after repair. This doe
 not guarantee real model compliance or a successful full ESG build.
 No raw rejected model values are added to persisted diagnostics or error text.
 
+### Follow-up after real packaged run a46f0f9f (2026-10-31)
+
+Published bd7b6a0e77a3 passed all three native release lanes and host packaging.
+Real ESG extraction restored 37 windows and reached 79/2994, then failed again
+on identity_owner_not_in_evidence. Retaining the rejected response alone did not
+prove model compliance. Inspection found two remaining gaps: the native schema
+omitted owner/instance cross-field evidence descriptions, and the native retry
+removed validator explanations along with private input/context from diagnostics.
+
+Repair the same owners: describe exact case-sensitive evidence requirements and
+null semantics in IdentityProfileOut's model-facing JSON schema; send Pydantic
+validation explanations only in ephemeral model retry context. Durable diagnostic
+locations/types, admission constraints and retry bounds remain unchanged. No
+alternate extraction or partial whole-response success is introduced.
+Four additional red specifications reproduce missing schema descriptions and
+missing corrective explanations. Focused native/identity/extraction/diagnostic
+regressions pass after repair. Real packaged ESG completion remains unverified.
+
 ## Upstream merge assessment
 
 Pending: reuse the upstream retry owner if it supplies equivalent corrective

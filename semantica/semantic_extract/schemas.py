@@ -20,11 +20,14 @@ class IdentityProfileOut(BaseModel):
     """Readable description with its separately located source support."""
     model_config = ConfigDict(extra="forbid")
     description: Optional[str] = Field(default=None, min_length=1, max_length=512)
-    evidence: str = Field(min_length=1, max_length=1600)
+    evidence: str = Field(min_length=1, max_length=1600,
+                         description="Exact source quote containing the entity name and supporting every supplied identity fact.")
     evidence_occurrence: int = Field(ge=0)
     referent_kind: Optional[Literal["named_entity", "institution", "dependent_entity", "concept", "role", "framework", "standard", "report", "index"]] = None
-    owner: Optional[str] = Field(default=None, min_length=1, max_length=256)
-    instance: Optional[str] = Field(default=None, min_length=1, max_length=128)
+    owner: Optional[str] = Field(default=None, min_length=1, max_length=256,
+                                description="Owning company/institution name as an exact, case-sensitive substring of this profile's evidence, including whitespace. Use null if not explicitly named there; do not expand aliases or infer ownership.")
+    instance: Optional[str] = Field(default=None, min_length=1, max_length=128,
+                                   description="Identifying year/edition/version as an exact, case-sensitive substring of this profile's evidence, including whitespace. Use null if not explicitly stated there; do not infer an edition.")
 
     @model_validator(mode="after")
     def grounded_owner(self):

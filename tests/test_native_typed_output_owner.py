@@ -19,6 +19,14 @@ def test_relay_inherits_native_typed_owner():
     assert _ProjectModelProvider.generate_typed is BaseProvider.generate_typed
 
 
+def test_identity_wire_schema_explains_exact_evidence_constraints():
+    from semantica.semantic_extract.schemas import grounded_entities_wire
+    fields = grounded_entities_wire().model_json_schema()['$defs']['IdentityProfileOut']['properties']
+    for name in ('owner', 'instance'):
+        assert 'exact, case-sensitive substring' in fields[name]['description']
+        assert 'null' in fields[name]['description']
+
+
 @pytest.mark.parametrize('invalid', ['{"value":7', 'not JSON', '{"value":"private invalid value"}'])
 def test_native_typed_owner_regenerates_invalid_response_with_safe_feedback(invalid):
     class Provider(BaseProvider):
@@ -75,6 +83,11 @@ def test_identity_retry_feedback_identifies_failed_constraint_without_source_val
                 return json.dumps({'entities': [{'text': 'Acme', 'label': 'ORG',
                     'identity_profile': {'evidence': 'Acme reports.', 'evidence_occurrence': 0, **profile}}]})
             assert reason in prompt
+            assert {
+                'identity_owner_not_in_evidence': 'identity owner must occur exactly in profile evidence',
+                'identity_instance_not_in_evidence': 'identity instance must occur exactly in profile evidence',
+                'identity_identifying_fact_missing': 'identity profile requires an identifying fact',
+            }[reason] in prompt
             assert 'Acme reports.' in prompt
             feedback = prompt.split('Validation feedback: ', 1)[1]
             assert 'private absent' not in feedback
