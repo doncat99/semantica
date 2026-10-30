@@ -1,6 +1,7 @@
 from typing import Any, List, Literal, Optional, Union
 from pydantic import BaseModel, Field, field_validator, model_validator, ConfigDict, create_model
 from pydantic.json_schema import SkipJsonSchema
+from pydantic_core import PydanticCustomError
 
 def validate_fact_qualifiers(value: dict) -> dict:
     if not isinstance(value, dict):
@@ -28,11 +29,11 @@ class IdentityProfileOut(BaseModel):
     @model_validator(mode="after")
     def grounded_owner(self):
         if self.owner and self.owner not in self.evidence:
-            raise ValueError("identity owner must occur exactly in profile evidence")
+            raise PydanticCustomError("identity_owner_not_in_evidence", "identity owner must occur exactly in profile evidence")
         if self.instance and self.instance not in self.evidence:
-            raise ValueError("identity instance must occur exactly in profile evidence")
+            raise PydanticCustomError("identity_instance_not_in_evidence", "identity instance must occur exactly in profile evidence")
         if not any((self.description, self.owner, self.referent_kind, self.instance)):
-            raise ValueError("identity profile requires an identifying fact")
+            raise PydanticCustomError("identity_identifying_fact_missing", "identity profile requires an identifying fact")
         return self
 
 

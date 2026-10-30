@@ -54,6 +54,34 @@ def test_native_exhaustion_retains_safe_schema_diagnostic():
     assert 'private invalid value' not in str(failure.value)
 
 
+@pytest.mark.parametrize(('profile', 'reason'), [
+    ({'owner': 'private absent owner'}, 'identity_owner_not_in_evidence'),
+    ({'instance': 'private absent edition'}, 'identity_instance_not_in_evidence'),
+    ({}, 'identity_identifying_fact_missing'),
+])
+def test_identity_retry_feedback_identifies_failed_constraint_without_source_values(profile, reason):
+    import json
+    from semantica.semantic_extract.schemas import EntitiesResponse
+
+    class Provider(BaseProvider):
+        prompts = None
+
+        def generate(self, prompt, **kwargs):
+            self.prompts.append(prompt)
+            if len(self.prompts) == 1:
+                return json.dumps({'entities': [{'text': 'Acme', 'label': 'ORG',
+                    'identity_profile': {'evidence': 'Acme reports.', 'evidence_occurrence': 0, **profile}}]})
+            assert reason in prompt
+            assert 'private absent' not in prompt
+            return '{"entities": [{"text": "Acme", "label": "ORG", "identity_profile": null}]}'
+
+    provider = Provider()
+    provider.prompts = []
+    result = provider.generate_typed('Extract JSON', EntitiesResponse, max_retries=2)
+    assert result.entities[0].identity_profile is None
+    assert len(provider.prompts) == 2
+
+
 @pytest.mark.parametrize('valid', [False, True])
 def test_strict_entity_schema_repair_is_bounded_in_native_provider(valid):
     from semantica.semantic_extract.methods import extract_entities_llm
