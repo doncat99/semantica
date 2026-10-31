@@ -60,7 +60,14 @@ test('large graph overview, intersecting scopes, empty results, repeated clear a
   await page.getByRole('button', { name: 'Open Semantica Explorer' }).click();
   await graphSize(page, 80, 80);
   await page.waitForFunction(() => document.querySelector('button[aria-pressed="true"]')?.textContent !== undefined);
-  assert.equal(await page.getByRole('button', { name: 'Grouped View', exact: true }).getAttribute('aria-pressed'), 'true');
+  const fullView = page.getByRole('button', { name: 'Full Graph', exact: true });
+  const groupedView = page.getByRole('button', { name: 'Grouped View', exact: true });
+  assert.equal(await fullView.getAttribute('aria-pressed'), 'true', 'large graphs default to Full Graph');
+  assert.equal(await groupedView.getAttribute('aria-pressed'), 'false');
+  await groupedView.click();
+  assert.equal(await groupedView.getAttribute('aria-pressed'), 'true', 'grouping remains an explicit choice');
+  await fullView.click();
+  assert.equal(await fullView.getAttribute('aria-pressed'), 'true');
   await page.locator('canvas').first().waitFor({ state: 'visible' });
   await mkdir('test-results', { recursive: true });
   await page.screenshot({ path: 'test-results/graph-filters-overview.png' });
@@ -93,6 +100,7 @@ test('large graph overview, intersecting scopes, empty results, repeated clear a
   await graphSize(page, 40, 40);
   await page.waitForFunction(() => !document.querySelector<HTMLSelectElement>('[aria-label="Filter node type"]')!.disabled);
   assert.equal(nodeRequests, 2, 'explicit reload fetches a fresh snapshot');
+  assert.equal(await fullView.getAttribute('aria-pressed'), 'true', 'reloading does not override Full Graph');
   await page.locator('.graph-stage-loader').waitFor({ state: 'hidden' });
   await page.screenshot({ path: 'test-results/graph-filters-scoped.png' });
   await page.setViewportSize({ width: 900, height: 800 });

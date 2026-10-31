@@ -1285,7 +1285,6 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
   const [viewMode, setViewMode] = useState<GraphViewMode>("full");
   const [filters, setFilters] = useState<GraphFilters>(EMPTY_GRAPH_FILTERS);
   const [filterText, setFilterText] = useState('');
-  const initialOverviewRef = useRef(false);
   const [filterChoices, setFilterChoices] = useState<{ nodes: string[]; edges: string[] }>({ nodes: [], edges: [] });
   const updateFilters = useCallback((next: React.SetStateAction<GraphFilters>) => {
     setFilters(next);
@@ -1407,10 +1406,6 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
     );
     setGraphReady(true);
     setFilterChoices({ nodes: graphSummary.nodeTypes ?? [], edges: graphSummary.edgeTypes ?? [] });
-    if (!initialOverviewRef.current) {
-      initialOverviewRef.current = true;
-      if (graphSummary.nodeCount > SMALL_GRAPH_MAX_NODES && checkGroupedViewAvailability().available) setViewMode('grouped');
-    }
     setGraphVersion((current) => current + 1);
     setIsLayoutRunning(!graphSummary.layoutReady);
 
