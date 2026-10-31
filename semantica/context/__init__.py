@@ -106,59 +106,51 @@ Production Examples:
     - Legal: Case precedent analysis, decision consistency
 """
 
-from .agent_context import AgentContext
-from .agent_memory import AgentMemory, MemoryItem
-from .context_graph import ContextEdge, ContextGraph, ContextNode
-from .context_retriever import (
-    ContextRetriever,
-    RetrievedContext,
-    TemporalGraphRetriever,
-)
-from .decision_context import DecisionContext
-from .entity_linker import EntityLink, EntityLinker, LinkedEntity
-from .erasure import ErasureCoordinator, ErasureReceipt
-from .truth_maintenance_filter import TruthMaintenanceContextFilter
+from importlib import import_module
 
-# Decision tracking imports
-from .decision_models import (
-    Decision, DecisionContext as DecisionContextModel, Policy,
-    PolicyException, Precedent, ApprovalChain
-)
-from .decision_recorder import DecisionRecorder
-from .decision_query import DecisionQuery
-from .causal_analyzer import CausalChainAnalyzer
-from .policy_engine import PolicyEngine
-from .decision_methods import (
-    record_decision, find_precedents, get_causal_chain, get_applicable_policies,
-    multi_hop_query, capture_decision_trace, find_exception_precedents,
-    analyze_decision_impact, create_policy_with_versioning, check_decision_compliance,
-    get_decision_statistics, setup_decision_tracking
-)
-from .graph_schema import setup_decision_schema, verify_schema, get_schema_info
+# Load the same-named submodule before binding the public function alias.
+from .methods import drift_search, global_search, retrieve_context, retrieve_drift, retrieve_global
 
-# Global GraphRAG and DRIFT search imports
-from .global_retriever import (
-    GlobalGraphRetriever,
-    GlobalSearchResult,
-    MapKeyPoint,
-    MapPointSchema,
-    MapResponseSchema,
-)
-from .drift_search import (
-    DriftFacet,
-    DriftFacetSchema,
-    DriftFacetsResponseSchema,
-    DriftSearchEngine,
-    DriftSearchResult,
-)
-from .registry import MethodRegistry, method_registry
-from .methods import (
-    drift_search,
-    global_search,
-    retrieve_context,
-    retrieve_drift,
-    retrieve_global,
-)
+# Importing a retriever must not initialize unrelated memory/vector/analytics owners.
+_MODULE_EXPORTS = {
+    'agent_context': 'AgentContext',
+    'agent_memory': 'AgentMemory MemoryItem',
+    'context_graph': 'ContextEdge ContextGraph ContextNode',
+    'context_retriever': 'ContextRetriever RetrievedContext TemporalGraphRetriever',
+    'decision_context': 'DecisionContext',
+    'entity_linker': 'EntityLink EntityLinker LinkedEntity',
+    'erasure': 'ErasureCoordinator ErasureReceipt',
+    'truth_maintenance_filter': 'TruthMaintenanceContextFilter',
+    'decision_models': 'Decision Policy PolicyException Precedent ApprovalChain',
+    'decision_recorder': 'DecisionRecorder',
+    'decision_query': 'DecisionQuery',
+    'causal_analyzer': 'CausalChainAnalyzer',
+    'policy_engine': 'PolicyEngine',
+    'decision_methods': ('record_decision find_precedents get_causal_chain get_applicable_policies '
+                         'multi_hop_query capture_decision_trace find_exception_precedents '
+                         'analyze_decision_impact create_policy_with_versioning check_decision_compliance '
+                         'get_decision_statistics setup_decision_tracking'),
+    'graph_schema': 'setup_decision_schema verify_schema get_schema_info',
+    'global_retriever': 'GlobalGraphRetriever GlobalSearchResult MapKeyPoint MapPointSchema MapResponseSchema',
+    'drift_search': 'DriftFacet DriftFacetSchema DriftFacetsResponseSchema DriftSearchEngine DriftSearchResult',
+    'registry': 'MethodRegistry method_registry',
+}
+_EXPORTS = {name: (module, name) for module, names in _MODULE_EXPORTS.items() for name in names.split()}
+_EXPORTS.update(DecisionContextModel=('decision_models', 'DecisionContext'),
+                ContextGraphBuilder=('context_graph', 'ContextGraph'))
+
+
+def __getattr__(name):
+    if name not in _EXPORTS:
+        raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+    module, symbol = _EXPORTS[name]
+    value = getattr(import_module('.' + module, __name__), symbol)
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_EXPORTS))
 
 __all__ = [
     # High-level interface
@@ -228,6 +220,3 @@ __all__ = [
     "global_search",
     "drift_search",
 ]
-
-# Backward compatibility alias
-ContextGraphBuilder = ContextGraph

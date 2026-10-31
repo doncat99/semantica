@@ -129,7 +129,8 @@ def verify_model_paths(root, destination):
             for mode in ("keyword", "semantic"):
                 queried = invoke("semantica.semantic_query_worker", {"protocol": "semantica.semantic-query.v1",
                     "id": "model-query", "method": "query", "params": {"projectId": "native",
-                    "snapshotId": admitted.id, "snapshot": snapshot_ref,
+                    "snapshotId": admitted.id, "snapshot": snapshot_ref, "keywordIndex": artifacts["keyword-index"],
+                    "sources": [{"sourceId": rep.source_id, "contentHash": rep.content_hash} for rep in admitted.document_representations],
                     "retrieval": artifacts["retrieval-index"], "query": "Ada", "mode": mode, "limit": 5,
                     **({"embedding": {"bindingId": "native-acceptance", "modelId": "embedding-1",
                          "vector": [0.25, 0.5, 0.75]}} if mode == "semantic" else {})}})

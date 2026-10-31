@@ -66,6 +66,8 @@ def _request(built, query="Ada"):
         "params": {
             "projectId": built["snapshot"].project_id,
             "snapshotId": built["snapshot"].id,
+            "sources": [{"sourceId": rep.source_id, "contentHash": rep.content_hash}
+                        for rep in built["snapshot"].document_representations],
             "snapshot": {
                 "path": str(built["graph_path"]),
                 "digest": built["graph_digest"],
@@ -77,6 +79,10 @@ def _request(built, query="Ada"):
                 "digest": built["retrieval_digest"],
                 "kind": "retrieval-index",
                 "mediaType": "application/vnd.semantica.retrieval+json",
+            },
+            "keywordIndex": {
+                "path": str(built["keyword_path"]), "digest": built["keyword_digest"],
+                "kind": "keyword-index", "mediaType": "application/vnd.semantica.keyword-index+sqlite3",
             },
             "query": query,
             "limit": 5,
@@ -99,8 +105,11 @@ def _rewrite_artifacts(built, *, snapshot_change=None, retrieval_change=None):
     for artifact in snapshot["artifact_manifest"]:
         if artifact["artifact_type"] == "retrieval":
             artifact["artifact_hash"] = built["retrieval_digest"]
-    built["graph_path"].write_text(json.dumps(snapshot), encoding="utf-8")
-    built["graph_digest"] = _digest(built["graph_path"])
+    from semantica.explorer.search_index import GraphSearchIndex
+    from semantica.semantic_artifact_schema import SemanticArtifact
+    built["keyword_path"].unlink()
+    built["graph_digest"], built["keyword_digest"] = GraphSearchIndex.publish_reference_index(
+        SemanticArtifact.model_validate(snapshot), built["graph_path"], built["keyword_path"])
 
 
 def _serve(request):
@@ -123,7 +132,22 @@ def test_query_worker_returns_snapshot_bound_evidence(tmp_path):
     assert any(context["kind"] == "evidence" and "Ada Lovelace" in context["text"] for context in result["contexts"])
 
 
-def test_warm_queries_reuse_preparation_but_recheck_source_scope(tmp_path, monkeypatch):
+def test_cold_keyword_reads_only_index_and_matching_canonical_records(tmp_path, monkeypatch):
+    from semantica import semantic_query
+    from semantica.explorer.search_index import GraphSearchIndex
+
+    built = _build(tmp_path)
+    def forbidden(*args, **kwargs):
+        raise AssertionError("keyword query must not load or prepare the entire graph")
+    monkeypatch.setattr(semantic_query, "_load_snapshot", forbidden)
+    monkeypatch.setattr(semantic_query, "_prepare_query_snapshot", forbidden)
+    monkeypatch.setattr(GraphSearchIndex, "rebuild", forbidden)
+    response = _serve(_request(built))
+    assert response["ok"] is True
+    assert response["result"]["contexts"]
+
+
+def test_queries_prepare_only_matches_and_recheck_source_scope(tmp_path, monkeypatch):
     from unittest.mock import Mock
     from semantica.context import snapshot_search
 
@@ -140,7 +164,7 @@ def test_warm_queries_reuse_preparation_but_recheck_source_scope(tmp_path, monke
     assert second["ok"] is True
     assert second["result"]["contexts"]
     assert all(hit["sourceIds"] == ["source-2"] for hit in second["result"]["contexts"])
-    assert source_ids.call_count == prepared_calls
+    assert source_ids.call_count - prepared_calls < prepared_calls
     request["params"]["sourceIds"] = []
     assert _serve(request)["result"]["contexts"] == []
     built["graph_path"].write_text("{}")
@@ -223,7 +247,9 @@ def test_query_worker_preserves_positive_negative_and_contradicted_fact_semantic
 def test_query_worker_rejects_copied_snapshot_records(tmp_path, field):
     built = _build(tmp_path)
     _rewrite_artifacts(built, retrieval_change=lambda value: value.update({field: []}))
-    response = _serve(_request(built))
+    request = _request(built)
+    request["params"].update({"mode": "semantic", "embedding": {"bindingId": "binding-1", "modelId": "model-1", "vector": [1.0]}})
+    response = _serve(request)
     assert response["ok"] is False
     assert response["error"]["type"] == "QueryError"
 
@@ -237,7 +263,9 @@ def test_query_worker_requires_current_reference_format(tmp_path, old_format):
         else:
             value["format"] = old_format
     _rewrite_artifacts(built, retrieval_change=change)
-    response = _serve(_request(built))
+    request = _request(built)
+    request["params"].update({"mode": "semantic", "embedding": {"bindingId": "binding-1", "modelId": "model-1", "vector": [1.0]}})
+    response = _serve(request)
     assert response["ok"] is False
     assert "rebuild is required" in response["error"]["message"]
 
@@ -255,7 +283,9 @@ def test_query_worker_rejects_tampered_retrieval_artifact(tmp_path):
     built = _build(tmp_path)
     built["retrieval_path"].write_text("{}", encoding="utf-8")
     stdout = io.StringIO()
-    assert serve(io.StringIO(json.dumps(_request(built)) + "\n"), stdout) == 0
+    request = _request(built)
+    request["params"].update({"mode": "semantic", "embedding": {"bindingId": "binding-1", "modelId": "model-1", "vector": [1.0]}})
+    assert serve(io.StringIO(json.dumps(request) + "\n"), stdout) == 0
     response = json.loads(stdout.getvalue())
     assert response["ok"] is False
     assert response["error"]["type"] == "QueryError"

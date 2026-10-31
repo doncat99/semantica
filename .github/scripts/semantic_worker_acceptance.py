@@ -163,7 +163,8 @@ with tempfile.TemporaryDirectory(prefix="semantica-native-acceptance-") as direc
     assert retrieval["revision"] == graph_manifest["id"]
     queried = invoke("semantica.semantic_query_worker", {"protocol": "semantica.semantic-query.v1", "id": "native-query", "method": "query", "params": {
         "projectId": "native", "snapshotId": snapshot["snapshot_id"],
-        "snapshot": artifacts["semantic-graph"], "retrieval": artifacts["retrieval-index"],
+        "sources": [{"sourceId": rep["source_id"], "contentHash": rep["content_hash"]} for rep in snapshot["document_representations"]],
+        "snapshot": artifacts["semantic-graph"], "retrieval": artifacts["retrieval-index"], "keywordIndex": artifacts["keyword-index"],
         "query": "Ada", "mode": "keyword", "limit": 5}})
     assert queried["contexts"]
     assert all(item["revision"].startswith("sha256:") for item in built["artifacts"] if item["kind"] == "document-representation")

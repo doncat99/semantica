@@ -2552,8 +2552,11 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
             ]
             snapshot = SemanticArtifact(snapshot_id=snapshot_id, project_id=request.project_id, lineage=lineage, artifact_manifest=representation_artifacts + [retrieval_artifact], document_representations=representations, evidence_spans=evidence, entity_mentions=mentions, entities=entities, assertions=assertions, relations=relations, identity_registry=identity_registry, communities=communities, topics=topics, source_relations=source_relations, source_classifications=source_classifications, classification_profile=request.recipe.classification_profile, extraction_spec=request.recipe.extraction_spec, conflicts=conflicts, retrieval_manifests=retrieval_manifests, model_receipts=model_receipts, metadata={"pipeline": "semantica", "recipe": request.recipe.id, "source_count": len(source_builds), "stages": ["document", "evidence", "identity", "knowledge", "organization", "retrieval"]})
             graph_path = output_dir / "semantic-graph.json"
-            graph_digest = _write_json(graph_path, snapshot.model_dump(mode="json", by_alias=True))
+            from .explorer.search_index import GraphSearchIndex
+            keyword_path = output_dir / "keyword-index.sqlite"
+            graph_digest, keyword_digest = GraphSearchIndex.publish_reference_index(snapshot, graph_path, keyword_path)
             return {"snapshot": snapshot, "graph_path": graph_path, "graph_digest": graph_digest,
+                    "keyword_path": keyword_path, "keyword_digest": keyword_digest,
                     "representation_artifacts": source_builds, "retrieval_path": retrieval_path,
                     "retrieval_digest": retrieval_digest, "model_receipts": model_receipts}
 

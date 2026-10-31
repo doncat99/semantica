@@ -6,14 +6,17 @@ hybrid search, and unified context retrieval, with registration into the
 context method registry.
 """
 
-from typing import Any, List, Optional, Union
+from __future__ import annotations
 
-from ..kg.community_hierarchy import CommunityHierarchy
-from ..kg.community_summarizer import CommunityReport
+from typing import TYPE_CHECKING, Any, List, Optional, Union
+
+if TYPE_CHECKING:
+    from ..kg.community_hierarchy import CommunityHierarchy
+    from ..kg.community_summarizer import CommunityReport
+    from .global_retriever import GlobalSearchResult
 from ..utils.logging import get_logger
 from .context_retriever import ContextRetriever, RetrievedContext
 from .drift_search import DriftSearchEngine, DriftSearchResult
-from .global_retriever import GlobalGraphRetriever, GlobalSearchResult
 from .registry import method_registry
 
 logger = get_logger("context_methods")
@@ -50,6 +53,8 @@ def retrieve_global(
     Returns:
         GlobalSearchResult with synthesized answer, key points, and citations.
     """
+    from .global_retriever import GlobalGraphRetriever
+
     retriever = GlobalGraphRetriever(
         reports=reports,
         hierarchy=hierarchy,

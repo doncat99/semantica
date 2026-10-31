@@ -7,6 +7,8 @@ local entity-hop graph retrieval, semantic drift pruning, and dual-attributed
 executive synthesis.
 """
 
+from __future__ import annotations
+
 from collections.abc import Callable, Iterable
 from dataclasses import dataclass, field
 import hashlib
@@ -14,12 +16,13 @@ import json
 import math
 import re
 import time
-from typing import Any, Dict, List, Optional, Sequence, Set, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Sequence, Set, Union
 
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field, field_validator
 
-from ..kg.community_hierarchy import CommunityHierarchy
-from ..kg.community_summarizer import CommunityReport, estimate_tokens
+if TYPE_CHECKING:
+    from ..kg.community_hierarchy import CommunityHierarchy
+    from ..kg.community_summarizer import CommunityReport
 from ..utils.logging import get_logger
 from .context_retriever import RetrievedContext
 
@@ -348,6 +351,8 @@ def _truncate_to_tokens(
     token_counter: Optional[Callable[[str], int]] = None,
 ) -> str:
     """Truncate text to fit within max_tokens without breaking prematurely."""
+    from ..kg.community_summarizer import estimate_tokens
+
     if not text or max_tokens <= 0:
         return ""
     if estimate_tokens(text, token_counter) <= max_tokens:
@@ -462,6 +467,8 @@ class DriftSearchEngine:
         ],
     ) -> None:
         """Update active community reports collection."""
+        from ..kg.community_summarizer import CommunityReport
+
         loaded: List[CommunityReport] = []
         if isinstance(reports, dict):
             if "community_id" in reports and "summary" in reports:
@@ -1111,6 +1118,8 @@ class DriftSearchEngine:
         self, query: str, thematic_framing: str
     ) -> List[DriftFacet]:
         """Stage 2: Directed reasoning to produce follow-up exploration facets."""
+        from ..kg.community_summarizer import estimate_tokens
+
         llm = self.llm
         if llm is None:
             return self._extractive_facets_fallback(query)
@@ -1355,6 +1364,8 @@ class DriftSearchEngine:
         """
         Stages 3, 4, and 5: Local entity-hop traversal, drift pruning, and deepening.
         """
+        from ..kg.community_summarizer import estimate_tokens
+
         verified_facts: List[Dict[str, Any]] = []
         visited_entities: Set[str] = set()
         seen_edges: Set[str] = set()
@@ -1507,6 +1518,8 @@ class DriftSearchEngine:
         verified_facts: List[Dict[str, Any]],
     ) -> str:
         """Stage 6: Authoritative dual-attributed executive synthesis."""
+        from ..kg.community_summarizer import estimate_tokens
+
         llm = self.llm
         sorted_facts = sorted(
             verified_facts,

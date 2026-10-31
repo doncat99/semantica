@@ -274,6 +274,9 @@ def _dispatch(request: WorkerRequest, progress: Optional[Callable[[Dict[str, Any
         "sourceId": item["source"].source_id,
     } for item in built["representation_artifacts"]]
     artifacts.extend([
+        {"digest": built["keyword_digest"], "kind": "keyword-index",
+         "mediaType": "application/vnd.semantica.keyword-index+sqlite3",
+         "path": str(built["keyword_path"]), "revision": snapshot.id},
         {"digest": built["retrieval_digest"], "kind": "retrieval-index",
          "mediaType": build_request.release.media_types["retrieval-index"],
          "path": str(built["retrieval_path"]), "revision": "retrieval:graph"},

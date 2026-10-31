@@ -8,7 +8,7 @@ from typing import Dict, List, Literal, Optional
 
 from pydantic import Field, field_validator, model_validator
 
-from .semantic_artifact_schema import DigestModel, StrictModel, _validate_media_type
+from .semantic_artifact_schema import DigestModel, StrictModel, MATERIAL_REVISION_PATTERN, _validate_media_type
 
 QUERY_PROTOCOL = "semantica.semantic-query.v1"
 
@@ -16,7 +16,7 @@ QUERY_PROTOCOL = "semantica.semantic-query.v1"
 class QueryArtifactRef(DigestModel):
     path: str
     digest: str
-    kind: Literal["semantic-graph", "retrieval-index"]
+    kind: Literal["semantic-graph", "retrieval-index", "keyword-index"]
     media_type: str = Field(alias="mediaType")
 
     @field_validator("path", mode="after")
@@ -45,6 +45,11 @@ class QueryEmbedding(StrictModel):
         return value
 
 
+class QuerySource(StrictModel):
+    source_id: str = Field(alias="sourceId", min_length=1)
+    content_hash: str = Field(alias="contentHash", pattern=MATERIAL_REVISION_PATTERN)
+
+
 class SemanticQueryRequest(StrictModel):
     protocol: Literal[QUERY_PROTOCOL] = QUERY_PROTOCOL
     id: str
@@ -52,17 +57,27 @@ class SemanticQueryRequest(StrictModel):
     project_id: str = Field(alias="projectId")
     snapshot_id: str = Field(alias="snapshotId")
     snapshot: QueryArtifactRef
-    retrieval: QueryArtifactRef
+    retrieval: Optional[QueryArtifactRef] = None
+    keyword_index: Optional[QueryArtifactRef] = Field(default=None, alias="keywordIndex")
     query: Optional[str] = None
     limit: int = Field(default=20, ge=1, le=1000)
     mode: Literal["keyword", "semantic"] = "keyword"
     embedding: Optional[QueryEmbedding] = None
     source_ids: Optional[List[str]] = Field(default=None, alias="sourceIds")
+    sources: List[QuerySource]
 
     @model_validator(mode="after")
     def validate_mode(self):
+        if len({source.source_id for source in self.sources}) != len(self.sources):
+            raise ValueError("query source identities must be unique")
+        if self.source_ids is not None and not set(self.source_ids).issubset(source.source_id for source in self.sources):
+            raise ValueError("query source scope is outside the authorized project")
         if (self.mode == "semantic") != (self.embedding is not None):
             raise ValueError("semantic mode requires a query embedding; keyword mode does not accept one")
+        if self.mode == "semantic" and self.retrieval is None:
+            raise ValueError("semantic mode requires the retrieval artifact")
+        if self.mode == "keyword" and (self.keyword_index is None or self.keyword_index.kind != "keyword-index"):
+            raise ValueError("keyword mode requires the published keyword index; rebuild is required")
         return self
 
     @field_validator("query", mode="after")

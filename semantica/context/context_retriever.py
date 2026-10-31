@@ -76,29 +76,19 @@ Author: Semantica Contributors
 License: MIT
 """
 
+from __future__ import annotations
+
 from datetime import datetime, timezone
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple, Union
+from functools import cached_property
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Tuple, Union
 
 from ..utils.logging import get_logger
 from ..utils.progress_tracker import get_progress_tracker
-from ..vector_store.hybrid_similarity import HybridSimilarityCalculator
-from ..vector_store.decision_embedding_pipeline import DecisionEmbeddingPipeline
-from ..kg.path_finder import PathFinder
-from ..kg.centrality_calculator import CentralityCalculator
-from ..kg.community_detector import CommunityDetector
-from ..kg.similarity_calculator import SimilarityCalculator
 from ..utils.exceptions import ValidationError
-from .truth_maintenance_filter import TruthMaintenanceContextFilter
+if TYPE_CHECKING:
+    from .truth_maintenance_filter import TruthMaintenanceContextFilter
 from .tiers import TierCalculator, TrustTier
-try:
-    from ..kg.temporal_query import TemporalGraphQuery as _TemporalGraphQuery
-    from ..kg.temporal_model import parse_temporal_value as _parse_temporal_value
-    _TEMPORAL_AVAILABLE = True
-except Exception:  # pragma: no cover
-    _TemporalGraphQuery = None  # type: ignore[assignment,misc]
-    _parse_temporal_value = None  # type: ignore[assignment]
-    _TEMPORAL_AVAILABLE = False
 
 
 @dataclass
@@ -189,11 +179,14 @@ class ContextRetriever:
             self.progress_tracker.enabled = True
 
         # Initialize decision-specific components
-        self.hybrid_calculator = HybridSimilarityCalculator()
-        self.decision_pipeline: Optional[DecisionEmbeddingPipeline] = None
+        self.decision_pipeline = None
 
         # Initialize KG algorithms if knowledge graph available
         if self.knowledge_graph:
+            from ..kg.path_finder import PathFinder
+            from ..kg.centrality_calculator import CentralityCalculator
+            from ..kg.community_detector import CommunityDetector
+            from ..kg.similarity_calculator import SimilarityCalculator
             self.path_finder = PathFinder()
             self.centrality_calculator = CentralityCalculator()
             self.community_detector = CommunityDetector()
@@ -206,6 +199,7 @@ class ContextRetriever:
 
         # Initialize decision pipeline if vector store available
         if self.vector_store:
+            from ..vector_store.decision_embedding_pipeline import DecisionEmbeddingPipeline
             self.decision_pipeline = DecisionEmbeddingPipeline(
                 vector_store=self.vector_store,
                 graph_store=self.knowledge_graph,
@@ -219,6 +213,11 @@ class ContextRetriever:
         self.tier_calculator = self.config.get("tier_calculator") or TierCalculator()
         self.provenance_manager = self.config.get("provenance_manager")
 
+    @cached_property
+    def hybrid_calculator(self):
+        from ..vector_store.hybrid_similarity import HybridSimilarityCalculator
+        return HybridSimilarityCalculator()
+
     @staticmethod
     def prepare_snapshot_search(snapshot):
         """Prepare immutable grounded candidates once; request scope is never cached."""
@@ -226,22 +225,26 @@ class ContextRetriever:
         return prepare_snapshot(snapshot)
 
     def search_snapshot(self, prepared, *, query, mode, retrieval,
-                        embedding=None, source_ids=None, max_results=5):
+                        embedding=None, source_ids=None, max_results=5, matched_ids=None):
         """Explicit keyword/vector retrieval, without expansion, fallback or model calls."""
         from .snapshot_search import rank_evidence
         if mode not in {"keyword", "semantic"}:
             raise ValueError("unsupported snapshot search mode")
-        evidence, representations, candidates = prepared
+        evidence, representations, candidates = prepared.evidence, prepared.representations, prepared.candidates
         allowed = set(source_ids) if source_ids is not None else None
-        admitted = [item for item in candidates
-                    if allowed is None or set(item[6]).issubset(allowed)]
         if mode == "keyword":
+            matches = prepared.keyword_index.substring_candidates(query.lower().split()) if matched_ids is None else matched_ids
+            # Restore publication order before the native scorer's stable tie sort.
+            ordered = sorted((prepared.candidate_by_id[item_id] for item_id in matches if item_id in prepared.candidate_by_id), key=lambda item: item[0])
+            admitted = [item for _, item in ordered if allowed is None or set(item[6]).issubset(allowed)]
             by_id = {item[0]: item for item in admitted}
             ranked = self._keyword_match_entities(
                 [{"id": item[0], "name": item[2]} for item in admitted],
                 query, len(admitted))
             ranked_items = [(by_id[item["id"]], score) for item, score in ranked]
         else:
+            admitted = [item for item in candidates
+                        if allowed is None or set(item[6]).issubset(allowed)]
             scores = rank_evidence(embedding, retrieval, evidence, representations)
             by_evidence = {}
             for item in admitted:
@@ -379,6 +382,8 @@ class ContextRetriever:
         )
 
         try:
+            if truth_filter is not None:
+                from .truth_maintenance_filter import TruthMaintenanceContextFilter
             if truth_filter is not None and not isinstance(
                 truth_filter, TruthMaintenanceContextFilter
             ):
@@ -3300,16 +3305,20 @@ class TemporalGraphRetriever:
             >>> retriever = TemporalGraphRetriever(base, at_time=parsed.at_time)
             >>> results = retriever.retrieve(parsed.rewritten_query)
         """
-        if not _TEMPORAL_AVAILABLE:
+        try:
+            from ..kg.temporal_query import TemporalGraphQuery
+            from ..kg.temporal_model import parse_temporal_value
+        except ImportError as exc:
             raise ImportError(
                 "TemporalGraphRetriever requires the semantica.kg temporal modules "
                 "(temporal_query, temporal_model). Ensure they are installed and "
                 "importable without errors."
-            )
+            ) from exc
         self.base_retriever = base_retriever
         self.at_time = at_time
         self.header_template = header_template
-        self._tgq = _TemporalGraphQuery()
+        self._tgq = TemporalGraphQuery()
+        self._parse_temporal_value = parse_temporal_value
 
     def retrieve(
         self,
@@ -3364,7 +3373,7 @@ class TemporalGraphRetriever:
         parsed = (
             effective_at_time
             if isinstance(effective_at_time, datetime)
-            else _parse_temporal_value(effective_at_time)
+            else self._parse_temporal_value(effective_at_time)
         )
         filtered_results = []
         for ctx in results:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 from datetime import datetime, timezone
+from functools import lru_cache
 from hashlib import sha256
 from os.path import isabs
 from typing import Any, Dict, List, Literal, Optional, Union
@@ -59,6 +60,11 @@ def _validate_media_type(value: str, field: str) -> str:
     return value.lower()
 
 
+@lru_cache(maxsize=128)
+def _identifier_fields(model: type[BaseModel]) -> tuple[str, ...]:
+    return tuple(name for name in model.model_fields if name == "id" or name.endswith(("_id", "_ids")))
+
+
 class StrictModel(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -68,7 +74,7 @@ class StrictModel(BaseModel):
 
     @model_validator(mode="after")
     def validate_id_like_fields(self) -> "StrictModel":
-        for name in self.__class__.model_fields:
+        for name in _identifier_fields(self.__class__):
             value = getattr(self, name)
             if isinstance(value, str) and (name == "id" or name.endswith("_id")):
                 pattern = MODEL_ID_RE if name == "model_id" else ID_RE
@@ -523,9 +529,16 @@ class SemanticArtifact(KernelModel):
         if self.classification_profile and classified_sources != set(sources_by_representation.values()):
             raise ValueError("classification profile requires a result for every source")
         registry_by_mention = {item.mention_id: item.entity_id for item in self.identity_registry}
+        owner_by_mention = {}
+        for entity in self.entities:
+            mention_ids = entity.metadata.get("mention_ids", [])
+            if not isinstance(mention_ids, list) or any(not isinstance(item, str) for item in mention_ids):
+                raise ValueError("entity mention_ids must be a list of strings")
+            for mention_id in mention_ids:
+                owner_by_mention.setdefault(mention_id, entity.id)
         for mention in self.entity_mentions:
             registered = registry_by_mention.get(mention.id)
-            owner = next((item.id for item in self.entities if mention.id in item.metadata.get("mention_ids", [])), None)
+            owner = owner_by_mention.get(mention.id)
             if registered is not None and registered != owner:
                 raise ValueError(f"identity registry disagrees with live mention owner: {mention.id}")
         for community in self.communities:

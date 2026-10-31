@@ -1,9 +1,27 @@
 """Grounded artifact projection for ContextRetriever (no independent scoring)."""
 
 import json
+from dataclasses import dataclass
+from functools import cached_property
 from typing import Any, Iterable
 
-from ..vector_store.vector_store import VectorRetriever
+
+@dataclass
+class PreparedSnapshotSearch:
+    evidence: dict
+    representations: dict
+    candidates: list
+
+    @cached_property
+    def keyword_index(self):
+        from ..explorer.search_index import GraphSearchIndex
+        index = GraphSearchIndex()
+        index.rebuild({"id": item[0], "content": item[2]} for item in self.candidates)
+        return index
+
+    @cached_property
+    def candidate_by_id(self):
+        return {item[0]: (position, item) for position, item in enumerate(self.candidates)}
 
 
 def _string_list(value: Any, field: str) -> list[str]:
@@ -43,6 +61,7 @@ def _source_ids(evidence_ids: Iterable[str], evidence_by_id: dict[str, Any], rep
 
 
 def rank_evidence(embedding, retrieval, evidence_by_id, representations):
+    from ..vector_store.vector_store import VectorRetriever
     space = retrieval.get("embedding_space")
     if not isinstance(space, dict) or embedding is None:
         raise ValueError("snapshot has no compatible embedding space; rebuild is required")
@@ -87,7 +106,7 @@ def rank_evidence(embedding, retrieval, evidence_by_id, representations):
 def prepare_snapshot(snapshot):
     """Project admitted artifact records for the native retriever; never copy artifacts to disk."""
     def records(items, fields):
-        return [item.model_dump(mode="json", by_alias=True, include=fields) for item in items]
+        return [item if isinstance(item, dict) else item.model_dump(mode="json", by_alias=True, include=fields) for item in items]
     # Search consumes coordinates and display fields, never whole documents or metadata.
     evidence_records = records(snapshot.evidence_spans, {
         "id": True, "representation_id": True, "quote": True, "origin": True,
@@ -98,7 +117,7 @@ def prepare_snapshot(snapshot):
     conflict_records = records(snapshot.conflicts, {"id", "conflict_type", "status", "reason", "evidence_ids"})
     topic_records = records(snapshot.topics, {"id", "title", "evidence_ids"})
     evidence_by_id = {item.get("id"): item for item in evidence_records if isinstance(item.get("id"), str)}
-    representation_by_id = {item.id: {"source_id": item.source_id} for item in snapshot.document_representations}
+    representation_by_id = {item["id"]: {"source_id": item["source_id"]} for item in records(snapshot.document_representations, {"id", "source_id"})}
     entity_by_id = {item.get("id"): item for item in entity_records if isinstance(item.get("id"), str)}
 
     candidates: list[tuple[str, str, str, list[str], str | None, str | None]] = []
@@ -127,4 +146,4 @@ def prepare_snapshot(snapshot):
         sources = _source_ids(evidence, evidence_by_id, representation_by_id)
         if evidence and sources:
             prepared.append((item_id, kind, text, evidence, status, polarity, sources))
-    return evidence_by_id, representation_by_id, prepared
+    return PreparedSnapshotSearch(evidence_by_id, representation_by_id, prepared)

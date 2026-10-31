@@ -21,6 +21,40 @@ H2 = "sha256:" + "2" * 64
 H3 = "sha256:" + "3" * 64
 
 
+def test_identifier_validation_does_not_visit_payload_fields():
+    from semantica.semantic_artifact_schema import StrictModel
+
+    class Record(StrictModel):
+        id: str
+        metadata: dict
+
+        def __getattribute__(self, name):
+            if name == "metadata":
+                pytest.fail("ID validation must not visit unrelated payload fields")
+            return super().__getattribute__(name)
+
+    assert Record.model_validate({"id": "record-1", "metadata": {"text": "body"}}).id == "record-1"
+    with pytest.raises(ValueError, match="invalid id"):
+        Record.model_validate({"id": "invalid id", "metadata": {}})
+
+
+@pytest.mark.parametrize("field,value", [
+    ("source_id", "invalid id"), ("model_id", "invalid model"), ("evidence_ids", ["!invalid"]),
+])
+def test_identifier_validation_preserves_scalar_model_and_list_checks(field, value):
+    from semantica.semantic_artifact_schema import StrictModel
+
+    class Record(StrictModel):
+        source_id: str
+        model_id: str
+        evidence_ids: list[str]
+
+    valid = {"source_id": "source-1", "model_id": "provider/model", "evidence_ids": ["evidence-1"]}
+    assert Record.model_validate(valid).model_id == "provider/model"
+    with pytest.raises(ValueError, match=f"invalid {field}"):
+        Record.model_validate({**valid, field: value})
+
+
 def _typed_prompt_context(payload):
     prompt = payload["messages"][0]["content"]
     marker = "Input JSON:\n"
@@ -57,11 +91,14 @@ def test_worker_publishes_one_canonical_snapshot_queryable_without_reconstructio
     result = response["result"]
     graph = next(item for item in result["artifacts"] if item["kind"] == "semantic-graph")
     retrieval = next(item for item in result["artifacts"] if item["kind"] == "retrieval-index")
+    keyword = next(item for item in result["artifacts"] if item["kind"] == "keyword-index")
     snapshot = SemanticArtifact.model_validate_json(Path(graph["path"]).read_bytes())
     answer = query({"protocol": "semantica.semantic-query.v1", "id": "query:canonical", "method": "query",
         "params": {"projectId": snapshot.project_id, "snapshotId": snapshot.id,
+            "sources": [{"sourceId": rep.source_id, "contentHash": rep.content_hash} for rep in snapshot.document_representations],
             "snapshot": {k: graph[k] for k in ("digest", "path", "kind", "mediaType")},
             "retrieval": {k: retrieval[k] for k in ("digest", "path", "kind", "mediaType")},
+            "keywordIndex": {k: keyword[k] for k in ("digest", "path", "kind", "mediaType")},
             "query": "Ada", "limit": 5}})
     assert answer["ok"] is True, answer
     assert answer["result"]["contexts"]
@@ -124,6 +161,7 @@ def test_worker_processes_parse_build_and_query_share_canonical_artifact(tmp_pat
     built = invoke('semantica.semantic_worker', request)
     graph = next(a for a in built['artifacts'] if a['kind'] == 'semantic-graph')
     retrieval = next(a for a in built['artifacts'] if a['kind'] == 'retrieval-index')
+    keyword = next(a for a in built['artifacts'] if a['kind'] == 'keyword-index')
     snapshot = SemanticArtifact.model_validate_json(Path(graph['path']).read_bytes())
     assert graph['revision'] == snapshot.id
     manifest = next(m for m in snapshot.retrieval_manifests if m.retrieval_type == 'graph')
@@ -134,8 +172,11 @@ def test_worker_processes_parse_build_and_query_share_canonical_artifact(tmp_pat
     answer = invoke('semantica.semantic_query_worker', {
         'protocol': 'semantica.semantic-query.v1', 'id': 'query', 'method': 'query',
         'params': {'projectId': snapshot.project_id, 'snapshotId': snapshot.id,
+            'sources': [{'sourceId': rep.source_id, 'contentHash': rep.content_hash}
+                        for rep in snapshot.document_representations],
             'snapshot': {k: graph[k] for k in ('digest', 'path', 'kind', 'mediaType')},
             'retrieval': {k: retrieval[k] for k in ('digest', 'path', 'kind', 'mediaType')},
+            'keywordIndex': {k: keyword[k] for k in ('digest', 'path', 'kind', 'mediaType')},
             'query': 'Ada', 'limit': 5}})
     assert answer['contexts']
     assert answer['retrievalManifestId'] == retrieval['revision']
@@ -903,7 +944,7 @@ def test_worker_builds_complete_snapshot_from_real_text_file(tmp_path):
     assert events[0]["type"] == "progress"
     assert events[0]["stage"] == "document_parsing"
     assert response["ok"] is True
-    assert [item["kind"] for item in response["result"]["artifacts"]] == ["document-representation", "retrieval-index", "semantic-graph"]
+    assert [item["kind"] for item in response["result"]["artifacts"]] == ["document-representation", "keyword-index", "retrieval-index", "semantic-graph"]
     assert response["result"]["relayReceipts"] == {"embedding": [], "model": []}
     assert not (tmp_path / "snapshot.json").exists()
 

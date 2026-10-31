@@ -148,9 +148,9 @@ class TestKGAlgorithmIntegration:
         assert result["structural_embedding"] is not None
         assert isinstance(result["structural_embedding"], np.ndarray)
     
-    @patch('semantica.context.context_retriever.PathFinder')
-    @patch('semantica.context.context_retriever.CommunityDetector')
-    @patch('semantica.context.context_retriever.CentralityCalculator')
+    @patch('semantica.kg.path_finder.PathFinder')
+    @patch('semantica.kg.community_detector.CommunityDetector')
+    @patch('semantica.kg.centrality_calculator.CentralityCalculator')
     def test_context_expansion_uses_kg_algorithms(self, mock_centrality, mock_community, mock_path_finder):
         """Test that context expansion uses KG algorithms."""
         # Mock KG algorithms

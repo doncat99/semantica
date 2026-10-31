@@ -20,13 +20,12 @@ from semantica.context.drift_search import (
     DriftFacet,
     DriftSearchEngine,
     DriftSearchResult,
-    estimate_tokens,
 )
 from semantica.context.global_retriever import (
     GlobalGraphRetriever,
     MapKeyPoint,
 )
-from semantica.kg.community_summarizer import CommunityReport
+from semantica.kg.community_summarizer import CommunityReport, estimate_tokens
 from semantica.kg.registry import AlgorithmRegistry, algorithm_registry
 
 
