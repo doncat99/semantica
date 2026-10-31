@@ -25,6 +25,7 @@ import { InspectorPanel, MetricChip, SurfaceCard } from "../../ui/primitives";
 import { lazy, Suspense } from "react";
 import { SigmaSceneAdapter } from "./SigmaSceneAdapter";
 import { useLoadGraph, useReloadGraph } from "./useLoadGraph";
+import { EMPTY_GRAPH_FILTERS, type GraphFilters } from './graphFilters';
 import { GraphLoadingOverlay } from "./GraphLoadingOverlay";
 import { createGraphLoadProgress, getGraphLoadTitle } from "./graphLoading";
 import { GRAPH_THEME, withAlpha } from "./graphTheme";
@@ -183,16 +184,6 @@ function debugGraphWorkspace(message: string, payload?: Record<string, unknown>)
   console.debug(`[GraphWorkspace] ${message}`, payload ?? {});
 }
 
-function getGraphSummarySignature(summary: GraphLoadSummary): string {
-  return [
-    summary.nodeCount,
-    summary.edgeCount,
-    summary.layoutSource ?? "unknown",
-    summary.layoutReady ? "ready" : "runtime",
-    summary.loadTimeMs,
-  ].join(":");
-}
-
 function useDebounce<T>(value: T, delay: number): T {
   const [debouncedValue, setDebouncedValue] = useState<T>(value);
   useEffect(() => {
@@ -348,7 +339,7 @@ function SearchCommandBar({
           return response.json();
         })
         .then((data: { results?: SearchResult[] }) => {
-          setSuggestions(data.results ?? []);
+          setSuggestions((data.results ?? []).filter(result => graph.hasNode(result.node.id)));
           setSuggestionsOpen(true);
           setHighlightedIndex(-1);
         })
@@ -921,6 +912,36 @@ const HUD_CSS = `
     font-size: 11px;
     font-weight: 600;
   }
+  .explore-graph-filters {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: end;
+    gap: 10px;
+    color: ${GRAPH_THEME.ui.text.subtle};
+    font-size: 12px;
+  }
+  .explore-graph-filters label {
+    display: flex;
+    flex-direction: column;
+    gap: 4px;
+    min-width: 0;
+    flex: 1 1 150px;
+  }
+  .explore-graph-filters select, .explore-graph-filters input, .explore-graph-filters button {
+    min-width: 0;
+    max-width: 100%;
+    min-height: 34px;
+    padding: 6px 10px;
+    border-radius: 8px;
+    border: 1px solid ${GRAPH_THEME.ui.control.activeBorder};
+    background: ${GRAPH_THEME.ui.control.activeBg};
+    color: ${GRAPH_THEME.ui.text.strong};
+    font: inherit;
+  }
+  .explore-graph-filters input::placeholder { color: ${GRAPH_THEME.ui.text.muted}; }
+  .explore-graph-filters :focus-visible { outline: 2px solid ${GRAPH_THEME.ui.control.focusRing}; outline-offset: 2px; }
+  .explore-graph-filters :disabled { opacity: 0.5; }
+  .explore-graph-filters [role="status"] { flex-basis: 100%; overflow-wrap: anywhere; }
   .explore-color-legend-label {
     flex-shrink: 0;
     color: ${GRAPH_THEME.ui.text.muted};
@@ -1262,6 +1283,27 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
     onDirtyChange?.(dirty);
   }, [onDirtyChange]);
   const [viewMode, setViewMode] = useState<GraphViewMode>("full");
+  const [filters, setFilters] = useState<GraphFilters>(EMPTY_GRAPH_FILTERS);
+  const [filterText, setFilterText] = useState('');
+  const initialOverviewRef = useRef(false);
+  const [filterChoices, setFilterChoices] = useState<{ nodes: string[]; edges: string[] }>({ nodes: [], edges: [] });
+  const updateFilters = useCallback((next: React.SetStateAction<GraphFilters>) => {
+    setFilters(next);
+    setSelectedNodeId('');
+    setFocusedNodeId('');
+    setSelectedEdgeId('');
+    setPathResult(null);
+    setSearchQuery('');
+    setSearchResults([]);
+    setCollapsedNeighborhoodNodeIds([]);
+  }, []);
+  useEffect(() => {
+    if (filterText === filters.text || markdownDraftDirty) return;
+    const timeout = setTimeout(() => {
+      updateFilters(current => current.text === filterText ? current : { ...current, text: filterText });
+    }, 250);
+    return () => clearTimeout(timeout);
+  }, [filterText, filters.text, markdownDraftDirty, updateFilters]);
   const [aggregationEnabled] = useState(true);
   const [collapsedNeighborhoodNodeIds, setCollapsedNeighborhoodNodeIds] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
@@ -1329,7 +1371,7 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
   const sceneRef = useRef<GraphSceneHandle>(null);
   const lastExternalFocusTokenRef = useRef<number | undefined>(undefined);
   const pluginRuntimeRef = useRef<GraphSceneRuntime | null>(null);
-  const appliedGraphSummarySignatureRef = useRef<string | null>(null);
+  const appliedGraphSummaryRef = useRef<GraphLoadSummary | null>(null);
   const smallGraphModeRef = useRef(false);
   const pluginInteractionStateRef = useRef<GraphInteractionState>({
     hoveredNodeId: null,
@@ -1352,12 +1394,11 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
   }, []);
 
   const applyGraphReadySummary = useCallback((graphSummary: GraphLoadSummary) => {
-    const signature = getGraphSummarySignature(graphSummary);
-    if (appliedGraphSummarySignatureRef.current === signature) {
+    if (appliedGraphSummaryRef.current === graphSummary) {
       return;
     }
 
-    appliedGraphSummarySignatureRef.current = signature;
+    appliedGraphSummaryRef.current = graphSummary;
     smallGraphModeRef.current = Boolean(
       graphSummary.layoutReady
       && !graphSummary.hasCoordinates
@@ -1365,6 +1406,11 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
       && graphSummary.nodeCount <= SMALL_GRAPH_MAX_NODES,
     );
     setGraphReady(true);
+    setFilterChoices({ nodes: graphSummary.nodeTypes ?? [], edges: graphSummary.edgeTypes ?? [] });
+    if (!initialOverviewRef.current) {
+      initialOverviewRef.current = true;
+      if (graphSummary.nodeCount > SMALL_GRAPH_MAX_NODES && checkGroupedViewAvailability().available) setViewMode('grouped');
+    }
     setGraphVersion((current) => current + 1);
     setIsLayoutRunning(!graphSummary.layoutReady);
 
@@ -1395,6 +1441,7 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
     error: graphLoadError,
     refetch: refetchGraph,
   } = useLoadGraph({
+    filters,
     enabled: true,
     onGraphReady: applyGraphReadySummary,
     onProgress: handleLoadProgress,
@@ -1802,7 +1849,7 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
         throw new Error(`Search failed with status ${response.status}`);
       }
       const data = await response.json();
-      setSearchResults(data.results || []);
+      setSearchResults((data.results || []).filter((result: SearchResult) => graph.hasNode(result.node.id)));
     } catch (searchFetchError) {
       setSearchError(searchFetchError instanceof Error ? searchFetchError.message : "Search failed");
     }
@@ -3148,6 +3195,29 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
                   </div>
                 </div>
                 {!showDistanceStatus ? <SemanticColorLegend items={colorLegendItems} /> : null}
+                <div className="explore-graph-filters" role="group" aria-label="Graph filters">
+                  <label>Node type{' '}
+                    <select aria-label="Filter node type" value={filters.nodeType} disabled={isFetching || markdownDraftDirty}
+                      onChange={event => updateFilters({ ...filters, nodeType: event.target.value })}>
+                      <option value="">All node types</option>
+                      {filterChoices.nodes.map(type => <option key={type} value={type}>{type}</option>)}
+                    </select>
+                  </label>
+                  <label>Relationship{' '}
+                    <select aria-label="Filter relationship type" value={filters.edgeType} disabled={isFetching || markdownDraftDirty}
+                      onChange={event => updateFilters({ ...filters, edgeType: event.target.value })}>
+                      <option value="">All relationships</option>
+                      {filterChoices.edges.map(type => <option key={type} value={type}>{type}</option>)}
+                    </select>
+                  </label>
+                  <label>Content
+                    <input aria-label="Filter node content" placeholder="Contains text…" value={filterText}
+                      disabled={markdownDraftDirty} onChange={event => setFilterText(event.target.value)} />
+                  </label>
+                  <button type="button" disabled={isFetching || markdownDraftDirty || (!filterText && !Object.values(filters).some(Boolean))}
+                    onClick={() => { setFilterText(''); updateFilters(EMPTY_GRAPH_FILTERS); }}>Clear filters</button>
+                  {summary ? <span role="status">{summary.nodeCount.toLocaleString()} / {(summary.totalNodeCount ?? summary.nodeCount).toLocaleString()} nodes · {summary.edgeCount.toLocaleString()} / {(summary.totalEdgeCount ?? summary.edgeCount).toLocaleString()} relationships{summary.nodeCount === 0 ? ' · No matches. Clear or change filters.' : ''}</span> : null}
+                </div>
               </div>
 
               {egoModeEnabled && (
