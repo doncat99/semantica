@@ -204,6 +204,20 @@ class IndexedNodeDocument:
 
 
 class GraphSearchIndex:
+    @staticmethod
+    def document_matches(text: str, query: str, *, offset: int, limit: int) -> dict:
+        """Literal original-text occurrences; pagination never changes recall or offsets."""
+        if not query.strip() or offset < 0 or not 1 <= limit <= 1000:
+            raise ValueError("invalid document keyword query")
+        matches = []
+        total = 0
+        for match in re.finditer(re.escape(query), text, re.IGNORECASE):
+            if offset <= total < offset + limit:
+                matches.append((match.start(), match.end()))
+            total += 1
+        return {"matches": matches, "total": total,
+                "nextOffset": offset + len(matches) if offset + len(matches) < total else None}
+
     def __init__(
         self,
         *,

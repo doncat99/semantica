@@ -66,6 +66,8 @@ def query_semantic_artifact(request: SemanticQueryRequest) -> SemanticQueryResul
             header, representations = index.read_catalog()
             _validate_sources(header["lineage"].get("rule_version"),
                 [(rep["source_id"], rep["content_hash"]) for rep in representations], request.sources)
+            if request.target == "documents":
+                return _query_documents(request, representations)
             prepared, matched_ids = index.prepare_matches((request.query or "").lower().split())
             contexts = ContextRetriever().search_snapshot(prepared, query=request.query or "", mode="keyword",
                 retrieval=None, source_ids=request.source_ids, max_results=request.limit, matched_ids=matched_ids)
@@ -118,6 +120,86 @@ def _validate_sources(rule_version, representations, sources):
     if (rule_version != "semantica-semantic-artifact-v6" or len(actual) != len(representations)
             or actual != expected):
         raise QueryError("the adopted semantic artifact is stale; rebuild before querying")
+
+
+@lru_cache(maxsize=64)
+def _load_document(path: Path, digest: str, identity: tuple[int, ...]):
+    """Admit the existing parsed source once; never copy or reparse a source file."""
+    payload = json.loads(_read_admitted_bytes(path, digest, identity))
+    document = payload.get("document", {})
+    text = document.get("text")
+    if payload.get("protocol") != "semantica.parsed-source.v2" or not isinstance(text, str):
+        raise QueryError("document keyword search requires the canonical parsed source")
+    if document.get("format") == "docling":
+        from .semantic_artifact_builder import _docling_locations
+        locations = _docling_locations(document, text)
+    else:
+        locations = []
+        cursor = 0
+        for page in document.get("pages", []):
+            page_text = page.get("text", "")
+            number = page.get("page_number")
+            if not page_text or not isinstance(number, int) or number < 1:
+                continue
+            start = text.find(page_text, cursor)
+            if start >= 0:
+                cursor = start + len(page_text)
+                locations.append({"start": start, "end": cursor, "page": number})
+    return payload, locations
+
+
+def _query_documents(request, representations):
+    from .explorer.search_index import GraphSearchIndex
+    from .semantic_artifact_schema import DocumentLocator
+    reps = {rep["source_id"]: rep for rep in representations}
+    selected = set(request.source_ids) if request.source_ids is not None else set(reps)
+    refs = {ref.source_id: ref for ref in request.documents}
+    if len(refs) != len(request.documents) or set(refs) != selected:
+        raise QueryError("document keyword search requires exactly the authorized source representations")
+    hits, total = [], 0
+    for source_id, ref in refs.items():
+        path = Path(ref.path).resolve()
+        stat = path.stat()
+        payload, locations = _load_document(path, ref.digest,
+            (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
+        rep, document = reps[source_id], payload["document"]
+        if (payload.get("sourceId") != source_id or payload.get("materialRevision") != rep["content_hash"]
+                or document.get("content_hash") != rep["content_hash"]
+                or document.get("representation_revision") != ref.revision
+                or rep.get("metadata", {}).get("representation_revision") != ref.revision):
+            raise QueryError("parsed source does not match the adopted representation")
+        text = document["text"]
+        page = GraphSearchIndex.document_matches(text, request.query, offset=max(0, request.offset - total),
+            limit=max(1, request.limit - len(hits)))
+        page_match_indexes: dict[object, int] = {}
+        for ordinal, (start, end) in enumerate(page["matches"], start=max(0, request.offset - total)):
+            if len(hits) >= request.limit:
+                break
+            located = [item for item in locations if item.get("start") is not None
+                       and item["start"] <= start and end <= item["end"]]
+            location = min(located, key=lambda item: item["end"] - item["start"]) if located else {}
+            page_number = location.get("page")
+            # Reader matchIndex is page-local, not the result's project ordinal.
+            page_start = min((item["start"] for item in locations
+                              if item.get("page") == page_number and item.get("start") is not None), default=0)
+            import re
+            if page_number not in page_match_indexes:
+                page_match_indexes[page_number] = sum(
+                    1 for _ in re.finditer(re.escape(request.query), text[page_start:start], re.IGNORECASE)
+                )
+            match_index = page_match_indexes[page_number]
+            page_match_indexes[page_number] += 1
+            locator = DocumentLocator(representation_id=rep["id"], origin=rep["origin"], quote=text[start:end],
+                start_char=start, end_char=end, quality="precise", **{key: location[key]
+                    for key in ("page", "bbox", "table_id", "cell", "section_path") if location.get(key) is not None})
+            hits.append(QueryHit(id=f"{rep['id']}:text:{start}:{end}", kind="source_text",
+                title=payload["name"], text=text[max(0, start-100):min(len(text), end+180)], score=1,
+                source_ids=[source_id], locator=locator, match_index=match_index))
+        total += page["total"]
+    next_offset = request.offset + len(hits)
+    return SemanticQueryResult(project_id=request.project_id, snapshot_id=request.snapshot_id,
+        query=request.query, contexts=hits, retrieval_manifest_id="retrieval:graph", total=total,
+        next_offset=next_offset if next_offset < total else None)
 
 
 def _result(request, contexts):

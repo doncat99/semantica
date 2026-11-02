@@ -90,6 +90,31 @@ def _request(built, query="Ada"):
     }
 
 
+def test_document_keyword_uses_original_text_locations_without_loading_graph(tmp_path, monkeypatch):
+    built = _build(tmp_path, second_source=True)
+    request = _request(built, "Ada")
+    request["params"].update(target="documents", limit=1, documents=[{
+        "path": str(item["artifact_path"]), "digest": item["artifact_digest"],
+        "sourceId": item["representation"].source_id,
+        "revision": item["representation"].metadata["representation_revision"],
+    } for item in built["representation_artifacts"]])
+    import semantica.semantic_query as owner
+    monkeypatch.setattr(owner, "_load_snapshot", lambda *args: pytest.fail("must not hydrate the graph"))
+    first = _serve(request)
+    assert first["ok"], first
+    assert first["result"]["total"] == 3
+    assert first["result"]["nextOffset"] == 1
+    hit = first["result"]["contexts"][0]
+    assert hit["kind"] == "source_text"
+    assert hit["locator"]["start_char"] == 0
+    assert hit["locator"]["quote"] == "Ada"
+    request["params"]["offset"] = 1
+    second = _serve(request)
+    assert second["result"]["contexts"][0]["locator"]["start_char"] > 0
+    request["params"]["documents"][0]["revision"] = H3
+    assert _serve(request)["ok"] is False
+
+
 def _rewrite_artifacts(built, *, snapshot_change=None, retrieval_change=None):
     snapshot = json.loads(built["graph_path"].read_text())
     retrieval = json.loads(built["retrieval_path"].read_text())

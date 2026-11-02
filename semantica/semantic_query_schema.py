@@ -8,7 +8,7 @@ from typing import Dict, List, Literal, Optional
 
 from pydantic import Field, field_validator, model_validator
 
-from .semantic_artifact_schema import DigestModel, StrictModel, MATERIAL_REVISION_PATTERN, _validate_media_type
+from .semantic_artifact_schema import DigestModel, StrictModel, DocumentLocator, MATERIAL_REVISION_PATTERN, _validate_media_type
 
 QUERY_PROTOCOL = "semantica.semantic-query.v1"
 
@@ -50,6 +50,20 @@ class QuerySource(StrictModel):
     content_hash: str = Field(alias="contentHash", pattern=MATERIAL_REVISION_PATTERN)
 
 
+class QueryDocument(DigestModel):
+    path: str
+    digest: str
+    source_id: str = Field(alias="sourceId")
+    revision: str = Field(pattern=r"^sha256:[0-9a-f]{64}$")
+
+    @field_validator("path", mode="after")
+    @classmethod
+    def validate_path(cls, value: str) -> str:
+        if not isabs(value):
+            raise ValueError("document query path must be absolute")
+        return value
+
+
 class SemanticQueryRequest(StrictModel):
     protocol: Literal[QUERY_PROTOCOL] = QUERY_PROTOCOL
     id: str
@@ -62,12 +76,19 @@ class SemanticQueryRequest(StrictModel):
     query: Optional[str] = None
     limit: int = Field(default=20, ge=1, le=1000)
     mode: Literal["keyword", "semantic"] = "keyword"
+    target: Literal["knowledge", "documents"] = "knowledge"
+    offset: int = Field(default=0, ge=0)
+    documents: List[QueryDocument] = Field(default_factory=list)
     embedding: Optional[QueryEmbedding] = None
     source_ids: Optional[List[str]] = Field(default=None, alias="sourceIds")
     sources: List[QuerySource]
 
     @model_validator(mode="after")
     def validate_mode(self):
+        if self.target == "documents" and self.mode != "keyword":
+            raise ValueError("document occurrences require keyword mode")
+        if self.target == "knowledge" and (self.offset or self.documents):
+            raise ValueError("knowledge queries do not accept document pagination")
         if len({source.source_id for source in self.sources}) != len(self.sources):
             raise ValueError("query source identities must be unique")
         if self.source_ids is not None and not set(self.source_ids).issubset(source.source_id for source in self.sources):
@@ -90,7 +111,7 @@ class SemanticQueryRequest(StrictModel):
 
 class QueryHit(StrictModel):
     id: str
-    kind: Literal["entity", "assertion", "relation", "conflict", "topic", "report", "evidence"]
+    kind: Literal["entity", "assertion", "relation", "conflict", "topic", "report", "evidence", "source_text"]
     title: str
     text: str
     score: float = Field(allow_inf_nan=False)
@@ -98,6 +119,8 @@ class QueryHit(StrictModel):
     polarity: Optional[Literal["positive", "negative"]] = None
     evidence_ids: List[str] = Field(default_factory=list, alias="evidenceIds")
     source_ids: List[str] = Field(default_factory=list, alias="sourceIds")
+    locator: Optional["DocumentLocator"] = None
+    match_index: Optional[int] = Field(default=None, alias="matchIndex", ge=0)
 
 
 class SemanticQueryResult(StrictModel):
@@ -106,6 +129,8 @@ class SemanticQueryResult(StrictModel):
     query: str
     contexts: List[QueryHit]
     retrieval_manifest_id: str = Field(alias="retrievalManifestId")
+    total: Optional[int] = Field(default=None, ge=0)
+    next_offset: Optional[int] = Field(default=None, alias="nextOffset", ge=0)
 
 
 class QueryWorkerRequest(StrictModel):
