@@ -196,6 +196,73 @@ def test_community_references_restart_and_canonical_membership_uniqueness(tmp_pa
         store.read_native_section_records('p',generation,dict(sourceId='foreign',positions=[dict(nativeRef='#/document/text',start=0,end=4)]))
 
 
+@pytest.mark.parametrize('unrelated_count', [64, 2048])
+def test_canonical_member_admission_uses_reverse_point_reads(tmp_path, unrelated_count):
+    from semantica.triplet_store.publication_records import P, PublicationRecords
+    store, _, receipt, identity = fixture(tmp_path)
+    generation = store.begin_publication('p', expected_generation=None,
+        source_count=1, canonical_count=1)['generation']
+    store.stage_publication_sources('p', generation, [dict(source='s', material='m',
+        representation='r', recipe='recipe', operation_count=1,
+        operations=[receipt['operation_id']])])
+    publication = PublicationRecords(store, 'p')
+    ox = store._oxigraph
+    member = ox.NamedNode(identity)
+    member_predicate, canonical = ox.NamedNode(P+'member'), ox.NamedNode(P+'canonical')
+    for index in range(unrelated_count):
+        node = ox.NamedNode('urn:unrelated:canonical:'+str(index))
+        store.store.add(ox.Quad(publication.head, canonical, node, publication.graph))
+        store.store.add(ox.Quad(node, member_predicate,
+            ox.NamedNode('urn:unrelated:member:'+str(index)), publication.graph))
+    # Member references outside this head's canonical set must not block admission.
+    for name in ('community', 'other-head-canonical'):
+        node = ox.NamedNode('urn:'+name)
+        store.store.add(ox.Quad(node, member_predicate, member, publication.graph))
+    store.store.add(ox.Quad(publication.head, ox.NamedNode(P+'community'),
+        ox.NamedNode('urn:community'), publication.graph))
+    store.store.add(ox.Quad(ox.NamedNode('urn:other-head'), canonical,
+        ox.NamedNode('urn:other-head-canonical'), publication.graph))
+    underlying, reverse_rows, membership_reads = store.store, [], []
+
+    class PointMembership:
+        def __getattr__(self, name):
+            return getattr(underlying, name)
+
+        def query(self, text):
+            assert not (text.startswith('ASK') and '?canonical' in text
+                and str(canonical) in text and str(member_predicate) in text), 'project-wide canonical member join'
+            return underlying.query(text)
+
+        def quads_for_pattern(self, subject, predicate, object_, graph):
+            if predicate == member_predicate:
+                assert subject is None and object_ == member and graph == publication.graph
+                for quad in underlying.quads_for_pattern(subject, predicate, object_, graph):
+                    reverse_rows.append(quad)
+                    yield quad
+                return
+            if subject == publication.head and predicate == canonical:
+                assert object_ is not None and graph == publication.graph
+                membership_reads.append(object_)
+            yield from underlying.quads_for_pattern(subject, predicate, object_, graph)
+
+    record = dict(id='urn:canonical:acme', representative=identity, members=[identity],
+        selectors=[], member_count=1, selector_count=0)
+    store.store = PointMembership()
+    try:
+        store.stage_publication_canonical('p', generation, [record])
+        assert len(reverse_rows) == len(membership_reads) == 2
+        with pytest.raises(ProcessingError, match='already belongs'):
+            store.stage_publication_canonical('p', generation,
+                [{**record, 'id':'urn:canonical:duplicate'}])
+        assert 3 <= len(reverse_rows) <= 5
+        assert len(reverse_rows) == len(membership_reads)
+        assert next(underlying.quads_for_pattern(publication.head, canonical,
+            ox.NamedNode('urn:canonical:duplicate'), publication.graph), None) is None
+    finally:
+        store.store = underlying
+        store.close()
+
+
 def test_publication_rejects_corrupt_native_facts_before_reference_admission(tmp_path):
     store, _, receipt, identity = fixture(tmp_path)
     quad = next(store.store.quads_for_pattern(store._oxigraph.NamedNode(identity), store._oxigraph.NamedNode(F + "name"), None, None))

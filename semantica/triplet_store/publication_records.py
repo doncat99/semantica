@@ -315,7 +315,11 @@ class PublicationRecords:
                 raise ProcessingError('Canonical completion plan exceeded')
             for identity in record["members"]:
                 member = self.iri(identity)
-                if identity in assigned or bool(self.owner.store.query(f'ASK {{ GRAPH {self.graph} {{ {self.head} <{P}canonical> ?canonical . ?canonical <{P}member> {member} }} }}')):
+                # Bind the member first; a SPARQL join can scan all canonical records.
+                if identity in assigned or any(next(self.owner.store.quads_for_pattern(
+                        self.head, self.ox.NamedNode(P+'canonical'), reference.subject, self.graph), None)
+                        is not None for reference in self.owner.store.quads_for_pattern(
+                            None, self.ox.NamedNode(P+'member'), member, self.graph)):
                     raise ProcessingError('Native Entity already belongs to a canonical member')
                 assigned.add(identity)
                 self.member(member)
