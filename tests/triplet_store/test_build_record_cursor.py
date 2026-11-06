@@ -56,6 +56,100 @@ def test_build_cursor_projects_fields_and_pages_without_loss_after_restart(tmp_p
         store.close()
 
 
+def test_point_membership_uses_reverse_native_indexes_and_preserves_source_scope(tmp_path, monkeypatch):
+    from semantica.triplet_store.publication_records import PublicationRecords
+    store, _, ids = staged(tmp_path, 3)
+    native = store.store
+
+    class IndexedOnly:
+        def __getattr__(self, key):
+            return getattr(native, key)
+
+        def query(self, *args, **kwargs):
+            raise AssertionError('Point membership must use keyed native indexes')
+
+    monkeypatch.setattr(store, 'store', IndexedOnly())
+    publication = PublicationRecords(store, 'p')
+    try:
+        publication.member(publication.iri(ids[0]))
+        publication.member(publication.iri(ids[0]), ['s'])
+        with pytest.raises(ProcessingError, match='outside current publication'):
+            publication.member(publication.iri(ids[0]), ['foreign'])
+        with pytest.raises(ProcessingError, match='batch'):
+            publication.member(publication.iri(ids[0]), [])
+        with pytest.raises(ProcessingError, match='outside current publication'):
+            PublicationRecords(store, 'foreign').member(publication.iri(ids[0]))
+        with pytest.raises(ProcessingError, match='Duplicate'):
+            publication.member(publication.iri(ids[0]), ['s', 's'])
+    finally:
+        store.close()
+
+
+def test_build_pages_sort_only_operation_scoped_records(tmp_path, monkeypatch):
+    store, generation, expected = staged(tmp_path, 137)
+    native = store.store
+
+    class OperationPagesOnly:
+        def __getattr__(self, key):
+            return getattr(native, key)
+
+        def query(self, query, *args, **kwargs):
+            assert not ('?operation <'+F+'ownedRecord> ?record' in query), \
+                'Record paging must not sort the project-wide operation/record join'
+            return native.query(query, *args, **kwargs)
+
+    monkeypatch.setattr(store, 'store', OperationPagesOnly())
+    try:
+        found, cursor = [], None
+        while True:
+            page = store.read_build_records('p', generation, kind='Entity', fields=[F+'name'],
+                after=cursor, limit=17)
+            found.extend(row['id'] for row in page['records'])
+            cursor = page['next_cursor']
+            if cursor is None:
+                break
+        assert found == expected
+    finally:
+        store.close()
+
+
+def test_build_cursor_crosses_operation_pages_without_loss_or_source_leak(tmp_path):
+    store = OxigraphStore(tmp_path / 'facts')
+    sources, expected = [], []
+    for index in range(130):
+        source = 's'+str(index)
+        binding = dict(project='p', source=source, material='m', representation='r',
+            recipe='recipe', model='model', specification='spec', parser='parser',
+            grounding='grounding', window_start=0, window_end=1)
+        entity = Entity('N', 'ORG', 0, 1, .9, {'mention_id':source})
+        receipt = store.adopt_extraction(binding, 'entities', [entity], text='N',
+            native_ranges=[dict(nativeRef='#/document/text', start=0, end=1,
+                windowStart=0, windowEnd=1)], accepted_digest='accepted')
+        expected.append(ExtractionRecords(store, binding, 'entities').entity_node(entity).value)
+        sources.append(dict(source=source, material='m', representation='r', recipe='recipe',
+            operation_count=1, operations=[receipt['operation_id']]))
+    generation = store.begin_publication('p', expected_generation=None,
+        source_count=len(sources), canonical_count=0)['generation']
+    for offset in range(0, len(sources), 128):
+        store.stage_publication_sources('p', generation, sources[offset:offset+128])
+    found, cursor = [], None
+    try:
+        while True:
+            page = store.read_build_records('p', generation, kind='Entity',
+                fields=[F+'name'], after=cursor, limit=17)
+            found.extend(row['id'] for row in page['records'])
+            cursor = page['next_cursor']
+            if cursor is None:
+                break
+            store.close()
+            store = OxigraphStore(tmp_path / 'facts')
+        assert found == sorted(expected)
+        assert store.read_build_records('p', generation, kind='Entity', source='s3')['records'][0]['id'] == expected[3]
+        assert store.read_build_records('p', generation, kind='Relation')['records'] == []
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize('source_count,operation_count', [(2, 1), (1, 2)])
 def test_incomplete_source_or_operation_plan_cannot_be_computed(tmp_path, source_count, operation_count):
     store, generation, _ = staged(tmp_path, 1, source_count=source_count, operation_count=operation_count)

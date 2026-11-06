@@ -309,12 +309,16 @@ def test_point_record_read_never_enumerates_unselected_native_facts(tmp_path):
             raise AssertionError('Record read must never iterate the native store')
 
         def quads_for_pattern(self, subject, predicate, object_, graph):
-            assert subject is not None and graph is not None
+            assert graph is not None
+            assert subject is not None or (predicate is not None and object_ is not None)
             calls.append((subject, predicate, object_, graph))
             for quad in underlying.quads_for_pattern(subject, predicate, object_, graph):
                 if graph == facts:
-                    assert subject.value == identity
-                    fact_rows.append(quad)
+                    if subject is None:
+                        assert predicate.value == F+'ownedRecord' and object_.value == identity
+                    else:
+                        assert subject.value == identity
+                        fact_rows.append(quad)
                 yield quad
 
         def query(self, text):
@@ -327,7 +331,7 @@ def test_point_record_read_never_enumerates_unselected_native_facts(tmp_path):
     try:
         assert store.read_native_records('p', generation, [identity]) == expected
         assert len(fact_rows) == sum(len(values) for values in expected[0]['fields'].values())
-        assert len(queries) == 1
+        assert len(queries) == 0
         assert calls
     finally:
         store.store = underlying

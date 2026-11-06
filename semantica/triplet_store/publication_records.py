@@ -237,18 +237,24 @@ class PublicationRecords:
         self.mutate(generation, triples)
 
     def member(self, record, source_ids=None):
-        selected = ""
+        selected = None
         if source_ids is not None:
             self.batch(source_ids)
             if len(set(source_ids)) != len(source_ids):
                 raise ProcessingError("Duplicate native source selection")
             for source in source_ids:
                 self.scalar(source)
-            nodes = [self.ox.NamedNode(self.graph.value + ":source:" + hashlib.sha256(source.encode()).hexdigest()) for source in source_ids]
-            selected = "VALUES ?source { " + " ".join(str(node) for node in nodes) + " }"
-        query = f"ASK {{ {selected} GRAPH {self.graph} {{ {self.head} <{P}source> ?source . ?source <{P}operation> ?operation }} GRAPH {self.facts} {{ ?operation <{F}ownedRecord> {record} }} }}"
-        if not bool(self.owner.store.query(query)):
-            raise ProcessingError("Record outside current publication")
+            selected = {self.ox.NamedNode(self.graph.value + ":source:" + hashlib.sha256(source.encode()).hexdigest()) for source in source_ids}
+        # Start at the requested record, so each point read avoids a project join.
+        for owned in self.owner.store.quads_for_pattern(None, self.ox.NamedNode(F + 'ownedRecord'), record, self.facts):
+            check_query_cancellation()
+            for binding in self.owner.store.quads_for_pattern(None, self.ox.NamedNode(P + 'operation'), owned.subject, self.graph):
+                check_query_cancellation()
+                if selected is not None and binding.subject not in selected:
+                    continue
+                if next(self.owner.store.quads_for_pattern(self.head, self.ox.NamedNode(P + 'source'), binding.subject, self.graph), None) is not None:
+                    return
+        raise ProcessingError("Record outside current publication")
 
     @_locked
     def attribute_reference(self, generation, entity, name):
@@ -666,20 +672,50 @@ class PublicationRecords:
         scope = hashlib.sha256(json.dumps([self.project, generation, kind, source, fields],
             sort_keys=True, separators=(',', ':')).encode()).hexdigest()
         prefix = 'build:' + scope + ':'
-        cursor = ''
+        identity = None
+        operation_after = None
         if after is not None:
             if not isinstance(after, str) or not after.startswith(prefix):
                 raise ProcessingError("Native build cursor belongs to another scope")
             identity = after[len(prefix):]
             self.iri(identity)
-            cursor = f"FILTER(STR(?record) > {self.scalar(identity)})"
-        query = f"""SELECT DISTINCT ?record WHERE {{
-            GRAPH {self.graph} {{ {self.head} <{P}source> ?source .
-                ?source <{P}operation> ?operation . {source_filter} }}
-            GRAPH {self.facts} {{ ?operation <{F}ownedRecord> ?record .
-                ?record <{RDF_TYPE}> <{F}{kind}> }} {cursor}
-        }} ORDER BY ?record LIMIT {limit + 1}"""
-        ids = [row['record'].value for row in self.owner.store.query(query)]
+            parts = identity.split(':', 4)
+            if (len(parts) != 5 or parts[:3] != ['urn', 'semantica', 'extraction']
+                    or len(parts[3]) != 64 or any(c not in '0123456789abcdef' for c in parts[3])):
+                raise ProcessingError('Invalid native build record cursor')
+            operation_after = ':'.join(parts[:4])
+        ids = []
+        inclusive = identity is not None
+        # Native record IRIs extend their operation IRI; preserve lexical order
+        # while sorting only bounded operation pages and one operation's records.
+        while len(ids) <= limit:
+            check_query_cancellation()
+            seek = (f"FILTER(STR(?operation) {'>=' if inclusive else '>'} {self.scalar(operation_after)})"
+                    if operation_after is not None else '')
+            operations = [row['operation'] for row in self.owner.store.query(f"""
+                SELECT DISTINCT ?operation WHERE {{ GRAPH {self.graph} {{
+                    {self.head} <{P}source> ?source .
+                    ?source <{P}operation> ?operation . {source_filter}
+                }} {seek} }} ORDER BY ?operation LIMIT {MAX_ROWS}""")]
+            if not operations:
+                break
+            for operation in operations:
+                check_query_cancellation()
+                cursor = f"FILTER(STR(?record) > {self.scalar(identity)})" if identity is not None else ''
+                query = f"""SELECT DISTINCT ?record WHERE {{ GRAPH {self.facts} {{
+                    {operation} <{F}ownedRecord> ?record .
+                    ?record <{RDF_TYPE}> <{F}{kind}> }} {cursor}
+                }} ORDER BY ?record LIMIT {limit + 1 - len(ids)}"""
+                records = [row['record'].value for row in self.owner.store.query(query)]
+                if any(not record.startswith(operation.value + ':') for record in records):
+                    raise ProcessingError('Native record does not belong to its operation namespace')
+                ids.extend(records)
+                if len(ids) > limit:
+                    break
+            if len(ids) > limit or len(operations) < MAX_ROWS:
+                break
+            operation_after = operations[-1].value
+            inclusive = False
         selected = ids[:limit]
         records = self._read(selected, fields=fields, max_bytes=max_bytes) if selected else []
         result = dict(records=records, next_cursor=prefix + selected[-1] if len(ids) > limit else None)
