@@ -49,14 +49,13 @@ from .types import Entity, Relation, Triplet
 NAMESPACES = ("entities", "relations", "triplets", "classification", "embedding")
 
 
-def _check_accepted_value(value: Any, *, namespace: str = '') -> None:
+def _check_accepted_value(value: Any) -> None:
     """Bound native JSON input before copying/serializing the complete result."""
-    remaining, nodes = 1024 * 1024, 32768 if namespace == 'embedding' else 8192
+    remaining = 1024 * 1024
 
     def visit(item, depth=0):
-        nonlocal remaining, nodes
-        nodes -= 1
-        if nodes < 0 or depth > 32:
+        nonlocal remaining
+        if depth > 32:
             raise ProcessingError("Accepted extraction exceeds structure budget")
         if isinstance(item, str):
             if len(item) > remaining:
@@ -690,7 +689,7 @@ class SqliteCacheBackend(CacheBackend):
         if self._serialize is not _cache_serialize or self._deserialize is not _cache_deserialize:
             raise ProcessingError("Accepted extraction serialization requires the native JSON codec")
         try:
-            _check_accepted_value(value, namespace=namespace)
+            _check_accepted_value(value)
             blob = self._serialize(value)
             digest = hashlib.sha256(blob).hexdigest()
         except ProcessingError:

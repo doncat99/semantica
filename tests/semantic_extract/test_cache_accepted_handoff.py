@@ -192,7 +192,7 @@ def test_protected_read_never_uses_ordinary_cache_miss_contract(tmp_path):
     c._backend.close()
 
 
-@pytest.mark.parametrize("value", ["x" * (4 * 1024 * 1024), [0] * 100000])
+@pytest.mark.parametrize("value", ["x" * (4 * 1024 * 1024), [0] * (1024 * 1024)])
 def test_accept_preflight_rejects_large_inputs_before_full_copy(tmp_path, value):
     c = cache(tmp_path / "cache.db")
     tracemalloc.start()
@@ -282,6 +282,27 @@ def test_native_dataclass_accepted_and_custom_codec_rejected(tmp_path):
     with pytest.raises(ProcessingError, match="native JSON codec"):
         ExtractionCache(backend=backend).accept("entities", "source", [1])
     backend.close()
+
+
+def test_dense_paid_result_uses_byte_budget_without_losing_records(tmp_path):
+    from semantica.semantic_extract.types import Entity
+    c = cache(tmp_path / 'dense.db')
+    value = [Entity(text=f'Organization {i}', label='ORG', start_char=i, end_char=i + 1)
+             for i in range(512)]
+    try:
+        digest = c.accept('entities', 'dense', value)
+        assert c.get_accepted('entities', 'dense') == value
+        c.release_accepted('entities', 'dense', digest)
+        with pytest.raises(ProcessingError, match='byte budget'):
+            c.accept('entities', 'wide', [None] * (1024 * 1024))
+        deep = []
+        for _ in range(34):
+            deep = [deep]
+        with pytest.raises(ProcessingError, match='structure budget'):
+            c.accept('entities', 'deep', deep)
+        assert c._backend.size('entities') == 0
+    finally:
+        c._backend.close()
 
 
 def test_sixteen_restored_identities_do_not_queue_behind_writer_commit(tmp_path):
