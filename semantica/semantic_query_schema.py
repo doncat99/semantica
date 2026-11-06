@@ -241,7 +241,7 @@ class NativeSceneRequest(StrictModel):
         if self.project_id != self.semantic_store.project:
             raise ValueError('native scene project differs from request project')
         # The native storage owner validates its single selection contract.
-        if len(self.selection) > 7:
+        if len(self.selection) > 8:
             raise ValueError('native scene selection exceeds field budget')
         return self
 

@@ -1166,6 +1166,81 @@ class PublicationRecords:
         self.fence(generation)
         return response
 
+    def _scene_projection(self, selection):
+        fields = selection.get('fields')
+        if 'fields' not in selection:
+            return None
+        allowed = ([['id'], ['id','name','sourceIds']] if selection.get('kind') == 'nodes'
+                   else [['id','source','target','predicate']] if selection.get('kind') == 'incident' else [])
+        if fields not in allowed:
+            raise ProcessingError('Invalid native scene field projection')
+        return fields
+
+    def _scene_name(self, node, source_ids):
+        # Read only name selectors, not descriptions, attributes or complete membership.
+        scope = ''
+        if source_ids is not None:
+            sources = ' '.join(str(self.scalar(source)) for source in source_ids)
+            scope = f"""GRAPH {self.graph} {{ {self.head} <{P}source> ?membership .
+                ?membership <{P}source> ?source ; <{P}operation> ?operation . }}
+                VALUES ?source {{ {sources} }} GRAPH {self.facts} {{ ?operation <{F}ownedRecord> ?record }}"""
+        query = f"""SELECT DISTINCT ?record WHERE {{ GRAPH {self.graph} {{
+            {node} <{P}selector> ?selector . ?selector <{P}field> 'name' ; <{P}record> ?record . }}
+            {scope} }} ORDER BY ?record"""
+        chosen, read_bytes = None, 0
+        def accept(identity):
+            nonlocal chosen, read_bytes
+            check_query_cancellation()
+            record = self._read([identity], fields=[F+'name'], source_ids=source_ids)[0]
+            read_bytes += len(json.dumps(record, ensure_ascii=False).encode())
+            if read_bytes > MAX_BYTES:
+                raise ProcessingError('Canonical name hydration exceeds byte budget')
+            names = record['fields'].get(F+'name', [])
+            if len(names) != 1 or names[0]['type'] != 'literal':
+                raise ProcessingError('Canonical field selector requires one native scalar')
+            if chosen is not None and chosen != names[0]:
+                raise ProcessingError('Canonical scalar selection has conflicting native values')
+            chosen = names[0]
+        found = False
+        for row in self.owner.store.query(query):
+            found = True
+            accept(row['record'].value)
+        if not found:
+            representative = self.one(node, 'representative')
+            if source_ids is not None:
+                # Match full-scene scoped representative selection without retaining members.
+                query = f"""SELECT DISTINCT ?record WHERE {{ GRAPH {self.graph} {{ {node} <{P}member> ?record }}
+                    {scope} }} ORDER BY ?record"""
+                first = None
+                for row in self.owner.store.query(query):
+                    check_query_cancellation()
+                    identity = row['record'].value
+                    if first is None: first = identity
+                    if identity == representative:
+                        break
+                else:
+                    representative = first
+                if representative is None:
+                    raise ProcessingError('Native scene source scope has no member')
+            accept(representative)
+        return chosen['value']
+
+    def _scene_sources(self, node, source_ids):
+        scope = ('VALUES ?source { ' + ' '.join(str(self.scalar(s)) for s in source_ids) + ' }') if source_ids else ''
+        query = f"""SELECT DISTINCT ?source WHERE {{ GRAPH {self.graph} {{
+            {node} <{P}member> ?record . {self.head} <{P}source> ?membership .
+            ?membership <{P}source> ?source ; <{P}operation> ?operation . }}
+            {scope} GRAPH {self.facts} {{ ?operation <{F}ownedRecord> ?record }} }} ORDER BY ?source"""
+        sources, size = [], 0
+        for row in self.owner.store.query(query):
+            check_query_cancellation()
+            source = row['source'].value
+            size += len(json.dumps(source).encode()) + 2
+            if size > MAX_BYTES:
+                raise ProcessingError('Native scene sources exceed byte budget')
+            sources.append(source)
+        return sources
+
     @_locked
     def scene(self, generation, selection):
         """Page the current native canonical references, never assemble a graph.
@@ -1179,13 +1254,14 @@ class PublicationRecords:
         if not isinstance(selection, dict):
             raise ProcessingError('Invalid native scene selection')
         kind = selection.get('kind')
+        projection = self._scene_projection(selection)
         if kind == 'sources':
             return self.source_scene(generation, selection)
         if kind in {'communities', 'topics'}:
             return self.organization_scene(generation, selection)
         if kind == 'incident':
             return self._incident(generation, selection)
-        permitted = {'kind','after','limit','maxBytes'} | ({'nodeIds','recordIds','sourceIds','communityId','topicId'} if kind == 'nodes' else {'visibleIds'})
+        permitted = {'kind','after','limit','maxBytes','fields'} | ({'nodeIds','recordIds','sourceIds','communityId','topicId'} if kind == 'nodes' else {'visibleIds'})
         limit, max_bytes = selection.get('limit', MAX_ROWS), selection.get('maxBytes', MAX_BYTES)
         if (kind not in {'nodes','links'} or set(selection) - permitted
                 or type(limit) is not int or not 1 <= limit <= MAX_ROWS
@@ -1196,6 +1272,8 @@ class PublicationRecords:
             self.iri(after)
         cursor = f'FILTER(STR(?id) > {self.scalar(after)})' if after is not None else ''
         response = dict(project=self.project, generation=generation, nodes=[], links=[], next_cursor=None)
+        if projection is not None:
+            response['fields'] = projection
         source_ids = None
         if kind == 'nodes':
             exact = selection.get('nodeIds')
@@ -1266,23 +1344,29 @@ class PublicationRecords:
                 raise ProcessingError('Native scene envelope exceeds byte budget')
             if kind == 'nodes':
                 node = self.iri(identity)
-                representative = self.one(node, 'representative')
-                members, selectors = self._canonical_references(node, remaining)
-                if source_ids is not None:
-                    members = [member for member in members if self._scene_references([member], source_ids)[0]]
-                    if representative not in members:
-                        representative = sorted(members)[0]
-                sources, evidence = self._scene_references(members, source_ids)
-                if source_ids is not None:
-                    selectors = [s for s in selectors if self._scene_references([s['record']], source_ids)[0]]
-                fields = self._selected_scene_fields(generation, representative, selectors, source_ids)
-                types = fields.get(RDF_TYPE, [])
-                if len(types) != 1 or types[0]['type'] != 'iri':
-                    raise ProcessingError('Native scene entity requires one native type')
-                item = dict(id=identity, type=types[0]['value'],
-                    recordId=representative, fields=fields, sourceIds=sources,
-                    evidenceIds=evidence, members=members, selectors=selectors)
-                target = response['nodes']
+                if projection is not None:
+                    item = dict(id=identity)
+                    if 'name' in projection:
+                        item.update(name=self._scene_name(node, source_ids), sourceIds=self._scene_sources(node, source_ids))
+                    target = response['nodes']
+                else:
+                    representative = self.one(node, 'representative')
+                    members, selectors = self._canonical_references(node, remaining)
+                    if source_ids is not None:
+                        members = [member for member in members if self._scene_references([member], source_ids)[0]]
+                        if representative not in members:
+                            representative = sorted(members)[0]
+                    sources, evidence = self._scene_references(members, source_ids)
+                    if source_ids is not None:
+                        selectors = [s for s in selectors if self._scene_references([s['record']], source_ids)[0]]
+                    fields = self._selected_scene_fields(generation, representative, selectors, source_ids)
+                    types = fields.get(RDF_TYPE, [])
+                    if len(types) != 1 or types[0]['type'] != 'iri':
+                        raise ProcessingError('Native scene entity requires one native type')
+                    item = dict(id=identity, type=types[0]['value'],
+                        recordId=representative, fields=fields, sourceIds=sources,
+                        evidenceIds=evidence, members=members, selectors=selectors)
+                    target = response['nodes']
             else:
                 item = self._fact_scene_link(generation, row)
                 target = response['links']
@@ -1306,7 +1390,8 @@ class PublicationRecords:
         """Seek incident native relations and only their canonical endpoints."""
         from ..semantic_worker_context import check_query_cancellation
         self.fence(generation)
-        if set(selection) - {'kind', 'nodeId', 'after', 'limit', 'maxBytes'}:
+        projection = self._scene_projection(selection)
+        if set(selection) - {'kind', 'nodeId', 'after', 'limit', 'maxBytes', 'fields'}:
             raise ProcessingError('Invalid incident selection fields')
         focus = self.iri(selection.get('nodeId'))
         limit, budget = selection.get('limit', 32), selection.get('maxBytes', MAX_BYTES)
@@ -1329,14 +1414,27 @@ class PublicationRecords:
             raise ProcessingError('Native incident endpoints require unique canonical membership')
         response = dict(project=self.project, generation=generation, nodes=[], links=[], next_cursor=None)
         identities = {focus.value}
-        response['nodes'] = self.scene(generation, dict(kind='nodes', nodeIds=[focus.value], limit=1, maxBytes=MAX_BYTES))['nodes']
+        if projection is not None:
+            response['fields'] = projection
+        else:
+            response['nodes'] = self.scene(generation, dict(kind='nodes', nodeIds=[focus.value], limit=1, maxBytes=MAX_BYTES))['nodes']
         if len(json.dumps(response, ensure_ascii=False).encode()) > budget:
             raise ProcessingError('Native incident focus exceeds byte budget')
         emitted = []
         for row in rows[:limit]:
             check_query_cancellation()
-            link = self._fact_scene_link(generation, row)
-            missing = sorted({row['source'].value, row['target'].value} - identities)
+            if projection is not None:
+                representative = self.one(self.iri(row['id'].value), 'representative')
+                record = self._read([representative], fields=[F+'predicateName'])[0]
+                predicates = record['fields'].get(F+'predicateName', [])
+                if len(predicates) != 1 or predicates[0]['type'] != 'literal':
+                    raise ProcessingError('Native relation predicate missing or duplicated')
+                link = dict(id=row['id'].value, source=row['source'].value, target=row['target'].value,
+                            predicate=normalize_fact_predicate(predicates[0]['value']))
+                missing = []
+            else:
+                link = self._fact_scene_link(generation, row)
+                missing = sorted({row['source'].value, row['target'].value} - identities)
             # Read endpoints individually so a combined exact request cannot exceed
             # its budget before we decide the incident page boundary.
             added = []

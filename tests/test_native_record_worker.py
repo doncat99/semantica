@@ -47,6 +47,7 @@ def publication(tmp_path):
     owner.activate_publication('project-1', generation, indexes={
         'keyword': dict(kind='native-keyword', store_id='keyword', recipe_digest='recipe'),
         'semantic': dict(kind='native-vector', store_id='vector', recipe_digest='recipe', space_id='space')})
+    owner.close()
     del owner
     ref = dict(path=str(path), project='project-1', generation=generation)
     handle_request(dict(id='acquire', method='acquire_store', params=dict(semanticStore=ref)))

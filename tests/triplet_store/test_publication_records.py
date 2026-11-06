@@ -149,6 +149,13 @@ def test_topic_catalog_and_memberships_page_past_128_without_loss(tmp_path):
         dict(kind='nodes', topicId='topic:wide', after=first['next_cursor']))
     assert [n['id'] for n in first['nodes']+second['nodes']] == members
     assert second['next_cursor'] is None
+    for fields in (['id'], ['id','name','sourceIds']):
+        projected=[]; after=None
+        while True:
+            page=store.read_publication_scene('p',generation,dict(kind='nodes',topicId='topic:wide',fields=fields,**({'after':after} if after else {})))
+            projected.extend(page['nodes']); after=page['next_cursor']
+            if after is None: break
+        assert [item['id'] for item in projected]==members
     store.close()
 
 
@@ -495,7 +502,7 @@ def test_native_scene_is_bounded_reference_projection_and_generation_fenced(tmp_
         store.read_publication_scene('p', generation, dict(kind='nodes'))
 
 
-def test_visible_native_scene_links_preserve_relation_qualifiers(tmp_path):
+def test_visible_native_scene_links_preserve_relation_qualifiers(tmp_path, monkeypatch):
     from semantica.semantic_extract.types import Relation
     store = OxigraphStore(tmp_path / 'facts')
     text = 'Acme owns Engine'
@@ -541,6 +548,18 @@ def test_visible_native_scene_links_preserve_relation_qualifiers(tmp_path):
     continuation = store.read_publication_scene('p', generation, dict(kind='incident',nodeId='urn:canonical:0',after=link['id']))
     assert continuation['links'] == []
     assert [node['id'] for node in continuation['nodes']] == ['urn:canonical:0']
+    from semantica.triplet_store.publication_records import PublicationRecords
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Incident projection hydrated unused fields/endpoints')
+    monkeypatch.setattr(PublicationRecords,'_fact_scene_link',forbidden)
+    monkeypatch.setattr(PublicationRecords,'_selected_scene_fields',forbidden)
+    fields=['id','source','target','predicate']
+    projected=store.read_publication_scene('p',generation,dict(kind='incident',nodeId='urn:canonical:0',fields=fields))
+    assert projected['fields']==fields and projected['nodes']==[]
+    assert projected['links']==[{key:link[key] for key in fields}]
+    assert store.read_publication_scene('p',generation,dict(kind='incident',nodeId='urn:canonical:0',fields=fields,after=link['id']))['links']==[]
+    with pytest.raises(ProcessingError,match='outside current'):
+        store.read_publication_scene('p',generation,dict(kind='incident',nodeId='urn:foreign',fields=fields))
 
 
 def test_native_record_literal_language_and_datatype_are_lossless(tmp_path):
@@ -654,6 +673,10 @@ def test_scene_applies_selected_member_fields_without_persisting_another_body(tm
     assert second_scope['fields'][F+'name'][0]['value'] == text
     assert second_scope['sourceIds'] == ['second'] and selected_evidence in second_scope['evidenceIds']
     assert second_scope['members'] == [identity2] and second_scope['selectors'] == selectors
+    for scope, expected in [(None,text),(['s'],'Acme'),(['second'],text)]:
+        projected=store.read_publication_scene('p',generation,dict(kind='nodes',fields=['id','name','sourceIds'],**({'sourceIds':scope} if scope else {})))['nodes'][0]
+        assert projected['name']==expected
+        assert projected['sourceIds']==(scope if scope else ['s','second'])
 
 
 def test_canonical_field_hydration_enforces_joint_read_budget(tmp_path, monkeypatch):
@@ -940,3 +963,78 @@ def test_canonical_checkpoint_failure_never_seals_partial_output(tmp_path, failu
         assert status['canonical_count'] is None
     finally:
         store.close()
+
+
+def test_scene_explicit_fields_avoids_unrequested_hydration(tmp_path, monkeypatch):
+    import json, time
+    from semantica.triplet_store.publication_records import PublicationRecords
+    store, _, receipt, identity = fixture(tmp_path)
+    generation = stage(store, receipt, identity)
+    store.activate_publication('p', generation, indexes=indexes())
+    calls=[]
+    original=PublicationRecords._read
+    def measured(owner, ids, **kwargs):
+        rows=original(owner, ids, **kwargs)
+        calls.append(dict(fields=kwargs.get('fields'), records=len(rows),
+                          terms=sum(len(v) for row in rows for v in row['fields'].values()),
+                          bytes=len(json.dumps(rows).encode())))
+        return rows
+    monkeypatch.setattr(PublicationRecords, '_read', measured)
+    start=time.perf_counter()
+    full=store.read_publication_scene('p', generation, dict(kind='nodes'))
+    before=dict(seconds=time.perf_counter()-start, reads=list(calls)); calls.clear()
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Projected scene hydrated unrequested references or fields')
+    for name in ('_canonical_references', '_selected_scene_fields', '_scene_references'):
+        monkeypatch.setattr(PublicationRecords, name, forbidden)
+    fields=['id','name','sourceIds']
+    start=time.perf_counter()
+    page=store.read_publication_scene('p', generation, dict(kind='nodes', fields=fields))
+    after=dict(seconds=time.perf_counter()-start, reads=list(calls))
+    assert page['fields']==fields
+    assert page['nodes']==[dict(id=full['nodes'][0]['id'],name='Acme',sourceIds=['s'])]
+    assert all(call['fields']==[F+'name'] for call in calls)
+    assert sum(call['terms'] for call in calls)<sum(call['terms'] for call in before['reads'])
+    calls.clear()
+    assert store.read_publication_scene('p', generation,dict(kind='nodes',fields=['id']))['nodes']==[dict(id='urn:canonical:acme')]
+    assert calls==[]
+    assert store.read_publication_scene('p', generation,dict(kind='nodes',fields=fields,sourceIds=['foreign']))['nodes']==[]
+    with pytest.raises(ProcessingError,match='outside'):
+        store.read_publication_scene('p', generation,dict(kind='nodes',fields=fields,nodeIds=['urn:foreign']))
+    for invalid in (None,[],['name'],['id','fields'],['id','id']):
+        with pytest.raises(ProcessingError,match='projection'):
+            store.read_publication_scene('p',generation,dict(kind='nodes',fields=invalid))
+    with pytest.raises(ProcessingError,match='byte'):
+        store.read_publication_scene('p',generation,dict(kind='nodes',fields=fields,maxBytes=32))
+    print('native-scene-projection-measure='+json.dumps(dict(before=before,after=after)))
+    store.withdraw_publication('p',expected_generation=generation)
+    with pytest.raises(ProcessingError,match='not ready'):
+        store.read_publication_scene('p',generation,dict(kind='nodes',fields=['id']))
+    store.close()
+
+
+def test_organization_member_projection_survives_full_reference_budget_failure(tmp_path, monkeypatch):
+    # Regression for captured G56 scene #96: community member enumeration only
+    # consumes identity; full canonical hydration exceeded 262144 bytes.
+    from semantica.triplet_store.publication_records import PublicationRecords
+    from semantica.semantic_worker_context import query_cancellation
+    from threading import Event
+    store, _, receipt, identity=fixture(tmp_path)
+    generation=stage(store,receipt,identity)
+    community='community:d9ee7a78ace79c7787476296'
+    store.stage_publication_communities('p',generation,[dict(id=community,members=['urn:canonical:acme'],member_count=1)])
+    store.activate_publication('p',generation,indexes=indexes())
+    def exhausted(*args, **kwargs):
+        raise ProcessingError('Canonical read exceeds byte budget')
+    monkeypatch.setattr(PublicationRecords,'_canonical_references',exhausted)
+    selection=dict(kind='nodes',communityId=community,limit=128,maxBytes=262144)
+    with pytest.raises(ProcessingError,match='Canonical read exceeds byte budget'):
+        store.read_publication_scene('p',generation,selection)
+    projected=store.read_publication_scene('p',generation,dict(selection,fields=['id']))
+    assert projected['nodes']==[dict(id='urn:canonical:acme')] and projected['next_cursor'] is None
+    event=Event();event.set();token=query_cancellation.set(event)
+    try:
+        with pytest.raises(ProcessingError,match='canceled'):
+            store.read_publication_scene('p',generation,dict(selection,fields=['id']))
+    finally: query_cancellation.reset(token)
+    store.close()

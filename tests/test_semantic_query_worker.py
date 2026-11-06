@@ -99,11 +99,14 @@ def test_worker_bounds_response_and_continues_session(monkeypatch):
     assert all(len(line.encode()) < 256 for line in lines)
     assert not json.loads(lines[0])['ok']
     assert json.loads(lines[1])['result']['text'] == '界'
-def test_scene_rpc_delegates_exact_scope_and_selection(monkeypatch):
+@pytest.mark.parametrize('fields', [None, ['id'], ['id', 'name', 'sourceIds']])
+def test_scene_rpc_delegates_exact_scope_and_selection(monkeypatch, fields):
     from semantica import semantic_query_worker as worker
     from pydantic import ValidationError
     import pytest
     selected = dict(kind='nodes', limit=17, maxBytes=8192)
+    if fields is not None:
+        selected['fields'] = fields
     calls = []
     class Owner:
         def read_publication_scene(self, project, generation, selection):
