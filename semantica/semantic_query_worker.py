@@ -212,6 +212,12 @@ def _serve(stdin, stdout, executor) -> int:
             continue
         if pending is not None:
             pending.result()
+        if (isinstance(raw, dict) and raw.get('method') == 'query'
+                and isinstance(raw.get('params'), dict) and raw['params'].get('mode') == 'semantic'):
+            # Windows NumPy/BLAS DLL initialization can block on first import
+            # inside an executor thread. Load the existing vector owner on the
+            # serving thread before dispatch, only when a vector query needs it.
+            from .vector_store.sqlite_vec_store import SQLiteVecStore
         active_id = raw.get('id') if isinstance(raw, dict) else None
         canceled = Event()
         pending = executor.submit(execute, line, canceled)

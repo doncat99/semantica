@@ -53,6 +53,31 @@ def test_worker_startup_does_not_import_aggregate_retrieval():
     assert result.returncode == 0, result.stderr
 
 
+def test_semantic_query_initializes_native_vector_dependency_on_serving_thread(monkeypatch):
+    import builtins
+    import threading
+    import semantica.semantic_query_worker as worker
+    imports, executions = [], []
+    original_import = builtins.__import__
+    serving_thread = threading.get_ident()
+    def importing(name, *args, **kwargs):
+        if name == 'vector_store.sqlite_vec_store':
+            imports.append(threading.get_ident())
+        return original_import(name, *args, **kwargs)
+    def handle(raw):
+        executions.append(threading.get_ident())
+        assert imports == [serving_thread]
+        return dict(id=raw['id'], ok=True, result={})
+    monkeypatch.setattr(builtins, '__import__', importing)
+    monkeypatch.setattr(worker, 'handle_request', handle)
+    output = io.StringIO()
+    assert worker.serve(io.StringIO(json.dumps(dict(id='semantic', method='query',
+        params=dict(mode='semantic'))) + '\n'), output) == 0
+    assert imports == [serving_thread]
+    assert len(executions) == 1 and executions[0] != serving_thread
+    assert json.loads(output.getvalue())['ok']
+
+
 @pytest.mark.parametrize('ensure_ascii',[True,False])
 def test_worker_rejects_oversized_input_before_parsing(monkeypatch,ensure_ascii):
     import semantica.semantic_query_worker as worker
