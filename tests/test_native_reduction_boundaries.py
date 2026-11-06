@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from semantica import semantic_artifact_builder as pipeline
+from semantica import semantic_publication_builder as pipeline
 from semantica.kg.community_summarizer import CommunitySummarizer, EvidenceBudgetError, DEFAULT_SYSTEM_PROMPT
 from semantica.semantic_artifact_schema import ClassificationProfile, ClassificationAssignment, SourceClassification
 
@@ -87,7 +87,7 @@ def test_relay_budgets_complete_serialized_request_without_sending(monkeypatch):
     expected = len(json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode())
     with pytest.raises(pipeline.SemanticArtifactError) as failure:
         pipeline._relay_uncached(SimpleNamespace(authorization_env="TEST_RELAY_TOKEN", context_window_tokens=100000, max_output_tokens=10000), payload,
-                                 "structured_extraction", None, None)
+                                 "structured_extraction")
     assert failure.value.code == "MODEL_CONTEXT_BUDGET_EXCEEDED"
     assert failure.value.retryable is False
     assert failure.value.diagnostic['requestBytes'] == expected
@@ -121,14 +121,12 @@ def test_native_report_preflight_counts_default_system_prompt(monkeypatch, optio
 def test_native_cache_reuses_entities_after_relation_transport_retry(tmp_path, monkeypatch):
     from tests.artifact_helpers import stub_native_provider
     from tests.test_semantic_artifact import _request
-    from semantica.project_checkpoint import SnapshotCheckpoint, active_checkpoint
+    from tests.artifact_helpers import native_extraction_owner
     from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest
 
     text = "Fund owns Bond."
     path = tmp_path / "source.txt"
     path.write_text(text)
-    checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(
-        _request(path, tmp_path / "output")["params"]))
     calls = []
     def respond(stage, prompt):
         calls.append(stage)
@@ -141,18 +139,13 @@ def test_native_cache_reuses_entities_after_relation_transport_retry(tmp_path, m
                                   for name in ("Fund", "Bond")]}
         return {"relations": []}
     stub_native_provider(monkeypatch, respond)
-    token = active_checkpoint.set(checkpoint)
-    try:
+    with native_extraction_owner(tmp_path / "native", text=text) as store:
         args = (text, SimpleNamespace(model_id="test"), None, (0, len(text), text), [])
         first, receipts, reused = pipeline._extract_window_context(*args)
         second, restored_receipts, restored = pipeline._extract_window_context(*args)
-    finally:
-        active_checkpoint.reset(token)
     assert calls == ["entities", "relations", "relations"]
     assert len(receipts) == len({item.id for item in receipts}) == 2
     assert not reused and restored
-    assert all(getattr(item, "_checkpoint_restored", False) for item in restored_receipts)
-    assert not getattr(receipts[1], "_checkpoint_restored", False)
     assert [item.id for item in receipts] == [item.id for item in restored_receipts]
     assert [(item.text, item.start_char, item.end_char) for item in first["entities"]] == [
         (item.text, item.start_char, item.end_char) for item in second["entities"]]
@@ -161,14 +154,12 @@ def test_native_cache_reuses_entities_after_relation_transport_retry(tmp_path, m
 def test_formula_semantics_opt_in_invalidates_only_selected_extraction(tmp_path, monkeypatch):
     from tests.artifact_helpers import stub_native_provider
     from tests.test_semantic_artifact import _request
-    from semantica.project_checkpoint import SnapshotCheckpoint, active_checkpoint
+    from tests.artifact_helpers import native_extraction_owner
     from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest
 
     text = "C = E / R"
     path = tmp_path / "source.txt"
     path.write_text(text)
-    checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(
-        _request(path, tmp_path / "output")["params"]))
     calls = []
 
     def respond(stage, prompt):
@@ -176,37 +167,31 @@ def test_formula_semantics_opt_in_invalidates_only_selected_extraction(tmp_path,
         return {"entities": []}
 
     stub_native_provider(monkeypatch, respond)
-    token = active_checkpoint.set(checkpoint)
-    try:
+    with native_extraction_owner(tmp_path / "native", text=text) as store:
         args = (text, SimpleNamespace(model_id="test"), None, (0, len(text), text),
                 [{"kind": "formula", "text": text, "start": 0, "end": len(text)}])
         pipeline._extract_window_context(*args)
         pipeline._extract_window_context(*args, formula_semantics=False)
         pipeline._extract_window_context(*args, formula_semantics=True)
         pipeline._extract_window_context(*args, formula_semantics=True)
-    finally:
-        active_checkpoint.reset(token)
     assert calls == [("entities", False), ("entities", True)]
 
 
 @pytest.mark.parametrize("field,value", [("max_output_tokens", 4096), ("binding_id", "other"),
                                         ("context_window_tokens", 65536)])
-def test_native_cache_survives_host_admitted_model_configuration_changes(tmp_path, monkeypatch, field, value):
+def test_direct_native_window_receipt_ignores_nonbinding_transport_configuration(tmp_path, monkeypatch, field, value):
     from tests.artifact_helpers import stub_native_provider
     from tests.test_semantic_artifact import _request
-    from semantica.project_checkpoint import SnapshotCheckpoint, active_checkpoint
+    from tests.artifact_helpers import native_extraction_owner
     from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest
     path = tmp_path / "source.txt"
     path.write_text("source")
-    checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(
-        _request(path, tmp_path / "output")["params"]))
     calls = []
     def respond(stage, prompt):
         calls.append(stage)
         return {"entities": []}
     stub_native_provider(monkeypatch, respond)
-    token = active_checkpoint.set(checkpoint)
-    try:
+    with native_extraction_owner(tmp_path / "native", text="source") as store:
         relay = SimpleNamespace(model_id="test")
         args = ("source", relay, None, (0, 6, "source"), [])
         pipeline._extract_window_context(*args)
@@ -215,5 +200,3 @@ def test_native_cache_survives_host_admitted_model_configuration_changes(tmp_pat
         setattr(relay, field, value)
         pipeline._extract_window_context(*args)
         assert calls == ["entities"]
-    finally:
-        active_checkpoint.reset(token)

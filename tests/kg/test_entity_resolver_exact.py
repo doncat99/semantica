@@ -1,6 +1,19 @@
 from semantica.kg.entity_resolver import EntityResolver
 
 
+def test_resolution_exposes_native_property_selections_without_copying_values():
+    resolver = EntityResolver(strategy="exact")
+    rows = [{"id": "a", "name": "X", "properties": {"x": 1}},
+            {"id": "b", "name": "X", "properties": {"y": 2}}]
+    resolved = resolver.resolve_entities(rows)
+    selection = resolver.resolution_selections[resolved[0]["id"]]
+    assert selection == {"representative": resolved[0]["id"], "members": ["a", "b"],
+                         "property_sources": {"x": ["a"], "y": ["b"]},
+                         "field_sources": {"name": [resolved[0]["id"]], "type": []}}
+    resolver.resolve_entities([])
+    assert resolver.resolution_selections == {}
+
+
 def test_exact_resolution_does_not_merge_similar_names():
     entities = [
         {"id": "1", "name": "Alice"},
@@ -10,6 +23,19 @@ def test_exact_resolution_does_not_merge_similar_names():
     resolved = EntityResolver(strategy="exact").resolve_entities(entities)
 
     assert {entity["id"] for entity in resolved} == {"1", "2"}
+
+
+def test_resolution_selection_does_not_invent_missing_fields():
+    resolver = EntityResolver(strategy="exact")
+    resolver.resolve_entities([{"id": "a", "name": "X", "type": None}])
+    assert resolver.resolution_selections["a"]["field_sources"] == {"name": ["a"], "type": []}
+
+
+def test_unhashable_entity_id_remains_usable_without_durable_selection():
+    resolver = EntityResolver(strategy="exact")
+    entity = {"id": ["a"], "name": "X"}
+    assert resolver.resolve_entities([entity]) == [entity]
+    assert resolver.resolution_selections == {}
 
 
 def test_exact_resolution_merges_case_and_whitespace_variants():

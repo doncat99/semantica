@@ -290,48 +290,7 @@ class TestAgentContextDecisions:
             # Should handle errors gracefully
             pass
 
-    def test_checkpoint_diff_and_flush(self, mock_vector_store):
-        """Checkpointing should capture and diff graph changes."""
-        graph = ContextGraph()
-        context = AgentContext(
-            vector_store=mock_vector_store,
-            knowledge_graph=graph,
-            decision_tracking=True,
-        )
 
-        context.checkpoint("before")
-        decision_id = context.record_decision(
-            category="policy",
-            scenario="Apply updated policy",
-            reasoning="New evidence available",
-            outcome="approved",
-            confidence=0.9,
-        )
-        graph.add_node("entity_001", "entity", content="Customer")
-        graph.add_edge(decision_id, "entity_001", "involves")
-        context.checkpoint("after")
-
-        diff = context.diff_checkpoints("before", "after")
-
-        assert any(item["id"] == decision_id for item in diff["decisions_added"])
-        assert any(item["type"] == "involves" for item in diff["relationships_added"])
-
-        snapshot = context.flush_checkpoint("after")
-        assert snapshot["label"] == "after"
-
-    def test_diff_checkpoints_unknown_label_raises_key_error(self, mock_vector_store):
-        """Unknown checkpoint labels should raise a clear KeyError."""
-        graph = ContextGraph()
-        context = AgentContext(
-            vector_store=mock_vector_store,
-            knowledge_graph=graph,
-            decision_tracking=True,
-        )
-
-        context.checkpoint("after")
-
-        with pytest.raises(KeyError, match="unknown"):
-            context.diff_checkpoints("unknown", "after")
     
     def test_decision_tracking_requires_knowledge_graph(self, mock_vector_store):
         """Test that decision tracking requires knowledge graph."""

@@ -1,9 +1,18 @@
 """Request-local authorization for serial workers and their native task contexts."""
 from contextvars import ContextVar
+from threading import Event
 import os
 
 worker_authorization: ContextVar[dict[str, str] | None] = ContextVar("worker_authorization", default=None)
 document_processing_authorization: ContextVar[str | None] = ContextVar("document_processing_authorization", default=None)
+query_cancellation: ContextVar[Event | None] = ContextVar("query_cancellation", default=None)
+
+
+def check_query_cancellation() -> None:
+    event = query_cancellation.get()
+    if event is not None and event.is_set():
+        from .utils.exceptions import ProcessingError
+        raise ProcessingError('query canceled')
 
 
 def relay_token(name: str) -> str | None:

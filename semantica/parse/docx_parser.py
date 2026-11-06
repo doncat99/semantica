@@ -130,9 +130,6 @@ class DOCXParser:
             if not file_path.exists():
                 raise ValidationError(f"DOCX file not found: {file_path}")
 
-            if not file_path.suffix.lower() in [".docx", ".doc"]:
-                raise ValidationError(f"File is not a DOCX: {file_path}")
-
             try:
                 doc = Document(str(file_path))
 

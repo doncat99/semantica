@@ -83,7 +83,7 @@ def test_get_stats_structure():
     cache = ExtractionCache(max_size=42)
     cache.set("entities", "a", [1])
     stats = cache.get_stats()
-    assert set(stats) == {"entities", "relations", "triplets"}
+    assert set(stats) == {"entities", "relations", "triplets", "classification", "embedding"}
     assert stats["entities"] == {"size": 1, "max_size": 42}
 
 

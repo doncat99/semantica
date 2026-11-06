@@ -426,3 +426,22 @@ class TestTemporalContextHeader:
         retriever.query_with_reasoning("q", self.mock_llm)
         prompt = self.mock_llm.generate.call_args[0][0]
         assert "Graph context valid as of" not in prompt
+
+
+def test_temporal_candidate_filtering_preserves_all_record_references():
+    class NonCopyableRecord(dict):
+        def __deepcopy__(self, memo):
+            raise AssertionError('candidate records must not be copied')
+
+    entities = [NonCopyableRecord(id=i) for i in range(257)]
+    relationships = [NonCopyableRecord(source=i, target=i + 1) for i in range(256)]
+    original = _make_result(entities, relationships)
+    base = _base_mock([original])
+    result = TemporalGraphRetriever(base, at_time='2024-01-01').retrieve('q', max_results=1)[0]
+    base.retrieve.assert_called_once_with('q', max_results=1)
+    assert len(result.related_entities) == 257
+    assert len(result.related_relationships) == 256
+    assert all(a is b for a, b in zip(entities, result.related_entities))
+    assert all(a is b for a, b in zip(relationships, result.related_relationships))
+    assert original.related_entities is entities
+    assert original.related_relationships is relationships

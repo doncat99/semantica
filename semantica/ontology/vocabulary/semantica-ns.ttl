@@ -189,13 +189,6 @@ is more useful than a type that invites arithmetic it cannot support.""" ;
     rdfs:range xsd:string ;
     rdfs:isDefinedBy <https://semantica.dev/ns> .
 
-sem:snapshotAt a owl:DatatypeProperty ;
-    rdfs:label "snapshot at" ;
-    rdfs:comment """The point in time a snapshot represents, from
-GraphBuilder.create_snapshot. A string for the same reason as sem:builtAt.""" ;
-    rdfs:range xsd:string ;
-    rdfs:isDefinedBy <https://semantica.dev/ns> .
-
 sem:sourceSystem a owl:DatatypeProperty ;
     rdfs:label "source system" ;
     rdfs:comment """The system a graph was loaded from, currently the literal

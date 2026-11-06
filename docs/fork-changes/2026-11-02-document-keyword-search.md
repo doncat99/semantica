@@ -59,5 +59,27 @@ locators. Semantic knowledge search and graph storage are out of scope.
 
 ## Dated follow-ups
 
+- 2026-11-03 cancellation correction: the host previously stopped waiting but
+  drained the active query, blocking the next serial request. The existing
+  `semantic_query_worker.serve` now reads bounded cancellation frames while one
+  query executes. A request-local cancellation event reaches the existing
+  keyword reader, canonical hydration and `SQLiteVecStore.search_groups`;
+  SQLite progress handlers interrupt active SQL. Terminal responses preserve
+  the worker and installed indexes. No parallel query pool or alternate search
+  implementation is introduced. Host termination remains the bounded recovery
+  for an unresponsive worker. Regression coverage exercises active JSONL
+  cancellation, actual SQLite interruption, scratch cleanup and subsequent
+  requests. Packaged cancellation latency and full acceptance remain pending.
+
+- 2026-11-03: inspected `24ef316816ea0141a1f30b571ce8dcbbd2d78bfe`
+  plus the search working changes. `query_semantic_artifact` remains the sole
+  worker query owner. Document queries never use `ContextRetriever`; defer its
+  import until the knowledge branch so a fresh document worker does not load
+  knowledge/vector retrieval dependencies. A fresh isolated-process regression
+  failed before the change. No query, ranking, authorization or integrity
+  semantics change; packaged cold-latency qualification remains required.
+  Renewed worker/document/location/persistent-vector regression selection:
+  160 passed (`python -B -m pytest`, 2026-11-03). A fresh native development
+  artifact is being built; this is not immutable release qualification.
 - 2026-11-02: added native document occurrence pagination and graph-selection
   presentation changes; no host-side search index or duplicate knowledge layer.

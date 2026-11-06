@@ -151,8 +151,16 @@ class QueryEngine:
                 )
                 raise ValidationError("Invalid SPARQL query")
 
+            # The existing cache identifies only prepared query text. Native
+            # bindings, result formats and resource budgets are execution
+            # contracts and must reach the backend on every call. Do not reuse
+            # or populate that cache when any such option is supplied. Dataset
+            # options below are already encoded in prepared_query.
+            cacheable = self.enable_caching and not (
+                options.keys() - {"graph", "graphs", "supports_named_graphs"}
+            )
             # Check cache
-            if self.enable_caching:
+            if cacheable:
                 self.progress_tracker.update_tracking(
                     tracking_id, message="Checking cache..."
                 )
@@ -203,7 +211,7 @@ class QueryEngine:
             )
 
             # Cache result
-            if self.enable_caching:
+            if cacheable:
                 self.progress_tracker.update_tracking(
                     tracking_id, message="Caching result..."
                 )
@@ -335,21 +343,9 @@ class QueryEngine:
         Returns:
             Optimized query
         """
-        optimized = query.strip()
-
-        # Remove unnecessary whitespace
-        optimized = " ".join(optimized.split())
-
-        # Add LIMIT if SELECT query doesn't have one
-        if "SELECT" in optimized.upper() and "LIMIT" not in optimized.upper():
-            if options.get("add_limit", True):
-                default_limit = options.get("default_limit", 1000)
-                optimized += f" LIMIT {default_limit}"
-
-        # Basic query rewriting
-        # (More sophisticated optimization would require query parser)
-
-        return optimized
+        # The native backend plans SPARQL; text rewriting can change literals,
+        # comments and recall. Pagination belongs to the explicit caller query.
+        return query.strip()
 
     def plan_query(self, query: str, **options) -> QueryPlan:
         """

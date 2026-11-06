@@ -52,7 +52,6 @@ Deduplication:
     - "relationships": Relationship deduplication only
 
 Temporal Queries:
-    - "time_point": Time-point queries
     - "time_range": Time-range queries
     - "pattern": Temporal pattern detection
     - "evolution": Graph evolution analysis
@@ -97,12 +96,10 @@ Conflict Detection:
     - Conflict Categorization: Value conflicts vs relationship conflicts
 
 Temporal Operations:
-    - Time-Point Queries: Temporal filtering using valid_from/valid_until comparison
     - Time-Range Queries: Interval overlap detection, union/intersection aggregation
     - Temporal Pattern Detection: Sequence detection, cycle detection, trend analysis
     - Graph Evolution Analysis: Time-series relationship counting, diversity metrics, stability measures
     - Temporal Path Finding: BFS with temporal validity constraints
-    - Version Management: Snapshot creation, version comparison, timestamp-based versioning
 
 Deduplication:
     - Duplicate Group Detection: Similarity-based clustering, threshold-based grouping
@@ -477,7 +474,7 @@ def analyze_connectivity(
 
 
 def query_temporal(
-    graph: Dict[str, Any], query: str = "", method: str = "time_point", **kwargs
+    graph: Dict[str, Any], query: str = "", method: str = "time_range", **kwargs
 ) -> Dict[str, Any]:
     """
     Query temporal knowledge graph (convenience function).
@@ -487,8 +484,7 @@ def query_temporal(
     Args:
         graph: Knowledge graph to query
         query: Query string (optional, depends on method)
-        method: Temporal query method (default: "time_point")
-            - "time_point": Time-point queries
+        method: Temporal query method (default: "time_range")
             - "time_range": Time-range queries
             - "pattern": Temporal pattern detection
             - "evolution": Graph evolution analysis
@@ -499,19 +495,12 @@ def query_temporal(
 
     Examples:
         >>> from semantica.kg.methods import query_temporal
-        >>> result = query_temporal(kg, at_time="2024-01-01", method="time_point")
         >>> patterns = query_temporal(kg, pattern="sequence", method="pattern")
     """
     # Check for custom method in registry
     custom_method = method_registry.get("temporal", method)
     if custom_method:
-        try:
-            return custom_method(graph, query=query, **kwargs)
-        except Exception as e:
-            logger.warning(
-                f"Custom method {method} failed: {e}, falling back to time_point"
-            )
-            method = "time_point"
+        return custom_method(graph, query=query, **kwargs)
 
     try:
         # Get config
@@ -520,18 +509,17 @@ def query_temporal(
 
         query_engine = TemporalGraphQuery(**config)
 
-        if method == "time_point":
-            at_time = kwargs.get("at_time")
-            return query_engine.query_at_time(graph, query, at_time=at_time, **kwargs)
-        elif method == "time_range":
-            start_time = kwargs.get("start_time")
-            end_time = kwargs.get("end_time")
+        if method == "time_range":
+            range_options = dict(kwargs)
+            start_time = range_options.pop("start_time", None)
+            end_time = range_options.pop("end_time", None)
             return query_engine.query_time_range(
-                graph, query, start_time, end_time, **kwargs
+                graph, query, start_time, end_time, **range_options
             )
         elif method == "pattern":
-            pattern = kwargs.get("pattern", "sequence")
-            return query_engine.query_temporal_pattern(graph, pattern, **kwargs)
+            pattern_options = dict(kwargs)
+            pattern = pattern_options.pop("pattern", "sequence")
+            return query_engine.query_temporal_pattern(graph, pattern, **pattern_options)
         elif method == "evolution":
             return query_engine.analyze_evolution(graph, **kwargs)
         else:

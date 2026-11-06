@@ -3,7 +3,7 @@ import pytest
 
 from semantica.deduplication.similarity_calculator import SimilarityCalculator
 from semantica.kg.entity_resolver import EntityResolver
-from semantica.semantic_artifact_builder import _resolve_native_entities
+from semantica.semantic_publication_builder import _resolve_native_entities
 from semantica.semantic_artifact_schema import KnowledgeEntity
 
 

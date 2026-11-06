@@ -8,6 +8,13 @@ method dispatchers and extractors can share result models without import cycles.
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional
 
+def normalize_fact_predicate(value: str) -> str:
+    """Current canonical predicate identity; native observations stay lossless."""
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("fact predicate must be a non-empty string")
+    return " ".join(value.split()).casefold()
+
+
 # Provenance vocabulary for Entity.confidence, recorded under
 # metadata[CONFIDENCE_SOURCE_KEY]. Producers must use these constants so the
 # vocabulary stays greppable and typo-proof.

@@ -4,8 +4,38 @@ from concurrent.futures import ThreadPoolExecutor
 from types import SimpleNamespace
 
 import pytest
-from semantica import semantic_artifact_builder as builder
+from semantica import semantic_publication_builder as builder
 from semantica.pipeline.parallelism_manager import ParallelismManager, Task
+from semantica.semantic_artifact_schema import DocumentProcessingProfile, RecipeRef
+from semantica.semantic_artifact_schema import SourceBuildInput
+from semantica.source import source_content_revision
+from tests.artifact_helpers import native_parsed_fixture
+
+
+def scheduling_request(tmp_path, materials, parallelism, *, window_chars=1):
+    sources, refs = [], []
+    for source_id, text in materials:
+        path = tmp_path / f'{source_id}.txt'
+        path.write_text(text)
+        source = SourceBuildInput(sourceId=source_id, materialRevision=source_content_revision(path),
+            filePath=str(path), name=path.name, mimeType='text/plain')
+        # Control the producer address seam, so scheduling still consumes the
+        # canonical installed index and its real bounded native text reader.
+        from semantica import semantic_document_reader as reader
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(reader, 'source_text_windows', lambda value: (
+                (start, min(len(value), start+window_chars))
+                for start in range(0, len(value), window_chars)))
+            parsed = native_parsed_fixture(source)
+        sources.append((source, False, parsed))
+        refs.append(SimpleNamespace(source_id=source_id,
+                                    representation_revision=parsed.document['representation_revision']))
+    relay = SimpleNamespace(binding_id='test', context_window_tokens=500000, max_output_tokens=32768)
+    request = SimpleNamespace(parallelism=parallelism, project_id='fixture-project',
+        parsed_sources=refs, relays={'model': relay, 'embedding': None},
+        recipe=RecipeRef(id='model', version='1'),
+        document_processing=DocumentProcessingProfile(mode='local'))
+    return sources, request
 
 
 def test_healthy_relay_is_parallel_and_recovery_is_single_probe():
@@ -39,9 +69,7 @@ def test_healthy_relay_is_parallel_and_recovery_is_single_probe():
     assert len(entries) == 4
 
 
-def test_global_queue_interleaves_sources_preserves_order_and_budget(monkeypatch):
-    monkeypatch.setattr(builder, '_text_windows', lambda text: [(i, i+1, c) for i, c in enumerate(text)])
-    monkeypatch.setattr(builder, '_docling_locations', lambda *args: [])
+def test_global_queue_interleaves_sources_preserves_order_and_budget(tmp_path, monkeypatch):
     lock = threading.Lock()
     active = peak = 0
     calls = []
@@ -51,38 +79,36 @@ def test_global_queue_interleaves_sources_preserves_order_and_budget(monkeypatch
         with lock:
             active += 1
             peak = max(peak, active)
-            calls.append(text)
+            calls.append(item[2])
         time.sleep(.01)
         with lock:
             active -= 1
         return ({'entities': [], 'relations': []}, [], False)
     monkeypatch.setattr(builder, '_extract_window', extract)
     monkeypatch.setattr(builder, '_embed_texts', lambda texts, relay: ([[1.] for _ in texts], SimpleNamespace()))
-    request = SimpleNamespace(parallelism=2, relays={'model': None, 'embedding': None}, recipe=SimpleNamespace(extraction_spec=None))
+    sources, request = scheduling_request(tmp_path, [('source-a', 'abc'), ('source-b', 'xy')], 2)
     events = []
-    result = builder._extract_project_sources([(SimpleNamespace(source_id='a', material_revision='immutable-a'), False, ('abc', {})), (SimpleNamespace(source_id='b', material_revision='immutable-b'), False, ('xy', {}))], request, events.append)
+    result = builder._extract_project_sources(sources, request, events.append)
     assert peak == 2
-    assert calls[:2] == ['abc', 'xy']
+    # Submission interleaves sources; worker start order is not deterministic.
+    assert sorted(calls[:2]) == ['a', 'x']
     assert [len(value[1]) for value in result] == [3, 2]
     assert [[chunk['start_char'] for chunk in value[1]] for value in result] == [[0, 1, 2], [0, 1]]
     counts = [event['metadata']['completedChunks'] for event in events if event['stage'] == 'extracting']
     assert counts[0] == 0 and counts[-1] == 5
     assert counts == sorted(counts)
     initial = events[0]['metadata']['sourceProgress']
-    assert [(s['sourceId'], s['completedChunks'], s['totalChunks'], s['state']) for s in initial] == [('a', 0, 3, 'queued'), ('b', 0, 2, 'queued')]
+    assert [(s['sourceId'], s['completedChunks'], s['totalChunks'], s['state']) for s in initial] == [('source-a', 0, 3, 'queued'), ('source-b', 0, 2, 'queued')]
     extracting = [event for event in events if event['stage'] == 'extracting']
     assert any(row['inFlightChunks'] > 0 for event in extracting for row in event['metadata']['sourceProgress'])
     final = extracting[-1]['metadata']['sourceProgress']
-    assert [(s['sourceId'], s['completedChunks'], s['totalChunks'], s['state']) for s in final] == [('a', 3, 3, 'completed'), ('b', 2, 2, 'completed')]
+    assert [(s['sourceId'], s['completedChunks'], s['totalChunks'], s['state']) for s in final] == [('source-a', 3, 3, 'completed'), ('source-b', 2, 2, 'completed')]
     assert all(sum(s['completedChunks'] for s in event['metadata']['sourceProgress']) == event['metadata']['completedChunks'] for event in events)
 
 
-def test_restore_coalesces_warnings_without_blocking_worker_lock(monkeypatch):
-    monkeypatch.setattr(builder, '_text_windows', lambda text: [(i, i + 1, c) for i, c in enumerate(text)])
-    monkeypatch.setattr(builder, '_docling_locations', lambda *args: [])
+def test_restore_coalesces_warnings_without_blocking_worker_lock(tmp_path, monkeypatch):
     calls, events = [], []
-    receipt = SimpleNamespace(metadata={'rejected_candidates': [
-        {'action': 'discarded_candidate', 'diagnostic': {'reason': 'ungrounded'}} for _ in range(100)]})
+    receipt = SimpleNamespace(metadata={'rejected_count': 100})
     def extract(*args):
         calls.append(args)
         return ({'entities': [], 'relations': []}, [receipt], True)
@@ -96,14 +122,14 @@ def test_restore_coalesces_warnings_without_blocking_worker_lock(monkeypatch):
                 time.sleep(.001)
             assert len(calls) == 20
         events.append(event)
-    source = SimpleNamespace(source_id='a', material_revision='a')
-    request = SimpleNamespace(parallelism=4, relays={'model': None, 'embedding': None}, recipe=SimpleNamespace(extraction_spec=None))
-    builder._extract_project_sources([(source, False, ('a' * 20, {}))], request, progress)
+    sources, request = scheduling_request(tmp_path, [('source-a', 'a' * 20)], 4)
+    builder._extract_project_sources(sources, request, progress)
     extraction = [e for e in events if e['stage'] == 'extracting']
     assert len(extraction) < 10
     assert extraction[-1]['metadata']['warningCount'] == 2000
     assert extraction[-1]['metadata']['restoredChunks'] == 20
-    assert len(receipt.metadata['rejected_candidates']) == 100
+    assert receipt.metadata == {'rejected_count': 100}
+    assert extraction[-1]['metadata']['warning']['diagnostic'] == {'rejectedCount': 100}
 
 
 def test_exhausted_transient_failure_stops_dispatching_new_chunks():

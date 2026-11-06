@@ -207,7 +207,7 @@ def test_rule_snapshot_is_isolated_from_mutation():
     assert session.facts == frozenset({"A(a)", "B(a)"})
 
 
-def test_returned_snapshots_are_immutable():
+def test_returned_facts_deltas_and_explanations_are_immutable():
     session = TruthMaintenanceSession(rules=[rule("ab", ["A(?x)"], "B(?x)")])
     delta = session.apply(assertions=[FactSupport("s", "A(a)")])
     facts = session.facts

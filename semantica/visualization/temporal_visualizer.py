@@ -3,12 +3,11 @@ Temporal Graph Visualizer Module
 
 This module provides comprehensive visualization capabilities for temporal knowledge graphs
 in the Semantica framework, including timeline views, temporal pattern visualizations,
-snapshot comparisons, version history, and metrics evolution over time.
+version history, and metrics evolution over time.
 
 Key Features:
     - Timeline visualization of entity/relationship changes
     - Temporal pattern detection and visualization
-    - Snapshot comparison across time points
     - Version history tree visualization
     - Metrics evolution over time
     - Multi-metric time series visualization
@@ -22,7 +21,6 @@ Example Usage:
     >>> viz = TemporalVisualizer(color_scheme="default")
     >>> fig = viz.visualize_timeline(temporal_data, output="interactive")
     >>> viz.visualize_temporal_patterns(patterns, file_path="patterns.html")
-    >>> viz.visualize_snapshot_comparison(snapshots, output="interactive")
     >>> viz.visualize_version_history(version_history, file_path="versions.png")
     >>> viz.visualize_metrics_evolution(metrics_history, timestamps, output="interactive")
 
@@ -57,7 +55,6 @@ class TemporalVisualizer:
     Provides visualization methods for temporal graphs including:
     - Timeline views of entity/relationship changes
     - Temporal pattern detection and visualization
-    - Snapshot comparison across time points
     - Version history tree visualization
     - Metrics evolution over time
     - Comprehensive temporal dashboards
@@ -685,99 +682,6 @@ class TemporalVisualizer:
             yaxis_title="Pattern",
             width=1200,
             height=max(400, len(patterns) * 50),
-        )
-
-        if output == "interactive":
-            return fig
-        elif file_path:
-            export_plotly_figure(
-                fig, file_path, format=output if output != "interactive" else "html"
-            )
-            return None
-
-    def visualize_snapshot_comparison(
-        self,
-        snapshots: Dict[str, Dict[str, Any]],
-        output: str = "interactive",
-        file_path: Optional[Union[str, Path]] = None,
-        **options,
-    ) -> Optional[Any]:
-        """
-        Visualize comparison of graph snapshots at different times.
-
-        Args:
-            snapshots: Dictionary mapping timestamps to graph snapshots
-            output: Output type
-            file_path: Output file path
-            **options: Additional options
-
-        Returns:
-            Visualization figure or None
-        """
-        self._check_dependencies()
-        self.logger.info("Visualizing snapshot comparison")
-
-        timestamps = sorted(snapshots.keys())
-
-        # Extract metrics for each snapshot
-        metrics_over_time = {"entities": [], "relationships": [], "density": []}
-
-        for timestamp in timestamps:
-            snapshot = snapshots[timestamp]
-            entities = snapshot.get("entities", [])
-            relationships = snapshot.get("relationships", [])
-
-            metrics_over_time["entities"].append(len(entities))
-            metrics_over_time["relationships"].append(len(relationships))
-
-            # Calculate density
-            num_nodes = len(entities)
-            num_edges = len(relationships)
-            max_edges = num_nodes * (num_nodes - 1) / 2 if num_nodes > 1 else 0
-            density = num_edges / max_edges if max_edges > 0 else 0
-            metrics_over_time["density"].append(density)
-
-        # Create line chart
-        fig = go.Figure()
-
-        fig.add_trace(
-            go.Scatter(
-                x=timestamps,
-                y=metrics_over_time["entities"],
-                mode="lines+markers",
-                name="Entities",
-                line=dict(color="blue", width=2),
-            )
-        )
-
-        fig.add_trace(
-            go.Scatter(
-                x=timestamps,
-                y=metrics_over_time["relationships"],
-                mode="lines+markers",
-                name="Relationships",
-                line=dict(color="red", width=2),
-            )
-        )
-
-        fig.add_trace(
-            go.Scatter(
-                x=timestamps,
-                y=metrics_over_time["density"],
-                mode="lines+markers",
-                name="Density",
-                line=dict(color="green", width=2),
-                yaxis="y2",
-            )
-        )
-
-        fig.update_layout(
-            title="Graph Evolution Over Time",
-            xaxis_title="Time",
-            yaxis_title="Count",
-            yaxis2=dict(title="Density", overlaying="y", side="right"),
-            width=1200,
-            height=600,
         )
 
         if output == "interactive":

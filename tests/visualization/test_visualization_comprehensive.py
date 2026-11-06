@@ -174,10 +174,6 @@ class TestVisualizationComprehensive(unittest.TestCase):
         patterns = [{"pattern_type": "trend", "start_time": "2023", "end_time": "2024", "entities": ["e1"]}]
         viz.visualize_temporal_patterns(patterns)
         
-        # Test visualize_snapshot_comparison
-        snapshots = {"2023": {"entities": ["e1"], "relationships": []}}
-        viz.visualize_snapshot_comparison(snapshots)
-        
         # Test visualize_version_history
         history = [{"version": "v1", "date": "2023-01-01"}]
         viz.visualize_version_history(history)

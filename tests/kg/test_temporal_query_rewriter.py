@@ -318,18 +318,18 @@ class TestRewrittenQueryQuality:
 
 
 # ---------------------------------------------------------------------------
-# Rewriter never calls reconstruct_at_time
+# Rewriter never reads graph records
 # ---------------------------------------------------------------------------
 
 class TestNoReconstructAtTime:
 
-    def test_reconstruct_at_time_never_called_on_regex_path(self):
+    def test_graph_records_never_read_on_regex_path(self):
         rw = TemporalQueryRewriter()
         with patch("semantica.kg.temporal_query.TemporalGraphQuery") as mock_tgq:
             rw.rewrite("threat actors active before 2021")
             mock_tgq.assert_not_called()
 
-    def test_reconstruct_at_time_never_called_on_no_phrase(self):
+    def test_graph_records_never_read_on_no_phrase(self):
         rw = TemporalQueryRewriter()
         with patch("semantica.kg.temporal_query.TemporalGraphQuery") as mock_tgq:
             rw.rewrite("list all suppliers")
@@ -410,7 +410,7 @@ class TestLLMAssistedRewrite:
         rw.rewrite("before 2021")
         self.mock_llm.generate.assert_not_called()
 
-    def test_llm_rewrite_never_calls_reconstruct_at_time(self):
+    def test_llm_rewrite_never_reads_graph_records(self):
         self._set_llm("2021", "before")
         rw = TemporalQueryRewriter(llm_provider=self.mock_llm)
         with patch("semantica.kg.temporal_query.TemporalGraphQuery") as mock_tgq:

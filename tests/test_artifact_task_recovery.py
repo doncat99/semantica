@@ -1,9 +1,10 @@
 from collections import Counter
 from types import SimpleNamespace
+from tests.artifact_helpers import extract_source
 
 import pytest
 
-from semantica import semantic_artifact_builder as builder
+from semantica import semantic_publication_builder as builder
 from semantica.pipeline import parallelism_manager as parallel
 
 
@@ -59,8 +60,8 @@ def test_permanent_failure_is_not_retried_or_followed_by_more_tasks():
 
 def test_phase_recovery_retains_counts_and_emits_retry_timing(monkeypatch):
     monkeypatch.setattr(parallel.time, 'sleep', lambda _: None)
-    monkeypatch.setattr(builder, '_source_windows', lambda *args, **kwargs: [(0, 1, 'a'), (1, 2, 'b')])
-    monkeypatch.setattr(builder, '_docling_locations', lambda *args: [])
+    monkeypatch.setattr(builder, '_source_windows', lambda parsed:
+        type(parsed.windows)(parsed.text, [(0, 1), (1, 2)]))
     calls = Counter()
 
     def extract(text, relay, spec, locations, item, formula_semantics):
@@ -71,10 +72,8 @@ def test_phase_recovery_retains_counts_and_emits_retry_timing(monkeypatch):
 
     monkeypatch.setattr(builder, '_extract_window', extract)
     monkeypatch.setattr(builder, '_embed_texts', lambda texts, relay: ([[1.] for _ in texts], SimpleNamespace()))
-    request = SimpleNamespace(parallelism=1, relays={'model': None, 'embedding': None},
-                              recipe=SimpleNamespace(extraction_spec=None))
     events = []
-    builder._extract_project_sources([(SimpleNamespace(source_id='a'), False, ('ab', {}))], request, events.append)
+    extract_source('ab', SimpleNamespace(model_id='test'), None, progress=events.append)
     extracting = [event['metadata'] for event in events if event['stage'] == 'extracting']
     assert max(row['retryCount'] for row in extracting) == 1
     assert extracting[-1]['lastRetry'] == {'taskId': '1', 'attempt': 2, 'delayMs': 1000}
@@ -113,8 +112,8 @@ def test_long_task_emits_heartbeat_and_joins_reporter_on_settlement(monkeypatch,
     import threading
     heartbeat = threading.Event()
     events = []
-    monkeypatch.setattr(builder, '_source_windows', lambda *args, **kwargs: [(0, 1, 'a')])
-    monkeypatch.setattr(builder, '_docling_locations', lambda *args: [])
+    monkeypatch.setattr(builder, '_source_windows', lambda parsed:
+        type(parsed.windows)(parsed.text, [(0, 1)]))
 
     def progress(event):
         events.append(event)
@@ -129,14 +128,11 @@ def test_long_task_emits_heartbeat_and_joins_reporter_on_settlement(monkeypatch,
 
     monkeypatch.setattr(builder, '_extract_window', extract)
     monkeypatch.setattr(builder, '_embed_texts', lambda texts, relay: ([[1.]], SimpleNamespace()))
-    request = SimpleNamespace(parallelism=1, relays={'model': None, 'embedding': None},
-                              recipe=SimpleNamespace(extraction_spec=None))
-    sources = [(SimpleNamespace(source_id='a'), False, ('a', {}))]
     if fail:
         with pytest.raises(builder.SemanticArtifactError, match='terminal'):
-            builder._extract_project_sources(sources, request, progress)
+            extract_source('a', SimpleNamespace(model_id='test'), None, progress=progress)
     else:
-        builder._extract_project_sources(sources, request, progress)
+        extract_source('a', SimpleNamespace(model_id='test'), None, progress=progress)
     assert any(event['metadata']['elapsedMs'] >= 4000 and event['metadata']['completedChunks'] == 0
                for event in events if event['stage'] == 'extracting')
     assert not any(t.name in {'extracting-progress', 'embedding-progress'}

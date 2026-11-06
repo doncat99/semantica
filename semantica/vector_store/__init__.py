@@ -132,63 +132,51 @@ Author: Semantica Contributors
 License: MIT
 """
 
-from .config import VectorStoreConfig, vector_store_config
-from .faiss_store import FAISSStore, FAISSIndex, FAISSIndexBuilder, FAISSSearch
-from .hybrid_search import HybridSearch, MetadataFilter, SearchRanker
-from .hybrid_similarity import HybridSimilarityCalculator
-from .decision_embedding_pipeline import DecisionEmbeddingPipeline
-from .decision_vector_methods import (
-    quick_decision,
-    find_precedents,
-    explain,
-    similar_to,
-    batch_decisions,
-    filter_decisions,
-    get_decision_context,
-    search_by_entities,
-    get_decision_statistics,
-    update_similarity_weights,
-    set_global_vector_store,
-    get_global_vector_store,
-    # Aliases
-    record,
-    precedents,
-    explain_decision,
-    similar,
-    batch,
-    filter,
-    context,
-    by_entities,
-    stats,
-    weights,
-)
-from .metadata_store import MetadataIndex, MetadataSchema, MetadataStore
-from .methods import (
-    create_index,
-    delete_vectors,
-    filter_metadata,
-    get_vector_store_method,
-    hybrid_search,
-    list_available_methods,
-    manage_namespace,
-    search_vectors,
-    store_vectors,
-    update_vectors,
-)
-from .milvus_store import MilvusStore, MilvusClient, MilvusCollection, MilvusSearch
-from .namespace_manager import Namespace, NamespaceManager
-from .pgvector_store import PgVectorStore
-from .pinecone_store import PineconeStore, PineconeClient, PineconeIndex, PineconeSearch
-from .qdrant_store import QdrantStore, QdrantClient, QdrantCollection, QdrantSearch
-from .registry import MethodRegistry, method_registry
-from .sqlite_vec_store import SQLiteVecStore
-from .vector_store import VectorIndexer, VectorManager, VectorRetriever, VectorStore, SearchResult
-from .weaviate_store import (
-    WeaviateStore,
-    WeaviateClient,
-    WeaviateQuery,
-    WeaviateSchema,
-)
+from importlib import import_module
+
+# Selecting one backend must not initialize other backends or decision pipelines.
+_MODULE_EXPORTS = {
+    'config': 'VectorStoreConfig vector_store_config',
+    'faiss_store': 'FAISSStore FAISSIndex FAISSIndexBuilder FAISSSearch',
+    'hybrid_search': 'HybridSearch MetadataFilter SearchRanker',
+    'hybrid_similarity': 'HybridSimilarityCalculator',
+    'decision_embedding_pipeline': 'DecisionEmbeddingPipeline',
+    'decision_vector_methods': (
+        'quick_decision find_precedents explain similar_to batch_decisions '
+        'filter_decisions get_decision_context search_by_entities '
+        'get_decision_statistics update_similarity_weights set_global_vector_store '
+        'get_global_vector_store record precedents explain_decision similar batch '
+        'filter context by_entities stats weights'),
+    'metadata_store': 'MetadataIndex MetadataSchema MetadataStore',
+    'methods': ('create_index delete_vectors filter_metadata get_vector_store_method '
+                'hybrid_search list_available_methods manage_namespace search_vectors '
+                'store_vectors update_vectors'),
+    'milvus_store': 'MilvusStore MilvusClient MilvusCollection MilvusSearch',
+    'namespace_manager': 'Namespace NamespaceManager',
+    'pgvector_store': 'PgVectorStore',
+    'pinecone_store': 'PineconeStore PineconeClient PineconeIndex PineconeSearch',
+    'qdrant_store': 'QdrantStore QdrantClient QdrantCollection QdrantSearch',
+    'registry': 'MethodRegistry method_registry',
+    'sqlite_vec_store': 'SQLiteVecStore',
+    'vector_store': 'VectorIndexer VectorManager VectorRetriever VectorStore SearchResult',
+    'weaviate_store': 'WeaviateStore WeaviateClient WeaviateQuery WeaviateSchema',
+}
+_EXPORTS = {name: module for module, names in _MODULE_EXPORTS.items() for name in names.split()}
+
+
+def __getattr__(name):
+    if name not in _EXPORTS:
+        raise AttributeError(f'module {__name__!r} has no attribute {name!r}')
+    value = getattr(import_module('.' + _EXPORTS[name], __name__), name)
+    # Importing the homonymous submodule must not shadow the public function.
+    if getattr(globals().get('hybrid_search'), '__name__', None) == __name__ + '.hybrid_search':
+        globals()['hybrid_search'] = getattr(import_module('.methods', __name__), 'hybrid_search')
+    globals()[name] = value
+    return value
+
+
+def __dir__():
+    return sorted(set(globals()) | set(_EXPORTS))
 
 __all__ = [
     # Core vector store

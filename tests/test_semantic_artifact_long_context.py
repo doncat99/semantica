@@ -1,3 +1,4 @@
+from tests.artifact_helpers import build_source_fixture
 from tests.artifact_helpers import extract_source
 from types import SimpleNamespace
 from threading import Lock
@@ -5,7 +6,7 @@ from time import sleep
 
 import pytest
 
-from semantica import semantic_artifact_builder as pipeline
+from semantica import semantic_publication_builder as pipeline
 from semantica.source import source_content_revision
 from semantica.semantic_artifact_schema import (
     ClassificationProfile, ModelReceipt, SourceBuildInput,
@@ -68,7 +69,7 @@ def test_long_extraction_visits_tail_and_preserves_absolute_repeated_mentions(tm
     monkeypatch.setattr(pipeline, "_embed_texts", lambda texts, relay: ([[1.0, 0.0] for _ in texts], receipt("embedding", len(calls))))
     extracted, embeddings, receipts = extract_source(text, SimpleNamespace(model_id="test"), None)
     assert len(calls) >= 5 and all(len(item) <= pipeline.TEXT_WINDOW_CHARS for item in calls)
-    assert len(receipts) == len(calls) + (len(calls) + 7) // 8
+    assert len(receipts) == 2 * len(calls)
     assert embeddings[-1]["end_char"] == len(text)
     covered = set()
     for chunk in embeddings:
@@ -76,10 +77,25 @@ def test_long_extraction_visits_tail_and_preserves_absolute_repeated_mentions(tm
     assert len(covered) == len(text)
     source = tmp_path / "source.txt"
     source.write_text(text)
-    built = pipeline._build_source(SourceBuildInput(filePath=str(source), sourceId="long", materialRevision=source_content_revision(source), name=source.name, mimeType="text/plain"), False, extracted)
+    built = build_source_fixture(SourceBuildInput(filePath=str(source), sourceId="long", materialRevision=source_content_revision(source), name=source.name, mimeType="text/plain"), False, extracted)
     assert any(entity.canonical_name == "Tail" for entity in built["entities"])
     ada = [entity for entity in built["entities"] if entity.canonical_name == "Ada"]
-    assert len(ada) >= 5 and all(len(entity.evidence_ids) == 1 for entity in ada)
+    assert len(ada) >= 5
+    spans = {span.id: span for span in built['evidence']}
+    mention_starts = []
+    for entity in ada:
+        context_id = entity.metadata['identity_context_evidence_id']
+        context = spans[context_id]
+        mentions = [spans[ref] for ref in entity.evidence_ids if spans[ref].quote == 'Ada']
+        assert len(mentions) == 1
+        mention = mentions[0]
+        mention_starts.append(mention.locator.start_char)
+        assert set(entity.evidence_ids) == {mention.id, context_id}
+        assert context.quote == entity.context
+        assert context.representation_id == mention.representation_id
+        assert context.locator.start_char <= mention.locator.start_char < mention.locator.end_char <= context.locator.end_char
+        assert len(context.quote) <= len('Ada') + 480
+    assert len(set(mention_starts)) == len(ada)
     for span in built["evidence"]:
         assert text[span.locator.start_char:span.locator.end_char] == span.quote
     assert max(span.locator.start_char for span in built["evidence"]) > len(text) - 30
@@ -120,13 +136,12 @@ def test_extraction_reports_active_stage_and_preserves_exact_evidence(monkeypatc
     assert evidence == text
 
 
-def test_extraction_reports_restored_checkpoint_chunks(monkeypatch):
+def test_extraction_reports_native_adoption_reuse(monkeypatch):
     events = []
     restored = receipt("structured_extraction", 1)
-    object.__setattr__(restored, "_checkpoint_restored", True)
-    _stub_canonical_extraction(monkeypatch, lambda *args: ({"entities": [], "relations": []}, restored))
+    monkeypatch.setattr(pipeline, '_extract_window', lambda *args: ({"entities": [], "relations": []}, [restored], True))
     embedding = receipt("embedding", 1)
-    object.__setattr__(embedding, "_checkpoint_restored", True)
+    object.__setattr__(embedding, "_native_reused", True)
     monkeypatch.setattr(pipeline, "_embed_texts", lambda texts, relay: ([[1.0] for _ in texts], embedding))
 
     extract_source("source", SimpleNamespace(model_id="test"), None, progress=events.append)
@@ -158,7 +173,8 @@ def test_stage_progress_precedes_relay_calls(monkeypatch):
 
 def test_parallel_extraction_is_bounded_and_preserves_window_order(monkeypatch):
     windows = [(index * 10, index * 10 + len(f"Fact{index}"), f"Fact{index}") for index in range(4)]
-    monkeypatch.setattr(pipeline, "_text_windows", lambda text: iter(windows))
+    monkeypatch.setattr(pipeline, "_source_windows", lambda parsed:
+        type(parsed.windows)(parsed.text, [(start, end) for start, end, _ in windows]))
     lock = Lock()
     active = peak = 0
 
@@ -184,13 +200,15 @@ def test_parallel_extraction_is_bounded_and_preserves_window_order(monkeypatch):
 
 def test_parallel_embedding_batches_are_bounded_and_ordered(monkeypatch):
     windows = [(index * 10, index * 10 + len(f"Fact{index}"), f"Fact{index}") for index in range(24)]
-    monkeypatch.setattr(pipeline, "_text_windows", lambda text: iter(windows))
+    monkeypatch.setattr(pipeline, "_source_windows", lambda parsed:
+        type(parsed.windows)(parsed.text, [(start, end) for start, end, _ in windows]))
     _stub_canonical_extraction(monkeypatch, lambda window, relay: ({"entities": [], "relations": []}, receipt("structured_extraction", int(window[4:]))))
     lock = Lock()
     active = peak = 0
 
     def embed(texts, relay):
         nonlocal active, peak
+        assert len(texts) == 1
         with lock:
             active += 1
             peak = max(peak, active)
@@ -203,8 +221,9 @@ def test_parallel_embedding_batches_are_bounded_and_ordered(monkeypatch):
     text = "".join(f"Fact{index}".ljust(10) for index in range(24))
     _, embeddings, receipts = extract_source(text, SimpleNamespace(model_id="test"), None, parallelism=2)
     assert peak == 2
-    assert [chunk["vector"] for chunk in embeddings] == [[float(index)] for index in range(24)]
-    assert [item.id for item in receipts[-3:]] == [f"receipt:embedding:{index}" for index in (0, 8, 16)]
+    assert len(embeddings) == 24
+    assert all("vector" not in chunk for chunk in embeddings)
+    assert [item.id for item in receipts[-24:]] == [f"receipt:embedding:{index}" for index in range(24)]
 
 
 @pytest.mark.parametrize("data", [
@@ -215,13 +234,13 @@ def test_parallel_embedding_batches_are_bounded_and_ordered(monkeypatch):
 def test_batch_embedding_rejects_invalid_response(monkeypatch, data):
     monkeypatch.setattr(pipeline, "_relay_json", lambda *args, **kwargs: ({"model": "test", "data": data}, receipt("embedding", 1)))
     with pytest.raises(pipeline.SemanticArtifactError, match="embedding response"):
-        pipeline._embed_texts(["one", "two"], SimpleNamespace(model_id="test"))
+        pipeline._request_embedding(["one", "two"], SimpleNamespace(model_id="test"))
 
 
 def test_classification_reads_every_passage_but_report_admits_representative_source(tmp_path, monkeypatch):
     source = tmp_path / "long.txt"
     source.write_text("\n".join(f"Passage {index}: " + "fact " * 260 for index in range(90)))
-    built = pipeline._build_source(SourceBuildInput(filePath=str(source), sourceId="long", materialRevision=source_content_revision(source), name=source.name, mimeType="text/plain"), False,
+    built = build_source_fixture(SourceBuildInput(filePath=str(source), sourceId="long", materialRevision=source_content_revision(source), name=source.name, mimeType="text/plain"), False,
                                    {"entities": [], "relations": []})
     built["passages"] = pipeline._source_passages(built)
     seen = {"source_classification": set(), "knowledge_explanation": set()}
@@ -256,7 +275,15 @@ def test_classification_reads_every_passage_but_report_admits_representative_sou
     profile = ClassificationProfile(id="profile", version="1", label="Subject", description="Classification", dimensions=[{"id": "subject", "label": "Subject", "cardinality": "single", "vocabulary": [{"id": "science", "label": "Science"}]}])
     relay = SimpleNamespace(model_id='test', context_window_tokens=13000, max_output_tokens=1000)
     classification, _ = pipeline._classify_source(built, profile, relay)
-    reports, _ = pipeline._explanation_reports("project", [built], [], [], [], [], [], built["passages"], relay)
+    request = SimpleNamespace(input_revision='fixture-input', organization_reports=SimpleNamespace(recipe_digest='sha256:' + 'a' * 64))
+    def product(action, identity, *, report=None, receipts=None):
+        return None if action == 'read' else (report, receipts)
+    monkeypatch.setattr(pipeline, '_organization_report_product', product)
+    token = pipeline._native_build.set((request, None, None))
+    try:
+        reports, _ = pipeline._explanation_reports("project", [built], [], [], [], [], [], built["passages"], relay)
+    finally:
+        pipeline._native_build.reset(token)
     expected = {span.id for span in built["passages"]}
     assert seen["source_classification"] == expected
     assert seen["knowledge_explanation"] == {"e1"}
@@ -268,7 +295,7 @@ def test_classification_reads_every_passage_but_report_admits_representative_sou
 
 def test_indivisible_context_is_rejected_without_truncation():
     with pytest.raises(pipeline.SemanticArtifactError, match="indivisible"):
-        pipeline._context_batches({}, [("evidence", {"quote": "x" * 60_000})], 12000)
+        list(pipeline._context_batches({}, [("evidence", {"quote": "x" * 60_000})], 12000))
 
 
 def test_native_report_cannot_introduce_evidence_from_another_batch(monkeypatch):
@@ -277,13 +304,24 @@ def test_native_report_cannot_introduce_evidence_from_another_batch(monkeypatch)
          "citations": [{"evidence_id": "other-evidence"}]}]}
     calls = []
     def respond(*args, **kwargs):
-        calls.append(args)
+        calls.append((args, kwargs))
         return {"model": "test", "choices": [{"finish_reason": "stop", "message": {"content": __import__('json').dumps(result)}}]}, receipt("knowledge_explanation", 1)
     monkeypatch.setattr(pipeline, "_relay_json", respond)
-    with pytest.raises(pipeline.SemanticArtifactError):
+    with pytest.raises(pipeline.SemanticArtifactError) as failure:
         pipeline._grounded_explanation({"target": {"id": "overview"}, "entities": [],
             "assertions": [], "relations": [], "evidence": [{"id": "source-evidence", "quote": "Supported"}]}, SimpleNamespace(model_id="test", max_output_tokens=1024, context_window_tokens=500000))
-    assert len(calls) == 1
+    # The native structured-generation owner admits three bounded attempts;
+    # each must retain the same one-item citation scope and none may succeed.
+    assert len(calls) == 3
+    assert failure.value.code == 'MODEL_OUTPUT_SCHEMA_INVALID'
+    assert any(item['type'] == 'citation_unknown_evidence'
+               for item in failure.value.diagnostic['validationErrors'])
+    for (_relay, payload, operation), kwargs in calls:
+        assert operation == 'knowledge_explanation'
+        assert kwargs['business_context']['evidence'] == [{'id': 'e1', 'quote': 'Supported'}]
+        prompt = payload['messages'][0]['content']
+        assert 'Supported' in prompt and 'e1' in prompt
+        assert 'source-evidence' not in prompt
 
 
 def test_worker_receipt_manifest_preserves_legacy_model_receipts():

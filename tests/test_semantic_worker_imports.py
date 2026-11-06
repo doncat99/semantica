@@ -28,22 +28,16 @@ def test_lightweight_worker_operations_do_not_import_build_pipeline():
             params = {"source": source, "outputDir": str(root / "parsed"),
                       "documentProcessing": {"mode": "local"}, "forceOcr": False}
             parsed = request("parse_source", params)["result"]
-            old = root / "historical.json"
-            payload = json.loads(Path(parsed["artifactPath"]).read_bytes())
-            payload["protocol"] = "semantica.parsed-source.v1"
-            payload.pop("processingRevision")
-            old.write_text(json.dumps(payload))
-            upgraded = request("upgrade_parsed_source", {"artifactPath": str(old),
-                "artifactDigest": "sha256:" + sha256(old.read_bytes()).hexdigest(),
-                "representationRevision": parsed["representationRevision"],
-                "representationId": parsed["representationId"], "outputDir": str(root / "upgraded")})["result"]
-            assert "processingRevision" not in upgraded
             bound = request("bind_parsed_source", {**params,
                 "source": {**source, "sourceId": "two", "name": "other.txt"},
-                "parsedArtifactPath": upgraded["artifactPath"],
-                "parsedArtifactDigest": upgraded["artifactDigest"]})["result"]
+                "parsedArtifactPath": parsed["artifactPath"],
+                "parsedArtifactDigest": parsed["artifactDigest"],
+                "parsedReaderIndexPath": parsed["readerIndexPath"],
+                "parsedReaderIndexDigest": parsed["readerIndexDigest"]})["result"]
             assert bound["sourceId"] == "two"
-            assert "processingRevision" not in bound
+            assert bound["processingRevision"].startswith("sha256:")
+            assert bound["artifactPath"] == parsed["artifactPath"]
+            assert bound["sourceHeader"]["parser"] == parsed["sourceHeader"]["parser"]
             path.write_text("changed")
             output = io.StringIO()
             messages = [{"id": "bad", "method": "parse_source", "params": params},
@@ -52,10 +46,18 @@ def test_lightweight_worker_operations_do_not_import_build_pipeline():
             replies = [json.loads(x) for x in output.getvalue().splitlines()]
             assert not replies[0]["ok"] and replies[0]["error"]["type"] == "SemanticArtifactError"
             assert replies[1]["ok"]
-        forbidden = [name for name in sys.modules if name == "semantica.semantic_artifact_builder"
+        forbidden = [name for name in sys.modules if name == "semantica.semantic_publication_builder"
                      or name.startswith(("semantica.kg.", "semantica.pipeline.", "torch", "spacy", "docling."))]
         assert not forbidden, forbidden
     ''')
     result = subprocess.run([sys.executable, "-c", code], cwd=Path(__file__).resolve().parents[1],
                             capture_output=True, text=True, timeout=90)
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_publication_builder_is_the_only_current_builder_module():
+    root = Path(__file__).resolve().parents[1]
+    assert (root / 'semantica' / 'semantic_publication_builder.py').is_file()
+    assert not (root / 'semantica' / ('semantic_' + 'artifact_builder.py')).exists()
+    worker = (root / 'semantica' / 'semantic_worker.py').read_text()
+    assert 'from .semantic_publication_builder import build_semantic_artifacts' in worker

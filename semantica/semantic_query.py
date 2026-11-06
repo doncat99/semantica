@@ -1,219 +1,227 @@
-"""Snapshot-bound keyword and vector retrieval with grounded evidence."""
-
+"""Demand-driven native RDF, lexical and vector owner queries."""
 from __future__ import annotations
-
 import json
-from functools import lru_cache
+import sqlite3
+import time
 from hashlib import sha256
 from pathlib import Path
-from typing import Any
-
 from .semantic_query_schema import SemanticQueryRequest, SemanticQueryResult, QueryHit
-from .semantic_artifact_schema import SemanticArtifact
-from .context.context_retriever import ContextRetriever
+from .utils.exceptions import ValidationError, ProcessingError
 
 
 class QueryError(RuntimeError):
-    """Raised when an artifact cannot be queried safely."""
+    """Native identity, scope or resource admission failed."""
 
 
-def _read_admitted_bytes(path: Path, digest: str, identity: tuple[int, ...]) -> bytes:
-    payload = path.read_bytes()
-    current = path.stat()
-    if (current.st_dev, current.st_ino, current.st_size, current.st_mtime_ns, current.st_ctime_ns) != identity:
-        raise QueryError(f"query artifact changed during admission: {path}")
-    if f"sha256:{sha256(payload).hexdigest()}" != digest:
-        raise QueryError(f"query artifact digest does not match: {path}")
-    return payload
+def admit_native_store(reference, project, owner):
+    from .semantic_worker_context import check_query_cancellation
+    check_query_cancellation()
+    if reference.project != project:
+        raise QueryError('native store project differs from request project')
+    status = owner.publication_status(project)
+    if status is None or status['generation'] != reference.generation or status['state'] != 'ready':
+        raise QueryError('native publication stale or not ready')
+    check_query_cancellation()
+    return owner
 
 
-@lru_cache(maxsize=2)
-def _load_admitted_json(path: Path, digest: str, identity: tuple[int, ...]) -> Any:
-    return json.loads(_read_admitted_bytes(path, digest, identity))
+class NativeQueryStore:
+    """One exclusive native handle in the existing serial query worker."""
+    def __init__(self):
+        self.owner = self.reference = None
+
+    def acquire(self, reference):
+        from .triplet_store.oxigraph_store import OxigraphStore
+        from .semantic_worker_context import check_query_cancellation
+        check_query_cancellation()
+        path = Path(reference.path)
+        if not path.is_dir() or not (path / 'CURRENT').is_file():
+            raise QueryError('native store does not exist')
+        if self.owner is not None:
+            if (reference.path, reference.project) != (self.reference.path, self.reference.project):
+                raise QueryError('release the acquired native store before switching identity')
+            admit_native_store(reference, reference.project, self.owner)
+        else:
+            try:
+                candidate = OxigraphStore(path)
+            except (ProcessingError, OSError) as exc:
+                raise QueryError(str(exc)) from exc
+            try:
+                admit_native_store(reference, reference.project, candidate)
+            except BaseException:
+                candidate.close()
+                raise
+            self.owner = candidate
+        self.reference = reference
+        return dict(project=reference.project, generation=reference.generation, state='ready')
+
+    def borrow(self, reference, project):
+        if self.owner is None or (reference.path, project) != (self.reference.path, self.reference.project):
+            raise QueryError('native store must be acquired for this identity')
+        return admit_native_store(reference, project, self.owner)
+
+    def release(self, reference):
+        if self.owner is not None and (reference.path, reference.project) != (self.reference.path, self.reference.project):
+            raise QueryError('native store release identity does not match')
+        self.close()
+        return dict(project=reference.project, released=True)
+
+    def close(self):
+        if self.owner is not None:
+            self.owner.close()
+            self.owner, self.reference = None, None
 
 
-def _load_json(path: Path, digest: str) -> Any:
+def read_canonical_records(request, session):
     try:
-        stat = path.stat()
-        return _load_admitted_json(path.resolve(), digest,
-            (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
-    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise QueryError(f"query artifact is not valid UTF-8 JSON: {path}") from exc
-
-
-@lru_cache(maxsize=2)
-def _load_snapshot(path: Path, digest: str, identity: tuple[int, ...]) -> SemanticArtifact:
-    # Keep one typed graph, rather than caching both JSON and Pydantic object trees.
-    return SemanticArtifact.model_validate_json(_read_admitted_bytes(path, digest, identity))
-
-
-@lru_cache(maxsize=2)
-def _prepare_query_snapshot(path: Path, digest: str, identity: tuple[int, ...]):
-    return ContextRetriever.prepare_snapshot_search(_load_snapshot(path, digest, identity))
-
-
-def query_semantic_artifact(request: SemanticQueryRequest) -> SemanticQueryResult:
-    if request.method != "query":
-        raise QueryError("query_semantic_artifact requires method=query")
-    if request.mode == "keyword":
-        from .explorer.search_index import ReferenceGraphSearchIndex
-        import sqlite3
-        index = None
-        try:
-            index = ReferenceGraphSearchIndex(
-                Path(request.keyword_index.path), request.keyword_index.digest,
-                Path(request.snapshot.path), request.snapshot.digest, request.project_id, request.snapshot_id)
-            header, representations = index.read_catalog()
-            _validate_sources(header["lineage"].get("rule_version"),
-                [(rep["source_id"], rep["content_hash"]) for rep in representations], request.sources)
-            if request.target == "documents":
-                return _query_documents(request, representations)
-            prepared, matched_ids = index.prepare_matches((request.query or "").lower().split())
-            contexts = ContextRetriever().search_snapshot(prepared, query=request.query or "", mode="keyword",
-                retrieval=None, source_ids=request.source_ids, max_results=request.limit, matched_ids=matched_ids)
-            return _result(request, contexts)
-        except (ValueError, TypeError, sqlite3.Error) as exc:
-            raise QueryError(str(exc)) from exc
-        finally:
-            if index:
-                index.close()
-    stat = Path(request.snapshot.path).stat()
-    snapshot = _load_snapshot(Path(request.snapshot.path).resolve(), request.snapshot.digest,
-        (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
-    if snapshot.project_id != request.project_id or snapshot.id != request.snapshot_id:
-        raise QueryError("query artifacts do not match the requested semantic artifact")
-    _validate_sources(snapshot.lineage.rule_version,
-        [(rep.source_id, rep.content_hash) for rep in snapshot.document_representations], request.sources)
-    manifest_id = "retrieval:graph"
-    manifests = {item.id: item for item in snapshot.retrieval_manifests}
-    graph_manifest = manifests.get(manifest_id)
-    if graph_manifest is None:
-        raise QueryError("retrieval artifact is not the snapshot graph manifest")
-    retrieval_payload = None
-    if request.mode == "semantic":
-        if graph_manifest.artifact_hash != request.retrieval.digest:
-            raise QueryError("retrieval artifact is not the snapshot graph manifest")
-        retrieval_payload = _load_json(Path(request.retrieval.path), request.retrieval.digest)
-        if not isinstance(retrieval_payload, dict):
-            raise QueryError("retrieval artifact must be a JSON object")
-        if retrieval_payload.get("format") != "semantica.retrieval-reference.v1":
-            raise QueryError("unsupported retrieval artifact format; rebuild is required")
-        duplicate_fields = {"entities", "assertions", "relations", "identity_decisions", "conflicts", "topics", "evidence"}
-        if duplicate_fields.intersection(retrieval_payload):
-            raise QueryError("reference retrieval artifact cannot duplicate snapshot records")
-    prepared = _prepare_query_snapshot(
-        Path(request.snapshot.path).resolve(), request.snapshot.digest,
-        (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
-    try:
-        contexts = ContextRetriever().search_snapshot(
-            prepared, query=request.query or "", mode=request.mode,
-            retrieval=retrieval_payload, embedding=request.embedding,
-            source_ids=request.source_ids, max_results=request.limit)
-    except (ValueError, TypeError) as exc:
+        from .semantic_worker_context import check_query_cancellation
+        reference, selection = request.semantic_store, request.selection
+        owner = session.borrow(reference, request.project_id)
+        if selection.ids is not None:
+            result = dict(records=owner.read_native_records(request.project_id, reference.generation,
+                selection.ids, max_bytes=selection.max_bytes, source_ids=selection.source_ids), next_cursor=None)
+        else:
+            result = owner.read_publication_records(request.project_id, reference.generation,
+                source=selection.source_id, after=selection.after, limit=selection.limit, max_bytes=selection.max_bytes)
+        check_query_cancellation()
+        return dict(project=request.project_id, generation=reference.generation, **result)
+    except (ValueError, TypeError, OSError, ValidationError, ProcessingError) as exc:
         raise QueryError(str(exc)) from exc
-    return _result(request, contexts)
 
 
-def _validate_sources(rule_version, representations, sources):
-    expected = {source.source_id: source.content_hash for source in sources}
-    actual = dict(representations)
-    if (rule_version != "semantica-semantic-artifact-v6" or len(actual) != len(representations)
-            or actual != expected):
-        raise QueryError("the adopted semantic artifact is stale; rebuild before querying")
+def _receipt(value):
+    return value.model_dump(exclude_none=True)
 
 
-@lru_cache(maxsize=64)
-def _load_document(path: Path, digest: str, identity: tuple[int, ...]):
-    """Admit the existing parsed source once; never copy or reparse a source file."""
-    payload = json.loads(_read_admitted_bytes(path, digest, identity))
-    document = payload.get("document", {})
-    text = document.get("text")
-    if payload.get("protocol") != "semantica.parsed-source.v2" or not isinstance(text, str):
-        raise QueryError("document keyword search requires the canonical parsed source")
-    if document.get("format") == "docling":
-        from .semantic_artifact_builder import _docling_locations
-        locations = _docling_locations(document, text)
-    else:
-        locations = []
-        cursor = 0
-        for page in document.get("pages", []):
-            page_text = page.get("text", "")
-            number = page.get("page_number")
-            if not page_text or not isinstance(number, int) or number < 1:
-                continue
-            start = text.find(page_text, cursor)
-            if start >= 0:
-                cursor = start + len(page_text)
-                locations.append({"start": start, "end": cursor, "page": number})
-    return payload, locations
-
-
-def _query_documents(request, representations):
+def query_semantic_artifact(request: SemanticQueryRequest, *, session, metrics=None) -> SemanticQueryResult:
+    """Retrieve native addresses first; hydrate only the selected native ranges."""
     from .explorer.search_index import GraphSearchIndex
+    from .semantic_worker_context import check_query_cancellation
+    started = time.perf_counter()
+    metrics = metrics if metrics is not None else {}
+    metrics.update(retrievalMs=0., hydrationMs=0., canonicalBytes=0, recordBytes=0, sqliteVmStepsLowerBound=0)
+    lexical = vector = None
+    try:
+        if request.method != 'query':
+            raise QueryError('native query requires method=query')
+        owner = session.borrow(request.semantic_store, request.project_id)
+        status = owner.publication_status(request.project_id)
+        for name in ('keyword', 'semantic'):
+            descriptor = getattr(request.native_indexes, name)
+            if descriptor is not None and _receipt(descriptor.receipt) != status['indexes'].get(name):
+                raise QueryError('query index differs from the current native publication')
+        before = time.perf_counter()
+        if request.mode == 'keyword':
+            descriptor = request.native_indexes.keyword
+            lexical = GraphSearchIndex.open_native_positions(descriptor.path, project=request.project_id,
+                generation=request.generation, receipt=_receipt(descriptor.receipt),
+                installation_identity=tuple(map(int, descriptor.installation.identity.split(':'))))
+            page = lexical.search_native_positions(request.query, source_ids=request.source_ids,
+                limit=request.limit, after=request.position, navigation=request.navigation)
+            rows = page['items']
+        else:
+            from .vector_store.sqlite_vec_store import SQLiteVecStore
+            descriptor = request.native_indexes.semantic
+            space = descriptor.space
+            if (request.embedding.binding_id,request.embedding.model_id) != (space.binding_id,space.model_id):
+                raise QueryError('query embedding differs from native space')
+            vector = SQLiteVecStore.open_embedding_space(descriptor.path,
+                dict(binding=space.space_id,model=space.model_id,recipe=space.recipe))
+            if vector is None or vector.dimension != space.dimensions:
+                raise QueryError('native vector owner missing or incompatible')
+            search = vector.search_native_records if request.target == 'knowledge' else vector.search_native_ranges
+            rows = search(request.embedding.vector, project=request.project_id,
+                generation=request.generation,receipt=_receipt(descriptor.receipt),top_k=request.top_k or request.limit,
+                source_ids=request.source_ids,page_limit=request.limit,offset=request.offset)
+            page = dict(total=None,nextCursor=None,previousCursor=None,startOffset=request.offset)
+        metrics['retrievalMs'] = (time.perf_counter()-before)*1000
+        common = dict(project_id=request.project_id,generation=request.generation,query=request.query,
+            total=page['total'],next_position=page['nextCursor'],previous_position=page['previousCursor'],
+            start_offset=page['startOffset'],next_offset=page['startOffset']+len(rows) if page['nextCursor'] else None)
+        if request.mode == 'semantic':
+            following = request.offset + len(rows)
+            common['next_offset'] = following if len(rows) == request.limit and following < (request.top_k or request.limit) else None
+        required = sorted({source for row in rows for source in row.get('sourceIds',[row.get('sourceId')])})
+        if request.source_artifacts is None:
+            return SemanticQueryResult(**common,contexts=[],required_source_ids=required)
+        if any(source not in request.source_artifacts for source in required):
+            raise QueryError('hydration requires selected native reader references')
+        before = time.perf_counter()
+        for source in required:
+            reader = request.source_artifacts[source]
+            binding = owner.read_source_binding(request.project_id,request.generation,source)
+            if (reader.material_revision,reader.representation_revision) != (binding['material'],binding['representation']):
+                raise QueryError('selected reader differs from native source membership')
+        if request.target == 'knowledge':
+            if request.mode == 'semantic':
+                records = owner.read_native_records(request.project_id,request.generation,
+                    [row['id'] for row in rows],max_bytes=262144) if rows else []
+                for record,row in zip(records,rows,strict=True):
+                    record.update(evidenceIds=row['evidenceIds'],sourceIds=row['sourceIds'],score=row['score'],
+                        evidenceNextCursor=row['evidenceNextCursor'])
+            else:
+                positions = [dict(source=row['sourceId'],**address) for row in rows
+                    for address in row.get('ranges',[dict(nativeRef=row.get('nativeRef'),start=row.get('start'),end=row.get('end'))])]
+                records = owner.read_grounded_candidates(request.project_id,request.generation,positions,
+                    limit=request.limit,max_bytes=262144) if positions else []
+            hits = _knowledge_hits(records)
+        else:
+            hits = [_document_hit(request,row,metrics,page['startOffset']+n) for n,row in enumerate(rows)]
+        check_query_cancellation()
+        admit_native_store(request.semantic_store,request.project_id,owner)
+        metrics['hydrationMs'] = (time.perf_counter()-before)*1000
+        result = SemanticQueryResult(**common,contexts=hits)
+        if len(result.model_dump_json().encode())>262144:
+            raise QueryError('native query response exceeds 256 KiB')
+        return result
+    except (ValueError,TypeError,sqlite3.Error,OSError,ValidationError,ProcessingError) as exc:
+        raise QueryError(str(exc)) from exc
+    finally:
+        if lexical is not None:
+            lexical.close_native_positions()
+        if vector is not None:
+            vector.close()
+        metrics['durationMs'] = (time.perf_counter()-started)*1000
+
+
+def _document_hit(request,row,metrics,match_index):
+    from .semantic_document_reader import read_document_reader
+    from .semantic_query_schema import DocumentReaderSelection
     from .semantic_artifact_schema import DocumentLocator
-    reps = {rep["source_id"]: rep for rep in representations}
-    selected = set(request.source_ids) if request.source_ids is not None else set(reps)
-    refs = {ref.source_id: ref for ref in request.documents}
-    if len(refs) != len(request.documents) or set(refs) != selected:
-        raise QueryError("document keyword search requires exactly the authorized source representations")
-    hits, total = [], 0
-    for source_id, ref in refs.items():
-        path = Path(ref.path).resolve()
-        stat = path.stat()
-        payload, locations = _load_document(path, ref.digest,
-            (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns))
-        rep, document = reps[source_id], payload["document"]
-        if (payload.get("sourceId") != source_id or payload.get("materialRevision") != rep["content_hash"]
-                or document.get("content_hash") != rep["content_hash"]
-                or document.get("representation_revision") != ref.revision
-                or rep.get("metadata", {}).get("representation_revision") != ref.revision):
-            raise QueryError("parsed source does not match the adopted representation")
-        text = document["text"]
-        page = GraphSearchIndex.document_matches(text, request.query, offset=max(0, request.offset - total),
-            limit=max(1, request.limit - len(hits)))
-        page_match_indexes: dict[object, int] = {}
-        for ordinal, (start, end) in enumerate(page["matches"], start=max(0, request.offset - total)):
-            if len(hits) >= request.limit:
-                break
-            located = [item for item in locations if item.get("start") is not None
-                       and item["start"] <= start and end <= item["end"]]
-            location = min(located, key=lambda item: item["end"] - item["start"]) if located else {}
-            page_number = location.get("page")
-            # Reader matchIndex is page-local, not the result's project ordinal.
-            page_start = min((item["start"] for item in locations
-                              if item.get("page") == page_number and item.get("start") is not None), default=0)
-            import re
-            if page_number not in page_match_indexes:
-                page_match_indexes[page_number] = sum(
-                    1 for _ in re.finditer(re.escape(request.query), text[page_start:start], re.IGNORECASE)
-                )
-            match_index = page_match_indexes[page_number]
-            page_match_indexes[page_number] += 1
-            locator = DocumentLocator(representation_id=rep["id"], origin=rep["origin"], quote=text[start:end],
-                start_char=start, end_char=end, quality="precise", **{key: location[key]
-                    for key in ("page", "bbox", "table_id", "cell", "section_path") if location.get(key) is not None})
-            hits.append(QueryHit(id=f"{rep['id']}:text:{start}:{end}", kind="source_text",
-                title=payload["name"], text=text[max(0, start-100):min(len(text), end+180)], score=1,
-                source_ids=[source_id], locator=locator, match_index=match_index))
-        total += page["total"]
-    next_offset = request.offset + len(hits)
-    return SemanticQueryResult(project_id=request.project_id, snapshot_id=request.snapshot_id,
-        query=request.query, contexts=hits, retrieval_manifest_id="retrieval:graph", total=total,
-        next_offset=next_offset if next_offset < total else None)
+    source = row['sourceId']
+    reader = request.source_artifacts[source]
+    if 'materialRevision' in row and (row['materialRevision'],row['representationRevision']) != (reader.material_revision,reader.representation_revision):
+        raise QueryError('native vector range differs from selected source')
+    ranges = row.get('ranges') or [dict(nativeRef=row['nativeRef'],start=row['start'],end=row['end'])]
+    selected = [dict(nativeRef=item['nativeRef'],start=item['start'],end=item['end']) for item in ranges]
+    page = read_document_reader(reader.model_copy(update={'selection':DocumentReaderSelection.model_validate(
+        dict(field='ranges',ranges=selected,maxBytes=262144))}))
+    metrics['canonicalBytes'] += page['readBytes']
+    text = ''.join(item.get('joinBefore','')+value['text'] for item,value in zip(ranges,page['items'],strict=True))
+    first = ranges[0]
+    location = row.get('locator',page['items'][0]['locator'])
+    locator = DocumentLocator(representation_id=reader.representation_revision,nativeRef=first['nativeRef'],
+        origin='native',quote=page['items'][0]['text'],start_char=first['start'],end_char=first['end'],quality='precise',
+        **{key:location[key] for key in ('page','bbox','table_id','cell','slide','section_path') if location.get(key) is not None})
+    identity = json.dumps([reader.representation_revision,selected],separators=(',',':'))
+    return QueryHit(id='text:'+sha256(identity.encode()).hexdigest(),kind='source_text',title=source,text=text,
+        score=row.get('score',1.),source_ids=[source],locator=locator,
+        match_index=match_index if request.mode=='keyword' else None,position=row.get('position'))
 
 
-def _result(request, contexts):
-    hits = [QueryHit(
-        id=context.metadata["id"], kind=context.metadata["kind"],
-        title=context.content.split(" ", 1)[0] if context.metadata["kind"] == "evidence" else context.content[:160],
-        text=context.content, score=context.score,
-        status=context.metadata["status"], polarity=context.metadata["polarity"],
-        evidence_ids=context.metadata["evidence_ids"], source_ids=context.metadata["source_ids"],
-    ) for context in contexts]
-    return SemanticQueryResult(
-        project_id=request.project_id,
-        snapshot_id=request.snapshot_id,
-        query=request.query or "",
-        contexts=hits[:request.limit],
-        retrieval_manifest_id="retrieval:graph",
-    )
+def _knowledge_hits(records):
+    from .triplet_store.extraction_records import F,RDF_TYPE
+    kinds={'Entity':'entity','Relation':'relation','Assertion':'assertion','Evidence':'evidence','EntityMention':'evidence'}
+    hits=[]
+    for item in records:
+        fields=item['fields']
+        types=[value['value'].removeprefix(F) for value in fields.get(RDF_TYPE,[])]
+        kind=next((kinds[value] for value in types if value in kinds),None)
+        if kind is None:
+            raise QueryError('unsupported native candidate type')
+        words=[value['value'] for key,values in fields.items() if key in {F+'name',F+'label',F+'text',F+'predicate',F+'description'}
+            for value in values if value['type']=='literal']
+        text=' '.join(words)
+        hits.append(QueryHit(id=item['id'],kind=kind,title=text[:160] or item['id'],text=text,score=item.get('score',1.),
+            evidence_ids=item['evidenceIds'],source_ids=item['sourceIds'],evidence_next_cursor=item.get('evidenceNextCursor')))
+    return hits

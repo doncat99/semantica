@@ -64,6 +64,7 @@ def create_app(
     provenance_storage_path: Optional[str] = None,
     agent_memory: Optional[AgentMemory] = None,
     allowed_origins: Optional[Sequence[str]] = None,
+    native_scope=None,
 ) -> FastAPI:
     """Create an Explorer application over live graph and memory objects.
 
@@ -95,6 +96,8 @@ def create_app(
         active_session = session
         if prov_path is not None:
             active_session.set_provenance_storage_path(prov_path)
+    if native_scope is not None:
+        active_session._read_only = True
     markdown_resources = MarkdownResourceRegistry(active_session.graph, agent_memory)
 
     @asynccontextmanager
@@ -140,6 +143,8 @@ def create_app(
                 "/api/graph/search", "/api/graph/distance-matrix",
                 "/api/export", "/api/export/distance-enriched", "/api/sparql",
                 "/api/ontology/preview", "/api/ontology/skos/search",
+                "/api/native-scope/select",
+                "/api/native-scope/cancel",
             }:
                 return JSONResponse(status_code=403, content={"detail": "Published graph is read-only"})
         return await call_next(request)
@@ -194,6 +199,9 @@ def create_app(
     from .routes.vocabulary import router as vocabulary_router
 
     _auth = [Depends(require_auth)]
+    if native_scope is not None:
+        from .native_scope import install_native_scope
+        install_native_scope(app,native_scope)
     app.include_router(graph_router, dependencies=_auth)
     app.include_router(analytics_router, dependencies=_auth)
     app.include_router(decisions_router, dependencies=_auth)

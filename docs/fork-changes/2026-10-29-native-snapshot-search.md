@@ -200,3 +200,42 @@ errors. They are not accepted as passing tests or fixed by this keyword change.
 Merge assessment: preserve the native public exports, callable drift_search alias,
 and actual graph/vector/temporal behavior while keeping unrelated initialization
 off the keyword startup path. This changes dependency timing, not ownership.
+
+
+### 2026-11-05 correction: physically remove the retired aggregate query owner
+
+Inspected revision `24ef316816ea0141a1f30b571ce8dcbbd2d78bfe` plus the current
+dirty native-publication migration. The earlier aggregate query implementation
+remained executable even though its consumers and aggregate-model tests had
+already been removed. `context/snapshot_search.py` still projected full evidence,
+entity, assertion, relation, conflict and topic collections and prepared complete
+candidate/evidence maps. `ContextRetriever.prepare_snapshot_search` and
+`search_snapshot` still exposed that retired path. This was an incomplete
+physical deletion, not merely old terminology.
+
+Native assessment: `semantic_query.NativeQueryStore` and
+`query_semantic_artifact` already acquire the current native publication and
+consume canonical records, indexes and source ranges. Whole-fork hidden searches
+and the host apps/packages/e2e found no executable callers or exports of the
+retired methods; the old `test_native_snapshot_search.py` was already deleted.
+Only historical change records and ignored generated egg-info inventory still
+named the module. No App integration change or alternate reader is needed.
+
+Delete `context/snapshot_search.py` and both obsolete ContextRetriever methods.
+Keep the generic retriever's current graph/vector/temporal owners unchanged.
+Extend the existing `test_native_query.py` owner with an unavailable-retired-API
+specification: it failed before deletion because Python still resolved the
+aggregate module. No production data is touched and no network/model call is
+introduced. Existing native keyword/semantic hydration and reopen tests remain
+the behavioral protection for the current implementation.
+
+Verification: the retired-API specification failed before deletion (1 failed,
+4 deselected). After deletion, native query/keyword plus generic retriever
+global/drift, hybrid and precedent suites passed: 82 passed in 11.53 seconds.
+Scoped `git diff --check` passed. A repeated hidden executable-source search
+found the removed module and method names only in the negative specification.
+This is source deletion; it does not itself qualify the rebuilt immutable App
+artifact or close G4. Upstream merge assessment: drop the retired aggregate
+projection and its two APIs; adapt incoming retrieval changes to the single
+current native owner, never restore a snapshot fallback. No incoming upstream
+revision was inspected in this correction.

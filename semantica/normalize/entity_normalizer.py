@@ -30,6 +30,8 @@ License: MIT
 """
 
 import re
+from contextlib import contextmanager
+from ..semantic_worker_context import check_query_cancellation
 from typing import Any, Dict, List, Optional
 
 from ..utils.exceptions import ProcessingError, ValidationError
@@ -326,6 +328,34 @@ class AliasResolver:
         return entity_name
 
 
+
+def _resolution_feature(method):
+    """Memoize immutable component features only inside a resolution scope."""
+    from functools import wraps
+    @wraps(method)
+    def feature(self, entity, *args):
+        cache = getattr(self, '_resolution_features', None)
+        if cache is None or not self._context_prepared:
+            return method(self, entity, *args)
+        key = (method.__name__, id(entity), args)
+        if key in cache:
+            return cache[key]
+        value = method(self, entity, *args)
+        # Features contain scalars/sets of scalars, never entity DTOs. Charge
+        # object storage conservatively, including shared strings repeatedly.
+        from sys import getsizeof
+        def size(item):
+            total = getsizeof(item)
+            if isinstance(item, (tuple, set, frozenset)):
+                total += sum(size(child) for child in item)
+            return total
+        charge = size(key) + size(value) + 96
+        if self._resolution_feature_bytes + charge <= 16 * 1024 * 1024:
+            cache[key] = value
+            self._resolution_feature_bytes += charge
+        return value
+    return feature
+
 class EntityDisambiguator:
     """
     Entity disambiguation engine.
@@ -366,13 +396,26 @@ class EntityDisambiguator:
         self._owner_aliases = {}
         self._identity_facts = {}
         self._described_scopes = set()
-        self._supported_facts = {}
         self._instances = {}
+        self._context_prepared = False
         self.logger.debug("Entity disambiguator initialized")
 
     @staticmethod
     def _identity_name(value):
         return " ".join(str(value).translate(str.maketrans("‐‑–—", "----")).split()).casefold()
+
+    @contextmanager
+    def feature_scope(self):
+        # The caller owns the bounded, immutable component for this scope.
+        previous = getattr(self, '_resolution_features', None)
+        previous_bytes = getattr(self, '_resolution_feature_bytes', 0)
+        self._resolution_features = {}
+        self._resolution_feature_bytes = 0
+        try:
+            yield
+        finally:
+            self._resolution_features = previous
+            self._resolution_feature_bytes = previous_bytes
 
     def disambiguate(self, entity_name: str, **context) -> Dict[str, Any]:
         """
@@ -429,6 +472,7 @@ class EntityDisambiguator:
     def _profile(cls, entity):
         return entity.get("metadata", {}).get("identity_profile") or {}
 
+    @_resolution_feature
     def _owner(self, entity):
         profile = self._profile(entity)
         owner = str(profile.get("owner") or "").strip()
@@ -531,6 +575,7 @@ class EntityDisambiguator:
             r'(?:manufactures?|publish(?:es)?|operates?)\s+([^.!?;\n]+)', text, re.I)
         return cls._words(match[1]) if match else frozenset()
 
+    @_resolution_feature
     def _explicit_owner(self, entity):
         owner = self._owner(entity)
         if owner:
@@ -554,6 +599,7 @@ class EntityDisambiguator:
         definitions = self._owner_aliases.get((self._scope(entity), owner), set())
         return next(iter(definitions)) if len(definitions) == 1 else owner
 
+    @_resolution_feature
     def _effective_owner(self, entity):
         owner = self._explicit_owner(entity)
         if owner:
@@ -561,6 +607,7 @@ class EntityDisambiguator:
         owners = self._local_owners.get((self._scope(entity), self._referent(entity)), set())
         return next(iter(owners)) if len(owners) == 1 else ''
 
+    @_resolution_feature
     def _instance(self, entity):
         profile = self._profile(entity)
         value = profile.get('instance')
@@ -596,9 +643,8 @@ class EntityDisambiguator:
             (left - negative) & (right - negative)) and (
             bool(left & negative) != bool(right & negative))
 
+    @_resolution_feature
     def _supported_fact(self, entity):
-        if id(entity) in self._supported_facts:
-            return self._supported_facts[id(entity)]
         key = (self._scope(entity), self._referent(entity),
                self._effective_owner(entity), self._instance(entity))
         fact = (self._context_definition(entity) if key in self._described_scopes
@@ -610,25 +656,33 @@ class EntityDisambiguator:
             return max(observed, key=lambda words: (len(words), tuple(sorted(words))))
         return frozenset()
 
-    def prepare(self, entities):
+    def prepare(self, entities, *, context=None):
         """Index source-grounded definitions once per resolution, never across runs.
 
         Scope records provenance, not an entity identity boundary.
         Only an extracted full name actually followed by its parenthetical
         abbreviation supplies a binding; old canonical aliases do not supply one.
+        A callable supplies a fresh native cursor for each semantic indexing pass.
         """
-        self._scope_definitions = {}
-        self._source_definitions = {}
-        self._project_definitions = {}
-        self._context_definitions = {}
-        self._defined_referents = set()
-        self._definition_variants = {}
-        self._local_owners = {}
-        self._owner_aliases = {}
-        self._identity_facts = {}
-        self._described_scopes = set()
-        self._supported_facts = {}
-        for entity in entities:
+        rows = entities if callable(entities) else lambda: iter(entities)
+        if context is None:
+            self._native_context = None
+            self._context_prepared = False
+            self._scope_definitions = {}
+            self._source_definitions = {}
+            self._project_definitions = {}
+            self._context_definitions = {}
+            self._defined_referents = set()
+            self._definition_variants = {}
+            self._local_owners = {}
+            self._owner_aliases = {}
+            self._identity_facts = {}
+            self._described_scopes = set()
+        else:
+            context.reset(self)
+            self._context_prepared = False
+        for entity in rows():
+            check_query_cancellation()
             scope = self._scope(entity)
             if not scope:
                 continue
@@ -662,7 +716,7 @@ class EntityDisambiguator:
                 self._defined_referents.add(referent)
         # Only independently grounded expansions of the same abbreviation may
         # share a separator variant; compact spelling alone is not identity.
-        variants = {}
+        variants = {} if context is None else context.mapping("variant_groups")
         for short, definitions in self._project_definitions.items():
             for full in definitions:
                 if len(full.split()) >= 4:
@@ -674,21 +728,31 @@ class EntityDisambiguator:
             canonical = min(definitions)
             for full in definitions:
                 self._definition_variants[full] = canonical
-        self._defined_referents = {self._definition_variants.get(full, full)
-                                  for full in self._defined_referents}
+        if context is None:
+            self._defined_referents = {self._definition_variants.get(full, full)
+                                      for full in self._defined_referents}
+        else:
+            # Canonicalize each grounded expansion without retaining all names.
+            for _, definitions in self._project_definitions.items():
+                for full in definitions:
+                    canonical = self._definition_variants.get(full, full)
+                    if canonical != full:
+                        self._defined_referents.discard(full)
+                        self._defined_referents.add(canonical)
         # Mentions in one sentence can have different bounded context windows.
         # Match indexed expansions in each mention's own window, never another's.
-        for entity in entities:
+        for entity in rows():
+            check_query_cancellation()
             scope = self._scope(entity)
             name = self._identity_name(entity.get("name", ""))
             definitions = self._project_definitions.get(name, set())
             if not scope or not definitions:
                 continue
-            context = self._identity_name(entity.get("context", ""))
-            if len(re.findall(r"(?<!\w)" + re.escape(name) + r"(?!\w)", context)) != 1:
+            text_context = self._identity_name(entity.get("context", ""))
+            if len(re.findall(r"(?<!\w)" + re.escape(name) + r"(?!\w)", text_context)) != 1:
                 continue
             local = {full for full in definitions if re.search(
-                r"(?<!\w)" + re.escape(full) + r"\s*\(\s*[\"“]?" + re.escape(name) + r"[\"”]?\s*\)", context)}
+                r"(?<!\w)" + re.escape(full) + r"\s*\(\s*[\"“]?" + re.escape(name) + r"[\"”]?\s*\)", text_context)}
             # With one acronym occurrence, nested suffix matches describe the
             # same definition span; only its longest grounded name is local.
             local = {full for full in local if not any(
@@ -702,7 +766,8 @@ class EntityDisambiguator:
                     self._source_definitions.setdefault((source, name), set()).update(local)
         # Owner aliases use the same grounded definition mechanism. A legal
         # suffix is never stripped globally.
-        for entity in entities:
+        for entity in rows():
+            check_query_cancellation()
             owner = str(self._profile(entity).get('owner') or '')
             quote = str(self._profile(entity).get('evidence') or '')
             if not owner:
@@ -713,17 +778,21 @@ class EntityDisambiguator:
                 if self._identity_name(owner) in {full, short} and self._abbreviation(full, short):
                     self._owner_aliases.setdefault((self._scope(entity), full), set()).add(full)
                     self._owner_aliases.setdefault((self._scope(entity), short), set()).add(full)
-        for entity in entities:
+        for entity in rows():
+            check_query_cancellation()
             referent = self._referent(entity)
             owner = self._explicit_owner(entity)
             if owner and self._scope(entity):
                 self._local_owners.setdefault((self._scope(entity), referent), set()).add(owner)
-        self._instances = {}
-        for entity in entities:
+        if context is None:
+            self._instances = {}
+        for entity in rows():
+            check_query_cancellation()
             if self._description_key(entity):
                 self._described_scopes.add((self._scope(entity), self._referent(entity),
                     self._effective_owner(entity), self._instance(entity)))
-        for entity in entities:
+        for entity in rows():
+            check_query_cancellation()
             referent = self._referent(entity)
             owner = self._effective_owner(entity)
             instance = self._instance(entity)
@@ -733,8 +802,11 @@ class EntityDisambiguator:
                     and not self._description_key(entity) else self._context_fact(entity))
             if fact:
                 self._identity_facts.setdefault(key, set()).add(fact)
-        self._supported_facts = {id(entity): self._supported_fact(entity) for entity in entities}
+        if context is not None:
+            context.seal()
+        self._context_prepared = True
 
+    @_resolution_feature
     def _definitions(self, entity, name):
         definitions = self._context_definitions.get((self._scope(entity), entity.get("context", ""), name), set())
         if definitions:
@@ -748,6 +820,7 @@ class EntityDisambiguator:
         definitions = source_definitions or self._scope_definitions.get((self._scope(entity), name), set())
         return {self._definition_variants.get(full, full) for full in definitions}
 
+    @_resolution_feature
     def _grounded_full_definition(self, entity, referent):
         """A locally expanded full name is a named referent, not a generic dependent head."""
         name = self._referent_name(entity.get("name", ""))
@@ -755,6 +828,7 @@ class EntityDisambiguator:
         return not (separator and self._dependent(entity, head)) and name == referent and (
             referent in self._defined_referents or name in self._definition_variants)
 
+    @_resolution_feature
     def _referent(self, entity):
         scope = self._scope(entity)
         name = self._referent_name(entity.get("name", ""))

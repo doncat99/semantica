@@ -15,7 +15,6 @@ from collections.abc import Iterable
 from typing import Dict, FrozenSet, List, Set, Tuple
 
 from ..utils.exceptions import ProcessingError, ValidationError
-from ._truth_maintenance_checkpoint import decode_checkpoint, encode_checkpoint
 from ._truth_maintenance_validation import (
     _RuleSnapshot,
     build_rule_snapshots,
@@ -29,7 +28,6 @@ from .truth_maintenance_types import (
     FactExplanation,
     FactSupport,
     MaintenanceDelta,
-    TruthMaintenanceSnapshot,
 )
 
 __all__ = ["TruthMaintenanceSession"]
@@ -173,24 +171,14 @@ class TruthMaintenanceSession:
         """Monotonic commit counter; unchanged for net-zero updates."""
         return self._version
 
-    def snapshot(self) -> TruthMaintenanceSnapshot:
-        """Return an immutable, detached view of the current committed state.
+    def has_fact(self, fact: str) -> bool:
+        """Check one canonical fact without copying the session's fact set."""
+        return validate_fact_text(fact) in self._state.active_facts
 
-        The snapshot is a full copy: later ``apply`` batches never change an
-        existing snapshot.  Reading it obeys the same caller-serialized
-        access contract as the rest of the session API.
-        """
-        state = self._state
-        return TruthMaintenanceSnapshot(
-            version=self._version,
-            facts=frozenset(state.active_facts),
-            active_supports=tuple(
-                sorted(
-                    state.active_supports.values(),
-                    key=lambda support: support.support_id,
-                )
-            ),
-        )
+    def has_support(self, support_id: str) -> bool:
+        """Check one active support identity without enumerating its catalog."""
+        identifiers = _coerce_id_iterable([support_id])
+        return identifiers[0] in self._state.active_supports
 
     def explain(self, fact: str) -> FactExplanation:
         """Explain one fact: explicit supports plus retained derivations."""
@@ -207,61 +195,6 @@ class TruthMaintenanceSession:
             key=lambda item: (item.rule_id, item.premises, item.bindings),
         )
         return FactExplanation(canonical, True, support_ids, tuple(derivations))
-
-    # -- checkpoints ------------------------------------------------------
-
-    def to_checkpoint(self) -> Dict[str, object]:
-        """Return a JSON-compatible, detached v1 checkpoint of this session.
-
-        The payload contains captured rules, the complete support catalog,
-        active support IDs, and the committed version.  It never contains
-        derived facts or internal indexes.  The session state is not read
-        through caller-owned :class:`Rule` objects and no matcher is invoked.
-        """
-        state = self._state
-        return encode_checkpoint(
-            rules=self._rules,
-            support_catalog=state.support_catalog,
-            active_support_ids=state.active_supports,
-            session_version=self._version,
-        )
-
-    @classmethod
-    def from_checkpoint(cls, payload: object) -> TruthMaintenanceSession:
-        """Restore a new session from a fixed v1 checkpoint payload.
-
-        Structural, rule, fact, arity, and closure rebuilding must all
-        succeed before a session is returned.  On failure, neither the input
-        payload nor an existing source session is modified.
-        """
-        try:
-            decoded = decode_checkpoint(payload)
-            session = cls(rules=decoded.rules)
-            canonical_pairs, new_arities = session._validate_assertions(
-                list(decoded.catalog_supports), []
-            )
-
-            candidate = _SessionState()
-            candidate.support_catalog = dict(canonical_pairs)
-            candidate.arities = dict(session._state.arities)
-            candidate.arities.update(new_arities)
-            session._state = candidate
-
-            session.apply(
-                assertions=[
-                    FactSupport(support_id, candidate.support_catalog[support_id])
-                    for support_id in decoded.active_support_ids
-                ]
-            )
-            session._version = decoded.session_version
-            return session
-        except (ValidationError, ProcessingError):
-            raise
-        except Exception as exc:
-            raise ProcessingError(
-                "truth maintenance checkpoint restore failed",
-                validation_context={},
-            ) from exc
 
     # -- batched updates --------------------------------------------------
 

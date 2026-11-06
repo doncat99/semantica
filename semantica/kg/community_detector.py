@@ -50,6 +50,10 @@ from typing import Any, Dict, List, Optional
 from ..utils.logging import get_logger
 from ..utils.progress_tracker import get_progress_tracker
 from ._graph_view import (
+    _extract_nodes,
+    _extract_edges,
+    _node_id,
+    _edge_endpoints,
     build_adjacency,
     build_edge_type_index,
     build_graph_view,
@@ -132,7 +136,7 @@ class CommunityDetector:
             self.progress_tracker.enabled = True
 
     def detect_communities_greedy_modularity(self, graph, resolution=1.0, **options):
-        """Run NetworkX greedy modularity explicitly, preserving isolated nodes."""
+        """Run exact greedy modularity, preserving isolated nodes."""
         if not self.use_networkx:
             raise RuntimeError("greedy_modularity requires NetworkX")
         from networkx.algorithms import community
@@ -141,7 +145,8 @@ class CommunityDetector:
             groups = [{node} for node in nx_graph.nodes]
             modularity = 0.0
         else:
-            groups = list(community.greedy_modularity_communities(nx_graph, resolution=resolution))
+            from ._greedy_modularity import greedy_modularity_communities
+            groups = greedy_modularity_communities(nx_graph, resolution=resolution)
             modularity = community.modularity(nx_graph, groups, resolution=resolution)
         groups = sorted((sorted(group) for group in groups), key=lambda group: tuple(group))
         return {"communities": groups,
@@ -461,11 +466,22 @@ class CommunityDetector:
         if hasattr(graph, 'nodes') and hasattr(graph, 'edges') and hasattr(graph, 'number_of_nodes'):
             return graph
 
-        view = build_graph_view(graph)
         nx_graph = self.nx.Graph()
-
-        nx_graph.add_nodes_from(view.nodes)
-        nx_graph.add_edges_from(view.edges)
+        for value in _extract_nodes(graph):
+            node = _node_id(value)
+            if node is not None and node != "":
+                nx_graph.add_node(node)
+        for value in _extract_edges(graph):
+            endpoints = _edge_endpoints(value)
+            if endpoints is None:
+                continue
+            source, target = (_node_id(value) for value in endpoints)
+            # GraphView admits a valid endpoint even when its counterpart is invalid.
+            for node in (source, target):
+                if node is not None and node != "":
+                    nx_graph.add_node(node)
+            if source is not None and source != "" and target is not None and target != "":
+                nx_graph.add_edge(source, target)
 
         return nx_graph
 

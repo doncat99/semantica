@@ -75,7 +75,8 @@ def test_exported_relationship_expiry_retracts_derived_facts():
     managed.sync(exported(), valid_at=at(10), known_at=at(10))
     managed.advance(valid_at=at(30), known_at=at(30))
     assert not managed.facts
-    assert managed.query_at(valid_at=at(10), known_at=at(30)).facts
+    managed.advance(valid_at=at(10), known_at=at(30))
+    assert managed.facts
 
 
 def test_exported_relationship_known_time_start_is_honoured():

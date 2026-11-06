@@ -141,7 +141,7 @@ class TestTemporalReasoningEngine:
         assert result["end_time"] is TemporalBound.OPEN
         assert [rel["id"] for rel in result["relationships"]] == ["open"]
 
-    def test_query_at_time_respects_month_granularity(self):
+    def test_record_active_at_time_respects_month_granularity(self):
         query = TemporalGraphQuery(temporal_granularity="month")
         graph = {
             "relationships": [
@@ -149,8 +149,8 @@ class TestTemporalReasoningEngine:
             ]
         }
 
-        january = query.query_at_time(graph, "", "2024-01-05T00:00:00Z")
-        february = query.query_at_time(graph, "", "2024-02-15T00:00:00Z")
+        january = {"relationships": [rel for rel in graph["relationships"] if query._relationship_active_at_time(rel, query._parse_time('2024-01-05T00:00:00Z'), time_axis="valid")]}
+        february = {"relationships": [rel for rel in graph["relationships"] if query._relationship_active_at_time(rel, query._parse_time('2024-02-15T00:00:00Z'), time_axis="valid")]}
 
         assert [rel["id"] for rel in january["relationships"]] == ["late-jan"]
         assert february["relationships"] == []

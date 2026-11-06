@@ -10,7 +10,6 @@ Key Features:
     - Temporal knowledge graph support with time-aware edges
     - Entity resolution and deduplication
     - Conflict detection and resolution
-    - Temporal snapshots and versioning
     - Neo4j integration for graph storage
 
 Example Usage:
@@ -38,7 +37,6 @@ class GraphBuilder:
     • Manages node and edge creation with temporal annotations
     • Handles graph structure optimization
     • Supports incremental graph building
-    • Enables temporal versioning and snapshots
 
     Attributes:
         • merge_entities: Whether to merge duplicate entities
@@ -47,13 +45,10 @@ class GraphBuilder:
         • enable_temporal: Enable temporal knowledge graph features
         • temporal_granularity: Time granularity (second, minute, hour, day, etc.)
         • track_history: Track historical changes
-        • version_snapshots: Create version snapshots
 
     Methods:
         • build(): Build knowledge graph from sources
         • add_temporal_edge(): Add edge with temporal validity
-        • create_temporal_snapshot(): Create temporal snapshot
-        • query_temporal(): Query graph at specific time point
     """
 
     def __init__(
@@ -64,7 +59,6 @@ class GraphBuilder:
         enable_temporal=False,
         temporal_granularity="day",
         track_history=False,
-        version_snapshots=False,
         graph_store=None,
         **kwargs,
     ):
@@ -79,7 +73,6 @@ class GraphBuilder:
             enable_temporal: Enable temporal knowledge graph features
             temporal_granularity: Time granularity ("second", "minute", "hour", "day", "week", "month", "year")
             track_history: Track historical changes to entities/relationships
-            version_snapshots: Create version snapshots at intervals
             graph_store: Optional GraphStore instance for persistence
             **kwargs: Additional configuration options
         """
@@ -89,7 +82,6 @@ class GraphBuilder:
         self.enable_temporal = enable_temporal
         self.temporal_granularity = temporal_granularity
         self.track_history = track_history
-        self.version_snapshots = version_snapshots
         self.graph_store = graph_store
         # The orchestrator builds with GraphBuilder(config=self.config.get("kg", {})).
         # That lands as a nested "config" keyword, so fold it into the option
@@ -1278,190 +1270,6 @@ class GraphBuilder:
                 message=f"Added temporal edge: {source} -{relationship}-> {target}",
             )
             return edge
-
-        except Exception as e:
-            self.progress_tracker.stop_tracking(
-                tracking_id, status="failed", message=str(e)
-            )
-            raise
-
-    def create_temporal_snapshot(
-        self, graph, timestamp=None, snapshot_name=None, **options
-    ):
-        """Create a snapshot of a graph at a specific point in time.
-
-        Args:
-            graph: Knowledge graph whose entities and relationships will be
-                copied into the snapshot.
-            timestamp: Snapshot time, or ``None`` to use the current time.
-            snapshot_name: Optional human-readable snapshot name.
-            **options: Additional snapshot options reserved for extensions.
-
-        Returns:
-            A snapshot dictionary containing the name, timestamp, all copied
-            entities, relationships valid at the timestamp, and summary
-            metadata.
-
-        Example:
-            >>> builder = GraphBuilder(resolve_conflicts=False)
-            >>> snapshot = builder.create_temporal_snapshot(  # doctest: +SKIP
-            ...     {"entities": [{"id": "ada"}], "relationships": []},
-            ...     timestamp="2026-01-01T00:00:00",
-            ...     snapshot_name="new-year",
-            ... )
-            >>> snapshot["name"]  # doctest: +SKIP
-            'new-year'
-        """
-        tracking_id = self.progress_tracker.start_tracking(
-            module="kg",
-            submodule="GraphBuilder",
-            message=f"Creating temporal snapshot: {snapshot_name or 'unnamed'}",
-        )
-
-        try:
-            self.logger.info(
-                f"Creating temporal snapshot: {snapshot_name or 'unnamed'}"
-            )
-
-            snapshot_time = self._parse_time(timestamp) or self._get_timestamp()
-
-            self.progress_tracker.update_tracking(
-                tracking_id, message="Filtering entities and relationships..."
-            )
-
-            # Filter entities and relationships valid at snapshot time
-            entities = []
-            relationships = []
-
-            # Get all entities
-            if "entities" in graph:
-                entities = graph["entities"].copy()
-
-            # Filter relationships valid at snapshot time
-            if "relationships" in graph:
-                for rel in graph["relationships"]:
-                    valid_from = self._parse_time(rel.get("valid_from"))
-                    valid_until = self._parse_time(rel.get("valid_until"))
-
-                    # Check if relationship is valid at snapshot time
-                    if (
-                        valid_from
-                        and self._compare_times(snapshot_time, valid_from) < 0
-                    ):
-                        continue
-                    if (
-                        valid_until
-                        and self._compare_times(snapshot_time, valid_until) > 0
-                    ):
-                        continue
-
-                    relationships.append(rel)
-
-            snapshot = {
-                "name": snapshot_name or f"snapshot_{snapshot_time}",
-                "timestamp": snapshot_time,
-                "entities": entities,
-                "relationships": relationships,
-                "metadata": {
-                    "num_entities": len(entities),
-                    "num_relationships": len(relationships),
-                    "snapshot_time": snapshot_time,
-                },
-            }
-
-            self.progress_tracker.stop_tracking(
-                tracking_id,
-                status="completed",
-                message=f"Created snapshot with {len(entities)} entities, {len(relationships)} relationships",
-            )
-            return snapshot
-
-        except Exception as e:
-            self.progress_tracker.stop_tracking(
-                tracking_id, status="failed", message=str(e)
-            )
-            raise
-
-    def query_temporal(
-        self,
-        graph,
-        query,
-        at_time=None,
-        time_range=None,
-        temporal_window=None,
-        **options,
-    ):
-        """Query a graph at a specific time or over a time range.
-
-        Args:
-            graph: Knowledge graph to query.
-            query: Query text to record in the result. The current
-                implementation does not interpret it or filter the graph.
-            at_time: Optional point in time at which to query the graph.
-            time_range: Optional ``(start, end)`` time range. The graph is
-                evaluated at the end of the range.
-            temporal_window: Optional temporal-window value reserved for
-                query-engine integrations.
-            **options: Additional query options reserved for extensions.
-
-        Returns:
-            A dictionary containing the query, temporal context, entities and
-            relationships from the selected graph or snapshot, and graph
-            metadata.
-
-        Example:
-            >>> builder = GraphBuilder(resolve_conflicts=False)
-            >>> result = builder.query_temporal(  # doctest: +SKIP
-            ...     {"entities": [{"id": "ada"}], "relationships": []},
-            ...     "MATCH (n) RETURN n",
-            ... )
-            >>> result["entities"][0]["id"]  # doctest: +SKIP
-            'ada'
-        """
-        tracking_id = self.progress_tracker.start_tracking(
-            module="kg",
-            submodule="GraphBuilder",
-            message=f"Executing temporal query: {query[:50]}...",
-        )
-
-        try:
-            self.logger.info(f"Executing temporal query: {query[:50]}...")
-
-            self.progress_tracker.update_tracking(
-                tracking_id, message="Creating temporal snapshot for query..."
-            )
-
-            # Create snapshot for query time
-            if at_time:
-                snapshot = self.create_temporal_snapshot(graph, timestamp=at_time)
-            elif time_range:
-                start_time, end_time = time_range
-                # Query at end time
-                snapshot = self.create_temporal_snapshot(graph, timestamp=end_time)
-            else:
-                # Use current graph
-                snapshot = graph
-
-            self.progress_tracker.update_tracking(
-                tracking_id, message="Executing query..."
-            )
-
-            # Basic query execution (simplified)
-            # In a real implementation, this would use a proper query engine
-            results = {
-                "query": query,
-                "timestamp": at_time or (time_range[1] if time_range else None),
-                "entities": snapshot.get("entities", []),
-                "relationships": snapshot.get("relationships", []),
-                "metadata": snapshot.get("metadata", {}),
-            }
-
-            self.progress_tracker.stop_tracking(
-                tracking_id,
-                status="completed",
-                message=f"Query executed: {len(results.get('entities', []))} entities, {len(results.get('relationships', []))} relationships",
-            )
-            return results
 
         except Exception as e:
             self.progress_tracker.stop_tracking(

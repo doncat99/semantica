@@ -71,11 +71,20 @@ _PARSER_MODULES = {
 }
 
 
-def document_parser_digest(files: list[dict], dependency_files: set[str] | None = None) -> str:
-    """Hash the parser runtime without coupling it to knowledge extraction code."""
+def document_parser_digest(files: list[dict], dependency_files: set[str] | None = None,
+                           console_script_files: set[str] | None = None) -> str:
+    """Hash parser execution inputs, separately from the complete artifact inventory."""
     selected = []
     for item in files:
         path = item["path"]
+        if console_script_files and path in console_script_files:
+            continue
+        # These installer records describe location/time, not import semantics.
+        # METADATA, entry_points.txt and all actual dependency bytes remain inputs.
+        if ".dist-info/" in path and path.rsplit(".dist-info/", 1)[1] in {
+            "RECORD", "direct_url.json", "uv_cache.json",
+        }:
+            continue
         marker = "/site-packages/semantica/"
         if path == "release.json" or ("/site-packages/semantica-" in path and ".dist-info/" in path):
             continue
@@ -122,6 +131,47 @@ def parser_dependency_files(root: Path) -> set[str]:
     return files
 
 
+def parser_console_script_files(root: Path) -> set[str]:
+    """Generated CLI wrappers unused by the isolated worker's library calls.
+
+    Identify wrappers through installed entry-point metadata, never by dropping
+    all bin files: Python interpreters and native tools are execution inputs.
+    """
+    from importlib import metadata
+    protected = {"python", "python3", "pythonw", "ffprobe"}
+    scripts = set()
+    for distribution in metadata.distributions():
+        # Wheels can declare script-files without entry_points (e.g. dill's
+        # profiling CLI). Identify installed Python scripts from their RECORD
+        # path and Python launcher; do not exclude arbitrary native bin tools.
+        for file in distribution.files or []:
+            candidate = Path(distribution.locate_file(file)).resolve()
+            if candidate.parent not in {root / "python/bin", root / "python/Scripts"}:
+                continue
+            if candidate.name in protected or candidate.name.startswith("python") or not candidate.is_file():
+                continue
+            with candidate.open("rb") as stream:
+                header = stream.read(512)
+            first_line = header.split(b"\n", 1)[0]
+            if ((first_line.startswith(b"#!") and b"python" in first_line)
+                    or (header.startswith(b"#!/bin/sh\n'''exec' ")
+                        and b"python" in header.split(b"\n", 2)[1])):
+                scripts.add(candidate.relative_to(root).as_posix())
+        for entry in distribution.entry_points:
+            if entry.group not in {"console_scripts", "gui_scripts"}:
+                continue
+            name = entry.name
+            if Path(name).name != name or name in protected or name.startswith("python"):
+                continue
+            candidates = [root / "python/bin" / name,
+                          *(root / "python/Scripts" / (name + suffix)
+                            for suffix in (".exe", "-script.py", "-script.pyw"))]
+            for candidate in candidates:
+                if candidate.is_file() and not candidate.is_symlink():
+                    scripts.add(candidate.relative_to(root).as_posix())
+    return scripts
+
+
 def remove_generated_bytecode(root: Path) -> None:
     for path in root.rglob("*.pyc"):
         if "__pycache__" in path.relative_to(root).parts:
@@ -154,7 +204,7 @@ def prune_worker_models(root: Path) -> None:
                     duplicate.unlink()
 
 
-def verify_bundle_inventory(root: Path, manifest: dict, *, remove_untracked_bytecode: bool = False) -> None:
+def verify_bundle_inventory(root: Path, manifest: dict) -> None:
     """Verify that the bundle contains exactly the immutable manifest files."""
     expected = {item["path"]: item for item in manifest["files"]}
     if len(expected) != len(manifest["files"]):
@@ -170,10 +220,6 @@ def verify_bundle_inventory(root: Path, manifest: dict, *, remove_untracked_byte
         return files
 
     actual = inventory()
-    if remove_untracked_bytecode:
-        remove_generated_bytecode(root)
-        actual = inventory()
-
     missing = sorted(expected.keys() - actual.keys())
     extra = sorted(actual.keys() - expected.keys())
     if missing or extra:
@@ -267,7 +313,7 @@ def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, output: P
     prune_worker_models(output)
     # CPython -I removes ambient Python paths; -B keeps the immutable tree clean.
     probe = subprocess.run([str(python), "-I", "-B", "-c",
-        "import json; from semantica.semantic_artifact_schema import semantic_artifact_json_schema; print(json.dumps(semantic_artifact_json_schema(), sort_keys=True, separators=(',', ':')))"],
+        "import json; from semantica.semantic_artifact_schema import build_request_json_schema; print(json.dumps(build_request_json_schema(), sort_keys=True, separators=(',', ':')))"],
         capture_output=True, text=True, check=True)
     schema_digest = "sha256:" + hashlib.sha256(probe.stdout.strip().encode()).hexdigest()
     manifest = {
@@ -278,8 +324,6 @@ def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, output: P
         "queryWorker": {"path": f"python/{python_name}", "args": ["-I", "-B", "-m", "semantica.semantic_query_worker"]},
         "mediaTypes": {
             "document-representation": "application/vnd.semantica.document-representation+json",
-            "retrieval-index": "application/vnd.semantica.retrieval+json",
-            "semantic-graph": "application/vnd.semantica.semantic-graph+json",
         },
         "files": [],
     }
@@ -298,9 +342,13 @@ def build_bundle(*, python_root: Path, wheel: Path, models_root: Path, output: P
         if item.is_file():
             manifest["files"].append({"path": item.relative_to(output).as_posix(), "size": item.stat().st_size, "sha256": digest_file(item)})
     closure = subprocess.run([str(python), "-I", "-B", "-c",
-        "import json,sys; from pathlib import Path; from semantica.bundle import parser_dependency_files; print(json.dumps(sorted(parser_dependency_files(Path(sys.argv[1]).resolve()))))", str(output)],
+        "import json,sys; from pathlib import Path; from semantica.bundle import parser_dependency_files,parser_console_script_files; "
+        "root=Path(sys.argv[1]).resolve(); print(json.dumps(dict(dependencies=sorted(parser_dependency_files(root)),"
+        "scripts=sorted(parser_console_script_files(root)))))", str(output)],
         capture_output=True, text=True, check=True)
-    manifest["documentParserDigest"] = document_parser_digest(manifest["files"], set(json.loads(closure.stdout)))
+    parser_inputs = json.loads(closure.stdout)
+    manifest["documentParserDigest"] = document_parser_digest(manifest["files"],
+        set(parser_inputs["dependencies"]), set(parser_inputs["scripts"]))
     descriptor = [manifest["protocol"], schema_digest, manifest["documentParserDigest"], manifest["pythonPath"],
                   [manifest["worker"]["path"], manifest["worker"]["args"]],
                   [manifest["queryWorker"]["path"], manifest["queryWorker"]["args"]],

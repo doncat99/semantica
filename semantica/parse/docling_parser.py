@@ -159,7 +159,7 @@ class DoclingParser:
                 - extract_tables: Whether to extract tables (default: True)
                 - extract_images: Whether to extract images (default: False)
                 - export_format: Export format ("markdown", "html", "json", "doctags")
-                - include_document: Include complete document JSON and DocTags from
+                - include_document: Include complete native document JSON from
                   the same conversion (default: False).
                 - pages: Specific page numbers to parse (None = all pages) - PDF only
                 - progress_callback: Optional native Docling conversion event callback.
@@ -278,7 +278,7 @@ class DoclingParser:
             elif export_format == "json":
                 # JSON export returns structured data
                 doc_dict = result.document.export_to_dict()
-                full_text = self._extract_text_from_dict(doc_dict)
+                full_text = result.document.export_to_text()
             elif export_format == "doctags":
                 full_text = result.document.export_to_doctags()
             else:
@@ -292,6 +292,7 @@ class DoclingParser:
                 message="Extracting document metadata..."
             )
             metadata = self._extract_metadata(result, file_path)
+            metadata.format = options.get('source_suffix', file_path.suffix.lower()).lstrip('.')
 
             # Stage 6: Table extraction (85-95%)
             tables = []
@@ -311,25 +312,37 @@ class DoclingParser:
                 total=10,
                 message="Extracting page structure..."
             )
-            pages = self._extract_pages(result, options)
-            cell_origins = {
-                bool(cell.from_ocr)
-                for page in getattr(result, "pages", [])
-                for cell in getattr(page, "cells", [])
-                if getattr(cell, "text", "").strip() and isinstance(getattr(cell, "from_ocr", None), bool)
-            }
             include_document = options.get("include_document", False)
-            plain_text = result.document.export_to_text() if include_document else full_text
+            # Complete native JSON already owns page contents. Only location
+            # descriptors may accompany it; never another page body projection.
+            page_origins = {}
+            cell_origins = set()
+            for converted_page in getattr(result, "pages", []):
+                origins = {cell.from_ocr for cell in getattr(converted_page, "cells", [])
+                           if getattr(cell, "text", "").strip()
+                           and isinstance(getattr(cell, "from_ocr", None), bool)}
+                cell_origins.update(origins)
+                if origins:
+                    # Converter Page.page_no and DoclingDocument.pages are
+                    # both 1-based. Keep only origin metadata, never cell text.
+                    page_origins[converted_page.page_no] = (
+                        "mixed" if len(origins) == 2 else "ocr" if True in origins else "native")
+            native_only = not (self.enable_ocr or self.force_full_page_ocr)
+            pages = ([{"page_number": number,
+                       "width": getattr(getattr(page, "size", None), "width", 0),
+                       "height": getattr(getattr(page, "size", None), "height", 0),
+                       "origin": page_origins.get(number, "native" if native_only else None)}
+                      for number, page in result.document.pages.items()]
+                     if include_document else self._extract_pages(result, options))
+            plain_text = (result.document.export_to_text()
+                          if include_document and export_format != "json" else full_text)
             if include_document and doc_dict is None:
                 doc_dict = result.document.export_to_dict()
-            doctags = full_text if export_format == "doctags" else (
-                result.document.export_to_doctags() if include_document else None)
             # With OCR disabled, surviving document text can only be native.
             # OCR-enabled conversion requires actual cell origins, never a guess.
-            native_only = not (self.enable_ocr or self.force_full_page_ocr)
             origin = ("mixed" if len(cell_origins) == 2 else "ocr" if True in cell_origins else "native"
                       if False in cell_origins or (native_only and plain_text.strip())
-                      or file_path.suffix.lower() not in {".pdf", ".png", ".jpg", ".jpeg"} else None)
+                      or options.get('source_suffix', file_path.suffix.lower()) not in {".pdf", ".png", ".jpg", ".jpeg"} else None)
 
             # Stage 8: Image extraction (98-100%)
             images = []
@@ -387,7 +400,7 @@ class DoclingParser:
                 "origin": origin,
                 **({
                     "document": doc_dict,
-                    "doctags": doctags,
+                    **({"doctags": full_text} if export_format == "doctags" else {}),
                     "plain_text": plain_text,
                     "conversion_status": str(getattr(result, "status", "unknown")),
                 } if options.get("include_document", False) else {}),
@@ -446,28 +459,6 @@ class DoclingParser:
             export_format=export_format,
         )
         return result["tables"]
-
-    def _extract_text_from_dict(self, doc_dict: Dict[str, Any]) -> str:
-        """Extract text content from Docling dict structure."""
-        text_parts = []
-
-        def extract_from_item(item: Dict[str, Any]):
-            if isinstance(item, dict):
-                if item.get("type") == "text":
-                    text_parts.append(item.get("text", ""))
-                elif item.get("type") == "paragraph":
-                    if "content" in item:
-                        for content_item in item["content"]:
-                            extract_from_item(content_item)
-                elif "content" in item:
-                    for content_item in item["content"]:
-                        extract_from_item(content_item)
-
-        if isinstance(doc_dict, dict) and "content" in doc_dict:
-            for item in doc_dict["content"]:
-                extract_from_item(item)
-
-        return "\n\n".join(text_parts)
 
     def _extract_tables(
         self, result: Any, export_format: str

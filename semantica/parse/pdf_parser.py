@@ -114,9 +114,6 @@ class PDFParser:
             if not file_path.exists():
                 raise ValidationError(f"PDF file not found: {file_path}")
 
-            if not file_path.suffix.lower() == ".pdf":
-                raise ValidationError(f"File is not a PDF: {file_path}")
-
             try:
                 try:
                     import pymupdf
@@ -126,6 +123,8 @@ class PDFParser:
                         "Install with: pip install 'semantica[parse-pdf]'"
                     )
                 with pymupdf.open(str(file_path)) as pdf:
+                    if not pdf.is_pdf:
+                        raise ValidationError(f"File is not a PDF: {file_path}")
                     if pdf.needs_pass:
                         raise ProcessingError("PDF requires a password")
                     # Extract metadata

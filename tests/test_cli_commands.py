@@ -2222,25 +2222,8 @@ class TestTemporal:
     def test_group_help(self, runner):
         result = runner.invoke(cli_module.main, ["temporal", "--help"])
         _ok(result)
-        for sub in ["snapshot", "query", "history", "distance", "allen"]:
+        for sub in ["history", "distance", "allen"]:
             assert sub in result.output
-
-    def test_snapshot_requires_at(self, runner):
-        result = runner.invoke(cli_module.main, ["temporal", "snapshot"])
-        assert result.exit_code != 0
-
-    def test_snapshot_json(self, runner, monkeypatch):
-        fake_kg = _fake_module(
-            TemporalGraphQuery=lambda **kw: MagicMock(
-                snapshot=lambda at: {"at": at, "nodes": 5}
-            ),
-        )
-        monkeypatch.setitem(__import__("sys").modules, "semantica.kg", fake_kg)
-        result = runner.invoke(cli_module.main, ["temporal", "snapshot",
-                                      "--at", "2026-01-01T00:00:00Z", "--json"])
-        _ok(result)
-        data = _json_output(result)
-        assert isinstance(data, dict)
 
     def test_distance_requires_both_events(self, runner):
         result = runner.invoke(cli_module.main, ["temporal", "distance", "--event1", "ev1"])

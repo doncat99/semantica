@@ -1,4 +1,4 @@
-from semantica.semantic_artifact_builder import reconcile_qualified_facts
+from semantica.semantic_publication_builder import reconcile_qualified_facts
 from semantica.semantic_artifact_schema import KnowledgeAssertion
 
 

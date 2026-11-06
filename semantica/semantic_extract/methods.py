@@ -244,22 +244,15 @@ def _build_cache_backend():
     """Select a cache backend from config.
 
     Returns ``None`` (ExtractionCache's default in-memory backend) unless a
-    persistent backend is requested. Any failure to construct the persistent
-    backend degrades gracefully to the in-memory default so extraction never
-    breaks because of a cache misconfiguration.
+    persistent backend is requested. A requested persistent owner fails closed
+    rather than silently losing paid-result durability.
     """
     backend_kind = str(config.get("cache_backend", "memory") or "memory").lower()
     if backend_kind == "sqlite":
         from .cache import SqliteCacheBackend
 
         path = config.get("cache_path") or _default_cache_path()
-        try:
-            return SqliteCacheBackend(path, max_size=config.get("cache_size", 1000))
-        except Exception as exc:  # defensive fallback (e.g. unsafe/owned path)
-            logger.warning(
-                f"Failed to init sqlite cache backend at {path!r} "
-                f"({exc}); falling back to in-memory cache."
-            )
+        return SqliteCacheBackend(path, max_size=config.get("cache_size", 1000))
     return None
 
 
@@ -1588,7 +1581,8 @@ Grounding requirements:
                                 if not begin <= start < end <= finish:
                                     raise ProcessingError("profile quote does not contain this located entity mention")
                                 metadata['identity_profile'] = {
-                                    **profile.model_dump(), 'evidence_start': begin, 'evidence_end': finish}
+                                    **profile.model_dump(), 'evidence': text[begin:finish],
+                                    'evidence_start': begin, 'evidence_end': finish}
                             except (ProcessingError, ValidationError):
                                 if rejection_receipts is not None:
                                     rejection_receipts.append({'candidate_index': index, 'kind': 'grounding',
@@ -1604,7 +1598,10 @@ Grounding requirements:
                             })
                         continue
                     entities.append(Entity(
-                        text=e_out.text,
+                        # Grounding may locate equivalent whitespace in the
+                        # source. Persist its exact span, as native adoption
+                        # and all downstream evidence readers require.
+                        text=text[start:end] if grounding == "strict" else e_out.text,
                         label=e_out.label,
                         start_char=start,
                         end_char=end,

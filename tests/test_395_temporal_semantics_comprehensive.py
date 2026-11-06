@@ -3,9 +3,9 @@ Comprehensive tests for Issue #395 — Temporal Semantics.
 
 Covers the sub-issues not fully tested elsewhere:
   #396 — Core Temporal Data Model (BiTemporalFact, parse/serialize helpers)
-  #397 — Temporal Query Engine (reconstruct_at_time, consistency validation,
+  #397 — Temporal Query Engine (per-record time predicates, consistency validation,
           analyze_evolution, query_time_range aggregation strategies)
-  #399 — Context Graph Temporal Awareness (state_at, record_decision validity
+  #399 — Context Graph Temporal Awareness (record_decision validity
           windows, find_precedents as_of, CausalChainAnalyzer.trace_at_time)
 
 Already covered separately:
@@ -375,142 +375,6 @@ class TestDeserializeAndJsonReady:
 # #397 — Temporal Query Engine
 # ===========================================================================
 
-class TestReconstructAtTime:
-    """TemporalGraphQuery.reconstruct_at_time returns a self-consistent subgraph."""
-
-    def setup_method(self):
-        from semantica.kg import TemporalGraphQuery
-        self.q = TemporalGraphQuery()
-
-    def _graph(self, entities, relationships):
-        return {"entities": entities, "relationships": relationships}
-
-    def test_active_entity_and_relationship_included(self):
-        graph = self._graph(
-            entities=[
-                {"id": "A", "valid_from": _iso(2020), "valid_until": _iso(2025)},
-                {"id": "B", "valid_from": _iso(2020), "valid_until": _iso(2025)},
-            ],
-            relationships=[
-                {"id": "r1", "source": "A", "target": "B", "type": "knows",
-                 "valid_from": _iso(2021), "valid_until": _iso(2024)},
-            ],
-        )
-        result = self.q.reconstruct_at_time(graph, _dt(2022))
-        assert len(result["entities"]) == 2
-        assert len(result["relationships"]) == 1
-
-    def test_expired_entity_excluded(self):
-        graph = self._graph(
-            entities=[
-                {"id": "A", "valid_from": _iso(2010), "valid_until": _iso(2015)},
-                {"id": "B", "valid_from": _iso(2020)},
-            ],
-            relationships=[],
-        )
-        result = self.q.reconstruct_at_time(graph, _dt(2023))
-        ids = {e["id"] for e in result["entities"]}
-        assert "A" not in ids
-        assert "B" in ids
-
-    def test_future_entity_excluded(self):
-        graph = self._graph(
-            entities=[
-                {"id": "future", "valid_from": _iso(2030)},
-                {"id": "present", "valid_from": _iso(2020)},
-            ],
-            relationships=[],
-        )
-        result = self.q.reconstruct_at_time(graph, _dt(2024))
-        ids = {e["id"] for e in result["entities"]}
-        assert "future" not in ids
-        assert "present" in ids
-
-    def test_dangling_relationship_removed_when_source_expired(self):
-        graph = self._graph(
-            entities=[
-                {"id": "A", "valid_from": _iso(2010), "valid_until": _iso(2015)},
-                {"id": "B", "valid_from": _iso(2010)},
-            ],
-            relationships=[
-                {"id": "r1", "source": "A", "target": "B", "type": "rel"},
-            ],
-        )
-        result = self.q.reconstruct_at_time(graph, _dt(2020))
-        assert result["relationships"] == []
-
-    def test_dangling_relationship_removed_when_target_expired(self):
-        graph = self._graph(
-            entities=[
-                {"id": "A", "valid_from": _iso(2010)},
-                {"id": "B", "valid_from": _iso(2010), "valid_until": _iso(2015)},
-            ],
-            relationships=[
-                {"id": "r1", "source": "A", "target": "B", "type": "rel"},
-            ],
-        )
-        result = self.q.reconstruct_at_time(graph, _dt(2020))
-        assert result["relationships"] == []
-
-    def test_entity_timeless_always_included(self):
-        # Entities with no valid_from/valid_until are always considered active
-        graph = self._graph(
-            entities=[{"id": "timeless"}],
-            relationships=[],
-        )
-        result = self.q.reconstruct_at_time(graph, _dt(2024))
-        assert len(result["entities"]) == 1
-
-    def test_no_entities_filters_only_relationships(self):
-        graph = self._graph(
-            entities=[],
-            relationships=[
-                {"id": "r1", "source": "A", "target": "B", "type": "t",
-                 "valid_from": _iso(2020), "valid_until": _iso(2025)},
-                {"id": "r2", "source": "C", "target": "D", "type": "t",
-                 "valid_from": _iso(2010), "valid_until": _iso(2015)},
-            ],
-        )
-        result = self.q.reconstruct_at_time(graph, _dt(2022))
-        assert len(result["relationships"]) == 1
-        assert result["relationships"][0]["id"] == "r1"
-
-    def test_boundary_dates_inclusive(self):
-        at = _dt(2024, 6, 1)
-        graph = self._graph(
-            entities=[],
-            relationships=[
-                {"id": "r1", "source": "A", "target": "B", "type": "t",
-                 "valid_from": _iso(2024, 6, 1), "valid_until": _iso(2024, 12, 31)},
-            ],
-        )
-        result = self.q.reconstruct_at_time(graph, at)
-        assert len(result["relationships"]) == 1
-
-    def test_result_is_independent_copy(self):
-        """Mutating reconstruct_at_time output must not affect original graph."""
-        graph = self._graph(
-            entities=[{"id": "A"}],
-            relationships=[],
-        )
-        result = self.q.reconstruct_at_time(graph, _dt(2024))
-        result["entities"].clear()
-        assert len(graph["entities"]) == 1
-
-    def test_transaction_time_axis_filters_by_recorded_at(self):
-        graph = self._graph(
-            entities=[],
-            relationships=[
-                {"id": "r1", "source": "A", "target": "B", "type": "t",
-                 "recorded_at": _iso(2022), "superseded_at": "OPEN"},
-                {"id": "r2", "source": "C", "target": "D", "type": "t",
-                 "recorded_at": _iso(2025), "superseded_at": "OPEN"},
-            ],
-        )
-        result = self.q.reconstruct_at_time(graph, _dt(2023), time_axis="transaction")
-        ids = {r["id"] for r in result["relationships"]}
-        assert "r1" in ids
-        assert "r2" not in ids
 
 
 class TestTemporalConsistencyValidation:
@@ -825,121 +689,10 @@ class TestDetectTemporalPatterns:
 # #399 — Context Graph Temporal Awareness
 # ===========================================================================
 
-class TestContextGraphStateAt:
-    """ContextGraph.state_at returns snapshot valid at the given timestamp."""
-
-    def setup_method(self):
-        from semantica.context import ContextGraph
-        self.graph = ContextGraph()
-
-    def test_returns_dict_with_expected_keys(self):
-        snapshot = self.graph.state_at("2024-01-01T00:00:00Z")
-        for key in ("timestamp", "nodes", "edges", "entities", "relationships", "decisions"):
-            assert key in snapshot
-
-    def test_timestamp_in_snapshot_matches_input(self):
-        snapshot = self.graph.state_at("2024-06-15T00:00:00Z")
-        assert "2024-06-15" in snapshot["timestamp"]
-
-    def test_active_node_included_in_snapshot(self):
-        self.graph.add_node(
-            node_id="n1",
-            node_type="Entity",
-            content="Always active",
-        )
-        snapshot = self.graph.state_at("2024-01-01T00:00:00Z")
-        ids = {n["id"] for n in snapshot["nodes"]}
-        assert "n1" in ids
-
-    def test_future_node_excluded_from_snapshot(self):
-        self.graph.add_node(
-            node_id="future",
-            node_type="Entity",
-            content="Not yet",
-            valid_from="2030-01-01T00:00:00Z",
-        )
-        snapshot = self.graph.state_at("2024-01-01T00:00:00Z")
-        ids = {n["id"] for n in snapshot["nodes"]}
-        assert "future" not in ids
-
-    def test_expired_node_excluded_from_snapshot(self):
-        self.graph.add_node(
-            node_id="expired",
-            node_type="Entity",
-            content="Old fact",
-            valid_from="2010-01-01T00:00:00Z",
-            valid_until="2015-01-01T00:00:00Z",
-        )
-        snapshot = self.graph.state_at("2024-01-01T00:00:00Z")
-        ids = {n["id"] for n in snapshot["nodes"]}
-        assert "expired" not in ids
-
-    def test_state_at_accepts_datetime_object(self):
-        snapshot = self.graph.state_at(_dt(2024, 6, 1))
-        assert snapshot["timestamp"] is not None
-
-    def test_state_at_accepts_iso_string(self):
-        snapshot = self.graph.state_at("2024-06-01T00:00:00Z")
-        assert "2024-06-01" in snapshot["timestamp"]
-
-    def test_state_at_accepts_unix_timestamp(self):
-        ts = 1704067200  # 2024-01-01 UTC
-        snapshot = self.graph.state_at(ts)
-        assert "2024-01-01" in snapshot["timestamp"]
-
-    def test_decisions_key_contains_only_decision_nodes(self):
-        self.graph.add_node(
-            node_id="d1",
-            node_type="decision",
-            content="Approve loan",
-            properties={
-                "category": "loan",
-                "scenario": "Approve loan",
-                "reasoning": "good credit",
-                "outcome": "approved",
-                "confidence": 0.9,
-            },
-        )
-        self.graph.add_node(
-            node_id="e1",
-            node_type="Entity",
-            content="Bob",
-        )
-        snapshot = self.graph.state_at("2024-01-01T00:00:00Z")
-        decision_ids = {d["id"] for d in snapshot["decisions"]}
-        assert "d1" in decision_ids
-        # entity node should NOT appear in decisions
-        assert "e1" not in decision_ids
-
-    def test_dangling_edge_excluded_when_target_node_expired(self):
-        self.graph.add_node(
-            node_id="A",
-            node_type="Entity",
-            content="A",
-        )
-        self.graph.add_node(
-            node_id="B_old",
-            node_type="Entity",
-            content="B old",
-            valid_from="2010-01-01T00:00:00Z",
-            valid_until="2015-01-01T00:00:00Z",
-        )
-        self.graph.add_edge(
-            source_id="A",
-            target_id="B_old",
-            relationship_type="knows",
-        )
-        snapshot = self.graph.state_at("2024-01-01T00:00:00Z")
-        # Edge should be excluded since B_old is expired
-        edge_pairs = {
-            (e.get("source_id", e.get("source")), e.get("target_id", e.get("target")))
-            for e in snapshot["edges"]
-        }
-        assert ("A", "B_old") not in edge_pairs
 
 
 class TestRecordDecisionWithValidityWindows:
-    """record_decision() accepts valid_from / valid_until and they appear in state_at."""
+    """record_decision() accepts valid_from / valid_until and activity queries respect those bounds."""
 
     def setup_method(self):
         from semantica.context import ContextGraph
@@ -965,7 +718,7 @@ class TestRecordDecisionWithValidityWindows:
             confidence=0.95,
             valid_from="2024-01-01T00:00:00Z",
         )
-        snapshot = self.graph.state_at("2024-06-01T00:00:00Z")
+        snapshot = {"decisions": [node["metadata"] for node in self.graph.find_active_nodes(node_type="decision", at_time=datetime.fromisoformat("2024-06-01T00:00:00Z".replace("Z", "+00:00")))]}
         assert len(snapshot["decisions"]) >= 1
 
     def test_decision_with_valid_until_excluded_after_expiry(self):
@@ -978,7 +731,7 @@ class TestRecordDecisionWithValidityWindows:
             valid_from="2020-01-01T00:00:00Z",
             valid_until="2022-01-01T00:00:00Z",
         )
-        snapshot = self.graph.state_at("2024-01-01T00:00:00Z")
+        snapshot = {"decisions": [node["metadata"] for node in self.graph.find_active_nodes(node_type="decision", at_time=datetime.fromisoformat("2024-01-01T00:00:00Z".replace("Z", "+00:00")))]}
         # The expired decision should not appear in the 2024 snapshot
         decision_scenarios = [d["scenario"] for d in snapshot["decisions"]]
         assert "old regulation" not in decision_scenarios
@@ -993,7 +746,7 @@ class TestRecordDecisionWithValidityWindows:
             valid_from="2022-01-01T00:00:00Z",
             valid_until="2026-01-01T00:00:00Z",
         )
-        snapshot = self.graph.state_at("2024-06-01T00:00:00Z")
+        snapshot = {"decisions": [node["metadata"] for node in self.graph.find_active_nodes(node_type="decision", at_time=datetime.fromisoformat("2024-06-01T00:00:00Z".replace("Z", "+00:00")))]}
         scenarios = [d["scenario"] for d in snapshot["decisions"]]
         assert "drug approval" in scenarios
 
@@ -1015,8 +768,8 @@ class TestRecordDecisionWithValidityWindows:
             confidence=0.8,
             valid_from="2021-01-01T00:00:00Z",
         )
-        old_snapshot = self.graph.state_at("2019-06-01T00:00:00Z")
-        new_snapshot = self.graph.state_at("2024-06-01T00:00:00Z")
+        old_snapshot = {"decisions": [node["metadata"] for node in self.graph.find_active_nodes(node_type="decision", at_time=datetime.fromisoformat("2019-06-01T00:00:00Z".replace("Z", "+00:00")))]}
+        new_snapshot = {"decisions": [node["metadata"] for node in self.graph.find_active_nodes(node_type="decision", at_time=datetime.fromisoformat("2024-06-01T00:00:00Z".replace("Z", "+00:00")))]}
 
         old_scenarios = [d["scenario"] for d in old_snapshot["decisions"]]
         new_scenarios = [d["scenario"] for d in new_snapshot["decisions"]]

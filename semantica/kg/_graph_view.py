@@ -1,6 +1,7 @@
 """Internal graph view helpers shared by KG analytics modules."""
 
 from dataclasses import dataclass
+from itertools import chain
 from typing import Any, Dict, Iterable, List, Optional, Set, Tuple
 
 
@@ -68,14 +69,10 @@ def build_adjacency(graph: Any, directed: bool = False) -> Dict[Any, List[Any]]:
 
 def _extract_nodes(graph: Any) -> Iterable[Any]:
     if isinstance(graph, dict):
-        raw_nodes: List[Any] = []
-        for key in ("entities", "nodes"):
-            values = graph.get(key, [])
-            if isinstance(values, dict):
-                raw_nodes.extend(values.keys())
-            elif values:
-                raw_nodes.extend(values)
-        return raw_nodes
+        return chain.from_iterable(
+            values.keys() if isinstance(values, dict) else values or ()
+            for values in (graph.get("entities", []), graph.get("nodes", []))
+        )
 
     raw_nodes = getattr(graph, "nodes", None)
     if callable(raw_nodes):
@@ -93,12 +90,10 @@ def _extract_nodes(graph: Any) -> Iterable[Any]:
 
 def _extract_edges(graph: Any) -> Iterable[Any]:
     if isinstance(graph, dict):
-        raw_edges: List[Any] = []
-        for key in ("relationships", "edges"):
-            values = graph.get(key, [])
-            if values:
-                raw_edges.extend(values)
-        return raw_edges
+        return chain.from_iterable(
+            values or ()
+            for values in (graph.get("relationships", []), graph.get("edges", []))
+        )
 
     raw_edges: List[Any] = []
     relationships = getattr(graph, "relationships", None)

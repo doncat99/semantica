@@ -85,7 +85,6 @@ from .decision_recorder import DecisionRecorder
 from .decision_query import DecisionQuery
 from .causal_analyzer import CausalChainAnalyzer
 from .policy_engine import PolicyEngine
-from ..change_management import TemporalVersionManager
 
 
 class AgentContext:
@@ -177,8 +176,6 @@ class AgentContext:
 
         self.vector_store = vector_store
         self.knowledge_graph = knowledge_graph
-        self._checkpoints: Dict[str, Dict[str, Any]] = {}
-        self._temporal_version_manager = kwargs.get("temporal_version_manager")
         self.evaluators = evaluators
         self.eval_config = eval_config or {}
 
@@ -1934,92 +1931,6 @@ class AgentContext:
 
         return results[:limit]
 
-    def checkpoint(self, label: str) -> Dict[str, Any]:
-        """Capture the current context state under a label."""
-        snapshot = self._capture_checkpoint_state()
-        self._checkpoints[label] = snapshot
-        return snapshot
-
-    def diff_checkpoints(self, label1: str, label2: str) -> Dict[str, Any]:
-        """Return a structured diff between two named checkpoints."""
-        missing = [label for label in (label1, label2) if label not in self._checkpoints]
-        if missing:
-            raise KeyError(f"Unknown checkpoint label(s): {', '.join(missing)}")
-
-        first = self._checkpoints[label1]
-        second = self._checkpoints[label2]
-
-        first_decisions = {decision.get("id"): decision for decision in first.get("decisions", [])}
-        second_decisions = {decision.get("id"): decision for decision in second.get("decisions", [])}
-        first_relationships = {self._relationship_key(rel): rel for rel in first.get("relationships", [])}
-        second_relationships = {self._relationship_key(rel): rel for rel in second.get("relationships", [])}
-
-        return {
-            "decisions_added": [second_decisions[key] for key in sorted(set(second_decisions) - set(first_decisions))],
-            "decisions_removed": [first_decisions[key] for key in sorted(set(first_decisions) - set(second_decisions))],
-            "relationships_added": [second_relationships[key] for key in sorted(set(second_relationships) - set(first_relationships))],
-            "relationships_removed": [first_relationships[key] for key in sorted(set(first_relationships) - set(second_relationships))],
-        }
-
-    def flush_checkpoint(self, label: str) -> Dict[str, Any]:
-        """Persist a named checkpoint via ``TemporalVersionManager``."""
-        if label not in self._checkpoints:
-            raise KeyError(f"Unknown checkpoint label: {label}")
-
-        if self._temporal_version_manager is None:
-            try:
-                self._temporal_version_manager = TemporalVersionManager()
-            except Exception as exc:
-                raise RuntimeError(
-                    "flush_checkpoint requires a TemporalVersionManager. "
-                    "Pass one via temporal_version_manager= at construction time."
-                ) from exc
-
-        return self._temporal_version_manager.create_snapshot(
-            self._checkpoints[label],
-            version_label=label,
-            author=str(self.config.get("checkpoint_author", "agent_context@local.test")),
-            description=f"Checkpoint '{label}'",
-        )
-
-    def _capture_checkpoint_state(self) -> Dict[str, Any]:
-        """Capture a serializable snapshot of the current graph state."""
-        if self.knowledge_graph and hasattr(self.knowledge_graph, "state_at"):
-            return self.knowledge_graph.state_at(datetime.utcnow())
-        if self.knowledge_graph and hasattr(self.knowledge_graph, "to_dict"):
-            graph_dict = self.knowledge_graph.to_dict()
-            return {
-                "timestamp": datetime.utcnow().isoformat(),
-                "nodes": graph_dict.get("nodes", []),
-                "edges": graph_dict.get("edges", []),
-                "entities": graph_dict.get("nodes", []),
-                "relationships": graph_dict.get("edges", []),
-                "decisions": [
-                    {
-                        "id": node.get("id"),
-                        "category": (node.get("properties", {}) or {}).get("category", ""),
-                        "scenario": node.get("content", ""),
-                    }
-                    for node in graph_dict.get("nodes", [])
-                    if str(node.get("type", "")).lower() == "decision"
-                ],
-            }
-        return {
-            "timestamp": datetime.utcnow().isoformat(),
-            "nodes": [],
-            "edges": [],
-            "entities": [],
-            "relationships": [],
-            "decisions": [],
-        }
-
-    def _relationship_key(self, relationship: Dict[str, Any]) -> tuple:
-        """Build a stable comparison key for checkpoint relationship diffs."""
-        return (
-            relationship.get("source_id", relationship.get("source")),
-            relationship.get("target_id", relationship.get("target")),
-            relationship.get("type"),
-        )
 
     def get_causal_chain(
         self,

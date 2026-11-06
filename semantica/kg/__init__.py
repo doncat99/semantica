@@ -75,7 +75,6 @@ Main Classes:
     - GraphAnalyzer: Graph analytics with temporal evolution analysis
     - TemporalGraphQuery: Time-aware graph querying
     - TemporalPatternDetector: Temporal pattern detection
-    - TemporalVersionManager: Temporal versioning and snapshots
     - ProvenanceTracker: Provenance tracking and management
     - CentralityCalculator: Centrality measures calculation
     - CommunityDetector: Community detection
@@ -140,7 +139,6 @@ from .similarity_calculator import SimilarityCalculator
 from .temporal_query import (
     TemporalGraphQuery,
     TemporalPatternDetector,
-    TemporalVersionManager,
 )
 from .knowledge_graph import KnowledgeGraph
 from .temporal_model import BiTemporalFact, TemporalBound
@@ -167,7 +165,6 @@ __all__ = [
     "GraphValidator",
     "TemporalGraphQuery",
     "TemporalPatternDetector",
-    "TemporalVersionManager",
     "TemporalBound",
     "BiTemporalFact",
     "TemporalNormalizer",

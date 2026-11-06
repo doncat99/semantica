@@ -23,7 +23,8 @@ def test_source_delegates_once_to_document_parser(tmp_path, monkeypatch, suffix,
     assert result.text == 'Exact source text'
     assert len(calls) == 1
     assert calls[0] == (path, {'name': 'Visible source', 'mime_type': mime, 'force_ocr': False,
-                            'document_processing': {'mode': 'local'}, 'progress_callback': None})
+                            'document_processing': {'mode': 'local'}, 'progress_callback': None,
+                            'remote_task': None, 'on_remote_task': None})
     assert 'quality' in result.document
 
 
@@ -54,3 +55,77 @@ def test_native_processing_profile_rejects_unknown_mode_without_conversion(tmp_p
     path.write_bytes(b'fixture')
     with pytest.raises(UnsupportedSourceFormatError, match='unsupported document processing mode'):
         DocumentParser().parse_document(path, document_processing={'mode': 'invalid'})
+
+
+def test_managed_text_uses_declared_mime_without_renaming(tmp_path):
+    from semantica.parse.document_parser import DocumentParser
+    path = tmp_path / 'b3-contenthash'
+    path.write_text('Exact immutable text', encoding='utf-8')
+    result = DocumentParser().parse_document(path, name='Summary Source',
+        mime_type='text/plain', document_processing={'mode': 'local'})
+    assert result['text'] == 'Exact immutable text'
+    assert result['document']['source'] == 'Summary Source'
+    assert list(tmp_path.iterdir()) == [path]
+
+
+def test_managed_pdf_uses_declared_format_in_native_profile(tmp_path):
+    from semantica.parse.document_parser import DocumentParser
+    path = tmp_path / 'b3-contenthash'
+    path.write_bytes(b'fixture')
+    parser = DocumentParser()
+    from unittest.mock import Mock
+    parser._parsers['pdf'] = Mock()
+    parser._parsers['pdf'].parse.return_value = {'full_text': 'PDF text', 'pages': [], 'metadata': {}}
+    result = parser.parse_document(path, name='Report', mime_type='application/pdf',
+        document_processing={'mode': 'native'})
+    assert result['text'] == 'PDF text'
+    assert parser._parsers['pdf'].parse.call_args.args == (path,)
+
+
+@pytest.mark.parametrize('name,mime', [('Report.pdf', 'text/plain'), ('Report.txt', 'application/pdf')])
+def test_managed_source_rejects_conflicting_declarations(tmp_path, name, mime):
+    from semantica.parse.document_parser import DocumentParser
+    from semantica.source import UnsupportedSourceFormatError
+    path = tmp_path / 'b3-contenthash'
+    path.write_bytes(b'fixture')
+    with pytest.raises(UnsupportedSourceFormatError, match='does not match'):
+        DocumentParser().parse_document(path, name=name, mime_type=mime,
+            document_processing={'mode': 'local'})
+
+
+@pytest.mark.parametrize('mime', ['application/x-unknown', None])
+def test_managed_source_without_supported_format_is_rejected(tmp_path, mime):
+    from semantica.parse.document_parser import DocumentParser
+    from semantica.source import UnsupportedSourceFormatError
+    path = tmp_path / 'b3-contenthash'
+    path.write_bytes(b'fixture')
+    with pytest.raises(UnsupportedSourceFormatError):
+        DocumentParser().parse_document(path, name='Unknown Source', mime_type=mime,
+            document_processing={'mode': 'local'})
+
+
+def test_managed_pdf_native_parser_reads_actual_immutable_bytes(tmp_path):
+    import fitz
+    from semantica.parse.document_parser import DocumentParser
+    path = tmp_path / 'b3-contenthash'
+    with fitz.open() as document:
+        page = document.new_page()
+        page.insert_text((72, 72), 'Immutable PDF evidence')
+        document.save(path)
+    original = path.read_bytes()
+    result = DocumentParser().parse_document(path, name='Report', mime_type='application/pdf',
+        document_processing={'mode': 'native'})
+    assert 'Immutable PDF evidence' in result['text']
+    assert path.read_bytes() == original
+
+
+def test_managed_docx_reads_actual_package_without_extension(tmp_path):
+    from docx import Document
+    from semantica.parse.document_parser import DocumentParser
+    path = tmp_path / 'b3-contenthash'
+    doc = Document()
+    doc.add_paragraph('Immutable DOCX evidence')
+    doc.save(path)
+    result = DocumentParser().parse_document(path, name='Report',
+        mime_type='application/vnd.openxmlformats-officedocument.wordprocessingml.document')
+    assert 'Immutable DOCX evidence' in result['full_text']

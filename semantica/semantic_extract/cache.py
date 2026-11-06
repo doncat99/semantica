@@ -31,6 +31,7 @@ import stat
 import time
 import hashlib
 import json
+import math
 import sqlite3
 import threading
 from abc import ABC, abstractmethod
@@ -40,11 +41,58 @@ from typing import Any, Callable, Dict, Optional
 from threading import Lock
 
 from ..utils.logging import get_logger
+from ..utils.exceptions import ProcessingError
 from .types import Entity, Relation, Triplet
 
 # The namespaces ExtractionCache manages. Kept as a module constant so backends
 # and get_stats() agree on the set without hard-coding it in several places.
-NAMESPACES = ("entities", "relations", "triplets")
+NAMESPACES = ("entities", "relations", "triplets", "classification", "embedding")
+
+
+def _check_accepted_value(value: Any, *, namespace: str = '') -> None:
+    """Bound native JSON input before copying/serializing the complete result."""
+    remaining, nodes = 1024 * 1024, 32768 if namespace == 'embedding' else 8192
+
+    def visit(item, depth=0):
+        nonlocal remaining, nodes
+        nodes -= 1
+        if nodes < 0 or depth > 32:
+            raise ProcessingError("Accepted extraction exceeds structure budget")
+        if isinstance(item, str):
+            if len(item) > remaining:
+                raise ProcessingError("Accepted extraction exceeds byte budget")
+            remaining -= 2
+            for start in range(0, len(item), 4096):
+                remaining -= len(json.dumps(item[start:start + 4096], ensure_ascii=False).encode("utf-8")) - 2
+                if remaining < 0:
+                    raise ProcessingError("Accepted extraction exceeds byte budget")
+        elif item is None or isinstance(item, bool):
+            remaining -= 5
+        elif isinstance(item, (int, float)):
+            if (isinstance(item, int) and item.bit_length() > 4096) or (isinstance(item, float) and not math.isfinite(item)):
+                raise ProcessingError("Accepted extraction numeric value is unsupported")
+            remaining -= len(str(item)) + 1
+        elif isinstance(item, (Entity, Relation, Triplet)):
+            visit({"__dc__": type(item).__name__, "fields": {f.name: getattr(item, f.name) for f in dataclasses.fields(item)}}, depth + 1)
+        elif isinstance(item, list):
+            remaining -= 2
+            for child in item:
+                remaining -= 2
+                visit(child, depth + 1)
+        elif isinstance(item, dict):
+            remaining -= 2
+            for key, child in item.items():
+                if not isinstance(key, str):
+                    raise ProcessingError("Accepted extraction serialization requires string field names")
+                remaining -= 4
+                visit(key, depth + 1)
+                visit(child, depth + 1)
+        else:
+            raise ProcessingError("Accepted extraction serialization requires native JSON fields")
+        if remaining < 0:
+            raise ProcessingError("Accepted extraction exceeds byte budget")
+
+    visit(value)
 
 
 # ---------------------------------------------------------------------------
@@ -403,6 +451,7 @@ class SqliteCacheBackend(CacheBackend):
             self.db_path, check_same_thread=False, timeout=self._busy_timeout
         )
         self._conn.execute(f"PRAGMA busy_timeout={int(self._busy_timeout * 1000)}")
+        self._conn.execute("PRAGMA synchronous=FULL")
         try:
             self._conn.execute("PRAGMA journal_mode=WAL")
         except sqlite3.DatabaseError:  # e.g. :memory: does not support WAL
@@ -414,15 +463,34 @@ class SqliteCacheBackend(CacheBackend):
             "  value BLOB NOT NULL,"
             "  expires_at REAL,"
             "  last_access REAL NOT NULL,"
+            "  accepted_digest TEXT,"
             "  PRIMARY KEY (namespace, key)"
             ")"
+        )
+        if "accepted_digest" not in {row[1] for row in self._conn.execute("PRAGMA table_info(cache)")}:
+            self._conn.close()
+            raise ProcessingError("Cache schema requires offline paid-result handoff; existing rows must be preserved")
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS accepted_receipts (namespace TEXT NOT NULL, "
+            "key TEXT NOT NULL, digest TEXT NOT NULL, PRIMARY KEY(namespace,key))"
         )
         # Index supporting the LRU eviction scan (ORDER BY last_access per ns).
         self._conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_cache_lru "
             "ON cache (namespace, last_access)"
         )
+        # Capacity accounting visits pending metadata only, never generic bodies.
+        self._conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_cache_pending_capacity "
+            "ON cache(namespace, length(value)) WHERE accepted_digest IS NOT NULL"
+        )
         self._conn.commit()
+        # One fixed read owner shares WAL visibility without queuing point reads
+        # behind writer fsync. No per-thread or per-request connection growth.
+        self._read_lock = threading.Lock()
+        self._read_conn = (sqlite3.connect(Path(self.db_path).as_uri() + '?mode=ro',
+                           uri=True, check_same_thread=False, timeout=0.1)
+                           if self.db_path != ':memory:' else None)
 
     def _create_or_validate_secure_file(self, path: str) -> None:
         """Create the db file atomically with ``0o600``, or validate an existing one.
@@ -461,16 +529,27 @@ class SqliteCacheBackend(CacheBackend):
         except sqlite3.Error:
             pass
 
-    def _write_locked(self, operation: Callable[[sqlite3.Connection], None]) -> bool:
+    def _write_locked(self, operation: Callable[[sqlite3.Connection], None], *, strict=False, cancel_event=None) -> bool:
         """Run a write ``operation`` + commit under the lock, rolling back within
         the same lock scope on failure. Retries on 'database is locked' with
         bounded backoff (sleeping outside the lock). Returns success."""
         last_exc: Optional[sqlite3.Error] = None
+        deadline = time.monotonic() + 0.5 if strict else None
         for attempt in range(self._max_retries):
+            if strict and ((cancel_event is not None and cancel_event.is_set()) or time.monotonic() >= deadline):
+                raise ProcessingError("Accepted extraction commit cancelled or deadline exceeded")
             retryable = False
-            with self._lock:
+            acquired = self._lock.acquire(timeout=max(0, deadline - time.monotonic())) if strict else self._lock.acquire()
+            if not acquired:
+                raise ProcessingError("Accepted extraction commit deadline exceeded waiting for owner")
+            try:
                 try:
+                    if strict:
+                        self._conn.execute("PRAGMA busy_timeout=100")
+                        self._conn.set_progress_handler(lambda: int(time.monotonic() >= deadline or (cancel_event is not None and cancel_event.is_set())), 1000)
                     operation(self._conn)
+                    if strict and (time.monotonic() >= deadline or (cancel_event is not None and cancel_event.is_set())):
+                        raise ProcessingError("Accepted extraction commit cancelled or deadline exceeded")
                     self._conn.commit()
                     return True
                 except sqlite3.OperationalError as exc:
@@ -480,9 +559,29 @@ class SqliteCacheBackend(CacheBackend):
                 except sqlite3.Error as exc:
                     self._rollback_locked()
                     last_exc = exc
+                except Exception:
+                    self._rollback_locked()
+                    raise
+                finally:
+                    if strict:
+                        try:
+                            self._conn.set_progress_handler(None, 0)
+                            self._conn.execute(f"PRAGMA busy_timeout={int(self._busy_timeout * 1000)}")
+                        except sqlite3.Error:
+                            pass
+            finally:
+                self._lock.release()
             if not retryable or attempt == self._max_retries - 1:
                 break
-            time.sleep(self._retry_backoff * (2**attempt))
+            delay = self._retry_backoff * (2**attempt)
+            if strict:
+                delay = min(delay, max(0, deadline - time.monotonic()))
+            if cancel_event is not None:
+                cancel_event.wait(delay)
+            else:
+                time.sleep(delay)
+        if strict:
+            raise ProcessingError("Accepted extraction commit failed") from last_exc
         self.logger.warning(f"sqlite cache write failed (skipped): {last_exc}")
         return False
 
@@ -491,7 +590,7 @@ class SqliteCacheBackend(CacheBackend):
         with self._lock:
             try:
                 row = self._conn.execute(
-                    "SELECT value, expires_at FROM cache WHERE namespace=? AND key=?",
+                    "SELECT CASE WHEN accepted_digest IS NULL THEN value END, expires_at, accepted_digest FROM cache WHERE namespace=? AND key=?",
                     (namespace, key),
                 ).fetchone()
             except sqlite3.Error as exc:
@@ -500,7 +599,9 @@ class SqliteCacheBackend(CacheBackend):
                 return None
             if row is None:
                 return None
-            value_blob, expires_at = row
+            value_blob, expires_at, accepted_digest = row
+            if accepted_digest is not None:
+                raise ProcessingError("Accepted extraction requires get_accepted; ordinary cache reads are prohibited")
             # ttl=0 -> expires_at == now: treat as expired (use <=), matching the
             # in-memory backend.
             if expires_at is not None and expires_at <= now:
@@ -565,16 +666,16 @@ class SqliteCacheBackend(CacheBackend):
                 "ON CONFLICT(namespace, key) DO UPDATE SET "
                 "  value=excluded.value,"
                 "  expires_at=excluded.expires_at,"
-                "  last_access=excluded.last_access",
+                "  last_access=excluded.last_access WHERE cache.accepted_digest IS NULL",
                 (namespace, key, blob, expires_at, now),
             )
             count = conn.execute(
-                "SELECT COUNT(*) FROM cache WHERE namespace=?", (namespace,)
+                "SELECT COUNT(*) FROM cache WHERE namespace=? AND accepted_digest IS NULL", (namespace,)
             ).fetchone()[0]
             if count > self.max_size:
                 conn.execute(
                     "DELETE FROM cache WHERE rowid IN ("
-                    "  SELECT rowid FROM cache WHERE namespace=? "
+                    "  SELECT rowid FROM cache WHERE namespace=? AND accepted_digest IS NULL "
                     "  ORDER BY last_access ASC LIMIT ?"
                     ")",
                     (namespace, count - self.max_size),
@@ -582,12 +683,126 @@ class SqliteCacheBackend(CacheBackend):
 
         self._write_locked(operation)
 
+    def accept(self, namespace: str, key: str, value: Any, *, cancel_event=None) -> str:
+        """Durably protect a paid result until its unique final owner commits it."""
+        if self.db_path == ":memory:":
+            raise ProcessingError("Accepted extraction requires persistent storage")
+        if self._serialize is not _cache_serialize or self._deserialize is not _cache_deserialize:
+            raise ProcessingError("Accepted extraction serialization requires the native JSON codec")
+        try:
+            _check_accepted_value(value, namespace=namespace)
+            blob = self._serialize(value)
+            digest = hashlib.sha256(blob).hexdigest()
+        except ProcessingError:
+            raise
+        except Exception as exc:
+            raise ProcessingError("Accepted extraction serialization failed") from exc
+        if len(blob) > 1024 * 1024:
+            raise ProcessingError("Accepted extraction exceeds 1 MiB byte budget")
+
+        def operation(conn):
+            conn.execute("BEGIN IMMEDIATE")
+            receipt = conn.execute("SELECT digest FROM accepted_receipts WHERE namespace=? AND key=?", (namespace, key)).fetchone()
+            row = conn.execute("SELECT value,accepted_digest FROM cache WHERE namespace=? AND key=?", (namespace, key)).fetchone()
+            if receipt is not None and (row is None or row[1] is None):
+                raise ProcessingError("Accepted extraction body missing; native adoption must be verified before reuse")
+            if row is not None and row[1] is not None:
+                if row != (blob, digest):
+                    raise ProcessingError("Accepted extraction already contains a different result")
+                return
+            count = conn.execute("SELECT COUNT(*) FROM cache WHERE namespace=? AND accepted_digest IS NOT NULL", (namespace,)).fetchone()[0]
+            size = conn.execute("SELECT COALESCE(SUM(length(value)),0) FROM cache WHERE accepted_digest IS NOT NULL").fetchone()[0]
+            if count >= self.max_size or size + len(blob) > 64 * 1024 * 1024:
+                raise ProcessingError("Accepted extraction capacity exhausted; adopt pending results before more paid work")
+            conn.execute("INSERT INTO cache(namespace,key,value,expires_at,last_access,accepted_digest) VALUES(?,?,?,NULL,?,?) "
+                         "ON CONFLICT(namespace,key) DO UPDATE SET value=excluded.value,expires_at=NULL,last_access=excluded.last_access,accepted_digest=excluded.accepted_digest",
+                         (namespace, key, blob, time.time(), digest))
+            conn.execute("INSERT INTO accepted_receipts(namespace,key,digest) VALUES(?,?,?)", (namespace, key, digest))
+
+        self._write_locked(operation, strict=True, cancel_event=cancel_event)
+        return digest
+
+    def _accepted_read(self, operation, *, cancel_event=None):
+        """Bound a WAL metadata/body read; codecs and writer commits stay outside."""
+        if self._read_conn is None:
+            raise ProcessingError("Accepted extraction requires persistent storage")
+        deadline = time.monotonic() + 0.5
+        def cancelled():
+            return time.monotonic() >= deadline or (cancel_event is not None and cancel_event.is_set())
+        if cancelled():
+            raise ProcessingError("Accepted extraction read cancelled or deadline exceeded")
+        if not self._read_lock.acquire(timeout=max(0, deadline - time.monotonic())):
+            raise ProcessingError("Accepted extraction read deadline exceeded waiting for owner")
+        try:
+            self._read_conn.set_progress_handler(lambda: int(cancelled()), 1000)
+            self._read_conn.execute("BEGIN")
+            result = operation(self._read_conn)
+            if cancelled():
+                raise ProcessingError("Accepted extraction read cancelled or deadline exceeded")
+            return result
+        except ProcessingError:
+            raise
+        except sqlite3.Error as exc:
+            raise ProcessingError("Accepted extraction read failed; paid work must not restart") from exc
+        finally:
+            try:
+                self._read_conn.set_progress_handler(None, 0)
+                self._read_conn.rollback()
+            except sqlite3.Error:
+                pass
+            finally:
+                self._read_lock.release()
+
+    def accepted_digest(self, namespace: str, key: str) -> str | None:
+        """Small durable acceptance identity; absence alone permits new work."""
+        def operation(conn):
+            row = conn.execute("SELECT digest FROM accepted_receipts WHERE namespace=? AND key=?", (namespace, key)).fetchone()
+            if row is None:
+                orphan = conn.execute("SELECT 1 FROM cache WHERE namespace=? AND key=? AND accepted_digest IS NOT NULL", (namespace, key)).fetchone()
+                if orphan is not None:
+                    raise ProcessingError("Accepted extraction receipt missing; explicit recovery required")
+                return None
+            return row[0]
+        return self._accepted_read(operation)
+
+    def has_accepted_body(self, namespace: str, key: str, digest: str) -> bool:
+        return self._accepted_read(lambda conn: conn.execute(
+            "SELECT 1 FROM cache WHERE namespace=? AND key=? AND accepted_digest=?",
+            (namespace, key, digest)).fetchone() is not None)
+
+    def get_accepted(self, namespace: str, key: str, *, cancel_event=None) -> Any:
+        """Read a bounded immutable blob, then verify/decode outside all DB locks."""
+        row = self._accepted_read(lambda conn: conn.execute(
+            "SELECT CASE WHEN length(value)<=1048576 THEN value END,accepted_digest FROM cache WHERE namespace=? AND key=? AND accepted_digest IS NOT NULL",
+            (namespace, key)).fetchone(), cancel_event=cancel_event)
+        if row is None:
+            raise ProcessingError("Accepted extraction result missing")
+        blob, digest = row
+        if blob is None:
+            raise ProcessingError("Accepted extraction exceeds stored byte budget; preserved for recovery")
+        if hashlib.sha256(blob).hexdigest() != digest:
+            raise ProcessingError("Accepted extraction digest mismatch")
+        if cancel_event is not None and cancel_event.is_set():
+            raise ProcessingError("Accepted extraction read cancelled")
+        try:
+            return self._deserialize(blob)
+        except Exception as exc:
+            raise ProcessingError("Accepted extraction read failed; paid work must not restart") from exc
+
+    def release_accepted(self, namespace: str, key: str, digest: str, *, cancel_event=None) -> None:
+        """Call only after the final native owner has durably adopted the value."""
+        def operation(conn):
+            deleted = conn.execute("DELETE FROM cache WHERE namespace=? AND key=? AND accepted_digest=?", (namespace, key, digest)).rowcount
+            if deleted != 1:
+                raise ProcessingError("Accepted extraction receipt mismatch or result missing")
+        self._write_locked(operation, strict=True, cancel_event=cancel_event)
+
     def clear(self, namespace: Optional[str] = None) -> None:
         def operation(conn: sqlite3.Connection) -> None:
             if namespace is None:
-                conn.execute("DELETE FROM cache")
+                conn.execute("DELETE FROM cache WHERE accepted_digest IS NULL")
             else:
-                conn.execute("DELETE FROM cache WHERE namespace=?", (namespace,))
+                conn.execute("DELETE FROM cache WHERE namespace=? AND accepted_digest IS NULL", (namespace,))
 
         self._write_locked(operation)
 
@@ -607,10 +822,13 @@ class SqliteCacheBackend(CacheBackend):
     def close(self) -> None:
         """Close the underlying connection (safe to call more than once)."""
         with self._lock:
-            try:
-                self._conn.close()
-            except sqlite3.Error:
-                pass
+            with self._read_lock:
+                try:
+                    if self._read_conn is not None:
+                        self._read_conn.close()
+                    self._conn.close()
+                except sqlite3.Error:
+                    pass
 
 
 class ExtractionCache:
@@ -755,6 +973,37 @@ class ExtractionCache:
     def clear(self, namespace: Optional[str] = None):
         """Clear cache(s)."""
         self._backend.clear(namespace)
+
+    def _accepted_backend(self, namespace: str) -> SqliteCacheBackend:
+        if not self.enabled:
+            raise ProcessingError("Accepted extraction cache disabled")
+        if namespace not in NAMESPACES:
+            raise ProcessingError("Unknown accepted extraction namespace")
+        if not isinstance(self._backend, SqliteCacheBackend) or self._backend.db_path == ":memory:":
+            raise ProcessingError("Accepted extraction requires persistent SQLite backend")
+        return self._backend
+
+    def accept(self, namespace: str, text: str, value: Any, *, cancel_event=None, **params) -> str:
+        """Confirm a durable result before reporting paid extraction complete."""
+        backend = self._accepted_backend(namespace)
+        _check_accepted_value([text, params])
+        return backend.accept(namespace, self._generate_key(text, **params), value, cancel_event=cancel_event)
+
+    def get_accepted(self, namespace: str, text: str, *, cancel_event=None, **params) -> Any:
+        _check_accepted_value([text, params])
+        return self._accepted_backend(namespace).get_accepted(namespace, self._generate_key(text, **params), cancel_event=cancel_event)
+
+    def accepted_digest(self, namespace: str, text: str, **params) -> str | None:
+        _check_accepted_value([text, params])
+        return self._accepted_backend(namespace).accepted_digest(namespace, self._generate_key(text, **params))
+
+    def has_accepted_body(self, namespace: str, text: str, digest: str, **params) -> bool:
+        _check_accepted_value([text, params])
+        return self._accepted_backend(namespace).has_accepted_body(namespace, self._generate_key(text, **params), digest)
+
+    def release_accepted(self, namespace: str, text: str, digest: str, *, cancel_event=None, **params) -> None:
+        _check_accepted_value([text, params])
+        self._accepted_backend(namespace).release_accepted(namespace, self._generate_key(text, **params), digest, cancel_event=cancel_event)
 
     def get_stats(self) -> Dict[str, Dict[str, int]]:
         """Get cache statistics (delegated to the backend so the reported

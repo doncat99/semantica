@@ -1,0 +1,9 @@
+# Ready canonical consumers span staged member/selector pages
+
+`stage_canonical` now appends pages against exact member/selector counts. Ready consumers previously reconstructed complete members and selectors with `values`, whose128-row protection rejected a valid canonical item spanning two staging pages. Scene provenance and scalar hydration imposed the same write-page count as a total-item limit.
+
+Ready canonical membership and scene reads now collect indexed references for only the selected canonical item, stopping at the existing response byte budget. They preserve full selector order and complete members. Provenance reads consume at most128 native record references per query and incrementally enforce a total retained-byte budget. Field hydration retains a bounded cache and its pre-existing joint read-byte budget, allowing more than128 small selected origins while rejecting oversized hydration. No pagination/truncation is hidden from the consumer: complete items over the existing256KiB limits remain explicit typed budget failures.
+
+Regression `test_canonical_ready_reads_span_staging_pages_after_restart` writes130 members and130 selectors in two pages, activates, restarts, then verifies complete canonical detail, scene detail, source-filtered scene and130 evidence addresses. Both low-byte detail requests fail closed. Existing joint hydration-byte regression remains green. Combined publication, extraction records, identity projection and build lifecycle suites:48 passed in20.01s, including the unchanged16MiB fresh-process point-read gate.
+
+Remaining product limit: one complete canonical item must fit the existing response and hydration byte budgets; this change does not introduce a new partial-field contract. Large canonical items beyond those byte limits require an explicitly designed member/selector detail continuation protocol, rather than silently truncating members or evidence.

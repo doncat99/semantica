@@ -77,7 +77,7 @@ def test_tracked_code_uses_native_reader_owners():
     "from docling.backend.pypdfium2_backend import PyPdfiumDocumentBackend",
 ])
 def test_gate_rejects_bypasses_in_builders_workers_and_examples(source):
-    assert _violations(source, "semantica/semantic_artifact_builder.py")
+    assert _violations(source, "semantica/semantic_publication_builder.py")
 
 
 def test_gate_allows_native_owners_and_unrelated_file_io():

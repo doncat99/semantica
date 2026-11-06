@@ -104,19 +104,30 @@ class ConflictDetector:
     """
 
     @staticmethod
+    def qualified_fact_identity(project_id, item, prefix):
+        """Canonical identity shared by native indexing and qualified reduction."""
+        from ..semantic_artifact_schema import stable_digest
+        from ..utils.exceptions import ProcessingError
+        if prefix not in {"assertion", "relation"}:
+            raise ProcessingError("Unknown qualified fact kind")
+        semantic = ([item["subject_id"], item["predicate"], item.get("object_entity_id") or item["object"], item["qualifiers"]]
+                    if prefix == "assertion" else
+                    [item["source_entity_id"], item["type"], item["target_entity_id"], item["qualifiers"]])
+        return prefix + ":" + stable_digest([project_id, semantic]).split(":")[1][:32]
+
+    @staticmethod
     def reconcile_qualified_facts(project_id, assertions, relations, *, functional_predicates=()):
         """One qualified fact identity; each located evidence span is an independent support."""
         from ..deduplication.entity_merger import EntityMerger
         from ..semantic_artifact_schema import KnowledgeAssertion, KnowledgeRelation, KnowledgeConflict, stable_digest
-        def identity(item, prefix):
-            semantic = ([item["subject_id"], item["predicate"], item.get("object_entity_id") or item["object"], item["qualifiers"]]
-                        if prefix == "assertion" else
-                        [item["source_entity_id"], item["type"], item["target_entity_id"], item["qualifiers"]])
-            return prefix + ":" + stable_digest([project_id, semantic]).split(":")[1][:32]
         canonical_assertions = [KnowledgeAssertion.model_validate(item) for item in EntityMerger.merge_qualified_facts(
-            [item.model_dump() for item in assertions], identity=lambda item: identity(item, "assertion"))]
+            (item.model_dump() for item in assertions), identity=lambda item: ConflictDetector.qualified_fact_identity(project_id, item, "assertion"))]
         canonical_relations = [KnowledgeRelation.model_validate(item) for item in EntityMerger.merge_qualified_facts(
-            [item.model_dump() for item in relations], identity=lambda item: identity(item, "relation"))]
+            (item.model_dump() for item in relations), identity=lambda item: ConflictDetector.qualified_fact_identity(project_id, item, "relation"))]
+        relations_by_endpoint = {}
+        for item in canonical_relations:
+            endpoint = (item.source_entity_id, item.target_entity_id, item.type)
+            relations_by_endpoint.setdefault(endpoint, []).append(item)
         assertion_by_id = {item.id: item for item in canonical_assertions}
         facts = [
             {"id": item.id, "subject": item.subject_id, "predicate": item.predicate,
@@ -132,9 +143,14 @@ class ConflictDetector:
             for item in members:
                 item.status = "contradicted"
             assertion_ids = sorted(item.id for item in members)
-            relation_ids = sorted(item.id for item in canonical_relations if any(
-                item.source_entity_id == assertion.subject_id and item.target_entity_id == assertion.object_entity_id
-                and item.type == assertion.predicate and item.qualifiers == assertion.qualifiers for assertion in members))
+            qualifiers_by_endpoint = {}
+            for assertion in members:
+                endpoint = (assertion.subject_id, assertion.object_entity_id, assertion.predicate)
+                qualifiers_by_endpoint.setdefault(endpoint, []).append(assertion.qualifiers)
+            relation_ids = sorted(item.id
+                for endpoint, qualifiers in qualifiers_by_endpoint.items()
+                for item in relations_by_endpoint.get(endpoint, ())
+                if any(item.qualifiers == qualifier for qualifier in qualifiers))
             conflicts.append(KnowledgeConflict(id="conflict:assertion:" + key.split(":")[1][:32], conflict_type="assertion",
                 assertion_ids=assertion_ids, relation_ids=relation_ids,
                 entity_ids=sorted({ref for item in members for ref in [item.subject_id, item.object_entity_id] if ref}),

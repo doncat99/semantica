@@ -129,7 +129,7 @@ def test_same_graph_node_id_candidates_are_not_merged():
                 },
                 related_entities=entities,
             )],
-            snapshot=gate.snapshot(),
+            version=gate.version,
         )[0]
 
     first = graph_candidate("n1", {"marker": "first"}, [{"id": "e1", "metadata": {

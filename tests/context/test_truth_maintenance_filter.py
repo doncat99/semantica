@@ -36,9 +36,9 @@ def test_last_support_withdrawal_excludes_cached_conclusion():
     gate = TruthMaintenanceContextFilter(session, session_id=SESSION_ID)
     cached = item(["B(x)"])
     session.apply(assertions=[FactSupport("old", "A(x)")])
-    assert len(gate.filter_contexts([cached], snapshot=gate.snapshot())) == 1
+    assert len(gate.filter_contexts([cached], version=gate.version)) == 1
     session.apply(retractions=["old"])
-    assert gate.filter_contexts([cached], snapshot=gate.snapshot()) == []
+    assert gate.filter_contexts([cached], version=gate.version) == []
 
 
 def test_source_replacement_invalidates_citation_but_keeps_fact():
@@ -53,7 +53,7 @@ def test_source_replacement_invalidates_citation_but_keeps_fact():
             item(["A(x)"], text="A holds"),
             item(["A(x)"], supports=["old"], text="A according to old"),
         ],
-        snapshot=gate.snapshot(),
+        version=gate.version,
     )
     assert [r.content for r in results] == ["A holds"]
 
@@ -154,14 +154,14 @@ def test_invalid_annotation_removes_candidate(annotation):
     candidate = RetrievedContext(
         content="stale", score=0.9, metadata={"truth_maintenance": annotation}
     )
-    assert gate.filter_contexts([candidate], snapshot=gate.snapshot()) == []
+    assert gate.filter_contexts([candidate], version=gate.version) == []
 
 
 def test_missing_truth_maintenance_metadata_removes_candidate():
     session = make_session()
     gate = TruthMaintenanceContextFilter(session, session_id=SESSION_ID)
     plain = RetrievedContext(content="no annotations", score=0.5)
-    assert gate.filter_contexts([plain], snapshot=gate.snapshot()) == []
+    assert gate.filter_contexts([plain], version=gate.version) == []
 
 
 def test_non_dict_truth_maintenance_metadata_removes_candidate():
@@ -170,14 +170,14 @@ def test_non_dict_truth_maintenance_metadata_removes_candidate():
     candidate = RetrievedContext(
         content="broken", score=0.5, metadata={"truth_maintenance": "yes"}
     )
-    assert gate.filter_contexts([candidate], snapshot=gate.snapshot()) == []
+    assert gate.filter_contexts([candidate], version=gate.version) == []
 
 
 def test_non_retrieved_context_candidate_raises():
     session = make_session()
     gate = TruthMaintenanceContextFilter(session, session_id=SESSION_ID)
     with pytest.raises(ValidationError):
-        gate.filter_contexts([object()], snapshot=gate.snapshot())
+        gate.filter_contexts([object()], version=gate.version)
 
 
 def test_whitespace_fact_is_normalized():
@@ -185,7 +185,7 @@ def test_whitespace_fact_is_normalized():
     session.apply(assertions=[FactSupport("s1", "A(x)")])
     gate = TruthMaintenanceContextFilter(session, session_id=SESSION_ID)
     candidate = item(["  A( x )  "])
-    results = gate.filter_contexts([candidate], snapshot=gate.snapshot())
+    results = gate.filter_contexts([candidate], version=gate.version)
     assert len(results) == 1
 
 
@@ -194,7 +194,7 @@ def test_duplicate_dependencies_are_normalized():
     session.apply(assertions=[FactSupport("s1", "A(x)")])
     gate = TruthMaintenanceContextFilter(session, session_id=SESSION_ID)
     candidate = item(["A(x)", "A(x)"], supports=["s1", "s1"])
-    results = gate.filter_contexts([candidate], snapshot=gate.snapshot())
+    results = gate.filter_contexts([candidate], version=gate.version)
     assert len(results) == 1
 
 
@@ -206,7 +206,7 @@ def test_and_semantics_requires_every_fact():
     session.apply(assertions=[FactSupport("s1", "A(x)")])
     gate = TruthMaintenanceContextFilter(session, session_id=SESSION_ID)
     both = item(["A(x)", "B(x)"])
-    assert gate.filter_contexts([both], snapshot=gate.snapshot()) == []
+    assert gate.filter_contexts([both], version=gate.version) == []
 
 
 def test_or_via_multiple_rules_keeps_conclusion():
@@ -217,7 +217,7 @@ def test_or_via_multiple_rules_keeps_conclusion():
     gate = TruthMaintenanceContextFilter(session, session_id=SESSION_ID)
     cached = item(["B(x)"])
     session.apply(assertions=[FactSupport("c1", "C(x)")])
-    assert len(gate.filter_contexts([cached], snapshot=gate.snapshot())) == 1
+    assert len(gate.filter_contexts([cached], version=gate.version)) == 1
 
 
 def test_direct_assertion_and_derived_fact_together():
@@ -225,7 +225,7 @@ def test_direct_assertion_and_derived_fact_together():
     session.apply(assertions=[FactSupport("a1", "A(x)")])
     gate = TruthMaintenanceContextFilter(session, session_id=SESSION_ID)
     candidate = item(["A(x)", "B(x)"])
-    results = gate.filter_contexts([candidate], snapshot=gate.snapshot())
+    results = gate.filter_contexts([candidate], version=gate.version)
     assert len(results) == 1
 
 
@@ -234,11 +234,11 @@ def test_retract_then_reactivate_restores_candidate():
     gate = TruthMaintenanceContextFilter(session, session_id=SESSION_ID)
     candidate = item(["A(x)"])
     session.apply(assertions=[FactSupport("s1", "A(x)")])
-    assert len(gate.filter_contexts([candidate], snapshot=gate.snapshot())) == 1
+    assert len(gate.filter_contexts([candidate], version=gate.version)) == 1
     session.apply(retractions=["s1"])
-    assert gate.filter_contexts([candidate], snapshot=gate.snapshot()) == []
+    assert gate.filter_contexts([candidate], version=gate.version) == []
     session.apply(assertions=[FactSupport("s2", "A(x)")])
-    assert len(gate.filter_contexts([candidate], snapshot=gate.snapshot())) == 1
+    assert len(gate.filter_contexts([candidate], version=gate.version)) == 1
 
 
 # --- graph bundle handling ---
@@ -269,11 +269,11 @@ def test_graph_bundle_requires_every_attachment_annotation():
     unannotated_attachment = attachment()
     assert gate.filter_contexts(
         [bundle(root, [valid_attachment, unannotated_attachment])],
-        snapshot=gate.snapshot(),
+        version=gate.version,
     ) == []
     assert len(
         gate.filter_contexts(
-            [bundle(root, [valid_attachment])], snapshot=gate.snapshot()
+            [bundle(root, [valid_attachment])], version=gate.version
         )
     ) == 1
 
@@ -287,7 +287,7 @@ def test_graph_bundle_stale_attachment_removes_whole_candidate():
             required_facts=["Old(x)"], required_support_ids=[])}
     )
     assert gate.filter_contexts(
-        [bundle(root, [stale_attachment])], snapshot=gate.snapshot()
+        [bundle(root, [stale_attachment])], version=gate.version
     ) == []
 
 
@@ -300,7 +300,7 @@ def test_graph_bundle_non_list_related_fields_remove_candidate():
         metadata={"truth_maintenance": invalid_annotation()},
         related_entities="not-a-list",
     )
-    assert gate.filter_contexts([candidate], snapshot=gate.snapshot()) == []
+    assert gate.filter_contexts([candidate], version=gate.version) == []
 
 
 def test_graph_bundle_member_without_metadata_dict_removes_candidate():
@@ -310,7 +310,7 @@ def test_graph_bundle_member_without_metadata_dict_removes_candidate():
     bad_member = attachment()
     bad_member.pop("metadata")
     assert gate.filter_contexts(
-        [bundle(root, [bad_member])], snapshot=gate.snapshot()
+        [bundle(root, [bad_member])], version=gate.version
     ) == []
 
 
@@ -322,7 +322,7 @@ def test_passing_candidate_is_deep_copied_and_stamped():
     session.apply(assertions=[FactSupport("s1", "A(x)")])
     gate = TruthMaintenanceContextFilter(session, session_id=SESSION_ID)
     original = item(["A(x)"])
-    results = gate.filter_contexts([original], snapshot=gate.snapshot())
+    results = gate.filter_contexts([original], version=gate.version)
     assert len(results) == 1
     stamped = results[0]
     assert stamped is not original
@@ -348,7 +348,7 @@ def test_old_validation_stamp_is_overwritten_not_trusted():
         "session_id": "someone-else",
         "version": 99,
     }
-    results = gate.filter_contexts([original], snapshot=gate.snapshot())
+    results = gate.filter_contexts([original], version=gate.version)
     assert results[0].metadata["truth_maintenance_validation"] == {
         "session_id": SESSION_ID,
         "version": session.version,
@@ -371,7 +371,7 @@ def test_related_attachments_are_copied_not_shared():
         related_entities=entities,
         related_relationships=[deepcopy(annotated)],
     )
-    results = gate.filter_contexts([original], snapshot=gate.snapshot())
+    results = gate.filter_contexts([original], version=gate.version)
     stamped = results[0]
     assert stamped.related_entities is not original.related_entities
     assert stamped.related_entities[0] is not original.related_entities[0]
@@ -386,47 +386,47 @@ def test_score_and_fields_are_preserved():
     original = item(["A(x)"], text="kept text")
     original.score = 0.42
     original.source = "graph:expanded"
-    results = gate.filter_contexts([original], snapshot=gate.snapshot())
+    results = gate.filter_contexts([original], version=gate.version)
     stamped = results[0]
     assert stamped.score == 0.42
     assert stamped.source == "graph:expanded"
     assert stamped.content == "kept text"
 
 
-# --- snapshot delegation and version gate ---
+# --- committed version gate ---
 
 
-def test_snapshot_delegates_to_session():
+def test_version_delegates_to_session():
     session = make_session()
     session.apply(assertions=[FactSupport("s1", "A(x)")])
     gate = TruthMaintenanceContextFilter(session, session_id=SESSION_ID)
-    snap = gate.snapshot()
-    assert snap == session.snapshot()
+    snap = gate.version
+    assert snap == session.version
 
 
 def test_assert_current_accepts_matching_version():
     session = make_session()
     session.apply(assertions=[FactSupport("s1", "A(x)")])
     gate = TruthMaintenanceContextFilter(session, session_id=SESSION_ID)
-    gate.assert_current(gate.snapshot())
+    gate.assert_current(gate.version)
 
 
 def test_assert_current_raises_processing_error_on_version_change():
     session = make_session()
     gate = TruthMaintenanceContextFilter(session, session_id=SESSION_ID)
-    stale = gate.snapshot()
+    stale = gate.version
     session.apply(assertions=[FactSupport("s1", "A(x)")])
     with pytest.raises(ProcessingError) as excinfo:
         gate.assert_current(stale)
     details = excinfo.value.details if hasattr(excinfo.value, "details") else {}
-    assert details.get("expected") == stale.version
+    assert details.get("expected") == stale
     assert details.get("actual") == session.version
 
 
 def test_assert_current_noop_apply_does_not_bump_version():
     session = make_session()
     gate = TruthMaintenanceContextFilter(session, session_id=SESSION_ID)
-    snap = gate.snapshot()
+    snap = gate.version
     session.apply(assertions=[])
     gate.assert_current(snap)
 
@@ -434,7 +434,7 @@ def test_assert_current_noop_apply_does_not_bump_version():
 def test_empty_input_returns_empty_list():
     session = make_session()
     gate = TruthMaintenanceContextFilter(session, session_id=SESSION_ID)
-    assert gate.filter_contexts([], snapshot=gate.snapshot()) == []
+    assert gate.filter_contexts([], version=gate.version) == []
 
 
 # --- malformed root metadata ---
@@ -454,5 +454,5 @@ def test_non_dict_root_metadata_removes_candidate_without_raising(broken_metadat
     broken = item(["A(x)"], text="broken record")
     broken.metadata = broken_metadata
     valid = item(["A(x)"], text="valid record")
-    results = gate.filter_contexts([broken, valid], snapshot=gate.snapshot())
+    results = gate.filter_contexts([broken, valid], version=gate.version)
     assert [r.content for r in results] == ["valid record"]

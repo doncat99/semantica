@@ -147,8 +147,8 @@ def mint_relationship_iri(index: int, source: Any, target: Any) -> str:
 
 
 #: The metadata keys Semantica itself produces, and the terms they are written
-#: as. GraphBuilder.build_graph writes the first five, create_snapshot writes
-#: snapshot_time, and load_from_neo4j writes source / uri / database. These are
+#: as. GraphBuilder.build_graph writes the first five, and load_from_neo4j
+#: writes source / uri / database. These are
 #: Semantica's own vocabulary, so they are minted in the declared namespace and
 #: declared in semantica-ns.ttl.
 #:
@@ -168,7 +168,6 @@ DEFAULT_METADATA_TERMS: Dict[str, str] = {
     "temporal_enabled": f"{SEMANTICA_NS}temporalEnabled",
     "entity_resolution_applied": f"{SEMANTICA_NS}entityResolutionApplied",
     "timestamp": f"{SEMANTICA_NS}builtAt",
-    "snapshot_time": f"{SEMANTICA_NS}snapshotAt",
     "source": f"{SEMANTICA_NS}sourceSystem",
     "uri": f"{SEMANTICA_NS}sourceUri",
     "database": f"{SEMANTICA_NS}sourceDatabase",

@@ -90,7 +90,12 @@ class TripletStore:
         self._initialize_store_backend()
 
         # Initialize components
-        self.query_engine = QueryEngine(self.config)
+        # Mutable embedded facts may change through native atomic updates;
+        # the query-text cache has no transaction identity or invalidation.
+        self.query_engine = QueryEngine({
+            **self.config,
+            **({"enable_caching": False} if self.backend_type == "oxigraph" else {}),
+        })
         self.bulk_loader = BulkLoader()
 
     def _initialize_store_backend(self) -> None:
@@ -460,7 +465,7 @@ class TripletStore:
 
         Args:
             query: SPARQL query string
-            parameters: Query parameters
+            parameters: Unsupported; use backend-native ``substitutions`` bindings
             graph: Optional default graph URI for dataset scoping
             graphs: Optional list of named graph URIs for dataset scoping
             **options: Additional options
@@ -468,6 +473,10 @@ class TripletStore:
         Returns:
             Query results (format depends on query type)
         """
+        if parameters is not None:
+            raise ValidationError(
+                "parameters is unsupported; use native substitutions for query bindings"
+            )
         if graph is not None:
             options["graph"] = graph
         if graphs is not None:

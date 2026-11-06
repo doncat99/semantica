@@ -85,8 +85,7 @@ from semantica.kg import GraphBuilder
 builder = GraphBuilder(
     enable_temporal=True,
     temporal_granularity="day",
-    track_history=True,
-    version_snapshots=True
+    track_history=True
 )
 
 temporal_kg = builder.build(sources)
@@ -1341,19 +1340,6 @@ for bridge in result["bridge_edges"]:
 
 ## Temporal Queries
 
-### Time-Point Queries
-
-```python
-from semantica.kg import TemporalGraphQuery
-
-# Create query engine and query at specific time
-query_engine = TemporalGraphQuery()
-result = query_engine.query_at_time(kg, query="", at_time="2024-01-01")
-
-print(f"Entities at time: {result['num_entities']}")
-print(f"Relationships at time: {result['num_relationships']}")
-```
-
 ### Time-Range Queries
 
 ```python
@@ -1519,7 +1505,7 @@ connectivity = analyze_connectivity(kg, method="default")
 deduplicated = deduplicate_graph(kg, method="default")
 
 # Query temporal
-temporal_result = query_temporal(kg, method="time_point", at_time="2024-01-01")
+temporal_result = query_temporal(kg, method="time_range", start_time="2024-01-01", end_time="2024-02-01")
 
 # Graph algorithm functions
 embeddings = compute_node_embeddings(graph_store, node_labels=["Entity"], relationship_types=["RELATED_TO"])

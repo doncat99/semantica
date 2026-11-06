@@ -1,9 +1,10 @@
+from tests.artifact_helpers import build_source_fixture
 """Reviewed semantic counterexamples through located source -> native resolver."""
 from types import SimpleNamespace
 
 import pytest
 
-from semantica.semantic_artifact_builder import _build_source, _resolve_native_entities
+from semantica.semantic_publication_builder import _resolve_native_entities
 
 
 def mention(name, context, scope='a', *, description=None, owner=None, kind=None, instance=None, type='ORG'):
@@ -29,7 +30,7 @@ def project(rows):
             begin += len(row['context']) + 1
         source = SimpleNamespace(source_id='source:' + scope, name=scope, mime_type='text/plain',
                                  material_revision='b3-' + '1' * 64)
-        built = _build_source(source, False, dict(entities=extracted, relations=[]),
+        built = build_source_fixture(source, False, dict(entities=extracted, relations=[]),
                              (text, dict(text=text), 'native', 'b3-' + '1' * 64, 'text', '1'))
         mentions.extend(built['entities'])
     before = [item.model_dump() for item in mentions]

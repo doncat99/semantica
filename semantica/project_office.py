@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+from hashlib import sha256
 import os
 from pathlib import Path
 import subprocess
@@ -18,13 +19,33 @@ class OfficeRuntimeUnavailableError(ValueError):
     """The optional LibreOffice capability is not installed."""
 
 
+def office_runtime_identity() -> str | None:
+    """Bind the installed immutable capability receipt, never scan its payload."""
+    configured = os.environ.get('SEMANTICA_OFFICE_ROOT', '').strip()
+    if not configured:
+        return None
+    _, raw = _office_receipt(Path(configured).expanduser().resolve())
+    return 'sha256:' + sha256(raw).hexdigest()
+
+
+def _office_receipt(root: Path) -> tuple[dict, bytes]:
+    with (root / 'office-release.json').open('rb') as stream:
+        raw = stream.read(65537)
+    if len(raw) > 65536:
+        raise ValueError('Office capability receipt exceeds 65536 bytes')
+    receipt = json.loads(raw)
+    if not isinstance(receipt, dict) or any(not isinstance(receipt.get(key), str)
+            or not receipt[key] for key in ('version', 'executable')):
+        raise ValueError('Office capability receipt is invalid')
+    return receipt, raw
+
+
 def bundled_office() -> tuple[Path, str]:
     configured = os.environ.get("SEMANTICA_OFFICE_ROOT", "").strip()
     root = Path(configured).expanduser().resolve() if configured else None
     if root is None:
         raise OfficeRuntimeUnavailableError("office-runtime-unavailable: install the LibreOffice capability and set SEMANTICA_OFFICE_ROOT")
-    receipt_path = root / "office-release.json"
-    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt, _ = _office_receipt(root)
     executable = (root / "office" / receipt["executable"]).resolve(strict=True)
     if not executable.is_relative_to(root / "office") or not executable.is_file():
         raise ValueError("the Office capability executable is outside its immutable runtime")
@@ -66,18 +87,12 @@ def flat_odf_document(xml: bytes, *, name: str) -> dict:
     body = root.find("office:body", _NS)
     if body is None:
         raise ValueError("Office representation has no document body")
-    sections, text_parts = [], []
-    position = 0
+    sections = []
 
     def append(text: str, locator: dict) -> None:
-        nonlocal position
         if not text.strip():
             return
-        if text_parts:
-            position += 2
-        sections.append({"text": text, "start_char": position, "end_char": position + len(text), "locator": locator})
-        text_parts.append(text)
-        position += len(text)
+        sections.append({"text": text, "locator": locator})
 
     spreadsheet = body.find("office:spreadsheet", _NS)
     slides = body.find("office:presentation", _NS)
@@ -104,14 +119,14 @@ def flat_odf_document(xml: bytes, *, name: str) -> dict:
             raise ValueError("unsupported flat ODF document body")
         for index, paragraph in enumerate(node for node in content.iter() if node.tag in {"{" + _NS["text"] + "}p", "{" + _NS["text"] + "}h"}):
             append(_paragraph_text(paragraph), {"kind": "paragraph", "paragraph": index})
-    if not text_parts:
+    if not sections:
         raise ValueError("Office source has no readable document text")
-    return {"format": "flat-odf", "source": name, "text": "\n\n".join(text_parts), "sections": sections, "flat_odf": xml.decode("utf-8")}
+    return {"format": "flat-odf", "source": name, "sections": sections}
 
 
-def parse_office(path: Path, *, name: str) -> tuple[dict, str]:
+def parse_office(path: Path, *, name: str, source_suffix: str | None = None) -> tuple[dict, str]:
     executable, version = bundled_office()
-    suffix = path.suffix.lower()
+    suffix = source_suffix if source_suffix is not None else path.suffix.lower()
     if suffix not in OFFICE_SUFFIXES:
         raise ValueError(f"unsupported dedicated Office source: {suffix}")
     target = "fods" if suffix == ".xls" else "fodp" if suffix == ".ppt" else "fodt"

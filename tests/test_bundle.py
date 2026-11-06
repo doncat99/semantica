@@ -110,7 +110,7 @@ def manifest_for(path: Path) -> dict:
     return {"files": [{"path": path.name, "size": path.stat().st_size, "sha256": digest_file(path)}]}
 
 
-def test_bundle_inventory_excludes_install_and_runtime_bytecode(tmp_path: Path):
+def test_bundle_inventory_prunes_install_but_rejects_runtime_bytecode(tmp_path: Path):
     tracked = tmp_path / "runtime.bin"
     tracked.write_bytes(b"runtime")
     bytecode = tmp_path / "python/lib/__pycache__/generated.cpython-312.pyc"
@@ -120,9 +120,10 @@ def test_bundle_inventory_excludes_install_and_runtime_bytecode(tmp_path: Path):
     remove_generated_bytecode(tmp_path)
     manifest = manifest_for(tracked)
     bytecode.write_bytes(b"generated at runtime")
-    verify_bundle_inventory(tmp_path, manifest, remove_untracked_bytecode=True)
+    with pytest.raises(ValueError, match="extra=.*generated.cpython-312.pyc"):
+        verify_bundle_inventory(tmp_path, manifest)
 
-    assert not bytecode.exists()
+    assert bytecode.exists()
 
 
 def test_post_acceptance_inventory_rejects_other_untracked_files(tmp_path: Path):
@@ -131,7 +132,7 @@ def test_post_acceptance_inventory_rejects_other_untracked_files(tmp_path: Path)
     (tmp_path / "unexpected.cache").write_bytes(b"generated")
 
     with pytest.raises(ValueError, match="extra=.*unexpected.cache"):
-        verify_bundle_inventory(tmp_path, manifest_for(tracked), remove_untracked_bytecode=True)
+        verify_bundle_inventory(tmp_path, manifest_for(tracked))
 
 
 def test_post_acceptance_inventory_rejects_changed_manifest_file(tmp_path: Path):
@@ -141,7 +142,7 @@ def test_post_acceptance_inventory_rejects_changed_manifest_file(tmp_path: Path)
     tracked.write_bytes(b"changed")
 
     with pytest.raises(ValueError, match="runtime.bin"):
-        verify_bundle_inventory(tmp_path, manifest, remove_untracked_bytecode=True)
+        verify_bundle_inventory(tmp_path, manifest)
 
 
 def test_document_parser_digest_ignores_extraction_code_but_tracks_parser_inputs():
@@ -149,7 +150,7 @@ def test_document_parser_digest_ignores_extraction_code_but_tracks_parser_inputs
         {"path": "models/layout/model.bin", "size": 1, "sha256": "sha256:" + "1" * 64},
         {"path": "python/lib/site-packages/docling/core.py", "size": 2, "sha256": "sha256:" + "2" * 64},
         {"path": "python/lib/site-packages/semantica/source.py", "size": 3, "sha256": "sha256:" + "3" * 64},
-        {"path": "python/lib/site-packages/semantica/semantic_artifact_builder.py", "size": 4, "sha256": "sha256:" + "4" * 64},
+        {"path": "python/lib/site-packages/semantica/semantic_publication_builder.py", "size": 4, "sha256": "sha256:" + "4" * 64},
     ]
     original = document_parser_digest(files)
     extraction_only = [*files[:3], {**files[3], "sha256": "sha256:" + "5" * 64}]
@@ -163,7 +164,7 @@ def test_parser_digest_excludes_protocol_and_nonparser_dependencies():
     def item(name, digest):
         return {"path": "python/lib/site-packages/" + name, "size": 1, "sha256": digest}
     files = [item("semantica/source.py", "source"), item("docling/core.py", "parser"),
-             item("semantica/semantic_worker.py", "protocol"), item("semantica/project_checkpoint.py", "checkpoint"),
+             item("semantica/semantic_worker.py", "protocol"), item("semantica/triplet_store/oxigraph_store.py", "knowledge"),
              item("openai/client.py", "llm")]
     closure = {files[1]["path"]}
     before = document_parser_digest(files, closure)
@@ -173,3 +174,77 @@ def test_parser_digest_excludes_protocol_and_nonparser_dependencies():
     assert document_parser_digest(changed, closure) == before
     changed[1]["sha256"] = "parser-changed"
     assert document_parser_digest(changed, closure) != before
+
+
+@pytest.mark.parametrize("relative", [
+    "python/lib/site-packages/docling-1.dist-info/RECORD",
+    "python/lib/site-packages/docling-1.dist-info/direct_url.json",
+    "python/lib/site-packages/docling-1.dist-info/uv_cache.json",
+])
+def test_parser_recipe_ignores_installation_location_and_time_metadata(relative):
+    files = [{"path": "python/lib/site-packages/docling/core.py", "size": 4, "sha256": "runtime"},
+             {"path": relative, "size": 10, "sha256": "installation-a"}]
+    changed = [files[0], {**files[1], "size": 20, "sha256": "installation-b"}]
+    assert document_parser_digest(files) == document_parser_digest(changed)
+
+
+@pytest.mark.parametrize("script", ["python/bin/docling", "python/Scripts/docling.exe"])
+def test_parser_recipe_ignores_only_declared_unused_console_wrappers(script):
+    files = [{"path": "python/bin/python3", "size": 4, "sha256": "interpreter"},
+             {"path": script, "size": 10, "sha256": "staging-path-a"},
+             {"path": "python/bin/ffprobe", "size": 4, "sha256": "media-tool"}]
+    changed = [files[0], {**files[1], "sha256": "staging-path-b"}, files[2]]
+    assert document_parser_digest(files, console_script_files={script}) == document_parser_digest(changed, console_script_files={script})
+    assert document_parser_digest(files) != document_parser_digest(changed)
+    changed[2] = {**files[2], "sha256": "changed-media-tool"}
+    assert document_parser_digest(files, console_script_files={script}) != document_parser_digest(changed, console_script_files={script})
+
+
+@pytest.mark.parametrize("relative", [
+    "python/bin/python3", "python/python.exe", "python/lib/python3.12/os.py",
+    "python/lib/site-packages/docling/core.py", "python/lib/site-packages/docling-1.dist-info/METADATA",
+    "python/lib/site-packages/docling-1.dist-info/entry_points.txt", "python/lib/site-packages/native/runtime.dylib",
+    "models/layout/model.bin", "office/receipt.json", "office/soffice",
+])
+def test_parser_recipe_still_tracks_executed_bytes_dependencies_and_models(relative):
+    files = [{"path": relative, "size": 4, "sha256": "before"}]
+    assert document_parser_digest(files) != document_parser_digest([{**files[0], "sha256": "after"}])
+
+
+@pytest.mark.parametrize("directory,suffix", [("bin", ""), ("Scripts", ".exe")])
+def test_console_wrapper_selection_uses_entry_points_and_preserves_native_tools(tmp_path, monkeypatch, directory, suffix):
+    from importlib import metadata
+    from semantica.bundle import parser_console_script_files
+    runtime = tmp_path / "python" / directory
+    runtime.mkdir(parents=True)
+    for name in ("docling", "python3", "python3.12", "ffprobe", "unregistered-tool"):
+        (runtime / (name + suffix)).write_bytes(b"runtime")
+    entries = [SimpleNamespace(group="console_scripts", name=name) for name in
+               ("docling", "python3", "python3.12", "ffprobe")]
+    entries.append(SimpleNamespace(group="other", name="unregistered-tool"))
+    monkeypatch.setattr(metadata, "distributions", lambda: [SimpleNamespace(entry_points=entries, files=[])])
+    assert parser_console_script_files(tmp_path) == {f"python/{directory}/docling{suffix}"}
+
+
+
+def test_console_wrapper_selection_handles_wheel_script_files_without_dropping_native_tools(tmp_path, monkeypatch):
+    from importlib import metadata
+    from semantica.bundle import parser_console_script_files
+    runtime = tmp_path / "python/bin"
+    runtime.mkdir(parents=True)
+    files = {"get_gprof": b"#!/bin/sh\n\'\'\'exec\' '/staging/python3' \"$0\" \"$@\"\n",
+             "legacy-cli": b"#!/staging/python3\nimport sys\n", "native-tool": b"\x7fELF",
+             "ffprobe": b"#!/staging/python3\nimport sys\n", "python3": b"binary"}
+    for name, content in files.items():
+        (runtime / name).write_bytes(content)
+    wheel_scripts = ("get_objgraph", "mpire-dashboard", "pygrun", "undill", "vba_extract.py")
+    for name in wheel_scripts:
+        (runtime / name).write_bytes(files["get_gprof"])
+    undeclared = runtime / "undeclared-python-cli"
+    undeclared.write_bytes(files["legacy-cli"])
+    escaped = tmp_path.parent / (tmp_path.name + "-outside")
+    escaped.write_bytes(files["legacy-cli"])
+    (runtime / "escape").symlink_to(escaped)
+    distribution = SimpleNamespace(entry_points=[], files=[*files, *wheel_scripts, "escape"], locate_file=lambda name: runtime / name)
+    monkeypatch.setattr(metadata, "distributions", lambda: [distribution])
+    assert parser_console_script_files(tmp_path) == {"python/bin/" + name for name in ("get_gprof", "legacy-cli", *wheel_scripts)}

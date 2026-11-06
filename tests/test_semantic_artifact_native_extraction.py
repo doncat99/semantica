@@ -1,3 +1,4 @@
+from tests.artifact_helpers import build_source_fixture
 from tests.artifact_helpers import extract_source
 import inspect
 from types import SimpleNamespace
@@ -6,8 +7,8 @@ import pytest
 import re
 from pydantic import BaseModel
 
-from semantica import semantic_artifact_builder
-from semantica.semantic_artifact_builder import SemanticArtifactError
+from semantica import semantic_publication_builder
+from semantica.semantic_publication_builder import SemanticArtifactError
 from semantica.semantic_artifact_schema import ModelReceipt
 from semantica.semantic_extract.types import Entity, Relation
 from semantica.utils.exceptions import ProcessingError
@@ -20,12 +21,14 @@ def test_entity_occurrence_index_preserves_identity_and_scans_each_name_once(mon
     def scan(*args, **kwargs):
         calls.append(args)
         return original(*args, **kwargs)
-    monkeypatch.setattr(semantic_artifact_builder.re, "finditer", scan)
-    cache = semantic_artifact_builder._entity_occurrence_index(text, ["Roof", "Roof"])
+    monkeypatch.setattr(semantic_publication_builder.re, "finditer", scan)
+    positions = [match.start() for match in original('Roof', text, re.IGNORECASE)]
+    cache = semantic_publication_builder._source_occurrence_ordinals(
+        lambda start, end: text[start:end], len(text), [('Roof', start) for start in positions])
     for match in original("Roof", text, re.IGNORECASE):
         occurrence = sum(1 for prior in original("Roof", text[:match.end()], re.IGNORECASE) if prior.start() < match.start())
-        expected = "mention:" + semantic_artifact_builder.stable_digest(["source", "object", "roof", occurrence]).split(":")[1][:32]
-        assert semantic_artifact_builder._entity_id("source", "Roof", "object", match.start(), cache) == expected
+        expected = "mention:" + semantic_publication_builder.stable_digest(["source", "object", "roof", occurrence]).split(":")[1][:32]
+        assert semantic_publication_builder._entity_id("source", "Roof", "object", cache['Roof', match.start()]) == expected
     assert calls == []
 
 
@@ -33,14 +36,18 @@ def test_occurrence_index_uses_literal_search_without_changing_unicode_matching(
     text = "I İ ı i S ſ s K K k Σ σ ς ß ẞ é É aaaa"
     names = ["I", "i", "S", "K", "Σ", "ß", "é", "aa"]
     original = re.finditer
-    expected = {name: [m.start() for m in original(re.escape(name), text, re.IGNORECASE)] for name in names}
+    from bisect import bisect_left
+    positions = {name: [m.start() for m in original(re.escape(name), text, re.IGNORECASE)] for name in names}
+    targets = [(name, start) for name in names for start in range(len(text)+1)]
+    expected = {(name, start): bisect_left(positions[name], start) for name, start in targets}
     scans = []
     def scan(pattern, source, flags=0):
         scans.append(flags)
         return original(pattern, source, flags)
-    monkeypatch.setattr(semantic_artifact_builder.re, "finditer", scan)
-    assert semantic_artifact_builder._entity_occurrence_index(text, names) == expected
-    assert sum(flags == re.IGNORECASE for flags in scans) == 3
+    monkeypatch.setattr(semantic_publication_builder.re, "finditer", scan)
+    assert semantic_publication_builder._source_occurrence_ordinals(
+        lambda start, end: text[start:end], len(text), targets) == expected
+    assert scans == []
 
 
 def test_worker_internal_failure_retains_code_location_without_source_content():
@@ -65,15 +72,15 @@ def test_parallel_extraction_failure_retains_task_and_window_context(monkeypatch
     )
 
     monkeypatch.setattr(
-        semantic_artifact_builder,
-        "_text_windows",
-        lambda text: [(12, 34, text[12:34])],
+        semantic_publication_builder,
+        "_source_windows",
+        lambda parsed: type(parsed.windows)(parsed.text, [(12, 34)]),
     )
 
     def grounded(_text, **_kwargs):
         raise ProcessingError("grounded extraction failed") from relay_failure
 
-    monkeypatch.setattr(semantic_artifact_builder, "extract_grounded_window", grounded)
+    monkeypatch.setattr(semantic_publication_builder, "extract_grounded_window", grounded)
 
     with pytest.raises(SemanticArtifactError) as failure:
         extract_source(
@@ -154,10 +161,10 @@ def test_semantic_artifact_extraction_uses_canonical_semantica_extractors(monkey
         )]
         return entities, relations, Provider()
 
-    monkeypatch.setattr(semantic_artifact_builder, "_project_model_provider", lambda _relay: Provider())
-    monkeypatch.setattr(semantic_artifact_builder, "extract_grounded_window", grounded)
+    monkeypatch.setattr(semantic_publication_builder, "_project_model_provider", lambda _relay: Provider())
+    monkeypatch.setattr(semantic_publication_builder, "extract_grounded_window", grounded)
     monkeypatch.setattr(
-        semantic_artifact_builder,
+        semantic_publication_builder,
         "_embed_texts",
         lambda texts, _relay: ([[0.1, 0.2] for _ in texts], ModelReceipt(
             id="receipt:embedding",
@@ -177,12 +184,12 @@ def test_semantic_artifact_extraction_uses_canonical_semantica_extractors(monkey
     assert calls[0][2]["extraction_spec"] is None
     assert result["entities"][0]["name"] == "Reflective roofs"
     assert result["relations"][0]["evidence"] == "Reflective roofs do not shade pedestrians."
-    assert embeddings == [{"start_char": 0, "end_char": 42, "vector": [0.1, 0.2]}]
+    assert embeddings == [{"start_char": 0, "end_char": 42}]
     assert {receipt.operation for receipt in receipts} == {"structured_extraction", "embedding"}
 
 
 def test_semantic_artifact_has_no_parallel_structured_extractor():
-    source = inspect.getsource(semantic_artifact_builder)
+    source = inspect.getsource(semantic_publication_builder)
     assert "def _structured_extract" not in source
     assert "return _structured_extract" not in source
     assert "ThreadPoolExecutor" not in source
@@ -206,8 +213,8 @@ def test_project_model_provider_uses_host_admitted_output_limit(monkeypatch):
             output_digest="sha256:" + "2" * 64,
         )
 
-    monkeypatch.setattr(semantic_artifact_builder, "_relay_json", relay_json)
-    provider = semantic_artifact_builder._project_model_provider(
+    monkeypatch.setattr(semantic_publication_builder, "_relay_json", relay_json)
+    provider = semantic_publication_builder._project_model_provider(
         SimpleNamespace(model_id="model-1", max_output_tokens=32768)
     )
 
@@ -229,7 +236,7 @@ def test_native_extraction_preserves_relay_cause_but_stops_after_task_retry_budg
         calls.append(_text)
         raise ProcessingError("typed extraction failed") from relay_failure
 
-    monkeypatch.setattr(semantic_artifact_builder, "extract_grounded_window", grounded)
+    monkeypatch.setattr(semantic_publication_builder, "extract_grounded_window", grounded)
 
     with pytest.raises(SemanticArtifactError) as failure:
         extract_source(
@@ -253,7 +260,7 @@ def test_native_parallel_map_propagates_permanent_failure_for_fail_fast():
         return item
 
     with pytest.raises(ProcessingError) as failure:
-        semantic_artifact_builder._native_parallel_map(
+        semantic_publication_builder._native_parallel_map(
             ["permanent", "queued"], grounded, parallelism=1
         )
 
@@ -346,8 +353,8 @@ def test_typed_relay_uses_json_object_and_local_schema_without_fallback(monkeypa
         receipt = ModelReceipt(id='test', operation=operation, provider='test', model='model-1', input_digest='sha256:' + 'a' * 64, output_digest='sha256:' + 'b' * 64)
         return {'model': 'model-1', 'choices': [{'finish_reason': 'stop', 'message': {'content': content}}]}, receipt
 
-    monkeypatch.setattr(semantic_artifact_builder, '_relay_json', relay_json)
-    provider = semantic_artifact_builder._project_model_provider(SimpleNamespace(model_id='model-1', max_output_tokens=32768))
+    monkeypatch.setattr(semantic_publication_builder, '_relay_json', relay_json)
+    provider = semantic_publication_builder._project_model_provider(SimpleNamespace(model_id='model-1', max_output_tokens=32768))
     if valid:
         assert provider.generate_typed('Extract JSON', Output).value == 7
     else:
@@ -367,11 +374,11 @@ def test_typed_provider_keeps_relay_failure_as_its_cause(monkeypatch):
         retryable=True,
     )
     monkeypatch.setattr(
-        semantic_artifact_builder,
+        semantic_publication_builder,
         "_relay_json",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(relay_failure),
     )
-    provider = semantic_artifact_builder._project_model_provider(
+    provider = semantic_publication_builder._project_model_provider(
         SimpleNamespace(model_id="model-1", max_output_tokens=393216)
     )
 
@@ -384,46 +391,41 @@ def test_typed_provider_keeps_relay_failure_as_its_cause(monkeypatch):
 def test_native_empty_result_cache_restores_rejections_and_receipts(tmp_path, monkeypatch):
     from tests.artifact_helpers import stub_native_provider
     from tests.test_semantic_artifact import _request
-    from semantica.project_checkpoint import SnapshotCheckpoint, active_checkpoint
+    from tests.artifact_helpers import native_extraction_owner
     from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest
 
     text = "The committee supervises reporting."
     path = tmp_path / "source.txt"
     path.write_text(text)
-    checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(
-        _request(path, tmp_path / "output")["params"]))
     calls = []
     def respond(stage, prompt):
         calls.append(stage)
         return {"entities": [{"text": " committee ", "label": "ORG", "occurrence": 0,
                               "confidence": 0.9, "attributes": {}}]}
     stub_native_provider(monkeypatch, respond)
-    token = active_checkpoint.set(checkpoint)
-    try:
+    with native_extraction_owner(tmp_path / "native", text=text) as store:
         args = (text, SimpleNamespace(model_id="test"), None, (0, len(text), text), [])
-        first, first_receipts, reused = semantic_artifact_builder._extract_window_context(*args)
-        second, receipts, restored = semantic_artifact_builder._extract_window_context(*args)
-    finally:
-        active_checkpoint.reset(token)
-    assert first == second == {"entities": [], "relations": []}
+        first, first_receipts, reused = semantic_publication_builder._extract_window_context(*args)
+        second, receipts, restored = semantic_publication_builder._extract_window_context(*args)
+    assert first == second
+    assert first['entities'] == first['relations'] == []
+    # Empty entity extraction never invokes/adopts a relations operation.
+    assert first['native_entity_refs'] == {} and len(first['native_operations']) == 1
     assert calls == ["entities"] and not reused and restored
     assert receipts[0].id == first_receipts[0].id
-    assert receipts[0].metadata["rejected_candidates"]
-    assert len(list(checkpoint.root.glob("extraction-entities-*.json"))) == 1
-    assert not list(checkpoint.root.glob("relay-*.json"))
+    assert receipts[0].metadata["rejected_count"] > 0
+    assert not list(tmp_path.rglob("extraction-entities-*.json"))
 
 
-def test_native_checkpoint_restores_identity_rejection_and_grounded_mention(tmp_path, monkeypatch):
+def test_native_owner_restores_identity_rejection_and_grounded_mention(tmp_path, monkeypatch):
     from tests.artifact_helpers import stub_native_provider
     from tests.test_semantic_artifact import _request
-    from semantica.project_checkpoint import SnapshotCheckpoint, active_checkpoint
+    from tests.artifact_helpers import native_extraction_owner
     from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest
 
     text = 'Our ESG Committee supervises reporting.'
     path = tmp_path / 'source.txt'
     path.write_text(text)
-    checkpoint = SnapshotCheckpoint(SemanticArtifactBuildRequest.model_validate(
-        _request(path, tmp_path / 'output')['params']))
     calls = []
 
     def respond(stage, prompt):
@@ -435,19 +437,16 @@ def test_native_checkpoint_restores_identity_rejection_and_grounded_mention(tmp_
                 owner='Acme', evidence=text, evidence_occurrence=0))]}
 
     stub_native_provider(monkeypatch, respond)
-    token = active_checkpoint.set(checkpoint)
-    try:
+    with native_extraction_owner(tmp_path / "native", text=text) as store:
         args = (text, SimpleNamespace(model_id='test'), None, (0, len(text), text), [])
-        first, first_receipts, reused = semantic_artifact_builder._extract_window_context(*args)
-        second, receipts, restored = semantic_artifact_builder._extract_window_context(*args)
-    finally:
-        active_checkpoint.reset(token)
+        first, first_receipts, reused = semantic_publication_builder._extract_window_context(*args)
+        second, receipts, restored = semantic_publication_builder._extract_window_context(*args)
     assert first == second
     assert len(first['entities']) == 1
     assert 'identity_profile' not in first['entities'][0].metadata
     assert calls == ['entities', 'relations'] and not reused and restored
     assert [receipt.id for receipt in receipts] == [receipt.id for receipt in first_receipts]
-    assert receipts[-1].metadata['rejected_candidates'][0]['kind'] == 'grounding'
+    assert any(item.metadata.get('rejected_count', 0) > 0 for item in receipts)
 
 
 def test_source_assembly_preserves_relations_when_distinct_refs_share_identity(tmp_path):
@@ -468,7 +467,7 @@ def test_source_assembly_preserves_relations_when_distinct_refs_share_identity(t
         {'subject': 'a', 'object': 'b', 'predicate': 'owns', 'evidence': text,
          'evidence_occurrence': 0, 'qualifiers': {'polarity': 'positive'}},
     ]}
-    built = semantic_artifact_builder._build_source(source, False, result,
+    built = build_source_fixture(source, False, result,
         (text, {'format': 'text'}, 'native', source.material_revision, 'text', '1'))
     assert len(built['entities']) == 2
     assert len(built['relations']) == len(built['assertions']) == 2
@@ -480,12 +479,13 @@ def test_whitespace_variants_share_occurrence_numbers_before_identity_resolution
     text = 'Paris Agreement and Paris  Agreement and Paris\nAgreement'
     names = ['Paris Agreement', 'Paris  Agreement', 'Paris\nAgreement']
     positions = [0, 20, 41]
-    index = semantic_artifact_builder._entity_occurrence_index(text, names)
-    assert all(index[name] == positions for name in names)
-    ids = [semantic_artifact_builder._entity_id('source', name, 'EVENT', start, index)
+    index = semantic_publication_builder._source_occurrence_ordinals(
+        lambda start, end: text[start:end], len(text), [(name, start) for name in names for start in positions])
+    assert all([index[name, start] for start in positions] == [0, 1, 2] for name in names)
+    ids = [semantic_publication_builder._entity_id('source', name, 'EVENT', index[name, start])
            for name, start in zip(names, positions)]
     assert len(set(ids)) == 3
-    assert semantic_artifact_builder._entity_id('source', names[0], 'EVENT', positions[1], index) == ids[1]
+    assert semantic_publication_builder._entity_id('source', names[0], 'EVENT', index[names[0], positions[1]]) == ids[1]
 
 
 def test_identity_remap_preserves_collapsed_facts_through_native_graph(monkeypatch):
@@ -501,7 +501,7 @@ def test_identity_remap_preserves_collapsed_facts_through_native_graph(monkeypat
     relations = [SimpleNamespace(id='r1', source_entity_id='first', target_entity_id='second', evidence_ids=['proof'])]
     entities = [KnowledgeEntity(id='canonical', canonical_name='Example', type='CONCEPT', evidence_ids=['proof'],
                                metadata={'mention_ids': ['first', 'second']})]
-    kept_assertions, kept_relations = semantic_artifact_builder._remap_identity_facts(
+    kept_assertions, kept_relations = semantic_publication_builder._remap_identity_facts(
         assertions, relations, {'first': 'canonical', 'second': 'canonical'}, entities)
     assert [item.id for item in kept_assertions] == ['a1']
     assert [item.id for item in kept_relations] == ['r1']

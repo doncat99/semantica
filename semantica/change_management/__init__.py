@@ -6,7 +6,7 @@ This module provides comprehensive change management capabilities including:
 - Detailed change tracking and diff algorithms
 - Standardized metadata and audit trails
 - Data integrity verification with checksums
-- Enhanced version managers for KG and ontologies
+- Enhanced version managers for ontologies
 - Enterprise compliance support (HIPAA, SOX, FDA)
 
 Public API:
@@ -16,7 +16,6 @@ Public API:
     SQLiteVersionStorage: Persistent SQLite storage backend
     compute_checksum: SHA-256 checksum computation
     verify_checksum: Data integrity verification
-    EnhancedTemporalVersionManager: Advanced KG version management
     EnhancedVersionManager: Advanced ontology version management
 """
 
@@ -30,7 +29,6 @@ from .version_storage import (
 )
 from .managers import (
     BaseVersionManager,
-    TemporalVersionManager,
     OntologyVersionManager
 )
 from .ontology_version_manager import VersionManager, OntologyVersion
@@ -50,7 +48,6 @@ __all__ = [
     
     # Version managers
     "BaseVersionManager",
-    "TemporalVersionManager",
     "OntologyVersionManager",
     
     # Ontology version management

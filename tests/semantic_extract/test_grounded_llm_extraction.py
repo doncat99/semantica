@@ -77,6 +77,37 @@ def test_grounded_description_has_separate_source_quote_and_no_extra_model_call(
     assert len(provider.prompts) == 1
 
 
+@pytest.mark.parametrize('separator', ['\n', '  ', '\t', '\u00a0'])
+def test_located_entity_and_identity_evidence_keep_exact_source_whitespace(tmp_path, separator):
+    from semantica.semantic_extract.schemas import grounded_entities_wire
+    from semantica.triplet_store.oxigraph_store import OxigraphStore
+
+    text = f'Acme{separator}Healthcare manufactures instruments.'
+    response = grounded_entities_wire().model_validate({'entities': [dict(
+        text='Acme Healthcare', label='ORG', occurrence=0, confidence=.9, attributes={},
+        identity_profile=dict(description='A manufacturer',
+            evidence='Acme Healthcare manufactures instruments.', evidence_occurrence=0))]})
+    provider = TypedProvider(response)
+    entity, = extract_entities_llm(text, provider='bifrost', provider_instance=provider, grounding='strict')
+    assert entity.text == f'Acme{separator}Healthcare'
+    assert text[entity.start_char:entity.end_char] == entity.text
+    profile = entity.metadata['identity_profile']
+    assert profile['evidence'] == text
+    assert profile['description'] == 'A manufacturer'
+    store = OxigraphStore(tmp_path / 'facts')
+    binding = dict(project='p', source='s', material='m', representation='r', recipe='recipe',
+        model='model', specification='none', parser='parser', grounding='grounding',
+        window_start=0, window_end=len(text))
+    ranges = [dict(nativeRef='#/document/text', start=0, end=len(text), windowStart=0, windowEnd=len(text))]
+    store.adopt_extraction(binding, 'entities', [entity], text=text, native_ranges=ranges, accepted_digest='paid')
+    restored, = store.read_extraction(binding, 'entities', text=text, native_ranges=ranges)
+    assert (restored.text, restored.start_char, restored.end_char) == (entity.text, entity.start_char, entity.end_char)
+    assert restored.metadata['identity_profile']['evidence'] == text
+    assert restored.metadata['identity_profile']['description'] == 'A manufacturer'
+    assert len(provider.prompts) == 1
+    store.close()
+
+
 @pytest.mark.parametrize('name,text,fact', [
     ('Audit Committee', 'Acme Audit Committee reviewed the report.',
      dict(owner='Acme', referent_kind='dependent_entity')),

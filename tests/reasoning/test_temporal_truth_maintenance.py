@@ -1,7 +1,6 @@
 """Public temporal adapter behavior, using real PR1 and temporal primitives."""
 
 from copy import deepcopy
-from dataclasses import FrozenInstanceError
 from datetime import datetime, timezone
 
 import pytest
@@ -69,24 +68,16 @@ def test_late_correction_distinguishes_valid_time_from_known_time():
     )
     delta = managed.sync(corrected, valid_at=at(15), known_at=at(20))
     assert delta.removed_facts == frozenset({"Employed(Alice)", "Eligible(Alice)"})
-    live_state = (managed.facts, managed.version, managed.valid_at, managed.known_at)
-
-    then = managed.query_at(valid_at=at(15), known_at=at(15))
-    hindsight = managed.query_at(valid_at=at(15), known_at=at(20))
-    assert then.facts == frozenset({"Employed(Alice)", "Eligible(Alice)"})
-    assert then.explain("Eligible(Alice)").derivations[0].premises == (
+    assert not managed.facts
+    managed.advance(valid_at=at(15), known_at=at(15))
+    assert managed.facts == frozenset({"Employed(Alice)", "Eligible(Alice)"})
+    assert managed.explain("Eligible(Alice)").derivations[0].premises == (
         "Employed(Alice)",
     )
-    assert then.active_supports == (FactSupport("hr-v1", "Employed(Alice)"),)
-    assert hindsight.facts == frozenset()
-    assert not hindsight.explain("Eligible(Alice)").active
-    assert then.graph_revision == hindsight.graph_revision == 2
-    assert live_state == (
-        managed.facts,
-        managed.version,
-        managed.valid_at,
-        managed.known_at,
-    )
+    assert managed.explain("Employed(Alice)").explicit_support_ids == ("hr-v1",)
+    managed.advance(valid_at=at(15), known_at=at(20))
+    assert not managed.facts
+    assert managed.graph_revision == 2
 
 
 def test_source_replacement_is_one_batch_without_fact_churn():
@@ -126,7 +117,6 @@ def state(managed):
         managed.graph_revision,
         managed.valid_at,
         managed.known_at,
-        managed.query_at(valid_at=at(10), known_at=at(10)),
     )
 
 
@@ -178,7 +168,8 @@ def test_closed_transaction_interval_cannot_be_reopened():
     with pytest.raises(ValidationError):
         managed.sync(graph(evidence()), valid_at=at(10), known_at=at(21))
     assert not managed.facts
-    assert managed.query_at(valid_at=at(10), known_at=at(19)).facts
+    managed.advance(valid_at=at(10), known_at=at(19))
+    assert managed.facts
 
 
 def test_inactive_records_are_checked_for_rule_arity_and_for_each_other():
@@ -247,7 +238,8 @@ def test_endpoint_expiry_retracts_support_even_when_edge_is_still_valid():
     assert managed.facts
     managed.advance(valid_at=at(12), known_at=at(12))
     assert not managed.facts
-    assert managed.query_at(valid_at=at(11), known_at=at(15)).facts
+    managed.advance(valid_at=at(11), known_at=at(15))
+    assert managed.facts
 
 
 def test_endpoint_known_time_is_also_required():
@@ -276,19 +268,16 @@ def test_full_precision_and_timezone_normalization_at_boundary():
     assert not managed.facts
 
 
-def test_rules_input_graph_and_historical_results_are_detached():
+def test_rules_input_and_graph_are_detached():
     rule = Rule("r", "r", ["Employed(?x)"], "Eligible(?x)")
     managed = reasoning.TemporalTruthMaintenanceAdapter(rules=iter([rule]))
     source = graph(evidence())
     managed.sync(source, valid_at=at(10), known_at=at(10))
-    snapshot = managed.query_at(valid_at=at(10), known_at=at(10))
     source["relationships"][0]["metadata"]["truth_maintenance"]["fact"] = "Changed(x)"
     rule.conclusion = "Changed(?x)"
     managed.advance(valid_at=at(30), known_at=at(30))
-    assert snapshot.facts == frozenset({"Employed(Alice)", "Eligible(Alice)"})
-    assert managed.query_at(valid_at=at(10), known_at=at(10)) == snapshot
-    with pytest.raises(FrozenInstanceError):
-        snapshot.active_supports[0].fact = "Changed(x)"
+    managed.advance(valid_at=at(10), known_at=at(10))
+    assert managed.facts == frozenset({"Employed(Alice)", "Eligible(Alice)"})
 
 
 def test_source_revision_changes_without_live_support_version_change():
@@ -366,8 +355,6 @@ def test_invalid_query_coordinates_cannot_move_live_state(value):
     before = state(managed)
     with pytest.raises(ValidationError):
         managed.advance(valid_at=value, known_at=at(10))
-    with pytest.raises(ValidationError):
-        managed.query_at(valid_at=at(10), known_at=value)
     assert state(managed) == before
 
 
@@ -378,7 +365,7 @@ def test_adding_endpoint_lifetimes_cannot_reinterpret_relationship_only_history(
     revised["entities"][0]["valid_until"] = at(5)
     with pytest.raises(ValidationError):
         managed.sync(revised, valid_at=at(10), known_at=at(10))
-    assert managed.query_at(valid_at=at(10), known_at=at(10)).facts
+    assert managed.facts
 
 
 @pytest.mark.parametrize("rules", [None, 1, "A(x)"])
@@ -398,7 +385,6 @@ def test_advancing_backward_reactivates_original_source_without_losing_history()
 
 def test_empty_history_has_no_implicit_wall_clock_or_facts():
     managed = adapter()
-    snapshot = managed.query_at(valid_at=at(1), known_at=at(1))
-    assert not snapshot.facts and not snapshot.active_supports
+    assert not managed.facts
     assert managed.valid_at is managed.known_at is None
     assert managed.version == managed.graph_revision == 0

@@ -218,51 +218,6 @@ class ContextRetriever:
         from ..vector_store.hybrid_similarity import HybridSimilarityCalculator
         return HybridSimilarityCalculator()
 
-    @staticmethod
-    def prepare_snapshot_search(snapshot):
-        """Prepare immutable grounded candidates once; request scope is never cached."""
-        from .snapshot_search import prepare_snapshot
-        return prepare_snapshot(snapshot)
-
-    def search_snapshot(self, prepared, *, query, mode, retrieval,
-                        embedding=None, source_ids=None, max_results=5, matched_ids=None):
-        """Explicit keyword/vector retrieval, without expansion, fallback or model calls."""
-        from .snapshot_search import rank_evidence
-        if mode not in {"keyword", "semantic"}:
-            raise ValueError("unsupported snapshot search mode")
-        evidence, representations, candidates = prepared.evidence, prepared.representations, prepared.candidates
-        allowed = set(source_ids) if source_ids is not None else None
-        if mode == "keyword":
-            matches = prepared.keyword_index.substring_candidates(query.lower().split()) if matched_ids is None else matched_ids
-            # Restore publication order before the native scorer's stable tie sort.
-            ordered = sorted((prepared.candidate_by_id[item_id] for item_id in matches if item_id in prepared.candidate_by_id), key=lambda item: item[0])
-            admitted = [item for _, item in ordered if allowed is None or set(item[6]).issubset(allowed)]
-            by_id = {item[0]: item for item in admitted}
-            ranked = self._keyword_match_entities(
-                [{"id": item[0], "name": item[2]} for item in admitted],
-                query, len(admitted))
-            ranked_items = [(by_id[item["id"]], score) for item, score in ranked]
-        else:
-            admitted = [item for item in candidates
-                        if allowed is None or set(item[6]).issubset(allowed)]
-            scores = rank_evidence(embedding, retrieval, evidence, representations)
-            by_evidence = {}
-            for item in admitted:
-                for evidence_id in item[3]:
-                    by_evidence.setdefault(evidence_id, []).append(item)
-            seen = set()
-            ranked_items = []
-            for evidence_id, score in scores.items():
-                for item in by_evidence.get(evidence_id, []):
-                    if item[0] not in seen:
-                        seen.add(item[0])
-                        ranked_items.append((item, score))
-        return [RetrievedContext(content=text, score=score, source=item_id,
-                    metadata={"id": item_id, "kind": kind, "evidence_ids": evidence_ids,
-                              "status": status, "polarity": polarity, "source_ids": sources})
-                for (item_id, kind, text, evidence_ids, status, polarity, sources), score
-                in ranked_items[:max_results]]
-
 
     def retrieve(
         self,
@@ -285,8 +240,8 @@ class ContextRetriever:
             min_relevance_score: Minimum relevance score
             mode: Retrieval mode ('local', 'global', 'drift', 'hybrid')
             truth_filter: Optional truth-maintenance filter for local mode only;
-                candidates are validated against a session snapshot before
-                ranking and the snapshot version is re-checked before
+                candidates are validated by indexed dependency reads before
+                ranking and the committed version is re-checked before
                 results are returned
             min_trust_tier: Optional minimum TrustTier. When set, each result
                 is graded on evidence quality (see the "trust_tier" key in
@@ -392,9 +347,7 @@ class ContextRetriever:
                     "instance",
                     validation_context={"method": "ContextRetriever.retrieve"},
                 )
-            snapshot = (
-                truth_filter.snapshot() if truth_filter is not None else None
-            )
+            truth_version = truth_filter.version if truth_filter is not None else None
 
             use_expansion = (
                 use_graph_expansion
@@ -438,12 +391,12 @@ class ContextRetriever:
             self.progress_tracker.update_tracking(
                 tracking_id, message="Ranking and merging results..."
             )
-            if snapshot is not None:
+            if truth_version is not None:
                 all_results = truth_filter.filter_contexts(
-                    all_results, snapshot=snapshot
+                    all_results, version=truth_version
                 )
             ranked_results = self._rank_and_merge(
-                all_results, query, merge_duplicates=snapshot is None
+                all_results, query, merge_duplicates=truth_version is None
             )
 
             # Filter by minimum score
@@ -461,8 +414,8 @@ class ContextRetriever:
                     filtered_results, min_trust_tier
                 )
 
-            if snapshot is not None:
-                truth_filter.assert_current(snapshot)
+            if truth_version is not None:
+                truth_filter.assert_current(truth_version)
 
             self.progress_tracker.stop_tracking(
                 tracking_id,
@@ -1193,6 +1146,11 @@ class ContextRetriever:
             self.logger.warning(f"Graph retrieval failed: {e}")
             return []
     
+    @staticmethod
+    def keyword_score(exact_words, substring_match, query_words):
+        """Shared scoring features for in-memory and persistent keyword retrieval."""
+        return (exact_words + int(substring_match)) / max(query_words, 1)
+
     def _keyword_match_entities(self, entities, query, max_results):
         """Fallback keyword matching for entities."""
         query_lower = query.lower()
@@ -1206,15 +1164,11 @@ class ContextRetriever:
             
             # Word overlap score
             entity_words = set(entity_name_lower.split())
-            match_score = len(query_words.intersection(entity_words))
-            
-            # Substring match boost
-            if any(word in entity_name_lower for word in query_words):
-                match_score += 1
+            match_score = self.keyword_score(len(query_words.intersection(entity_words)),
+                any(word in entity_name_lower for word in query_words), len(query_words))
             
             if match_score > 0:
-                score = match_score / max(len(query_words), 1)
-                entity_scores.append((entity, score))
+                entity_scores.append((entity, match_score))
         
         entity_scores.sort(key=lambda x: x[1], reverse=True)
         return entity_scores[:max_results]
@@ -3241,8 +3195,7 @@ class TemporalGraphRetriever:
 
     Calls ``base_retriever.retrieve(query)``, then filters ``related_entities``
     and ``related_relationships`` in each :class:`RetrievedContext` item to
-    those active at *at_time* using
-    :meth:`~semantica.kg.temporal_query.TemporalGraphQuery.reconstruct_at_time`.
+    those active at *at_time* using native per-record temporal predicates.
 
     When no *at_time* is set (neither in the constructor nor at the call site)
     the base retriever result is returned unchanged — no copies, no filtering.
@@ -3286,7 +3239,7 @@ class TemporalGraphRetriever:
             >>> retriever = TemporalGraphRetriever(base)
             >>> results = retriever.retrieve("active suppliers")  # identical to base.retrieve()
 
-            >>> # Point-in-time snapshot — ISO string shorthand
+            >>> # Point-in-time filtering — ISO string shorthand
             >>> retriever = TemporalGraphRetriever(base, at_time="2023-06-01")
             >>> results = retriever.retrieve("certified suppliers")
             >>> # related_entities/related_relationships are valid as of 2023-06-01
@@ -3295,7 +3248,7 @@ class TemporalGraphRetriever:
             >>> retriever = TemporalGraphRetriever(
             ...     base,
             ...     at_time="2023-06-01",
-            ...     header_template="[Snapshot: {at_time} | {source}]",
+            ...     header_template="[Valid at: {at_time} | {source}]",
             ... )
 
             >>> # Combine with TemporalQueryRewriter for end-to-end temporal RAG
@@ -3377,17 +3330,29 @@ class TemporalGraphRetriever:
         )
         filtered_results = []
         for ctx in results:
-            subgraph = {
-                "entities": ctx.related_entities,
-                "relationships": ctx.related_relationships,
-            }
-            filtered = self._tgq.reconstruct_at_time(subgraph, parsed)
+            # Filter only candidates supplied by the bounded base retrieval.
+            # Keep record references; temporal selection never copies a graph.
+            entities = [
+                entity for entity in ctx.related_entities
+                if self._tgq._entity_active_at_time(entity, parsed, time_axis="valid")
+            ]
+            entity_ids = {self._tgq._entity_id(entity) for entity in entities}
+            relationships = []
+            for relationship in ctx.related_relationships:
+                if not self._tgq._relationship_active_at_time(relationship, parsed, time_axis="valid"):
+                    continue
+                if ctx.related_entities:
+                    source = relationship.get("source", relationship.get("source_id"))
+                    target = relationship.get("target", relationship.get("target_id"))
+                    if str(source) not in entity_ids or str(target) not in entity_ids:
+                        continue
+                relationships.append(relationship)
             # Return a new RetrievedContext rather than mutating the original
             # so callers that hold a reference to the base retriever's results
             # are not surprised by side-effects.
             filtered_results.append(dataclasses.replace(
                 ctx,
-                related_entities=filtered["entities"],
-                related_relationships=filtered["relationships"],
+                related_entities=entities,
+                related_relationships=relationships,
             ))
         return filtered_results

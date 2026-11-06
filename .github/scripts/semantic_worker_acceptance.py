@@ -17,7 +17,7 @@ from docx import Document
 from PIL import Image, ImageDraw, ImageFont
 from pptx import Presentation
 from openpyxl import Workbook
-from semantica.bundle import verify_bundle_inventory, parser_dependency_files, document_parser_digest, acceleration_inventory, validate_acceleration_profile
+from semantica.bundle import verify_bundle_inventory, parser_dependency_files, parser_console_script_files, document_parser_digest, acceleration_inventory, validate_acceleration_profile
 from semantica.source import parse_source, UnsupportedSourceFormatError
 from semantica.project_document_quality import assess_document_quality
 
@@ -38,7 +38,7 @@ if profile == "directml":
     assert not options.enable_mem_pattern, "RapidOCR DirectML session fix is missing"
     assert options.execution_mode == ExecutionMode.ORT_SEQUENTIAL
 parser_files = parser_dependency_files(root)
-assert document_parser_digest(manifest["files"], parser_files) == manifest["documentParserDigest"]
+assert document_parser_digest(manifest["files"], parser_files, parser_console_script_files(root)) == manifest["documentParserDigest"]
 assert Path(sys.executable).is_relative_to(root)
 assert "semantica" in str(parse_source.__code__.co_filename)
 assert Path(parse_source.__code__.co_filename).is_relative_to(root)
@@ -65,7 +65,8 @@ assert assess_document_quality("", {"document": {"texts": [{"label": "formula", 
 
 def invoke(module, request):
     process = subprocess.run([sys.executable, "-I", "-B", "-m", module], input=json.dumps(request) + "\n",
-                             text=True, capture_output=True, timeout=180, check=True)
+                             text=True, capture_output=True, timeout=180)
+    assert process.returncode == 0, (process.returncode, process.stdout[-8000:], process.stderr[-8000:])
     response = json.loads(process.stdout.splitlines()[-1])
     assert response["ok"], response
     return response["result"]
@@ -115,7 +116,8 @@ with tempfile.TemporaryDirectory(prefix="semantica-native-acceptance-") as direc
     ]:
         result = parse_source(scratch / name, name=name, mime_type=mime, force_ocr=force)
         assert expected in result.text and "73" in result.text, result.text
-        assert result.document["document"] and result.document["doctags"]
+        assert result.document["document"]
+        assert all(key not in result.document for key in ("doctags", "plain_text", "flat_odf"))
         assert result.document["quality"]["status"] == "passed", result.document["quality"]
         if force:
             assert result.origin == "ocr"
@@ -142,44 +144,41 @@ with tempfile.TemporaryDirectory(prefix="semantica-native-acceptance-") as direc
     for item in sources:
         result = invoke("semantica.semantic_worker", {"protocol": "semantica.semantic-worker.v1", "id": "native-parse", "method": "parse_source", "params": {
             "source": item, "outputDir": str(scratch / "parsed"), "forceOcr": False, "documentProcessing": {"mode": "local"}}})
-        parsed_sources.append({key: result[key] for key in ("sourceId", "artifactPath", "artifactDigest")})
+        parsed_sources.append({key: result[key] for key in ("sourceId", "artifactPath", "artifactDigest", "representationRevision", "readerIndexPath", "readerIndexDigest")})
     built = invoke("semantica.semantic_worker", {"protocol": "semantica.semantic-worker.v1", "id": "native-build", "method": "build_semantic_artifacts", "params": {
-        "projectId": "native", "baseSnapshot": None, "inputRevision": "sha256:" + "1" * 64, "outputDir": str(scratch / "output"),
+        "projectId": "native", "inputRevision": "sha256:" + "1" * 64, "outputDir": str(scratch / "output"),
+        "nativeCacheDir": str(scratch / "native-cache"), "nativeStoreDir": str(scratch / "native-store"),
+        "organizationReports": {"baseUrl": "http://127.0.0.1:9021/v1/products/semantic-organization",
+            "authorizationEnv": "OPENAI_API_KEY", "recipeDigest": "sha256:" + "1" * 64},
         "recipe": {"id": "deterministic", "version": "1", "forceOcrSourceIds": []}, "sources": sources, "parsedSources": parsed_sources, "documentProcessing": {"mode": "local"},
         "release": {key: manifest[key] for key in ("artifactDigest", "schemaDigest", "mediaTypes")},
         "relays": {key: {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/" + endpoint, "modelId": "nvidia/llama-nemotron-embed-vl-1b-v2:free", "capability": capability, "receipts": "required",
             **({"contextWindowTokens": 500000, "maxOutputTokens": 393216} if key == "model" else {})}
-            for key, endpoint, capability in [("model", "chat/completions", "knowledge.snapshot.generate"), ("embedding", "embeddings", "knowledge.snapshot.embed")]}}})
-    artifacts = {item["kind"]: {key: item[key] for key in ("path", "digest", "kind", "mediaType")} for item in built["artifacts"]}
-    graph = json.loads(Path(artifacts["semantic-graph"]["path"]).read_text())
-    from semantica.semantic_artifact_schema import SemanticArtifact
-    snapshot = SemanticArtifact.model_validate(graph).model_dump(mode="json", by_alias=True)
-    assert snapshot["snapshot_id"] == built["semanticGraph"]["artifactRevision"]
-    assert snapshot["project_id"] == "native"
-    retrieval = next(item for item in built["artifacts"] if item["kind"] == "retrieval-index")
-    graph_manifest = next(item for item in snapshot["retrieval_manifests"] if item["id"] == "retrieval:graph")
-    assert "source_snapshot_id" not in graph_manifest
-    assert graph_manifest["artifact_hash"] == retrieval["digest"]
-    assert retrieval["revision"] == graph_manifest["id"]
-    queried = invoke("semantica.semantic_query_worker", {"protocol": "semantica.semantic-query.v1", "id": "native-query", "method": "query", "params": {
-        "projectId": "native", "snapshotId": snapshot["snapshot_id"],
-        "sources": [{"sourceId": rep["source_id"], "contentHash": rep["content_hash"]} for rep in snapshot["document_representations"]],
-        "snapshot": artifacts["semantic-graph"], "retrieval": artifacts["retrieval-index"], "keywordIndex": artifacts["keyword-index"],
-        "query": "Ada", "mode": "keyword", "limit": 5}})
-    assert queried["contexts"]
-    assert all(item["revision"].startswith("sha256:") for item in built["artifacts"] if item["kind"] == "document-representation")
-    for representation in snapshot["document_representations"]:
-        source = next(item for item in sources if item["sourceId"] == representation["source_id"])
-        assert representation["content_hash"] == representation["material_revision_id"] == source["materialRevision"]
+            for key, endpoint, capability in [("model", "chat/completions", "knowledge.publication.generate"), ("embedding", "embeddings", "knowledge.publication.embed")]}}})
+    assert built["publication"]["state"] == "pending", built
+    assert built["publication"]["source_count"] == len(sources)
+    assert built["semanticStore"]["project"] == "native"
+    assert built["semanticStore"]["generation"] == built["publication"]["generation"]
+    assert set(built["nativeIndexes"]) == {"keyword"}, built["nativeIndexes"]
+    assert "artifacts" not in built and "semanticGraph" not in built
+    assert not (scratch / "output/semantic-graph.json").exists()
+    assert not (scratch / "output/snapshot.json").exists()
+    pending = subprocess.run([sys.executable, "-I", "-B", "-m", "semantica.semantic_query_worker"],
+        input=json.dumps({"id": "pending", "method": "acquire_store",
+            "params": {"semanticStore": built["semanticStore"]}}) + "\n",
+        text=True, capture_output=True, timeout=30, check=True)
+    rejected = json.loads(pending.stdout.splitlines()[-1])
+    assert not rejected["ok"], rejected
+    assert rejected["error"]["type"] == "QueryError" and "not ready" in rejected["error"]["message"].lower(), rejected
     assert assess_document_quality("Broken \ufffd\ufffd mapping", {})["status"] == "needs_review"
     model_result = scratch / "model-acceptance.json"
     subprocess.run([sys.executable, "-I", "-B",
         str(Path(__file__).with_name("semantic_worker_model_acceptance.py")),
         str(root), str(model_result)], check=True, timeout=240)
-    verify_bundle_inventory(root, manifest, remove_untracked_bytecode=True)
+    verify_bundle_inventory(root, manifest)
     destination.parent.mkdir(parents=True, exist_ok=True)
     destination.write_text(json.dumps({"artifactDigest": manifest["artifactDigest"], "schemaDigest": manifest["schemaDigest"],
-        "parsers": parsed, "queryContexts": len(queried["contexts"]), "documentQualityAdmission": True,
+        "parsers": parsed, "pendingPublicationRejected": True, "documentQualityAdmission": True,
         "representationRevisions": True, "postRunInventoryVerified": True, "deterministicProtocolOnly": False,
         "modelPathAcceptance": json.loads(model_result.read_text()),
         "accelerationProfile": profile,

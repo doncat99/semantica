@@ -11,10 +11,10 @@ Separation of concerns
 * **This module** — extracts ``at_time``, ``start_time``, ``end_time``, and
   ``temporal_intent`` from query text and produces a cleaned ``rewritten_query``
   with the temporal phrase stripped out.
-* **TemporalGraphRetriever** — uses the extracted parameters to call
-  ``reconstruct_at_time()`` on the retrieved subgraph.
+* **TemporalGraphRetriever** — uses the extracted parameters to filter
+  retrieved candidates with native per-record temporal predicates.
 
-This module never calls ``reconstruct_at_time()``.
+This module does not read graph records.
 
 Usage::
 
@@ -202,7 +202,7 @@ class TemporalQueryRewriter:
         result is always deterministic given the same phrase text.
 
     .. warning::
-        This class never calls ``reconstruct_at_time()``.  It is a pure
+        This class never reads graph records.  It is a pure
         parameter-extraction step; the actual temporal filtering is always
         performed by
         :class:`~semantica.context.context_retriever.TemporalGraphRetriever`.

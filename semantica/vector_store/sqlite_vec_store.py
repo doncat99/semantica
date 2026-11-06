@@ -36,10 +36,14 @@ License: MIT
 import importlib.util
 import json
 import os
+import hashlib
 import re
 import sqlite3
+import sys
 import threading
+import time
 import uuid
+from bisect import insort
 from contextlib import contextmanager
 from typing import Any, Dict, List, Optional, Union
 from urllib.request import pathname2url
@@ -52,6 +56,9 @@ from ..utils.logging import get_logger
 # Optional sqlite-vec import
 # (Loaded lazily inside SQLiteVecStore.__init__ to prevent eager loading)
 sqlite_vec = None
+
+# Per-query disk scratch ceiling, independent of eligible vector count.
+_NATIVE_QUERY_TEMP_BYTES = 32 * 1024 * 1024
 
 # Availability check only (via find_spec, not an actual import) so callers and
 # tests can detect whether sqlite-vec is installed without paying the load cost.
@@ -69,6 +76,7 @@ class SQLiteVecStore:
     """
 
     SUPPORTED_METRICS = {"cosine", "l2"}
+    _embedding_space_lock = threading.Lock()
 
     def __init__(
         self,
@@ -191,6 +199,10 @@ class SQLiteVecStore:
             if self.use_wal and not self.read_only and self.db_path != ":memory:":
                 self._conn.execute("PRAGMA journal_mode=WAL")
                 self._conn.execute("PRAGMA synchronous=NORMAL")
+            # Accepted paid results are released only after their canonical
+            # vectors survive a durable commit, including reopened connections.
+            if not self.read_only and self.config.get('embedding_space_identity') is not None:
+                self._conn.execute('PRAGMA synchronous=FULL')
 
         except (ValidationError, ProcessingError):
             if self._conn:
@@ -237,12 +249,172 @@ class SQLiteVecStore:
         """
         with self._lock, self._get_connection() as conn:
             try:
+                conn.execute('BEGIN IMMEDIATE')
                 conn.execute(create_table_sql)
+                conn.execute(f'''CREATE TABLE IF NOT EXISTS {self.table_name}_embedding_operations (
+                    id TEXT PRIMARY KEY, count INTEGER NOT NULL, digest TEXT NOT NULL,
+                    receipt TEXT NOT NULL, receipt_digest TEXT NOT NULL,
+                    accepted_digest TEXT NOT NULL) WITHOUT ROWID''')
+                if self.config.get('embedding_space_identity') is not None:
+                    conn.execute('CREATE TABLE IF NOT EXISTS embedding_space(id INTEGER PRIMARY KEY CHECK(id=1),identity TEXT NOT NULL,dimension INTEGER NOT NULL)')
+                    conn.execute('INSERT OR IGNORE INTO embedding_space VALUES(1,?,?)',
+                        (json.dumps(self.config['embedding_space_identity'], sort_keys=True, separators=(',', ':')), self.dimension))
                 conn.commit()
                 self.logger.debug(f"Virtual table {self.table_name} ensured")
             except Exception as e:
                 conn.rollback()
                 raise ProcessingError("Failed to create vec0 virtual table") from e
+
+    @classmethod
+    def open_embedding_space(cls, db_path, space, dimension=None):
+        # Multiple bounded build workers can encounter a new space together.
+        # Hold only schema admission, never model execution or vector queries.
+        with cls._embedding_space_lock:
+            return cls._open_embedding_space(db_path, space, dimension)
+
+    @classmethod
+    def _open_embedding_space(cls, db_path, space, dimension=None):
+        """Open a bound native space without a model call to rediscover dimension.
+
+        A new space has no carrier until the first accepted model response gives
+        its dimension. Existing malformed/incompatible metadata fails closed.
+        """
+        if (not isinstance(space, dict) or set(space) != {'binding', 'model', 'recipe'}
+                or any(not isinstance(v, str) or not v or len(v.encode()) > 4096 for v in space.values())):
+            raise ValidationError('Embedding space requires exact binding/model/recipe identities')
+        encoded = json.dumps(space, sort_keys=True, separators=(',', ':'))
+        exists = os.path.exists(db_path)
+        if exists:
+            with sqlite3.connect(f'file:{pathname2url(os.path.abspath(db_path))}?mode=ro', uri=True) as conn:
+                row = conn.execute('SELECT identity,dimension FROM embedding_space WHERE id=1').fetchone()
+            if row is None or len(row[0]) > 16384 or row[0] != encoded or (dimension is not None and row[1] != dimension):
+                raise ProcessingError('Embedding space identity or dimension differs')
+            dimension = row[1]
+        elif dimension is None:
+            return None
+        if type(dimension) is not int or not 1 <= dimension <= 8192:
+            raise ValidationError('Embedding dimension exceeds native space budget')
+        owner = cls(str(db_path), 'embeddings', dimension, 'cosine', embedding_space_identity=space)
+        owner.embedding_space_identity = space
+        return owner
+
+    @staticmethod
+    def embedding_operation_id(binding):
+        fields = {'project', 'source', 'material', 'representation', 'recipe', 'model', 'space', 'parser', 'ranges', 'input_digest'}
+        if not isinstance(binding, dict) or set(binding) != fields:
+            raise ValidationError('Embedding operation requires the complete named input tuple')
+        if any(not isinstance(binding[k], str) or not binding[k] or len(binding[k].encode()) > 4096 for k in fields - {'ranges'}):
+            raise ValidationError('Invalid embedding input identity')
+        ranges = binding['ranges']
+        if (not isinstance(ranges, list) or not 1 <= len(ranges) <= 256
+                or any(not isinstance(r, list) or len(r) != 2 or any(type(n) is not int or n < 0 for n in r) or r[1] <= r[0] for r in ranges)):
+            raise ValidationError('Embedding source ranges exceed the bounded batch contract')
+        return hashlib.sha256(json.dumps(binding, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+
+    def _read_embedding(self, conn, identity, *, include_vectors=True):
+        row = conn.execute(f'SELECT count,digest,receipt,receipt_digest,accepted_digest FROM {self.table_name}_embedding_operations WHERE id=?', (identity,)).fetchone()
+        if row is None:
+            return None
+        count, digest, receipt, receipt_digest, accepted_digest = row
+        if not 1 <= count <= 256 or count * self.dimension * 4 > 8 * 1024 * 1024 or len(receipt.encode()) > 65536:
+            raise ProcessingError('Stored embedding operation exceeds resource budget')
+        vectors, hasher = [], hashlib.sha256()
+        for index in range(count):
+            record = conn.execute(f'SELECT embedding FROM {self.table_name} WHERE id=?', (identity + ':' + str(index),)).fetchone()
+            if record is None or len(record[0]) != self.dimension * 4:
+                raise ProcessingError('Adopted embedding vector is missing or invalid')
+            hasher.update(record[0])
+            vector = np.frombuffer(record[0], dtype=np.float32)
+            if not np.all(np.isfinite(vector)):
+                raise ProcessingError('Adopted embedding vector is corrupt')
+            if include_vectors:
+                vectors.append(vector.tolist())
+        if hasher.hexdigest() != digest or hashlib.sha256(receipt.encode()).hexdigest() != receipt_digest:
+            raise ProcessingError('Adopted embedding operation digest differs')
+        result = dict(ids=[identity + ':' + str(i) for i in range(count)],
+                      receipt=json.loads(receipt), accepted_digest=accepted_digest)
+        if include_vectors:
+            result['vectors'] = vectors
+        return result
+
+    def read_embedding(self, binding, *, include_vectors=True):
+        """Read only one indexed, bounded paid operation; never scan the matrix."""
+        identity = self.embedding_operation_id(binding)
+        space = getattr(self, 'embedding_space_identity', None)
+        if space is None or any(binding[k] != space[k] for k in ('model', 'recipe')) or binding['space'] != space['binding']:
+            raise ValidationError('Embedding operation differs from its native space')
+        with self._lock, self._get_connection() as conn:
+            return self._read_embedding(conn, identity, include_vectors=include_vectors)
+
+    @staticmethod
+    def pack_embedding_vectors(vectors, dimension, count):
+        """Validate and encode the sole native float32 representation."""
+        if (type(dimension) is not int or not 1 <= dimension <= 8192
+                or not isinstance(vectors, list) or len(vectors) != count
+                or not 1 <= count <= 256 or count * dimension * 4 > 8 * 1024 * 1024):
+            raise ValidationError('Embedding adoption exceeds vector byte or dimension budget')
+        packed = []
+        for vector in vectors:
+            if not isinstance(vector, list) or len(vector) != dimension or any(type(v) not in (int, float) for v in vector):
+                raise ValidationError('Embedding vector shape or scalar type differs')
+            with np.errstate(over='ignore', invalid='ignore'):
+                array = np.asarray(vector, dtype=np.float32)
+            if array.shape != (dimension,) or not np.all(np.isfinite(array)) or not np.any(array):
+                raise ValidationError('Embedding vector is invalid for its native space')
+            packed.append(array.tobytes())
+        return packed
+
+    def adopt_embedding(self, binding, vectors, receipt, *, accepted_digest, include_vectors=True):
+        """Atomically adopt vectors and their small receipt into their sole owner."""
+        if self.read_only or self.db_path == ':memory:':
+            raise ProcessingError('Paid embeddings require a persistent writable native store')
+        identity = self.embedding_operation_id(binding)
+        self.read_embedding(binding)  # Validates native space admission.
+        if hasattr(receipt, 'model_dump'):
+            receipt = receipt.model_dump(mode='json')
+        fields = {'id', 'operation', 'provider', 'model', 'input_digest', 'output_digest', 'created_at', 'parameters', 'metadata'}
+        if (not isinstance(receipt, dict) or set(receipt) - fields
+                or receipt.get('operation') != 'embedding' or receipt.get('model') != binding['model']
+                or any(not isinstance(receipt.get(k), str) or not receipt[k] for k in ('id', 'provider', 'input_digest', 'output_digest'))
+                or not isinstance(receipt.get('metadata', {}), dict) or set(receipt.get('metadata', {})) - {'usage'}
+                or not isinstance(receipt.get('parameters', {}), dict) or set(receipt.get('parameters', {})) - {'dimensions', 'encoding_format'}
+                or not isinstance(receipt.get('metadata', {}).get('usage', {}), dict)
+                or set(receipt.get('metadata', {}).get('usage', {})) - {'prompt_tokens', 'completion_tokens', 'total_tokens', 'input_tokens'}
+                or not isinstance(accepted_digest, str) or not accepted_digest):
+            raise ValidationError('Embedding adoption requires a typed matching receipt')
+        encoded = json.dumps(receipt, sort_keys=True, separators=(',', ':'), allow_nan=False)
+        usage = receipt.get('metadata', {}).get('usage', {})
+        if any(type(value) is not int or value < 0 for value in usage.values()):
+            raise ValidationError('Embedding usage must contain nonnegative token counts')
+        if usage.get('completion_tokens', 0) != 0:
+            raise ValidationError('Embedding usage cannot include generated tokens')
+        input_count = usage.get('prompt_tokens', usage.get('input_tokens'))
+        if (input_count is not None and 'total_tokens' in usage
+                and usage['total_tokens'] != input_count):
+            raise ValidationError('Embedding usage total differs from input tokens')
+        if len(encoded.encode()) > 65536 or not isinstance(vectors, list) or len(vectors) != len(binding['ranges']):
+            raise ValidationError('Embedding adoption exceeds receipt or batch budget')
+        packed = self.pack_embedding_vectors(vectors, self.dimension, len(binding['ranges']))
+        digest = hashlib.sha256(b''.join(packed)).hexdigest()
+        with self._lock, self._get_connection() as conn:
+            try:
+                conn.execute('BEGIN IMMEDIATE')
+                existing = self._read_embedding(conn, identity, include_vectors=include_vectors)
+                if existing is not None:
+                    prior = conn.execute(f'SELECT digest,receipt_digest FROM {self.table_name}_embedding_operations WHERE id=?', (identity,)).fetchone()
+                    if existing['accepted_digest'] != accepted_digest or prior != (digest, hashlib.sha256(encoded.encode()).hexdigest()):
+                        raise ProcessingError('Embedding acceptance digest differs from adopted operation')
+                    conn.commit()
+                    return existing
+                conn.executemany(f'INSERT INTO {self.table_name}(id,embedding,metadata) VALUES(?,?,?)',
+                    ((identity + ':' + str(i), value, '{}') for i, value in enumerate(packed)))
+                conn.execute(f'INSERT INTO {self.table_name}_embedding_operations VALUES(?,?,?,?,?,?)',
+                    (identity, len(packed), digest, encoded, hashlib.sha256(encoded.encode()).hexdigest(), accepted_digest))
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+        return self.read_embedding(binding, include_vectors=include_vectors)
 
     def add(
         self,
@@ -424,6 +596,339 @@ class SQLiteVecStore:
                 raise
             except Exception as e:
                 raise ProcessingError("Failed to search vectors") from e
+
+    def native_publication_digest(self, conn, project, generation, *, check):
+        """Reproducible bounded integrity traversal for publish and offline verify."""
+        digest, count = hashlib.sha256(), 0
+        table = self.table_name + '_native_ranges'
+        for kind, columns, order in (
+            ('range', 'project,generation,vector_id,source,material,representation,ranges', 'vector_id'),
+            ('record', 'project,generation,vector_id,record_id,evidence_id,source', 'vector_id,record_id,evidence_id'),
+        ):
+            selected = table if kind == 'range' else table+'_records'
+            for row in conn.execute(f'SELECT {columns} FROM {selected} WHERE project=? AND generation=? ORDER BY {order}', (project,generation)):
+                check()
+                encoded = json.dumps([kind,*row],separators=(',',':'),ensure_ascii=False).encode()
+                if len(encoded) > 262144:
+                    raise ProcessingError('Native publication digest row exceeds byte budget')
+                digest.update(encoded)
+                digest.update(b'\n')
+                count += kind == 'range'
+        return 'sha256:'+digest.hexdigest(), count
+
+    def publish_native_ranges(self, project, generation, links, *, record_references=None):
+        """Associate accepted vectors with current native scalar addresses, no copies.
+
+        Called only by publication maintenance. Every link proves its original
+        paid operation binding; query reads never inspect its vector body.
+        """
+        if self.read_only or not project or not generation:
+            raise ValidationError('Native vector publication requires a writable project generation')
+        from ..semantic_worker_context import check_query_cancellation
+        recipe = hashlib.sha256(b'SQLiteVecStore:native-scalar-range-links:canonical-key-digest').hexdigest()
+        count = 0
+        table = self.table_name + '_native_ranges'
+        metadata = self.table_name + '_native_publications'
+        with self._lock, self._get_connection() as conn:
+            conn.executescript(f'''CREATE TABLE IF NOT EXISTS {table}(
+                project TEXT,generation TEXT,vector_id TEXT,source TEXT,material TEXT,
+                representation TEXT,ranges TEXT,PRIMARY KEY(project,vector_id)) WITHOUT ROWID;
+                CREATE INDEX IF NOT EXISTS {table}_scope ON {table}(project,generation,source,vector_id);
+                CREATE TABLE IF NOT EXISTS {metadata}(project TEXT PRIMARY KEY,generation TEXT,
+                    count INTEGER,digest TEXT,recipe TEXT) WITHOUT ROWID;
+                CREATE TABLE IF NOT EXISTS {table}_records(
+                    project TEXT,generation TEXT,vector_id TEXT,record_id TEXT,evidence_id TEXT,source TEXT,
+                    PRIMARY KEY(project,vector_id,record_id,evidence_id)) WITHOUT ROWID;
+                CREATE INDEX IF NOT EXISTS {table}_records_record ON {table}_records(project,generation,record_id);
+                CREATE INDEX IF NOT EXISTS {table}_records_evidence ON {table}_records(project,generation,record_id,evidence_id,source);
+                CREATE INDEX IF NOT EXISTS {table}_records_scope ON {table}_records(project,generation,source,vector_id);''')
+            try:
+                conn.execute('BEGIN IMMEDIATE')
+                conn.execute(f'DELETE FROM {table} WHERE project=?', (project,))
+                conn.execute(f'DELETE FROM {table}_records WHERE project=?', (project,))
+                for link in links:
+                    check_query_cancellation()
+                    if not isinstance(link, dict) or set(link) != {'vector_id','binding','ranges'}:
+                        raise ValidationError('Native vector link requires exact reference fields')
+                    binding, ranges = link['binding'], link['ranges']
+                    operation = self.embedding_operation_id(binding)
+                    if binding['project'] != project:
+                        raise ValidationError('Native vector link belongs to another project')
+                    space = self.embedding_space_identity
+                    if binding['space'] != space['binding'] or any(binding[k] != space[k] for k in ('model','recipe')):
+                        raise ValidationError('Native vector link differs from its embedding space')
+                    adopted = self._read_embedding(conn, operation)
+                    if adopted is None or link['vector_id'] not in adopted['ids']:
+                        raise ProcessingError('Native vector link has no accepted native vector')
+                    if not isinstance(ranges, list) or not 1 <= len(ranges) <= 128:
+                        raise ValidationError('Native vector address fanout exceeds budget')
+                    previous = 0
+                    for item in ranges:
+                        if (not isinstance(item, dict) or set(item)-{'nativeRef','start','end','joinBefore'}
+                                or not {'nativeRef','start','end'} <= set(item)
+                                or not isinstance(item['nativeRef'],str) or not item['nativeRef'].startswith('#/document/')
+                                or len(item['nativeRef'].encode()) > 4096
+                                or any(type(item[k]) is not int for k in ('start','end'))
+                                or not 0 <= item['start'] < item['end'] or item['end']-item['start'] > 65536
+                                or not isinstance(item.get('joinBefore',''), str)
+                                or len(item.get('joinBefore','').encode()) > 8
+                                or item.get('joinBefore','').strip()):
+                            raise ValidationError('Native vector scalar address is invalid')
+                        previous += item['end']-item['start']+len(item.get('joinBefore',''))
+                    vector_index = adopted['ids'].index(link['vector_id'])
+                    if previous != binding['ranges'][vector_index][1]-binding['ranges'][vector_index][0]:
+                        raise ValidationError('Native vector scalar addresses differ from accepted input extent')
+                    encoded = json.dumps(ranges, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
+                    if len(encoded.encode()) > 65536:
+                        raise ValidationError('Native vector scalar addresses exceed byte budget')
+                    values = (project,generation,link['vector_id'],binding['source'],binding['material'],binding['representation'],encoded)
+                    conn.execute(f'INSERT INTO {table} VALUES (?,?,?,?,?,?,?)', values)
+                    if record_references is not None:
+                        for reference in record_references(link):
+                            check_query_cancellation()
+                            if (not isinstance(reference,dict) or set(reference) != {'id','evidence','source'}
+                                    or reference['source'] != binding['source']
+                                    or any(not isinstance(reference[key],str) or not reference[key]
+                                           or len(reference[key].encode())>8192 for key in ('id','evidence'))):
+                                raise ValidationError('Invalid native record association')
+                            association = (project,generation,link['vector_id'],reference['id'],reference['evidence'],reference['source'])
+                            conn.execute(f'INSERT OR IGNORE INTO {table}_records VALUES (?,?,?,?,?,?)',association)
+                    count += 1
+                store_id, verified_count = self.native_publication_digest(conn,project,generation,check=check_query_cancellation)
+                if verified_count != count:
+                    raise ProcessingError('Native vector publication inserted count differs')
+                conn.execute(f'INSERT OR REPLACE INTO {metadata} VALUES (?,?,?,?,?)', (project,generation,count,store_id,recipe))
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+        return {'kind':'native-sqlite-vec', 'store_id':store_id, 'recipe_digest':recipe,
+            'space_id':self.embedding_space_identity['binding']}
+
+    def search_native_ranges(self, query_vector, *, project, generation, receipt, top_k=128, source_ids=None,
+                             page_limit=128, offset=0):
+        """Current-scope native KNN over accepted rows; return only scalar addresses."""
+        from ..semantic_worker_context import check_query_cancellation
+        if (type(top_k) is not int or not 1 <= top_k <= 1000
+                or type(page_limit) is not int or not 1 <= page_limit <= 128
+                or type(offset) is not int or not 0 <= offset < top_k
+                or set(receipt) != {'kind','store_id','recipe_digest','space_id'}
+                or receipt['kind'] != 'native-sqlite-vec'
+                or receipt['space_id'] != self.embedding_space_identity['binding']
+                or (source_ids is not None and (not isinstance(source_ids,list) or len(source_ids)>128
+                    or any(not isinstance(s,str) or not s or len(s.encode())>4096 for s in source_ids)))):
+            raise ValidationError('Native vector query scope or receipt differs')
+        vector = np.asarray(query_vector, dtype=np.float32)
+        if (self.distance_metric != 'cosine' or vector.shape != (self.dimension,)
+                or not np.all(np.isfinite(vector)) or not np.linalg.norm(vector)):
+            raise ValidationError('Native vector query requires a finite matching cosine vector')
+        table, metadata = self.table_name+'_native_ranges', self.table_name+'_native_publications'
+        with self._lock, self._get_connection() as conn:
+            row = conn.execute(f'SELECT generation,digest,recipe FROM {metadata} WHERE project=?', (project,)).fetchone()
+            if row != (generation,receipt['store_id'],receipt['recipe_digest']):
+                raise ProcessingError('Native vector publication is missing or stale')
+            if source_ids == []:
+                return []
+            deadline = time.monotonic()+3
+            def check():
+                check_query_cancellation()
+                return int(time.monotonic()>deadline)
+            conn.set_progress_handler(check,1000)
+            try:
+                scope = '' if source_ids is None else ' AND source IN ('+','.join('?' for _ in source_ids)+')'
+                rows = conn.execute(f'''WITH matches AS MATERIALIZED (
+                    SELECT id,distance FROM {self.table_name} WHERE embedding MATCH ? AND k=? AND id IN (
+                        SELECT vector_id FROM {table} WHERE project=? AND generation=?{scope}))
+                    SELECT r.vector_id,v.distance,r.source,r.material,r.representation,r.ranges
+                    FROM matches v JOIN {table} r ON r.vector_id=v.id AND r.project=? AND r.generation=?
+                    ORDER BY v.distance,r.vector_id LIMIT ? OFFSET ?''', [sqlite_vec.serialize_float32(vector),top_k,
+                    project,generation,*(source_ids or []),project,generation,min(page_limit,top_k-offset),offset]).fetchall()
+                check_query_cancellation()
+                result = [dict(id=identity,score=1.-float(distance),sourceId=source,materialRevision=material,
+                    representationRevision=representation,ranges=json.loads(ranges))
+                    for identity,distance,source,material,representation,ranges in rows]
+                if len(json.dumps(result,ensure_ascii=False).encode())>262144:
+                    raise ProcessingError('Native vector query response exceeds byte budget')
+                return result
+            finally:
+                conn.set_progress_handler(None,0)
+
+    def search_native_records(self, query_vector, *, project, generation, receipt,
+                              top_k=128, source_ids=None, page_limit=128, offset=0):
+        """Exact grouped cosine KNN with scope admission before ranking.
+
+        Repeated vectors for one group must not consume the result budget. Disk
+        scratch tracks visited vector IDs; only top_k groups are retained in Python.
+        Continue through tied frontiers so native record ID ties remain stable.
+        The candidate budget is never confused with the typed result budget.
+        """
+        from ..semantic_worker_context import check_query_cancellation, query_cancellation
+        check_query_cancellation()
+        cancellation = query_cancellation.get()
+        if (self.distance_metric != 'cosine' or type(top_k) is not int or not 1 <= top_k <= 1000
+                or type(page_limit) is not int or not 1 <= page_limit <= 128
+                or type(offset) is not int or not 0 <= offset < top_k
+                or (source_ids is not None and (not isinstance(source_ids,list) or len(source_ids)>128
+                    or any(not isinstance(source,str) or not source or len(source.encode())>4096 for source in source_ids)))):
+            raise ValidationError('group search requires cosine and a bounded result limit')
+        vector = np.asarray(query_vector, dtype=np.float32)
+        if vector.shape != (self.dimension,) or not np.all(np.isfinite(vector)) or not np.linalg.norm(vector):
+            raise ValidationError('group query vector is invalid')
+        if source_ids == []:
+            return []
+        serialized = sqlite_vec.serialize_float32(vector)
+        links = self.table_name+'_native_ranges_records'
+        with self._lock, self._get_connection() as conn:
+            row = conn.execute(f'SELECT generation,digest,recipe FROM {self.table_name}_native_publications WHERE project=?',(project,)).fetchone()
+            if (set(receipt) != {'kind','store_id','recipe_digest','space_id'}
+                    or receipt['kind'] != 'native-sqlite-vec'
+                    or receipt['space_id'] != self.embedding_space_identity['binding']
+                    or row != (generation,receipt['store_id'],receipt['recipe_digest'])):
+                raise ProcessingError('Native record index publication is missing or stale')
+            conn.execute('PRAGMA temp_store=FILE')
+            conn.execute('PRAGMA cache_size=-8192')
+            deadline = time.monotonic() + 3
+            best = {}
+            ordered = []
+            try:
+                conn.set_progress_handler(lambda: int(time.monotonic() > deadline
+                    or (cancellation is not None and cancellation.is_set())), 10000)
+                conn.execute('PRAGMA temp.cache_size=-512')
+                page_size = conn.execute('PRAGMA temp.page_size').fetchone()[0]
+                max_pages = _NATIVE_QUERY_TEMP_BYTES // page_size
+                if max_pages < 1:
+                    raise ProcessingError('Native record query scratch exceeds byte budget')
+                actual_pages = conn.execute(f'PRAGMA temp.max_page_count={max_pages}').fetchone()[0]
+                if actual_pages * page_size > _NATIVE_QUERY_TEMP_BYTES:
+                    raise ProcessingError('Native record query scratch exceeds byte budget')
+                conn.executescript('''DROP TABLE IF EXISTS temp.knn_seen; DROP TABLE IF EXISTS temp.knn_scope;
+                    DROP TABLE IF EXISTS temp.knn_batch;
+                    CREATE TEMP TABLE knn_seen(id TEXT PRIMARY KEY) WITHOUT ROWID;
+                    CREATE TEMP TABLE knn_batch(id TEXT PRIMARY KEY,distance REAL) WITHOUT ROWID;
+                    CREATE INDEX temp.knn_batch_distance ON knn_batch(distance,id);
+                    CREATE TEMP TABLE knn_scope(id TEXT PRIMARY KEY) WITHOUT ROWID;''')
+                if source_ids is not None:
+                    conn.executemany('INSERT INTO knn_scope VALUES (?)', ((source,) for source in source_ids))
+                while True:
+                    check_query_cancellation()
+                    if time.monotonic() > deadline:
+                        raise ProcessingError('group query exceeded its execution budget')
+                    rows = conn.execute(f'''SELECT id,distance FROM {self.table_name}
+                        WHERE embedding MATCH ? AND k=256 AND id IN (
+                            SELECT DISTINCT g.vector_id FROM {links} g
+                            WHERE g.project=? AND g.generation=?
+                            AND g.vector_id NOT IN (SELECT id FROM knn_seen)
+                            AND (? OR g.source IN (SELECT id FROM knn_scope)))
+                        ORDER BY distance''',
+                        (serialized, project,generation, source_ids is None)).fetchall()
+                    rows.sort(key=lambda row:(row[1],row[0]))
+                    if not rows:
+                        break
+                    conn.execute('DELETE FROM knn_batch')
+                    conn.executemany('INSERT INTO knn_batch VALUES (?,?)', rows)
+                    # Aggregate the bounded batch's indexed links once; a
+                    # correlated distance lookup rescans the batch per group.
+                    for group_id, position, distance in conn.execute(f'''WITH batch_groups AS MATERIALIZED (
+                            SELECT g.record_id AS group_id, 0 AS position, MIN(b.distance) AS distance
+                            FROM knn_batch b CROSS JOIN {links} g
+                            WHERE g.vector_id=b.id AND g.project=? AND g.generation=?
+                            AND (? OR g.source IN (SELECT id FROM knn_scope)) GROUP BY g.record_id)
+                            SELECT group_id,position,distance FROM batch_groups
+                            ORDER BY distance,group_id LIMIT ?''',
+                            (project,generation,source_ids is None, top_k)):
+                        entry = (float(distance), position, group_id)
+                        previous = best.get(group_id)
+                        if previous is not None and entry >= previous:
+                            continue
+                        if previous is None and len(ordered) == top_k and entry >= ordered[-1]:
+                            continue
+                        if previous is not None:
+                            ordered.remove(previous)
+                        insort(ordered, entry)
+                        best[group_id] = entry
+                        if len(ordered) > top_k:
+                            del best[ordered.pop()[2]]
+                    conn.executemany('INSERT INTO knn_seen VALUES (?)', ((row[0],) for row in rows))
+                    if len(rows) < 256 or (len(ordered) == top_k and ordered[-1][0] < rows[-1][1]):
+                        break
+                result=[]
+                for distance,_,identity in ordered[offset:offset+page_limit]:
+                    evidence=self._native_evidence_page(conn,project,generation,identity,source_ids,limit=128)
+                    refs=[(item['id'],item['source']) for item in evidence['items']]
+                    result.append(dict(id=identity,score=1.-distance,
+                        evidenceIds=sorted({e for e,_ in refs}),sourceIds=sorted({s for _,s in refs}),
+                        evidenceNextCursor=evidence['nextCursor']))
+                if len(json.dumps(result,ensure_ascii=False).encode())>262144:
+                    raise ProcessingError('Native record query response exceeds byte budget')
+                check_query_cancellation()
+                if time.monotonic() > deadline:
+                    raise ProcessingError('group query exceeded its execution budget')
+                return result
+            except sqlite3.Error as error:
+                check_query_cancellation()
+                if time.monotonic() > deadline:
+                    raise ProcessingError('group query exceeded its execution budget') from error
+                if (getattr(error, 'sqlite_errorcode', None) == sqlite3.SQLITE_FULL
+                        or str(error) == 'database or disk is full'):
+                    raise ProcessingError('Native record query scratch exceeds byte budget') from error
+                raise ProcessingError('Native record query database operation failed') from error
+            finally:
+                error = sys.exc_info()[1]
+                try:
+                    conn.set_progress_handler(None, 0)
+                    conn.executescript('DROP TABLE IF EXISTS temp.knn_seen; DROP TABLE IF EXISTS temp.knn_scope; DROP TABLE IF EXISTS temp.knn_batch;')
+                except sqlite3.Error:
+                    if error is None:
+                        raise
+                    self.logger.warning('Native record scratch cleanup failed', exc_info=True)
+
+    def _native_evidence_page(self,conn,project,generation,identity,source_ids,*,after=None,limit=128):
+        from ..semantic_worker_context import check_query_cancellation
+        if (type(limit) is not int or not 1<=limit<=128 or not isinstance(identity,str)
+                or not identity or len(identity.encode())>8192
+                or (after is not None and (not isinstance(after,(tuple,list)) or len(after)!=2
+                    or any(not isinstance(value,str) or not value or len(value.encode())>8192 for value in after)))):
+            raise ValidationError('Invalid native evidence selection')
+        scope='' if source_ids is None else ' AND source IN ('+','.join('?' for _ in source_ids)+')'
+        cursor='' if after is None else ' AND (evidence_id,source)>(?,?)'
+        result=[]
+        size=0
+        rows=conn.execute(f'''SELECT DISTINCT evidence_id,source FROM {self.table_name}_native_ranges_records
+            WHERE project=? AND generation=? AND record_id=?{scope}{cursor}
+            ORDER BY evidence_id,source LIMIT ?''',[project,generation,identity,*(source_ids or []),*(after or []),limit+1])
+        for evidence,source in rows:
+            check_query_cancellation()
+            item=dict(id=evidence,source=source)
+            size+=len(json.dumps(item).encode())
+            if len(result)==limit or size>262144:
+                if not result:
+                    raise ProcessingError('Native evidence exceeds byte budget')
+                return dict(items=result,nextCursor=[result[-1]['id'],result[-1]['source']])
+            result.append(item)
+        return dict(items=result,nextCursor=None)
+
+    def read_native_evidence(self, *,project,generation,receipt,identity,source_ids=None,after=None,limit=128):
+        """Page reference-only evidence links for one current native result."""
+        if source_ids is not None and (not isinstance(source_ids,list) or len(source_ids)>128
+                or any(not isinstance(s,str) or not s or len(s.encode())>4096 for s in source_ids)):
+            raise ValidationError('Invalid native evidence source scope')
+        if set(receipt)!={'kind','store_id','recipe_digest','space_id'}:
+            raise ValidationError('Invalid native evidence receipt')
+        with self._lock,self._get_connection() as conn:
+            row=conn.execute(f'SELECT generation,digest,recipe FROM {self.table_name}_native_publications WHERE project=?',(project,)).fetchone()
+            if (receipt['kind']!='native-sqlite-vec' or receipt['space_id']!=self.embedding_space_identity['binding']
+                    or row!=(generation,receipt['store_id'],receipt['recipe_digest'])):
+                raise ProcessingError('Native evidence publication missing or stale')
+            from ..semantic_worker_context import check_query_cancellation
+            deadline=time.monotonic()+10
+            def progress():
+                check_query_cancellation()
+                return int(time.monotonic()>deadline)
+            conn.set_progress_handler(progress,1000)
+            try:
+                return self._native_evidence_page(conn,project,generation,identity,source_ids,after=after,limit=limit)
+            finally:
+                conn.set_progress_handler(None,0)
 
     def delete(self, ids: List[str]) -> bool:
         """

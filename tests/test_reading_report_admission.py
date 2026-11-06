@@ -1,9 +1,9 @@
-"""Reading reports consume knowledge, not the snapshot's storage indexes."""
+"""Reading reports consume knowledge through current native owners."""
 import json
 import pytest
 from types import SimpleNamespace
 
-from semantica import semantic_artifact_builder as pipeline
+from semantica import semantic_publication_builder as pipeline
 from semantica.semantic_artifact_schema import EvidenceSpan, KnowledgeAssertion, KnowledgeEntity, KnowledgeRelation
 
 
@@ -22,24 +22,6 @@ def test_default_reading_plan_includes_grounded_topics_and_core_concepts_only():
     assert "e49" not in plan
 
 
-def test_worker_reuses_existing_default_reports_without_model_calls(monkeypatch, tmp_path):
-    from semantica import semantic_worker as worker
-    snapshot = SimpleNamespace(id="snapshot", project_id="project", entities=[], assertions=[], relations=[],
-        topics=[], communities=[], evidence_spans=[], document_representations=[])
-    monkeypatch.setattr(worker, "_verified_snapshot", lambda request: snapshot)
-    monkeypatch.setattr(pipeline, "_report_support_sources", lambda *args: None)
-    monkeypatch.setattr(pipeline, "_explanation_reports", lambda *args, **kwargs: (_ for _ in ()).throw(AssertionError("paid call")))
-    worker._reading_reports({"snapshotPath": "/unused", "snapshotDigest": "sha256:" + "1" * 64,
-        "snapshotId": "snapshot", "projectId": "project", "outputDir": str(tmp_path),
-        "existingTargetIds": ["project"], "relay": {"authorizationEnv": "OPENAI_API_KEY",
-            "baseUrl": "http://127.0.0.1:9999/v1/chat/completions", "bindingId": "binding:test",
-            "modelId": "test/model", "contextWindowTokens": 10000, "maxOutputTokens": 1000,
-            "capability": "knowledge.snapshot.generate", "receipts": "required"}}, None)
-    artifact = json.loads((tmp_path / "reading-reports.json").read_text())
-    assert artifact["plannedTargetIds"] == ["project"]
-    assert artifact["reports"] == artifact["modelReceipts"] == []
-
-
 def test_report_wire_schema_declares_required_finding_and_citation_fields():
     schema = pipeline._GroundedCommunityReport.model_json_schema()
     item = schema["properties"]["findings"]["items"]
@@ -53,6 +35,31 @@ def span(ref, quote, representation="source:1", start=0):
     return EvidenceSpan(id=ref, representation_id=representation, quote=quote,
         locator=dict(representation_id=representation, origin="native", quote=quote,
                      start_char=start, end_char=start + len(quote), quality="precise"))
+
+
+def test_topics_are_grounded_report_sections_not_connected_component_names():
+    from semantica.semantic_artifact_schema import KnowledgeReport, ReportSection
+    evidence = [span("s1", "A cuts energy use."), span("s2", "B cuts energy use.", "source:2"),
+                span("s3", "C publishes accounts.")]
+    entities = [KnowledgeEntity(id="entity:" + name.lower(), canonical_name=name, type="ORG", evidence_ids=[ref])
+                for name, ref in [("A", "s1"), ("B", "s2"), ("C", "s3")]]
+    claims = [KnowledgeAssertion(id="assertion:a", subject_id="entity:a", predicate="cuts", object="energy use",
+                                qualifiers={"polarity": "positive"}, evidence_ids=["s1"])]
+    report = KnowledgeReport(id="report:overview", report_type="overview", title="Overview",
+        content_hash="sha256:" + "1" * 64, evidence_ids=["s1", "s2"],
+        sections=[ReportSection(title="Energy efficiency", text="Both companies reduce energy use.",
+                                evidence_ids=["s1", "s2"])])
+    communities = pipeline._semantic_organization({"entities": [{"id": item.id, "name": item.canonical_name} for item in entities], "relationships": []})
+    topics = pipeline._grounded_topics(entities, claims, evidence, communities, [report])
+    assert len(communities) == 3  # Disconnected topology does not decide subject membership.
+    assert len(topics) == 1
+    assert topics[0].title == "Energy efficiency"
+    assert topics[0].entity_ids == ["entity:a", "entity:b"]
+    assert topics[0].assertion_ids == ["assertion:a"]
+    assert topics[0].evidence_ids == ["s1", "s2"]
+    assert topics[0].metadata["organization"]["basis"] == "grounded-overview-section"
+    assert "entity:c" not in topics[0].entity_ids  # Uncited knowledge remains unclassified, not lost.
+    assert pipeline._grounded_topics(entities, claims, evidence, communities, []) == []
 
 
 def test_report_admits_qualified_facts_and_source_support_not_all_mentions(monkeypatch):
@@ -77,8 +84,10 @@ def test_report_admits_qualified_facts_and_source_support_not_all_mentions(monke
         return [pipeline.ReportSection(title="Summary", text="Grounded",
             evidence_ids=[row["id"] for row in context["evidence"]])], []
     monkeypatch.setattr(pipeline, "_grounded_explanation", explain)
-    pipeline._explanation_reports("project", [{"passages": raw}], [entity], claims, [], [], [],
-                                  [*mentions, *supports, *raw], SimpleNamespace(model_id="test"))
+    from tests.artifact_helpers import organization_report_owner
+    with organization_report_owner(monkeypatch):
+        pipeline._explanation_reports("project", [{"passages": raw}], [entity], claims, [], [], [],
+                                      [*mentions, *supports, *raw], SimpleNamespace(model_id="test"))
     context = captured[0]
     assert {item["id"] for item in context["evidence"]} == {"fact:one", "fact:two", "raw:three"}
     assert len(json.dumps(context)) < 5000
@@ -110,19 +119,31 @@ def test_grounded_payload_never_repeats_storage_reference_arrays(monkeypatch):
     assert sections[0].evidence_ids == ["ev"]
 
 
-def test_snapshot_bytes_do_not_depend_on_build_directory(tmp_path):
+def test_native_canonical_identity_does_not_depend_on_build_directory(tmp_path, monkeypatch):
     from tests.test_semantic_artifact import _request
     from semantica.semantic_worker import handle_request
+    from semantica.triplet_store.publication_records import PublicationRecords
+    stage = PublicationRecords.stage_canonical
+    selections = []
+    def capture(owner, generation, records):
+        selections.append(json.dumps(records, sort_keys=True))
+        return stage(owner, generation, records)
+    monkeypatch.setattr(PublicationRecords, "stage_canonical", capture)
     source = tmp_path / "source.txt"
     source.write_text("Ada designed the Engine.")
     request = _request(source, tmp_path / "first")
     first = handle_request(request)
-    request["params"]["resumeCheckpointDirs"] = [str(tmp_path / "first" / "checkpoint")]
+    first_selections = selections[:]
+    selections.clear()
     request["params"]["outputDir"] = str(tmp_path / "second")
     second = handle_request(request)
     assert first["ok"] and second["ok"]
-    graph = lambda result: next(item for item in result["result"]["artifacts"] if item["kind"] == "semantic-graph")
-    assert graph(first)["digest"] == graph(second)["digest"]
+    assert first_selections and first_selections == selections
+    # Generations identify publication attempts; canonical selections identify content.
+    assert first["result"]["semanticStore"]["path"] == second["result"]["semanticStore"]["path"]
+    for directory in ("first", "second"):
+        assert not (tmp_path / directory / "semantic-graph.json").exists()
+        assert not (tmp_path / directory / "snapshot.json").exists()
 
 
 def test_short_reference_from_another_batch_is_rejected(monkeypatch):
@@ -204,8 +225,10 @@ def test_concept_and_topic_reports_select_knowledge_before_prompting(monkeypatch
         contexts.append(context)
         return [pipeline.ReportSection(title="Summary", text="Grounded", evidence_ids=[context["evidence"][0]["id"]])], []
     monkeypatch.setattr(pipeline, "_grounded_explanation", explain)
-    pipeline._explanation_reports("project", [], [entity], claims, [], [], [topic], evidence,
-                                  SimpleNamespace(model_id="test"), target_ids=["acme", "topic"])
+    from tests.artifact_helpers import organization_report_owner
+    with organization_report_owner(monkeypatch):
+        pipeline._explanation_reports("project", [], [entity], claims, [], [], [topic], evidence,
+                                      SimpleNamespace(model_id="test"), target_ids=["acme", "topic"])
     assert {context["target"]["type"] for context in contexts} == {"concept", "topic"}
     assert all(len(context["assertions"]) == 4 for context in contexts)
     assert len(claims) == 100
@@ -235,8 +258,10 @@ def test_topic_and_community_reports_respect_membership_before_shared_entity_exp
         contexts.append(context)
         return [pipeline.ReportSection(title="Support", text="Grounded", evidence_ids=["inside"])], []
     monkeypatch.setattr(pipeline, "_grounded_explanation", explain)
-    pipeline._explanation_reports("project", [], entities, claims, relations, [community], [topic],
-        evidence, SimpleNamespace(model_id="test"), target_ids=["topic", "community"])
+    from tests.artifact_helpers import organization_report_owner
+    with organization_report_owner(monkeypatch):
+        pipeline._explanation_reports("project", [], entities, claims, relations, [community], [topic],
+            evidence, SimpleNamespace(model_id="test"), target_ids=["topic", "community"])
     assert len(contexts) == 2
     for context in contexts:
         assert {item["id"] for item in context["assertions"]} == {"member"}
@@ -249,7 +274,7 @@ def test_topic_and_community_reports_respect_membership_before_shared_entity_exp
     assert claims[0].evidence_ids == ["inside", "outside"]
 
 
-def test_topic_organization_does_not_admit_cross_community_assertions(monkeypatch):
+def test_topic_organization_does_not_admit_uncited_assertions(monkeypatch):
     from semantica.kg import CommunityDetector
     monkeypatch.setattr(CommunityDetector, "detect_communities", lambda *args, **kwargs:
         {"communities": [["acme", "plant"], ["outside"]]})
@@ -258,7 +283,11 @@ def test_topic_organization_does_not_admit_cross_community_assertions(monkeypatc
         object_entity_id="plant", qualifiers={"polarity": "positive"}, evidence_ids=["in"]),
         KnowledgeAssertion(id="boundary", subject_id="acme", predicate="funds", object="outside",
         object_entity_id="outside", qualifiers={"polarity": "positive"}, evidence_ids=["out"])]
-    _, topics = pipeline._semantic_organization(entities, claims, [], [span("in", "Operations"), span("out", "Research")])
+    from semantica.semantic_artifact_schema import KnowledgeReport, ReportSection
+    report = KnowledgeReport(id="report:overview", report_type="overview", title="Overview",
+        content_hash="sha256:" + "1" * 64, evidence_ids=["in"],
+        sections=[ReportSection(title="Operations", text="Acme operates the plant.", evidence_ids=["in"])])
+    topics = pipeline._grounded_topics(entities, claims, [span("in", "Operations"), span("out", "Research")], [], [report])
     topic = next(item for item in topics if "plant" in item.entity_ids)
     assert topic.assertion_ids == ["inside"]
     assert topic.evidence_ids == ["in"]

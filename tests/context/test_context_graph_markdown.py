@@ -7,7 +7,6 @@ import pytest
 import yaml
 
 import semantica.context.context_graph as context_graph_module
-from semantica.change_management.managers import TemporalVersionManager
 from semantica.context.context_graph import ContextEdge, ContextGraph, ContextNode
 from semantica.context.markdown import (
     MarkdownRevisionConflictError,
@@ -545,18 +544,6 @@ def test_markdown_load_rebuilds_indexes_and_emits_json_compatible_events(tmp_pat
     }
 
 
-def test_markdown_load_records_granular_change_manager_history(tmp_path):
-    source, _, _ = _sample_graph()
-    destination = tmp_path / "graph"
-    source.save_to_file(destination, format="markdown")
-    target = ContextGraph(advanced_analytics=False)
-    manager = TemporalVersionManager()
-    manager.attach_to_graph(target)
-
-    target.load_from_file(destination, format="markdown")
-
-    assert manager.get_node_history("evidence-1")[0]["operation"] == "ADD_NODE"
-    assert manager.get_node_history("edge-supports")[0]["operation"] == "ADD_EDGE"
 
 
 def test_markdown_export_rejects_recursive_metadata(tmp_path):

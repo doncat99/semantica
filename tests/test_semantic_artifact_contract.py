@@ -7,10 +7,12 @@ import pytest
 from pydantic import ValidationError
 
 from semantica.semantic_artifact_schema import (
-    SemanticArtifact,
+    KnowledgeAssertion,
+    KnowledgeRelation,
+    EvidenceSpan,
     SemanticArtifactBuildRequest,
     WorkerRequest,
-    semantic_artifact_json_schema,
+    build_request_json_schema,
 )
 from semantica.semantic_worker import serve
 
@@ -43,181 +45,79 @@ worker.main()
     assert "Docling table warning" in result.stderr
 
 
-def _snapshot_payload():
-    return {
-        "snapshot_id": "snapshot:one",
-        "project_id": "project-1",
-        "artifact_manifest": [
-            {"id": "artifact-repr", "artifact_type": "representation", "artifact_ref": "object://repr", "artifact_hash": H1},
-            {"id": "artifact-retrieval", "artifact_type": "retrieval", "artifact_ref": "object://retrieval", "artifact_hash": H2, "depends_on": ["artifact-repr"]},
-        ],
-        "lineage": {
-            "schema_digest": H3,
-            "recipe_id": "recipe:default",
-            "recipe_digest": H4,
-            "rule_version": "rules-v1",
-            "rule_digest": H5,
-            "ontology_version": "ontology-v1",
-            "ontology_digest": H6,
-            "model_receipt_ids": ["model-1"],
-        },
-        "document_representations": [
-            {
-                "id": "repr-1",
-                "source_id": "source-1",
-                "material_revision_id": "b3-" + "7" * 64,
-                "input_revision": "b3-" + "7" * 64,
-                "media_type": "application/pdf",
-                "content_hash": "b3-" + "7" * 64,
-                "parser": "docling",
-                "parser_version": "1",
-                "recipe_id": "recipe:default",
-                "recipe_digest": H4,
-                "origin": "mixed",
-                "artifact_ref_id": "artifact-repr",
-            }
-        ],
-        "evidence_spans": [
-            {
-                "id": "ev-1",
-                "representation_id": "repr-1",
-                "quote": "Ada",
-                "origin": "observed",
-                "locator": {
-                    "representation_id": "repr-1",
-                    "origin": "native",
-                    "quote": "Ada",
-                    "start_char": 0,
-                    "end_char": 3,
-                    "quality": "precise",
-                },
-            }
-        ],
-        "entities": [
-            {"id": "entity-ada", "canonical_name": "Ada", "type": "PERSON", "evidence_ids": ["ev-1"], "status": "accepted"},
-            {"id": "entity-engine", "canonical_name": "Engine", "type": "CONCEPT", "status": "accepted"},
-        ],
-        "assertions": [
-            {"id": "assertion-1", "subject_id": "entity-ada", "predicate": "designed", "object": "Engine", "object_entity_id": "entity-engine", "qualifiers": {"polarity": "positive"}, "evidence_ids": ["ev-1"], "status": "accepted"}
-        ],
-        "relations": [
-            {"id": "relation-1", "source_entity_id": "entity-ada", "target_entity_id": "entity-engine", "type": "designed", "qualifiers": {"polarity": "positive"}, "evidence_ids": ["ev-1"], "status": "accepted"}
-        ],
-        "communities": [
-            {"id": "community-1", "level": 0, "title": "Design", "entity_ids": ["entity-ada", "entity-engine"], "relation_ids": ["relation-1"]}
-        ],
-        "topics": [
-            {"id": "topic-1", "title": "Design history", "community_ids": ["community-1"], "entity_ids": ["entity-ada"], "assertion_ids": ["assertion-1"], "evidence_ids": ["ev-1"]}
-        ],
-        "model_receipts": [
-            {"id": "model-1", "operation": "community_report", "provider": "test", "model": "deterministic", "input_digest": H1, "output_digest": H2}
-        ],
-        "conflicts": [
-            {"id": "conflict-1", "conflict_type": "identity", "reason": "same label appears twice", "entity_ids": ["entity-ada"]}
-        ],
-        "retrieval_manifests": [
-            {"id": "retrieval-1", "retrieval_type": "graph", "artifact_hash": H8, "artifact_ref_id": "artifact-retrieval", "record_count": 1, "entity_ids": ["entity-ada"], "relation_ids": ["relation-1"], "community_ids": ["community-1"], "evidence_ids": ["ev-1"], "model_receipt_ids": ["model-1"]}
-        ],
-    }
 
 
 def _build_request_payload():
     return {
         "projectId": "project-1",
-        "baseSnapshot": {"snapshotId": "snapshot:base", "snapshotPath": "/tmp/base.json", "artifactDigest": H8, "schemaDigest": H3},
         "inputRevision": H1,
         "outputDir": "/tmp/semantica-output",
-        "parsedSources": [{"artifactDigest": H2, "artifactPath": "/tmp/parsed.json", "sourceId": "source-1"}],
+        "nativeCacheDir": "/tmp/semantica-native/cache",
+        "nativeStoreDir": "/tmp/semantica-native/store",
+        "organizationReports": {"baseUrl": "http://127.0.0.1:9021/v1/products/semantic-organization",
+            "authorizationEnv": "OPENAI_API_KEY", "recipeDigest": H1},
+        "parsedSources": [{"artifactDigest": H2, "artifactPath": "/tmp/parsed.json", "readerIndexPath": "/tmp/reader.sqlite", "readerIndexDigest": H1, "sourceId": "source-1", "representationRevision": H3}],
         "sources": [{"filePath": "/tmp/source.pdf", "materialRevision": "b3-" + "7" * 64, "mimeType": "application/pdf", "name": "source.pdf", "sourceId": "source-1"}],
         "recipe": {"forceOcrSourceIds": [], "id": "deterministic", "version": "1"},
         "relays": {
-            "embedding": {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/embeddings", "capability": "knowledge.snapshot.embed", "modelId": "embedding-1", "receipts": "required"},
-            "model": {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/chat/completions", "capability": "knowledge.snapshot.generate", "contextWindowTokens": 500000, "maxOutputTokens": 393216, "modelId": "model-1", "receipts": "required"},
+            "embedding": {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/embeddings", "capability": "knowledge.publication.embed", "modelId": "embedding-1", "receipts": "required"},
+            "model": {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/chat/completions", "capability": "knowledge.publication.generate", "contextWindowTokens": 500000, "maxOutputTokens": 393216, "modelId": "model-1", "receipts": "required"},
         },
-        "release": {"artifactDigest": H2, "schemaDigest": H3, "mediaTypes": {"document-representation": "application/vnd.semantica.document-representation+json", "retrieval-index": "application/vnd.semantica.retrieval+json", "semantic-graph": "application/vnd.semantica.semantic-graph+json"}},
+        "release": {"artifactDigest": H2, "schemaDigest": H3, "mediaTypes": {"document-representation": "application/vnd.semantica.document-representation+json"}},
     }
 
 
-def test_semantic_artifact_contract_covers_kernel_sections():
-    props = semantic_artifact_json_schema()["properties"]
-    for key in ["lineage", "artifact_manifest", "document_representations", "evidence_spans", "entities", "assertions", "relations", "communities", "topics", "conflicts", "retrieval_manifests", "model_receipts"]:
-        assert key in props
-    assert "change_delta" not in props
-    assert "reports" not in props
+def test_build_schema_exposes_only_current_reference_input():
+    props = build_request_json_schema()["properties"]
+    assert {"nativeCacheDir", "nativeStoreDir", "organizationReports", "parsedSources"} <= props.keys()
+    assert not {"baseSnapshot", "entities", "relations", "checkpointDir"} & props.keys()
 
 
-def test_semantic_artifact_validates_complete_cross_references():
-    snapshot = SemanticArtifact.model_validate(_snapshot_payload())
-    assert snapshot.protocol == "semantica.semantic-artifact.v1"
-    assert snapshot.id == "snapshot:one"
-    assert snapshot.model_dump()["snapshot_id"] == "snapshot:one"
-    assert "reports" not in snapshot.model_dump()
-
-
-def test_snapshot_rejects_embedded_reports_and_change_delta():
-    payload = _snapshot_payload()
-    payload["reports"] = []
-    with pytest.raises(ValidationError, match="reports"):
-        SemanticArtifact.model_validate(payload)
-    payload = _snapshot_payload()
-    payload["change_delta"] = {}
-    with pytest.raises(ValidationError, match="change_delta"):
-        SemanticArtifact.model_validate(payload)
-
-
-def test_semantic_artifact_rejects_bad_hash_and_duplicate_ids():
-    bad = _snapshot_payload()
-    bad["document_representations"][0]["content_hash"] = "not-a-hash"
-    with pytest.raises(ValidationError, match="b3-"):
-        SemanticArtifact.model_validate(bad)
-
-    dup = _snapshot_payload()
-    dup["entities"].append(dict(dup["entities"][0]))
-    with pytest.raises(ValidationError, match="duplicate entity id"):
-        SemanticArtifact.model_validate(dup)
-
-
-@pytest.mark.parametrize("section", ["assertions", "relations"])
-@pytest.mark.parametrize("qualifiers", [
-    None,
-    {},
-    {"polarity": "unknown"},
-    {"polarity": "positive", "scope": "global"},
-    {"polarity": "positive", "condition": ""},
-    {"polarity": "positive", "value": 42},
+@pytest.mark.parametrize("model,payload", [
+    (KnowledgeAssertion, {"id": "assertion-1", "subject_id": "entity-ada", "predicate": "designed", "object": "Engine"}),
+    (KnowledgeRelation, {"id": "relation-1", "source_entity_id": "entity-ada", "target_entity_id": "entity-engine", "type": "designed"}),
 ])
-def test_semantic_artifact_rejects_invalid_fact_qualifiers(section, qualifiers):
-    payload = _snapshot_payload()
-    fact = payload[section][0]
-    if qualifiers is None:
-        fact.pop("qualifiers")
-    else:
-        fact["qualifiers"] = qualifiers
+@pytest.mark.parametrize("qualifiers", [None, {}, {"polarity": "unknown"},
+    {"polarity": "positive", "scope": "global"}, {"polarity": "positive", "condition": ""},
+    {"polarity": "positive", "value": 42}])
+def test_native_fact_rows_reject_invalid_qualifiers(model, payload, qualifiers):
+    value = dict(payload)
+    if qualifiers is not None:
+        value["qualifiers"] = qualifiers
     with pytest.raises(ValidationError, match="qualifier|qualifiers"):
-        SemanticArtifact.model_validate(payload)
+        model.model_validate(value)
 
 
-def test_semantic_artifact_rejects_unavailable_or_empty_locator():
-    bad = _snapshot_payload()
-    locator = bad["evidence_spans"][0]["locator"]
-    locator.pop("start_char")
-    locator.pop("end_char")
+def test_native_evidence_rejects_unavailable_locator():
     with pytest.raises(ValidationError, match="locator requires"):
-        SemanticArtifact.model_validate(bad)
+        EvidenceSpan.model_validate({"id": "ev-1", "representation_id": "repr-1",
+            "quote": "Ada", "origin": "observed",
+            "locator": {"representation_id": "repr-1", "origin": "native", "quote": "Ada", "quality": "precise"}})
 
 
-def test_semantic_artifact_rejects_unknown_community_topic_conflict_retrieval_refs():
-    bad = _snapshot_payload()
-    bad["retrieval_manifests"][0]["community_ids"] = ["missing-community"]
-    with pytest.raises(ValidationError, match="unknown community"):
-        SemanticArtifact.model_validate(bad)
+@pytest.mark.parametrize("field,value", [("baseSnapshot", None), ("checkpointDir", "/tmp/checkpoints"),
+    ("entities", []), ("relations", [])])
+def test_build_request_rejects_removed_aggregate_inputs(field, value):
+    payload = _build_request_payload()
+    payload[field] = value
+    with pytest.raises(ValidationError, match=field):
+        SemanticArtifactBuildRequest.model_validate(payload)
+
+
+@pytest.mark.parametrize("media_types", [{}, {"document-representation": "application/json"},
+    {"document-representation": "application/vnd.semantica.document-representation+json",
+     "semantic-graph": "application/vnd.semantica.semantic-graph+json"}])
+def test_build_request_rejects_stale_release_media_types(media_types):
+    payload = _build_request_payload()
+    payload["release"]["mediaTypes"] = media_types
+    with pytest.raises(ValidationError, match="mediaTypes"):
+        SemanticArtifactBuildRequest.model_validate(payload)
 
 
 
 def test_build_request_accepts_sources_not_semantic_objects():
     request = SemanticArtifactBuildRequest.model_validate(_build_request_payload())
     assert request.sources[0].source_id == "source-1"
-    assert request.base_snapshot.artifact_digest == H8
 
     bad = _build_request_payload()
     bad["entities"] = [{"id": "host-entity"}]
@@ -275,7 +175,7 @@ def test_build_request_requires_admitted_model_output_limits():
         SemanticArtifactBuildRequest.model_validate(bad)
 
 
-def test_build_request_and_snapshot_preserve_extraction_specification():
+def test_build_request_preserves_extraction_specification():
     payload = _build_request_payload()
     payload["recipe"]["id"] = "model"
     payload["recipe"]["extractionSpec"] = {
@@ -285,13 +185,8 @@ def test_build_request_and_snapshot_preserve_extraction_specification():
         }}],
     }
     request = SemanticArtifactBuildRequest.model_validate(payload)
-    snapshot_payload = _snapshot_payload()
-    snapshot_payload["extraction_spec"] = payload["recipe"]["extractionSpec"]
-    snapshot_payload["lineage"]["extraction_spec_digest"] = request.recipe.extraction_spec.digest
-    snapshot = SemanticArtifact.model_validate(snapshot_payload)
-
-    assert request.recipe.extraction_spec.digest == snapshot.lineage.extraction_spec_digest
-    assert snapshot.extraction_spec.entity_types[0].name == "Issuer"
+    assert request.recipe.extraction_spec.digest.startswith("sha256:")
+    assert request.recipe.extraction_spec.entity_types[0].name == "Issuer"
 
 
 def test_build_request_rejects_unsafe_release_and_source_boundaries():
@@ -333,17 +228,16 @@ def test_jsonl_worker_build_requires_a_real_source_file():
     assert serve(stdin, stdout) == 0
     response = json.loads(stdout.getvalue())
     assert response["ok"] is False
-    assert response["error"]["type"] in {"SemanticArtifactError", "FileNotFoundError", "SnapshotCheckpointError"}
+    assert response["error"]["type"] in {"SemanticArtifactError", "FileNotFoundError"}
 
 
-def test_jsonl_worker_validate_artifact_method():
-    request = {"protocol": "semantica.semantic-worker.v1", "id": "validate-1", "method": "validate_artifact", "params": _snapshot_payload()}
-    stdin = io.StringIO(json.dumps(request) + "\n")
+def test_jsonl_worker_rejects_removed_validate_artifact_method():
+    request = {"protocol": "semantica.semantic-worker.v1", "id": "validate-1", "method": "validate_artifact", "params": {}}
     stdout = io.StringIO()
-    assert serve(stdin, stdout) == 0
+    assert serve(io.StringIO(json.dumps(request) + "\n"), stdout) == 0
     response = json.loads(stdout.getvalue())
-    assert response["ok"] is True
-    assert response["result"] == {"valid": True, "snapshot_id": "snapshot:one"}
+    assert response["ok"] is False
+    assert response["error"]["type"] == "ValidationError"
 
 
 def test_jsonl_worker_validates_extraction_spec_with_semantica_owned_schema():
@@ -360,14 +254,14 @@ def test_jsonl_worker_validates_extraction_spec_with_semantica_owned_schema():
     assert response["result"]["digest"].startswith("sha256:")
 
 
-def test_jsonl_worker_schema_method_returns_semantic_graph_and_build_request_schema():
+def test_jsonl_worker_schema_returns_only_current_build_request():
     request = {"protocol": "semantica.semantic-worker.v1", "id": "schema-1", "method": "schema"}
     stdin = io.StringIO(json.dumps(request) + "\n")
     stdout = io.StringIO()
     assert serve(stdin, stdout) == 0
     response = json.loads(stdout.getvalue())
     assert response["ok"] is True
-    assert "document_representations" in response["result"]["semantic_graph"]["properties"]
+    assert set(response["result"]) == {"build_request"}
     assert "sources" in response["result"]["build_request"]["properties"]
 
 
@@ -376,8 +270,26 @@ def test_worker_request_rejects_unknown_method():
         WorkerRequest.model_validate({"id": "bad", "method": "fallback"})
 
 
-def test_snapshot_rejects_removed_identity_decisions():
-    payload = _snapshot_payload()
-    payload["identity_decisions"] = []
-    with pytest.raises(ValidationError):
-        SemanticArtifact.model_validate(payload)
+@pytest.mark.parametrize("field,value", [
+    ("readerIndexPath", None), ("readerIndexDigest", None),
+    ("readerIndexPath", "relative.sqlite"), ("readerIndexDigest", "unbound"),
+])
+def test_parsed_source_requires_explicit_bound_reader_index(field, value):
+    request = _build_request_payload()
+    if value is None:
+        del request['parsedSources'][0][field]
+    else:
+        request['parsedSources'][0][field] = value
+    with pytest.raises(ValidationError, match=field):
+        SemanticArtifactBuildRequest.model_validate(request)
+
+
+@pytest.mark.parametrize('relay,retired', [
+    ('embedding', 'knowledge.snapshot.embed'),
+    ('model', 'knowledge.snapshot.generate'),
+])
+def test_build_request_rejects_retired_relay_capabilities(relay, retired):
+    payload = _build_request_payload()
+    payload['relays'][relay]['capability'] = retired
+    with pytest.raises(ValidationError, match='capability'):
+        SemanticArtifactBuildRequest.model_validate(payload)

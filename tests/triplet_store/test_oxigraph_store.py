@@ -87,6 +87,21 @@ def test_named_graphs_are_isolated_for_crud_and_queries():
     assert [row["s"]["value"] for row in result.bindings] == [named_triplet.subject]
 
 
+@pytest.mark.parametrize("metadata", [{"datatype": "xsd:string"}, {"language": "en"}, {"literal_datatype": "xsd:anyURI"}])
+def test_explicit_url_literal_survives_read_reinsert_and_delete(metadata):
+    backend = OxigraphStore()
+    triplet = Triplet(EX + "source", EX + "label", EX + "literal", metadata=metadata)
+    backend.add_triplet(triplet)
+    query = "SELECT ?value WHERE { <http://example.org/source> <http://example.org/label> ?value }"
+    original = backend.execute_sparql(query)["bindings"]
+    assert original[0]["value"]["type"] == "literal"
+    saved = backend.get_triplets(subject=triplet.subject)[0]
+    backend.delete_triplet(saved)
+    assert backend.get_triplets(subject=triplet.subject) == []
+    backend.add_triplet(saved)
+    assert backend.execute_sparql(query)["bindings"] == original
+
+
 def test_select_ask_and_construct_result_shapes():
     backend = OxigraphStore()
     backend.add_triplet(
@@ -136,6 +151,76 @@ def test_invalid_result_format_is_rejected():
 
     with pytest.raises(ValidationError, match="Invalid result_format"):
         backend.execute_sparql("SELECT * WHERE { ?s ?p ?o }", result_format="csv")
+
+
+def test_query_substitutions_preserve_literal_and_graph_scope():
+    from pyoxigraph import Literal, NamedNode, Variable
+
+    backend = OxigraphStore()
+    text = 'quoted " value 😀 } UNION { ?s ?p ?o } #'
+    backend.add_triplets([Triplet(EX + "one", EX + "label", text)], graph=EX + "p1")
+    backend.add_triplets([Triplet(EX + "two", EX + "label", text)], graph=EX + "p2")
+    result = backend.execute_sparql(
+        "SELECT ?s ?graph ?value WHERE { GRAPH ?graph { ?s <http://example.org/label> ?value } } LIMIT 2",
+        substitutions={Variable("graph"): NamedNode(EX + "p1"), Variable("value"): Literal(text)},
+        max_rows=2, max_bytes=4096,
+    )
+    assert [row["s"]["value"] for row in result["bindings"]] == [EX + "one"]
+
+
+@pytest.mark.parametrize("query", [
+    "SELECT ?s ?p ?o WHERE { ?s ?p ?o }",
+    "CONSTRUCT { ?s ?p ?o } WHERE { ?s ?p ?o }",
+])
+def test_query_budget_rejects_overflow_instead_of_truncating(query):
+    backend = OxigraphStore()
+    backend.add_triplets([Triplet(EX + str(i), EX + "label", "body" * 100) for i in range(3)])
+    with pytest.raises(ProcessingError, match="row budget"):
+        backend.execute_sparql(query, max_rows=2, max_bytes=8192)
+    with pytest.raises(ProcessingError, match="byte budget"):
+        backend.execute_sparql(query, max_rows=3, max_bytes=1024)
+
+
+@pytest.mark.parametrize("option,value", [("max_rows", 0), ("max_rows", True),
+                                         ("max_bytes", -1), ("max_bytes", 1.5)])
+def test_query_budget_options_are_validated(option, value):
+    with pytest.raises(ValidationError, match=option):
+        OxigraphStore().execute_sparql("ASK {}", **{option: value})
+
+
+def test_native_update_is_atomic_and_durable(tmp_path):
+    backend = OxigraphStore(path=tmp_path / "atomic")
+    update = 'INSERT DATA { <http://example.org/one> <http://example.org/label> "one" }'
+    backend.execute_update(update)
+    with pytest.raises(ProcessingError, match="update failed"):
+        backend.execute_update(update.replace("/one>", "/bad>") + "; INVALID")
+    assert backend.get_triplets(subject=EX + "bad") == []
+    del backend
+    gc.collect()
+    assert OxigraphStore(path=tmp_path / "atomic").get_triplets(subject=EX + "one")[0].object == "one"
+
+
+def test_update_native_literal_serialization_prevents_syntax_injection():
+    from pyoxigraph import Literal
+
+    backend = OxigraphStore()
+    text = '" } }; DROP ALL; INSERT DATA { <urn:bad> <urn:p> "😀'
+    backend.execute_update(
+        'INSERT DATA { <http://example.org/one> <http://example.org/label> '
+        + str(Literal(text)) + ' }'
+    )
+    assert backend.get_triplets(subject=EX + "one")[0].object == text
+    assert len(backend.get_triplets()) == 1
+
+
+def test_update_flush_failure_reports_already_committed_state(tmp_path):
+    backend = OxigraphStore(path=tmp_path / "flush-failure")
+    with patch.object(backend, "flush", side_effect=OSError("disk unavailable")):
+        with pytest.raises(ProcessingError, match="committed but durability flush failed"):
+            backend.execute_update(
+                'INSERT DATA { <http://example.org/one> <http://example.org/label> "one" }'
+            )
+    assert backend.get_triplets(subject=EX + "one")[0].object == "one"
 
 
 def test_invalid_rdf_term_is_reported_as_processing_error():

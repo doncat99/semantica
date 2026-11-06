@@ -7,30 +7,93 @@ import subprocess
 import sys
 import tempfile
 import threading
+from hashlib import file_digest
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
 
 def invoke(module, request):
     process = subprocess.run([sys.executable, "-I", "-B", "-m", module],
-        input=json.dumps(request) + "\n", text=True, capture_output=True, timeout=180, check=True)
+        input=json.dumps(request) + "\n", text=True, capture_output=True, timeout=180)
+    assert process.returncode == 0, (process.returncode, process.stdout[-8000:], process.stderr[-8000:])
     response = json.loads(process.stdout.splitlines()[-1])
     assert response["ok"], response
     return response["result"]
 
 
+class QuerySession:
+    """One acquired native owner per fresh query worker process."""
+    def __enter__(self):
+        self.process = subprocess.Popen([sys.executable, "-I", "-B", "-m",
+            "semantica.semantic_query_worker"], stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        return self
+
+    def call(self, method, params):
+        self.process.stdin.write(json.dumps({"id": "acceptance-" + method,
+            "method": method, "params": params}) + "\n")
+        self.process.stdin.flush()
+        deadline = threading.Timer(180, self.process.kill)
+        deadline.start()
+        try:
+            line = self.process.stdout.readline()
+            assert line, "native query worker exited or exceeded its 180-second deadline"
+            response = json.loads(line)
+        finally:
+            deadline.cancel()
+        assert response["ok"], response
+        return response["result"]
+
+    def __exit__(self, *_args):
+        self.process.stdin.close()
+        try:
+            self.process.wait(timeout=30)
+        finally:
+            if self.process.poll() is None:
+                self.process.kill()
+                self.process.wait(timeout=10)
+        assert self.process.returncode == 0, self.process.stderr.read()
+        self.process.stdout.close()
+        self.process.stderr.close()
+
+
+def reader_request(parsed, source):
+    def reference(path, kind):
+        with path.open("rb") as stream:
+            digest = "sha256:" + file_digest(stream, "sha256").hexdigest()
+        stat = path.stat()
+        return {"path": str(path), "kind": kind, "digest": digest, "mediaType": "application/json",
+            "installation": {"digest": digest, "identity": ":".join(map(str,
+                (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)))}}
+    path = Path(parsed["artifactPath"])
+    return {"id": "acceptance-reader", "sourceId": source["sourceId"],
+        "materialRevision": source["materialRevision"], "representationRevision": parsed["representationRevision"],
+        "artifact": reference(path, "document-representation"),
+        "readerIndex": reference(path.with_suffix(".reader.sqlite"), "document-reader-index"),
+        "selection": {"field": "chunks", "limit": 128, "maxBytes": 262144}}
+
+
 def verify_model_paths(root, destination):
-    from semantica.semantic_artifact_builder import explain_evidence
-    from semantica.semantic_artifact_schema import SemanticArtifact, RelayRef
+    from semantica.semantic_artifact_schema import stable_digest
     from semantica.source import source_content_revision
 
     manifest = json.loads((root / "manifest.json").read_text())
     calls = []
+    products = {}
 
     class Relay(BaseHTTPRequestHandler):
         def do_POST(self):
             assert self.headers.get("Authorization") == "Bearer native-acceptance-only"
             payload = json.loads(self.rfile.read(int(self.headers["content-length"])))
-            if self.path == "/v1/embeddings":
+            if self.path.startswith("/v1/products/semantic-organization/"):
+                operation = stable_digest([payload[key] for key in
+                    ("projectId", "inputRevision", "recipeDigest", "modelId", "targetId")])
+                if self.path.endswith("/adopt"):
+                    products[operation] = {"report": payload["report"], "receipts": payload["receipts"],
+                        "operationId": operation, "digest": stable_digest(payload)}
+                else:
+                    assert self.path.endswith("/read"), self.path
+                response = products.get(operation, {"report": None})
+            elif self.path == "/v1/embeddings":
                 calls.append("embedding")
                 response = {"model": payload["model"], "data": [
                     {"embedding": [0.25, 0.5, 0.75], "index": index}
@@ -95,50 +158,135 @@ def verify_model_paths(root, destination):
             parsed = invoke("semantica.semantic_worker", {"protocol": "semantica.semantic-worker.v1",
                 "id": "model-parse", "method": "parse_source", "params": {"source": source_ref,
                 "outputDir": str(scratch / "parsed"), "forceOcr": False, "documentProcessing": {"mode": "local"}}})
+            second_source = scratch / "second.txt"
+            second_source.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+            second_ref = {**source_ref, "sourceId": "native-second", "filePath": str(second_source), "name": second_source.name}
+            second_parsed = invoke("semantica.semantic_worker", {"id": "model-second-parse", "method": "parse_source",
+                "params": {"source": second_ref, "outputDir": str(scratch / "parsed"),
+                    "forceOcr": False, "documentProcessing": {"mode": "local"}}})
             relays = {key: {"authorizationEnv": token_name,
                 "baseUrl": f"http://127.0.0.1:{server.server_port}/v1/{endpoint}",
                 "modelId": model, "bindingId": "native-acceptance", "capability": capability, "receipts": "required",
                 **({"contextWindowTokens": 500000, "maxOutputTokens": 393216} if key == "model" else {})}
                 for key, endpoint, model, capability in [
-                    ("model", "chat/completions", "model-1", "knowledge.snapshot.generate"),
-                    ("embedding", "embeddings", "embedding-1", "knowledge.snapshot.embed")]}
+                    ("model", "chat/completions", "model-1", "knowledge.publication.generate"),
+                    ("embedding", "embeddings", "embedding-1", "knowledge.publication.embed")]}
             built = invoke("semantica.semantic_worker", {"protocol": "semantica.semantic-worker.v1",
                 "id": "model-build", "method": "build_semantic_artifacts", "params": {
-                "projectId": "native", "baseSnapshot": None, "inputRevision": "sha256:" + "1" * 64,
+                "projectId": "native", "inputRevision": "sha256:" + "1" * 64,
+                "nativeCacheDir": str(scratch / "native-cache"), "nativeStoreDir": str(scratch / "native-store"),
+                "organizationReports": {"baseUrl": f"http://127.0.0.1:{server.server_port}/v1/products/semantic-organization",
+                    "authorizationEnv": token_name, "recipeDigest": "sha256:" + "1" * 64},
                 "outputDir": str(scratch / "output"), "parallelism": 1,
                 "recipe": {"id": "model", "version": "1", "forceOcrSourceIds": [], "classificationProfile": {
                     "id": "profile:acceptance", "version": "1", "label": "Purpose", "description": "Source purpose",
                     "dimensions": [{"id": "purpose", "label": "Purpose", "cardinality": "single",
                                     "vocabulary": [{"id": "history", "label": "History"}]}]}},
-                "sources": [source_ref], "parsedSources": [{key: parsed[key] for key in ("sourceId", "artifactPath", "artifactDigest")}],
+                "sources": [source_ref, second_ref], "parsedSources": [{key: item[key] for key in
+                    ("sourceId", "artifactPath", "artifactDigest", "representationRevision", "readerIndexPath", "readerIndexDigest")} for item in (parsed, second_parsed)],
                 "documentProcessing": {"mode": "local"}, "relays": relays,
                 "release": {key: manifest[key] for key in ("artifactDigest", "schemaDigest", "mediaTypes")}}})
-            artifacts = {item["kind"]: {key: item[key] for key in ("path", "digest", "kind", "mediaType")}
-                         for item in built["artifacts"]}
-            graph = json.loads(Path(artifacts["semantic-graph"]["path"]).read_text())
-            admitted = SemanticArtifact.model_validate(graph)
-            assert admitted.project_id == "native"
-            assert admitted.id == built["semanticGraph"]["artifactRevision"]
-            assert len(admitted.entities) == 2 and len(admitted.relations) == 1
-            assert admitted.source_classifications[0].assignments[0].item_id == "history"
-            sections, receipts = explain_evidence(admitted,
-                {"id": "native-source", "type": "source-scope", "title": "Historical role"},
-                [span.id for span in admitted.evidence_spans], RelayRef.model_validate(relays["model"]))
-            assert sections and all(section.evidence_ids for section in sections) and receipts
-            snapshot_ref = artifacts["semantic-graph"]
-            for mode in ("keyword", "semantic"):
-                queried = invoke("semantica.semantic_query_worker", {"protocol": "semantica.semantic-query.v1",
-                    "id": "model-query", "method": "query", "params": {"projectId": "native",
-                    "snapshotId": admitted.id, "snapshot": snapshot_ref, "keywordIndex": artifacts["keyword-index"],
-                    "sources": [{"sourceId": rep.source_id, "contentHash": rep.content_hash} for rep in admitted.document_representations],
-                    "retrieval": artifacts["retrieval-index"], "query": "Ada", "mode": mode, "limit": 5,
-                    **({"embedding": {"bindingId": "native-acceptance", "modelId": "embedding-1",
-                         "vector": [0.25, 0.5, 0.75]}} if mode == "semantic" else {})}})
-                assert queried["contexts"] and all(context["evidenceIds"] for context in queried["contexts"])
+            assert built["publication"]["state"] == "ready", built
+            assert built["semanticStore"]["project"] == "native"
+            assert built["semanticStore"]["generation"] == built["publication"]["generation"]
+            assert "artifacts" not in built and "semanticGraph" not in built
+            assert not (scratch / "output/semantic-graph.json").exists()
+            assert not (scratch / "output/snapshot.json").exists()
+            reader = reader_request(parsed, source_ref)
+            readers = {"native-source": reader, "native-second": reader_request(second_parsed, second_ref)}
+            base = {"projectId": "native", "semanticStore": built["semanticStore"],
+                "generation": built["publication"]["generation"], "nativeIndexes": built["nativeIndexes"],
+                "sourceIds": ["native-source"]}
+            descriptor = built["nativeIndexes"]["semantic"]["space"]
+            embedding = {"bindingId": descriptor["bindingId"], "modelId": descriptor["modelId"],
+                "vector": [0.25, 0.5, 0.75]}
+            with QuerySession() as session:
+                session.call("acquire_store", {"semanticStore": built["semanticStore"]})
+                scene_params = {"projectId": "native", "semanticStore": built["semanticStore"]}
+                themes = session.call("scene", {**scene_params,
+                    "selection": {"kind": "topics", "limit": 128, "maxBytes": 262144}})
+                assert themes["generation"] == built["publication"]["generation"]
+                assert themes["nodes"] and themes["next_cursor"] is None, themes
+                theme = themes["nodes"][0]
+                assert theme["organization"]["basis"] == "grounded-overview-section"
+                assert theme["evidenceCount"] > 0 and theme["memberCount"] > 0, theme
+                members = session.call("scene", {**scene_params, "selection": {
+                    "kind": "nodes", "topicId": theme["id"], "limit": 128, "maxBytes": 262144}})
+                assert members["nodes"] and members["next_cursor"] is None, members
+                assert len(members["nodes"]) == theme["memberCount"]
+                header = session.call("classification", {"projectId": "native",
+                    "semanticStore": built["semanticStore"], "selection": {"sourceId": "native-source"}})
+                assert header["dimensionIds"] == ["purpose"], header
+                classification = session.call("classification", {"projectId": "native",
+                    "semanticStore": built["semanticStore"],
+                    "selection": {"sourceId": "native-source", "dimensionId": "purpose", "limit": 128}})
+                assert "history" in json.dumps(classification), classification
+                evidence_ids = []
+                for mode in ("keyword", "semantic"):
+                    params = {**base, "query": "Ada", "mode": mode, "target": "knowledge", "limit": 5,
+                        "sourceArtifacts": {"native-source": reader},
+                        **({"embedding": embedding} if mode == "semantic" else {})}
+                    queried = session.call("query", params)
+                    assert queried["contexts"] and all(hit["evidenceIds"] for hit in queried["contexts"])
+                    evidence_ids = sorted({identity for hit in queried["contexts"] for identity in hit["evidenceIds"]})
+                assert evidence_ids
+                # Exact IDs and explicit source grants go through the canonical record owner.
+                identity = queried["contexts"][0]["id"]
+                canonical = session.call("records", {"projectId": "native", "semanticStore": built["semanticStore"],
+                    "selection": {"ids": [identity], "sourceIds": ["native-source"]}})
+                assert canonical["generation"] == built["publication"]["generation"]
+                assert [row["id"] for row in canonical["records"]] == [identity]
+                for mode in ("keyword", "semantic"):
+                    params = {**base, "query": "Ada", "mode": mode, "target": "documents", "limit": 1,
+                        **({"embedding": embedding} if mode == "semantic" else {})}
+                    if mode == "keyword":
+                        params.pop("sourceIds")
+                    visited = []
+                    for _ in range(2 if mode == "keyword" else 1):
+                        selected = session.call("query", params)
+                        assert selected["contexts"] == [] and len(selected["requiredSourceIds"]) == 1
+                        refs = {key: readers[key] for key in selected["requiredSourceIds"]}
+                        document_page = session.call("query", {**params, "sourceArtifacts": refs})
+                        assert len(document_page["contexts"]) == 1
+                        hit = document_page["contexts"][0]
+                        assert hit["kind"] == "source_text" and len(hit["sourceIds"]) == 1
+                        assert hit["locator"]["quote"] == hit["text"]
+                        assert hit["text"] == ("Ada" if mode == "keyword" else source.read_text(encoding="utf-8"))
+                        assert not hit["evidenceIds"]
+                        visited.extend(hit["sourceIds"])
+                        if document_page.get("nextPosition") is not None:
+                            params.update(position=document_page["nextPosition"], offset=document_page["nextOffset"])
+                    assert document_page.get("nextPosition") is None
+                    if mode == "keyword":
+                        assert set(visited) == set(readers) and document_page["total"] == 2
+                session.call("release_store", {"semanticStore": {key: built["semanticStore"][key]
+                    for key in ("path", "project")}})
+            # A second fresh process must acquire the same ready publication explicitly.
+            with QuerySession() as reopened:
+                reopened.call("acquire_store", {"semanticStore": built["semanticStore"]})
+                reopened_themes = reopened.call("scene", {**scene_params,
+                    "selection": {"kind": "topics", "limit": 128, "maxBytes": 262144}})
+                assert reopened_themes == themes
+                reopened.call("records", {"projectId": "native", "semanticStore": built["semanticStore"],
+                    "selection": {"ids": [identity], "sourceIds": ["native-source"]}})
+                reopened.call("release_store", {"semanticStore": {key: built["semanticStore"][key]
+                    for key in ("path", "project")}})
+            explanation_source = {key: value for key, value in reader.items() if key not in ("id", "selection")}
+            explained = invoke("semantica.semantic_worker", {"id": "model-explanation", "method": "explain_evidence",
+                "params": {"projectId": "native", "semanticStore": built["semanticStore"],
+                    "target": {"id": "native-source", "type": "source-scope", "title": "Historical role"},
+                    "sources": [explanation_source], "evidenceIds": evidence_ids[:32],
+                    "outputDir": str(scratch), "relay": relays["model"]}})
+            explanation = json.loads(Path(explained["path"]).read_text())
+            assert explained["sectionCount"] > 0 and explained["receiptCount"] > 0
+            assert explanation["evidenceIds"] and set(explanation["evidenceIds"]) <= set(evidence_ids)
             assert set(calls) == {"entities", "relations", "embedding", "classification", "explanation"}, calls
+            assert built["relayReceiptManifest"] and built["relayReceipts"]["embedding"] and built["relayReceipts"]["model"]
             result = {"loopbackOnly": True, "freshBuildWorker": True, "freshQueryWorker": True,
-                "operations": calls, "queryModes": ["keyword", "semantic"],
-                "modelReceipts": len(admitted.model_receipts), "explanationReceipts": len(receipts)}
+                "operations": calls, "queryModes": ["keyword", "semantic"], "semanticOriginalRanges": True,
+                "nativeAcquisitionReopen": True, "boundedCanonicalRecords": True,
+                "nativeGroundedTopics": True, "nativeTopicMembers": True,
+                "modelReceipts": len(built["relayReceiptManifest"]), "explanationReceipts": explained["receiptCount"]}
             destination.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
             return result
     finally:

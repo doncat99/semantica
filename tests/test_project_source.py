@@ -14,7 +14,7 @@ def test_material_revision_matches_shared_blake3_known_vector(tmp_path):
 
 
 def test_worker_rejects_changed_bytes_before_parsing(tmp_path, monkeypatch):
-    from semantica.semantic_artifact_builder import _parse_source, SemanticArtifactError
+    from semantica.semantic_source_artifact import _parse_source, SemanticArtifactError
     from semantica.semantic_artifact_schema import SourceBuildInput
     source = tmp_path / "source.txt"
     source.write_bytes(b"abc")
@@ -27,13 +27,13 @@ def test_worker_rejects_changed_bytes_before_parsing(tmp_path, monkeypatch):
 
 
 def test_worker_preserves_material_identity_in_representation(tmp_path):
-    from semantica.semantic_artifact_builder import _build_source
+    from tests.artifact_helpers import build_source_fixture
     from semantica.semantic_artifact_schema import SourceBuildInput
     source = tmp_path / "source.txt"
     source.write_bytes(b"Ada Lovelace designed the Analytical Engine.")
     revision = source_content_revision(source)
     request = SourceBuildInput(filePath=str(source), sourceId="s1", materialRevision=revision, name=source.name, mimeType="text/plain")
-    representation = _build_source(request, False)["representation"]
+    representation = build_source_fixture(request, False)["representation"]
     assert representation.content_hash == representation.material_revision_id == revision
     assert "document" not in representation.metadata
 
@@ -51,7 +51,7 @@ def test_text_source_uses_the_canonical_adapter_contract(tmp_path: Path):
 
     assert parsed.parser == "semantica.text"
     assert parsed.origin == "native"
-    assert parsed.document["format"] == "markdown"
+    assert parsed.document["format"] == "text"
     assert parsed.text.endswith("one representation.")
 
 

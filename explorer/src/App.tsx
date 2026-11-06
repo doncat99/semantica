@@ -20,6 +20,7 @@ import { ErrorBoundary } from './ErrorBoundary';
 import { ExploreWorkspaceTabs, type ExploreView } from './ExploreWorkspaceTabs';
 import { fetchAgentMemoryAvailability } from './explorerCapabilities';
 import { hasOntologyUrlState } from './workspaces/OntologyWorkspace/ontologyUrlState';
+import { NativeScopeControls } from './NativeScopeControls';
 
 const DecisionWorkspace = lazy(() => import('./workspaces/DecisionWorkspace/DecisionWorkspace').then((module) => ({ default: module.DecisionWorkspace })));
 const DiffMergeWorkspace = lazy(() => import('./workspaces/DiffMergeWorkspace/DiffMergeWorkspace').then((module) => ({ default: module.DiffMergeWorkspace })));
@@ -1780,6 +1781,7 @@ function WelcomeScreen({
 }
 
 export default function App() {
+  const [nativeScopeRevision, setNativeScopeRevision] = useState(0);
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceId>(readInitialWorkspace);
   const [exploreView, setExploreView] = useState<ExploreView>('graph');
   const [analyzeView, setAnalyzeView] = useState<AnalyzeView>('reasoning');
@@ -2027,7 +2029,10 @@ export default function App() {
             </button>
           ))}
         </aside>
-        {renderWorkspace()}
+        <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0 }}>
+          <NativeScopeControls onChange={() => setNativeScopeRevision(value => value + 1)} />
+          <div key={nativeScopeRevision} style={{ display: 'flex', flex: 1, minHeight: 0 }}>{renderWorkspace()}</div>
+        </div>
       </div>
     </QueryClientProvider>
   );

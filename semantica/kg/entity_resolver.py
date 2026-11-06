@@ -21,12 +21,31 @@ License: MIT
 """
 
 from typing import Any, Dict, List, Optional
+from functools import wraps
+from contextlib import nullcontext
+
+from ..semantic_worker_context import check_query_cancellation
 
 from ..deduplication.duplicate_detector import DuplicateGroup
 from ..deduplication.entity_merger import EntityMerger
 from ..utils.entity_ids import get_entity_id
 from ..utils.logging import get_logger
 from ..utils.progress_tracker import get_progress_tracker
+
+
+def _identity_resolution_scope(method):
+    @wraps(method)
+    def resolve(self, entities, **kwargs):
+        check_query_cancellation()
+        disambiguator = self.duplicate_detector.disambiguator
+        context = (getattr(disambiguator, '_native_context', None)
+                   if kwargs.get('context_prepared', False) else None)
+        scope = context.resolution_scope() if context is not None else nullcontext()
+        with scope, disambiguator.feature_scope(), self.duplicate_detector.decision_scope(entities):
+            result = method(self, entities, **kwargs)
+            check_query_cancellation()
+            return result
+    return resolve
 
 
 class EntityResolver:
@@ -74,6 +93,7 @@ class EntityResolver:
         if not self.progress_tracker.enabled:
             self.progress_tracker.enabled = True
         self.config = config
+        self.resolution_selections = {}
 
         # Resolution strategy and threshold
         self.resolution_strategy = strategy
@@ -97,7 +117,9 @@ class EntityResolver:
             f"threshold: {similarity_threshold}"
         )
 
-    def resolve_entities(self, entities: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    @_identity_resolution_scope
+    def resolve_entities(self, entities: List[Dict[str, Any]], *,
+                         context_prepared: bool = False) -> List[Dict[str, Any]]:
         """
         Resolve and disambiguate entities by detecting and merging duplicates.
 
@@ -109,6 +131,9 @@ class EntityResolver:
         Args:
             entities: List of entity dictionaries to resolve. Each entity should
                      have at least an "id" or "entity_id" field and a "name" field.
+            context_prepared: Reuse project context previously indexed through
+                disambiguator.prepare. Input must be a complete candidate-connected
+                component; a source/page subset can discard cross-page identity.
 
         Returns:
             List of resolved entities with duplicates merged. The number of
@@ -123,6 +148,10 @@ class EntityResolver:
             >>> resolved = resolver.resolve_entities(entities)
             >>> # Returns 2 entities: merged "Apple Inc."/Apple and "Microsoft"
         """
+        if context_prepared and (self.resolution_strategy != "contextual" or
+                                 not self.duplicate_detector.disambiguator._context_prepared):
+            raise ValueError("Prepared context requires completed contextual identity preparation")
+        self.resolution_selections = {}
         self.logger.info(
             f"Resolving {len(entities)} entities using {self.resolution_strategy} strategy"
         )
@@ -131,7 +160,7 @@ class EntityResolver:
         if not entities:
             self.duplicate_detector.identity_reviews = {}
             self.duplicate_detector._identity_review_ids = []
-            if self.duplicate_detector.contextual_identity:
+            if self.duplicate_detector.contextual_identity and not context_prepared:
                 self.duplicate_detector.disambiguator.prepare([])
             self.logger.debug("No entities to resolve")
             return []
@@ -150,7 +179,7 @@ class EntityResolver:
             self.logger.debug(
                 f"Detecting duplicate groups with threshold {self.similarity_threshold}"
             )
-            duplicate_groups = self._detect_duplicate_groups(entities)
+            duplicate_groups = self._detect_duplicate_groups(entities, context_prepared=context_prepared)
 
             self.logger.debug(f"Found {len(duplicate_groups)} duplicate group(s)")
 
@@ -163,6 +192,7 @@ class EntityResolver:
             processed_entity_objects = set()
 
             for group in duplicate_groups:
+                check_query_cancellation()
                 # Skip groups with less than 2 entities (not duplicates)
                 if len(group.entities) < 2:
                     continue
@@ -183,6 +213,17 @@ class EntityResolver:
                 for operation in merge_operations:
                     merged_entity = operation.merged_entity
                     merged_entities.append(merged_entity)
+                    representative = self._get_entity_id(merged_entity)
+                    if representative is not None:
+                        try:
+                            self.resolution_selections[representative] = {
+                                "representative": representative,
+                                "members": [self._get_entity_id(item) for item in operation.source_entities],
+                                "property_sources": operation.merge_result.property_sources,
+                                "field_sources": operation.merge_result.field_sources,
+                            }
+                        except TypeError:
+                            pass  # Unhashable IDs cannot identify durable selections.
 
                     # Mark all source entities as processed
                     for source_entity in operation.source_entities:
@@ -197,6 +238,7 @@ class EntityResolver:
 
             # Step 3: Add non-duplicate entities (entities not in any duplicate group)
             for entity in entities:
+                check_query_cancellation()
                 entity_id = self._get_entity_id(entity)
                 if entity_id is None:
                     is_unprocessed = id(entity) not in processed_entity_objects
@@ -208,6 +250,16 @@ class EntityResolver:
                 if is_unprocessed:
                     # This entity was not merged, add it as-is
                     merged_entities.append(entity)
+                    if entity_id is not None:
+                        try:
+                            self.resolution_selections[entity_id] = {
+                                "representative": entity_id, "members": [entity_id],
+                                "property_sources": {key: [entity_id] for key in entity.get("properties", {})},
+                                "field_sources": {key: [entity_id] if entity.get(key) is not None else []
+                                                  for key in ("name", "type")},
+                            }
+                        except TypeError:
+                            pass  # Preserve support for transient entities without durable IDs.
 
             # Log resolution statistics
             original_count = len(entities)
@@ -228,12 +280,12 @@ class EntityResolver:
             raise
 
     def _detect_duplicate_groups(
-        self, entities: List[Dict[str, Any]]
+        self, entities: List[Dict[str, Any]], *, context_prepared=False
     ) -> List[DuplicateGroup]:
         """Detect duplicate groups according to the configured strategy."""
         if self.resolution_strategy != "exact":
             return self.duplicate_detector.detect_duplicate_groups(
-                entities, threshold=self.similarity_threshold
+                entities, threshold=self.similarity_threshold, context_prepared=context_prepared
             )
 
         # Exact resolution still honors explicit aliases, but never compares
@@ -241,6 +293,7 @@ class EntityResolver:
         # canonical/alias keys, then retain only compatible connected components.
         key_to_indexes = {}
         for index, entity in enumerate(entities):
+            check_query_cancellation()
             names = [self._get_entity_name(entity)]
             aliases = entity.get("aliases", []) if isinstance(entity, dict) else getattr(entity, "aliases", [])
             names.extend(aliases or [])

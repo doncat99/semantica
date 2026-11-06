@@ -41,13 +41,65 @@ License: MIT
 """
 
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, Iterable, Iterator, List, Optional, Set, Tuple
 
+from contextlib import contextmanager
+from ..semantic_worker_context import check_query_cancellation
 from ..utils.exceptions import ProcessingError
 from ..utils.logging import get_logger
 from ..utils.progress_tracker import get_progress_tracker
 from .similarity_calculator import SimilarityCalculator, SimilarityResult
 from ..normalize.entity_normalizer import EntityDisambiguator
+
+
+def _identity_pair_result(method):
+    """Reuse exact ordered pair decisions inside one immutable resolution only."""
+    from functools import wraps
+    @wraps(method)
+    def compare(self, left, right, score):
+        check_query_cancellation()
+        cache = getattr(self, '_resolution_pair_cache', None)
+        if cache is None or score != 1.0:
+            return method(self, left, right, score)
+        indexes, codes, templates, template_codes = cache
+        i, j = indexes.get(id(left)), indexes.get(id(right))
+        if i is None or j is None or i == j:
+            return method(self, left, right, score)
+        low, high = sorted((i, j))
+        position = high * (high - 1) // 2 + low
+        shift = 4 if i > j else 0
+        code = (codes[position] >> shift) & 15
+        if code:
+            confidence, reasons, metadata = templates[code - 1]
+            return DuplicateCandidate(left, right, score, confidence,
+                                      list(reasons), dict(metadata))
+        result = method(self, left, right, score)
+        import json
+        key = json.dumps([result.confidence, result.reasons, result.metadata],
+                         ensure_ascii=False, sort_keys=True, separators=(',', ':'))
+        number = template_codes.get(key)
+        # The byte table is at most 8 MiB; template storage is capped at 1 MiB.
+        # A cache miss always evaluates the same authoritative pair operation.
+        if number is None:
+            from sys import getsizeof
+            def size(item):
+                total = getsizeof(item)
+                if isinstance(item, dict):
+                    total += sum(size(k) + size(v) for k, v in item.items())
+                elif isinstance(item, (tuple, list, set, frozenset)):
+                    total += sum(size(child) for child in item)
+                return total
+            template = (result.confidence, tuple(result.reasons), dict(result.metadata))
+            charge = size(key) + size(template) + 192
+            if number is None and len(templates) < 15 and self._pair_template_bytes + charge <= 1024 * 1024:
+                templates.append(template)
+                number = len(templates)
+                template_codes[key] = number
+                self._pair_template_bytes += charge
+        if number is not None:
+            codes[position] = (codes[position] & ~(15 << shift)) | (number << shift)
+        return result
+    return compare
 
 
 @dataclass
@@ -387,7 +439,8 @@ class DuplicateDetector:
             )
 
             # Detect duplicate candidates
-            candidates = (self._contextual_candidates(entities) if self.contextual_identity
+            candidates = (self._contextual_candidates(entities,
+                context_prepared=options.get("context_prepared", False)) if self.contextual_identity
                           else self.detect_duplicates(entities, threshold=threshold, **options))
 
             self.progress_tracker.update_tracking(
@@ -758,6 +811,22 @@ class DuplicateDetector:
             return entity.get(key, default)
         return default
 
+    @contextmanager
+    def decision_scope(self, entities):
+        previous = getattr(self, '_resolution_pair_cache', None)
+        previous_bytes = getattr(self, '_pair_template_bytes', 0)
+        pairs = len(entities) * (len(entities) - 1) // 2
+        indexes = {id(row): index for index, row in enumerate(entities)}
+        self._resolution_pair_cache = ((indexes, bytearray(pairs), [], {})
+            if self.contextual_identity and pairs <= 8 * 1024 * 1024 and len(indexes) == len(entities) else None)
+        self._pair_template_bytes = 0
+        try:
+            yield
+        finally:
+            self._resolution_pair_cache = previous
+            self._pair_template_bytes = previous_bytes
+
+    @_identity_pair_result
     def _create_duplicate_candidate(
         self,
         entity1: Dict[str, Any],
@@ -779,6 +848,7 @@ class DuplicateDetector:
         Returns:
             DuplicateCandidate object with calculated confidence and reasons
         """
+        check_query_cancellation()
         reasons = []
         confidence = similarity_score
 
@@ -866,7 +936,7 @@ class DuplicateDetector:
         )
 
     def _build_duplicate_groups(
-        self, candidates: List[DuplicateCandidate]
+        self, candidates: Iterable[DuplicateCandidate]
     ) -> List[DuplicateGroup]:
         """Build duplicate groups from candidates."""
         # Union-find structure
@@ -874,6 +944,7 @@ class DuplicateDetector:
         groups = []
 
         for candidate in candidates:
+            check_query_cancellation()
             entity1_id = self._normalize_entity_id(candidate.entity1)
             entity2_id = self._normalize_entity_id(candidate.entity2)
 
@@ -928,6 +999,7 @@ class DuplicateDetector:
         # Connectedness is not identity: an unknown bridge cannot erase a conflict.
         compatible = []
         for group in groups:
+            check_query_cancellation()
             if self.contextual_identity:
                 compatible.extend(self._partition_contextual_group(group))
                 continue
@@ -948,59 +1020,81 @@ class DuplicateDetector:
     def _partition_contextual_group(self, group):
         """Retain supported subgroups without propagating a local conflict globally."""
         rows = sorted(group.entities, key=self._normalize_entity_id)
-        neighbors = {i: set() for i in range(len(rows))}
-        blocked = set()
+        # Pair decisions are exact, but an edge needs one bit rather than a
+        # Python int in a set (and blockers do not need tuple objects).
+        neighbors = [0] * len(rows)
+        blocked = [0] * len(rows)
         for i, left in enumerate(rows):
             for j in range(i + 1, len(rows)):
                 metadata = self._create_duplicate_candidate(left, rows[j], 1.0).metadata
                 if metadata.get('decision') == 'same':
-                    neighbors[i].add(j)
-                    neighbors[j].add(i)
+                    neighbors[i] |= 1 << j
+                    neighbors[j] |= 1 << i
                 elif self._blocks_identity(metadata):
-                    blocked.add((i, j))
-        if not blocked:
+                    blocked[i] |= 1 << j
+                    blocked[j] |= 1 << i
+        if not any(blocked):
             return [group]
+        def indices(bits):
+            while bits:
+                check_query_cancellation()
+                bit = bits & -bits
+                yield bit.bit_length() - 1
+                bits ^= bit
+
+        def has_blocked_pair(bits):
+            return any(blocked[index] & bits for index in indices(bits))
+
         # A mention directly supported by both conflicting sides remains alone.
-        ambiguous = {i for i, adjacent in neighbors.items() if any(
-            a in adjacent and b in adjacent for a, b in blocked)}
-        memberships = {i: {i} for i in range(len(rows)) if i not in ambiguous}
-        for i, j in sorted((i, j) for i, adjacent in neighbors.items() for j in adjacent if i < j):
-            if i in ambiguous or j in ambiguous:
+        ambiguous = sum(1 << i for i, adjacent in enumerate(neighbors)
+                        if has_blocked_pair(adjacent))
+        memberships = {i: 1 << i for i in range(len(rows)) if not ambiguous & (1 << i)}
+        # Low-bit iteration preserves the original lexicographic edge order.
+        edges = ((i, j) for i in range(len(rows))
+                 for j in indices(neighbors[i] & ~((1 << (i + 1)) - 1)))
+        for i, j in edges:
+            check_query_cancellation()
+            if ambiguous & ((1 << i) | (1 << j)):
                 continue
-            neighborhood = (neighbors[i] | neighbors[j] | {i, j}) - ambiguous
-            if any(a in neighborhood and b in neighborhood for a, b in blocked):
+            neighborhood = (neighbors[i] | neighbors[j] | (1 << i) | (1 << j)) & ~ambiguous
+            if has_blocked_pair(neighborhood):
                 continue
             left, right = memberships[i], memberships[j]
-            if left is right or any((a in left and b in right) or (b in left and a in right)
-                                    for a, b in blocked):
+            if left == right or any(blocked[index] & right for index in indices(left)):
                 continue
             joined = left | right
-            for index in joined:
+            for index in indices(joined):
                 memberships[index] = joined
-        groups = {tuple(sorted(members)) for members in memberships.values() if len(members) > 1}
+        groups = {tuple(indices(members)) for members in memberships.values() if members.bit_count() > 1}
         return [DuplicateGroup(entities=[rows[i] for i in members],
                     similarity_scores={(self._normalize_entity_id(rows[i]), self._normalize_entity_id(rows[j])): 1.
-                        for i in members for j in members if i < j and j in neighbors[i]})
+                        for i in members for j in members if i < j and neighbors[i] & (1 << j)})
                 for members in sorted(groups)]
 
-    def _contextual_candidates(self, entities):
-        """Retrieve by names/definitions and scoped identifiers, never all pairs."""
-        self.disambiguator.prepare(entities)
+    def candidate_keys(self, entity):
+        """Use the same grounded candidate retrieval keys in memory and storage."""
+        keys = self.disambiguator.candidate_keys(entity)
+        keys.update(("identity", name, value) for name, value in
+                    self.similarity_calculator._identity_values(entity).items())
+        return keys
+
+    def _contextual_candidates(self, entities, *, context_prepared=False) -> Iterator[DuplicateCandidate]:
+        """Stream candidates retrieved by names/definitions and scoped identifiers."""
+        if not context_prepared:
+            self.disambiguator.prepare(entities)
         self.identity_reviews = {}
         self._identity_review_ids = [self._normalize_entity_id(row) for row in entities]
         buckets = {}
-        candidates = []
         for index, entity in enumerate(entities):
-            keys = self.disambiguator.candidate_keys(entity)
-            keys.update(("identity", name, value) for name, value in
-                        self.similarity_calculator._identity_values(entity).items())
+            check_query_cancellation()
+            keys = self.candidate_keys(entity)
             previous = set()
             for key in keys:
                 previous.update(buckets.get(key, []))
             for other in sorted(previous):
                 candidate = self._create_duplicate_candidate(entities[other], entity, 1.0)
                 if candidate.metadata["merge_allowed"]:
-                    candidates.append(candidate)
+                    yield candidate
                 elif candidate.metadata.get('decision') == 'unknown':
                     reason = candidate.metadata['reason']
                     for left, right in ((index, other), (other, index)):
@@ -1008,29 +1102,45 @@ class DuplicateDetector:
                         reasons[reason] = reasons.get(reason, 0) | (1 << right)
             for key in keys:
                 buckets.setdefault(key, []).append(index)
-        return candidates
 
     def iter_identity_review_summaries(self, remap):
         """Expand compact diagnostic bitsets one mention at a time, after merging."""
         from heapq import nsmallest
+        from itertools import chain
 
         for index, reasons in self.identity_reviews.items():
             mention_id = self._identity_review_ids[index]
             own_entity = remap[mention_id]
-            candidates = set()
+            count, sample = 0, []
             for reason, bits in reasons.items():
+                candidates = set()
                 while bits:
                     bit = bits & -bits
                     candidate_id = remap[self._identity_review_ids[bit.bit_length() - 1]]
                     if candidate_id != own_entity:
-                        candidates.add((candidate_id, reason))
+                        candidates.add(candidate_id)
                     bits ^= bit
-            yield mention_id, len(candidates), nsmallest(8, candidates)
+                count += len(candidates)
+                sample = nsmallest(8, chain(sample, ((candidate_id, reason)
+                                                   for candidate_id in candidates)))
+                del candidates
+            yield mention_id, count, sample
 
     def is_group_compatible(self, entities: List[Dict[str, Any]]) -> bool:
         """Check native constraints without rescoring or choosing an arbitrary side."""
         if self.contextual_identity:
-            neighbors = {i: set() for i in range(len(entities))}
+            # This check needs connectivity only; conflict partitioning separately
+            # retains its direct-edge semantics in _partition_contextual_group.
+            parents = list(range(len(entities)))
+            sizes = [1] * len(entities)
+            components = len(entities)
+
+            def root(index):
+                while parents[index] != index:
+                    parents[index] = parents[parents[index]]
+                    index = parents[index]
+                return index
+
             for i, left in enumerate(entities):
                 for j in range(i + 1, len(entities)):
                     metadata = self._create_duplicate_candidate(left, entities[j], 1.0).metadata
@@ -1038,15 +1148,14 @@ class DuplicateDetector:
                     if self._blocks_identity(metadata):
                         return False
                     if decision == "same":
-                        neighbors[i].add(j)
-                        neighbors[j].add(i)
-            reached, pending = set(), [0] if entities else []
-            while pending:
-                index = pending.pop()
-                if index not in reached:
-                    reached.add(index)
-                    pending.extend(neighbors[index] - reached)
-            return len(reached) == len(entities)
+                        left_root, right_root = root(i), root(j)
+                        if left_root != right_root:
+                            if sizes[left_root] < sizes[right_root]:
+                                left_root, right_root = right_root, left_root
+                            parents[right_root] = left_root
+                            sizes[left_root] += sizes[right_root]
+                            components -= 1
+            return components <= 1
         return all(self._create_duplicate_candidate(left, right, 1.0).metadata.get("merge_allowed", True)
                    for index, left in enumerate(entities) for right in entities[index + 1:])
 
@@ -1055,8 +1164,8 @@ class DuplicateDetector:
         if not group.similarity_scores:
             return 0.0
 
-        scores = list(group.similarity_scores.values())
-        avg_score = sum(scores) / len(scores) if scores else 0.0
+        scores = group.similarity_scores
+        avg_score = sum(scores.values()) / len(scores)
 
         # Boost confidence for larger groups
         size_factor = min(1.0, len(group.entities) / 5.0)

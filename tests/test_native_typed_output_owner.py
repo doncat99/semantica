@@ -4,7 +4,7 @@ from types import SimpleNamespace
 import pytest
 from pydantic import BaseModel
 
-from semantica.semantic_artifact_builder import _ProjectModelProvider
+from semantica.semantic_publication_builder import _ProjectModelProvider
 from semantica.semantic_artifact_errors import ModelOutputError, model_output_cause
 from semantica.semantic_extract import grounded_window
 from semantica.semantic_extract.providers import BaseProvider
@@ -142,4 +142,4 @@ def test_failed_whole_response_never_returns_partial_success(monkeypatch, stage)
     assert failure.value is error
     assert provider.rejections[-1]['stage'] == stage
     assert provider.rejections[-1]['action'] == 'failed_extraction'
-    assert provider.receipts[0]['metadata']['rejected_candidates'] == provider.rejections
+    assert provider.receipts[0]['metadata'] == {'rejected_count': len(provider.rejections)}

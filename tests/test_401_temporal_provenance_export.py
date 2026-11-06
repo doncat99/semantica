@@ -5,7 +5,6 @@ Covers all acceptance criteria from the issue:
   - ProvenanceTracker: recorded_at, query_recorded_between
   - ProvenanceTracker: revision_history, export_audit_log
   - RDFExporter: include_temporal OWL-Time Turtle output
-  - TemporalVersionManager: format_version, validate_snapshot, migrate_snapshot
 """
 
 import csv
@@ -17,7 +16,6 @@ import pytest
 
 from semantica.kg.provenance_tracker import ProvenanceTracker
 from semantica.export.rdf_exporter import RDFExporter
-from semantica.kg.temporal_query import TemporalVersionManager
 
 
 # ---------------------------------------------------------------------------
@@ -319,71 +317,3 @@ class TestOWLTimeExport:
 # ---------------------------------------------------------------------------
 # 4. Stable Snapshot Serialization Format
 # ---------------------------------------------------------------------------
-
-class TestSnapshotSerialization:
-    @pytest.fixture
-    def manager(self):
-        return TemporalVersionManager()
-
-    @pytest.fixture
-    def graph(self):
-        return {
-            "entities": [{"id": "e1", "label": "Alice"}],
-            "relationships": [{"source": "e1", "target": "e2", "type": "knows"}],
-        }
-
-    def test_create_snapshot_includes_format_version(self, manager, graph):
-        snap = manager.create_snapshot(graph, "v1.0", "alice@example.com", "Initial")
-        assert snap.get("format_version") == "1.0"
-
-    def test_created_snapshot_passes_validate(self, manager, graph):
-        snap = manager.create_snapshot(graph, "v1.0", "alice@example.com", "Initial")
-        assert manager.validate_snapshot(snap) is True
-
-    def test_validate_snapshot_false_on_missing_fields(self, manager):
-        incomplete = {
-            "format_version": "1.0",
-            "label": "v1.0",
-            # missing: timestamp, author, description, entities, relationships, checksum
-        }
-        assert manager.validate_snapshot(incomplete) is False
-
-    def test_validate_snapshot_false_reports_missing_field_names(self, manager):
-        # validate_snapshot returns False — we just check it doesn't raise
-        result = manager.validate_snapshot({"format_version": "1.0"})
-        assert result is False
-
-    def test_validate_snapshot_never_raises(self, manager):
-        for bad in [{}, None, "string", 42, []]:
-            try:
-                result = manager.validate_snapshot(bad) if isinstance(bad, dict) else manager.validate_snapshot({})
-                assert result in (True, False)
-            except Exception as exc:
-                pytest.fail(f"validate_snapshot raised unexpectedly: {exc}")
-
-    def test_migrate_snapshot_upgrades_old_format(self, manager):
-        old = {
-            "label": "v0.1",
-            "timestamp": "2023-01-01T00:00:00",
-            "entities": [],
-            "relationships": [],
-        }
-        migrated = manager.migrate_snapshot(old)
-        assert migrated["format_version"] == "1.0"
-        assert migrated["label"] == "v0.1"   # existing data preserved
-
-    def test_migrate_snapshot_fills_missing_required_fields_with_none(self, manager):
-        old = {"label": "v0.1"}
-        migrated = manager.migrate_snapshot(old)
-        for field in ("author", "description", "entities", "relationships", "checksum"):
-            assert field in migrated
-
-    def test_migrate_snapshot_already_v1_returned_unchanged(self, manager, graph):
-        snap = manager.create_snapshot(graph, "v1.0", "alice@example.com", "desc")
-        migrated = manager.migrate_snapshot(snap)
-        assert migrated == snap
-
-    def test_migrate_snapshot_no_data_loss(self, manager):
-        old = {"label": "v0.1", "custom_field": "keep_me"}
-        migrated = manager.migrate_snapshot(old)
-        assert migrated["custom_field"] == "keep_me"

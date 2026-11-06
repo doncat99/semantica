@@ -4,10 +4,10 @@ import pytest
 
 from semantica.project_document_quality import assess_document_quality
 from semantica.source import SourceDocument
-from semantica.project_checkpoint import active_checkpoint
-from semantica.semantic_artifact_builder import DocumentQualityError, _build_source, parse_source_artifact
+from semantica.semantic_publication_builder import DocumentQualityError, _build_source, parse_source_artifact
 from semantica.semantic_artifact_schema import ParseSourceRequest, SemanticArtifactBuildRequest
 from tests.test_semantic_artifact import _request
+from tests.artifact_helpers import build_source_fixture
 
 
 def test_native_font_corruption_requires_review_with_exact_location():
@@ -33,7 +33,7 @@ def test_encoding_loss_is_reported():
 
 @pytest.mark.parametrize("force_ocr", [False, True])
 def test_quality_review_is_nonfatal_and_retains_exact_issue_locations(force_ocr):
-    from semantica.semantic_artifact_builder import _admit_document_quality
+    from semantica.semantic_source_artifact import _admit_document_quality
     document = {"text": "Readable paragraph\nBroken \ufffd\ufffd text",
         "quality": {"status": "needs_review", "issues": [{"code": "unmapped_characters", "pageNumber": 2}]}}
     _admit_document_quality(document, force_ocr)
@@ -63,16 +63,16 @@ def test_ocr_recipe_and_text_revision_have_distinct_evidence_identity(tmp_path: 
     source.write_text("Ada Lovelace designed the Analytical Engine.")
     request = SemanticArtifactBuildRequest.model_validate(_request(source, tmp_path / "build")["params"])
     parsed = (source.read_text(), {"format": "docling", "text": source.read_text()}, "native", request.sources[0].material_revision, "docling", "2")
-    native = _build_source(request.sources[0], False, parsed=parsed)
-    repaired = _build_source(request.sources[0], True, parsed=(*parsed[:2], "ocr", *parsed[3:]))
+    native = build_source_fixture(request.sources[0], False, parsed=parsed)
+    repaired = build_source_fixture(request.sources[0], True, parsed=(*parsed[:2], "ocr", *parsed[3:]))
     assert native["representation"].id != repaired["representation"].id
     assert native["representation"].metadata["representation_revision"] != repaired["representation"].metadata["representation_revision"]
     assert {item.id for item in native["evidence"]}.isdisjoint(item.id for item in repaired["evidence"])
-    assert _build_source(request.sources[0], False, parsed=parsed)["representation"].id == native["representation"].id
+    assert build_source_fixture(request.sources[0], False, parsed=parsed)["representation"].id == native["representation"].id
 
 
-def test_quality_findings_survive_cached_parse_and_snapshot_loading(tmp_path, monkeypatch):
-    import semantica.semantic_artifact_builder as pipeline
+def test_quality_findings_survive_canonical_source_loading(tmp_path, monkeypatch):
+    import semantica.semantic_publication_builder as pipeline
     source = tmp_path / "source.pdf"
     source.write_bytes(b"fixture")
     request = _request(source, tmp_path / "build", prepare=False)
@@ -84,41 +84,33 @@ def test_quality_findings_survive_cached_parse_and_snapshot_loading(tmp_path, mo
         "documentProcessing": {"mode": "local"},
     })
     calls = []
-    cache = {}
-
-    class Checkpoint:
-        def read(self, stage, key):
-            return cache.get((stage, repr(key)))
-
-        def write(self, stage, key, value):
-            cache[(stage, repr(key))] = value
-
     def parse(*args, **kwargs):
         calls.append(kwargs["force_ocr"])
-        return SourceDocument("Broken \ufffd\ufffd text", {"format": "docling", "source": kwargs["name"]}, "native", "docling", "2")
+        from docling_core.types.doc import DoclingDocument
+        native = DoclingDocument(name=kwargs['name'])
+        native.add_text(label='text', text='Broken \ufffd\ufffd text')
+        return SourceDocument(native.export_to_text(),
+            {"format": "docling", "document": native.export_to_dict()}, "native", "docling", "2")
 
     from semantica import semantic_source_artifact
     monkeypatch.setattr(semantic_source_artifact, "parse_source", parse)
     monkeypatch.setattr(pipeline, "_build_source", lambda *args, **kwargs: pytest.fail("failed quality reached extraction"))
-    token = active_checkpoint.set(Checkpoint())
-    try:
-        first = parse_source_artifact(parse_request)
-        second = parse_source_artifact(parse_request)
-    finally:
-        active_checkpoint.reset(token)
+    first = parse_source_artifact(parse_request)
     assert calls == [False]
-    assert next(iter(cache.values()))[1]["quality"]["status"] == "needs_review"
-    assert first["artifactDigest"] == second["artifactDigest"]
     from semantica.semantic_artifact_schema import ParsedSourceRef
     source_input = parse_request.source
     ref = ParsedSourceRef.model_validate({"sourceId": source_input.source_id,
-        "artifactPath": first["artifactPath"], "artifactDigest": first["artifactDigest"]})
+        "artifactPath": first["artifactPath"], "artifactDigest": first["artifactDigest"],
+        "representationRevision": first["representationRevision"],
+        "readerIndexPath": first["readerIndexPath"], "readerIndexDigest": first["readerIndexDigest"]})
     profile = parse_request.document_processing.model_dump(mode="json", by_alias=True)
     parsed = semantic_source_artifact._load_parsed_source(source_input, ref, False, profile)
-    assert parsed[0] == "Broken \ufffd\ufffd text"
-    assert parsed[1]["quality"]["status"] == "needs_review"
+    assert semantic_source_artifact._load_parsed_source(source_input, ref, False, profile).content_hash == parsed.content_hash
+    assert calls == [False]
+    assert parsed.text[:] == "Broken \ufffd\ufffd text"
+    assert parsed.document["quality"]["status"] == "needs_review"
     built = _build_source(source_input, False, parsed=parsed)
-    assert built["document"]["quality"] == parsed[1]["quality"]
+    assert built["document"]["quality"] == parsed.document["quality"]
     assert "document" not in built["representation"].metadata
     Path(first["artifactPath"]).write_text("tampered")
     with pytest.raises(Exception, match="artifact digest is invalid"):
@@ -126,7 +118,7 @@ def test_quality_findings_survive_cached_parse_and_snapshot_loading(tmp_path, mo
 
 
 def test_empty_docling_source_enters_quality_repair_path(tmp_path, monkeypatch):
-    import semantica.semantic_artifact_builder as pipeline
+    import semantica.semantic_publication_builder as pipeline
     from semantica.source import SourceQualityError
     source = tmp_path / "source.pdf"
     source.write_bytes(b"fixture")

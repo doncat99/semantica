@@ -5,14 +5,12 @@ option was ``clear()``, which discards the whole graph. Two operations are
 added, with deliberately different contracts.
 
 Retraction closes an entity's validity window. The entity stops being active
-going forward, but ``state_at()`` before the retraction still returns it, so
+going forward, but activity queries before the retraction still returns it, so
 decisions recorded against it remain explainable. Purge is destructive: the
 entity is gone from history too, leaving only a tombstone recording that a
 purge happened and why -- never the purged content.
 
-The audit-trail assertions run against a real ``TemporalVersionManager`` rather
-than a mock callback, since the behaviour under test is precisely that these
-operations reach the existing mutation-recording path.
+Mutation callbacks are tested directly against their event contract.
 """
 
 import ast
@@ -24,7 +22,6 @@ import threading
 import unittest
 from datetime import datetime, timedelta, timezone
 
-from semantica.change_management import TemporalVersionManager
 from semantica.context import ContextEdge, ContextGraph
 from semantica.context.context_graph import normalize_temporal_input
 
@@ -322,7 +319,7 @@ def _graph():
 
 
 def _ids_at(graph, when):
-    return {node.get("id") for node in graph.state_at(when).get("nodes", [])}
+    return {node.get("id") for node in graph.find_active_nodes(at_time=datetime.fromisoformat(when.replace("Z", "+00:00")))}
 
 
 def _index_totals(graph):
@@ -489,7 +486,7 @@ class TestRetractionNeverWidensTheWindow(unittest.TestCase):
 
     An entity added with ``valid_until`` already in the past was inactive from
     that point on. Overwriting the bound with a later retraction time would
-    make ``state_at`` report it active over a span it previously was not.
+    make activity queries report it active over a span it previously was not.
     """
 
     def test_a_node_keeps_an_earlier_valid_until(self):
@@ -741,49 +738,6 @@ class TestClearResetsRecords(unittest.TestCase):
         self.assertTrue(graph.retract_node("alice", at=CUTOFF))
 
 
-class TestAuditTrailIntegration(unittest.TestCase):
-    """Against the real TemporalVersionManager, not a mock callback."""
-
-    def _attached(self):
-        manager = TemporalVersionManager()
-        graph = _graph()
-        manager.attach_to_graph(graph)
-        return manager, graph
-
-    def _ops(self, manager, entity_id):
-        history = manager.storage.get_entity_history(entity_id) or []
-        return [entry.get("operation") for entry in history]
-
-    def test_retraction_is_recorded_as_an_update(self):
-        manager, graph = self._attached()
-        graph.retract_node("alice", reason="left", at=CUTOFF)
-        self.assertIn("UPDATE_NODE", self._ops(manager, "alice"))
-
-    def test_purge_is_recorded_as_a_removal(self):
-        manager, graph = self._attached()
-        graph.purge_node("acme", reason="erasure request #3")
-        self.assertIn("REMOVE_NODE", self._ops(manager, "acme"))
-
-    def test_operations_use_the_documented_mutation_vocabulary(self):
-        """MutationRecord documents ADD/UPDATE/REMOVE for nodes and edges."""
-        manager, graph = self._attached()
-        graph.retract_node("alice", at=CUTOFF)
-        graph.purge_node("bob")
-        allowed = {
-            "ADD_NODE",
-            "UPDATE_NODE",
-            "REMOVE_NODE",
-            "ADD_EDGE",
-            "UPDATE_EDGE",
-            "REMOVE_EDGE",
-        }
-        seen = set()
-        for entity_id in ("alice", "acme", "bob"):
-            seen.update(self._ops(manager, entity_id))
-        self.assertTrue(seen)
-        self.assertTrue(
-            seen <= allowed, f"undocumented mutation operation(s): {seen - allowed}"
-        )
 
 
 class TestMutationEmissionIsSelfContained(unittest.TestCase):

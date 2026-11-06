@@ -12,6 +12,16 @@ def test_all_worker_profiles_include_the_native_typed_schema_dependency():
     config = tomllib.loads((Path(__file__).parents[1] / "pyproject.toml").read_text())
     requirements = [Requirement(value) for value in config["project"]["optional-dependencies"]["semantic-worker-common"]]
     assert any(requirement.name == "openai" for requirement in requirements)
+    assert any(requirement.name == "semantica" and "tripletstore-oxigraph" in requirement.extras
+               for requirement in requirements)
+
+
+def test_all_worker_locks_pin_the_native_store_dependency():
+    import re
+    locks = sorted((Path(__file__).parents[1] / ".github/requirements").glob("semantic-worker-*.lock"))
+    assert len(locks) == 6
+    for lock in locks:
+        assert re.search(r"^pyoxigraph==\S+$", lock.read_text(), re.M), lock.name
 
 SCRIPT = Path(__file__).parents[1] / ".github/scripts/semantic_worker_release.py"
 
@@ -38,6 +48,27 @@ def test_offline_acceptance_sets_model_environment_before_dependency_imports(tmp
     exec(compile(ast.Module(body=tree.body[:boundary], type_ignores=[]), str(SCRIPT), "exec"), {})
     assert os.environ["DOCLING_ARTIFACTS_PATH"] == str(tmp_path / "models")
     assert [os.environ[key] for key in keys[1:]] == ["1", "1", "cpu", "1"]
+
+
+def test_offline_acceptance_uses_the_installed_parser_recipe(tmp_path):
+    import ast
+    from semantica.bundle import document_parser_digest
+
+    files = [
+        {"path": "python/bin/python3", "size": 10, "sha256": "interpreter"},
+        {"path": "python/bin/docling", "size": 20, "sha256": "installation-path"},
+    ]
+    scripts = {"python/bin/docling"}
+    manifest = {"files": files, "documentParserDigest": document_parser_digest(files, set(), scripts)}
+    tree = ast.parse(SCRIPT.with_name("semantic_worker_acceptance.py").read_text())
+    start = next(index for index, node in enumerate(tree.body)
+                 if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "parser_files" for target in node.targets))
+    end = next(index for index in range(start, len(tree.body)) if isinstance(tree.body[index], ast.Assert))
+    exec(compile(ast.Module(body=tree.body[start:end + 1], type_ignores=[]), str(SCRIPT), "exec"), {
+        "root": tmp_path, "manifest": manifest, "document_parser_digest": document_parser_digest,
+        "parser_dependency_files": lambda root: set(),
+        "parser_console_script_files": lambda root: scripts,
+    })
 
 
 spec = importlib.util.spec_from_file_location("semantic_worker_release", SCRIPT)
@@ -69,8 +100,6 @@ def test_model_acceptance_queries_the_worker_artifact(tmp_path, monkeypatch):
         "schemaDigest": "sha256:" + "3" * 64,
         "mediaTypes": {
             "document-representation": "application/vnd.semantica.document-representation+json",
-            "retrieval-index": "application/vnd.semantica.retrieval+json",
-            "semantic-graph": "application/vnd.semantica.semantic-graph+json",
         },
     }))
     result = acceptance.verify_model_paths(tmp_path, tmp_path / "acceptance.json")

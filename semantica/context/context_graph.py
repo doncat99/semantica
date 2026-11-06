@@ -291,7 +291,7 @@ def _closing_valid_until(current: Optional[str], at_iso: str) -> str:
 
     Retraction closes a validity window and must never widen one: an entity
     added with ``valid_until`` already in the past would otherwise be reported
-    active by ``is_active``/``state_at`` for the span between its original end
+    active by ``is_active`` for the span between its original end
     and the retraction. An unparseable ``current`` imposes no end bound at all
     (see :func:`_parse_iso_dt`), so ``at_iso`` still closes it.
     """
@@ -667,7 +667,6 @@ class ContextGraph:
             except Exception as e:
                 self.logger.warning(f"Failed to initialize KG components: {e}")
                 self.kg_components = {}
-
 
 
     def add_nodes(self, nodes: List[Dict[str, Any]]) -> int:
@@ -2711,7 +2710,7 @@ class ContextGraph:
         """Retract a node: no longer active, but still visible in history.
 
         Closes the node's validity window rather than deleting it, so
-        :meth:`state_at` before ``at`` still returns the node and any decision
+        :meth:`find_active_nodes` before ``at`` still returns the node and any decision
         recorded against it remains explainable. Use :meth:`purge_node` when
         the data itself has to be gone.
 
@@ -2726,8 +2725,8 @@ class ContextGraph:
                 so the default keeps the active view self-consistent.
 
         Retraction is expressed through the temporal window, so it is visible
-        to the activity-aware views -- :meth:`find_active_nodes`,
-        :meth:`state_at`, ``ContextNode.is_active`` -- and not to membership
+        to the activity-aware views -- :meth:`find_active_nodes` and
+        ``ContextNode.is_active`` -- and not to membership
         checks like :meth:`has_node` or :meth:`stats`, which continue to count
         the retained record. That matches how ``valid_until`` already behaved
         before retraction existed.
@@ -2873,7 +2872,7 @@ class ContextGraph:
         """Permanently remove a node; history no longer contains it.
 
         Unlike :meth:`retract_node` this is destructive: the node disappears
-        from :meth:`state_at` as well as from the active view. Only a tombstone
+        from all history and activity queries. Only a tombstone
         remains, recording that a purge happened and why -- deliberately
         without the purged content, since retaining it would defeat the point.
 
@@ -3758,48 +3757,6 @@ class ContextGraph:
         # Rebuild derived decision indexes from the now-populated node store.
         self._rebuild_decision_indexes()
 
-    def state_at(self, timestamp: Union[str, int, float, datetime]) -> Dict[str, Any]:
-        """Return a serializable snapshot of graph state valid at the given time."""
-        at_time = self._normalize_timestamp(timestamp)
-        with self._lock:
-            active_nodes = [node for node in self.nodes.values() if node.is_active(at_time)]
-            active_node_ids = {node.node_id for node in active_nodes}
-            active_edges = [
-                edge for edge in self.edges
-                if edge.is_active(at_time)
-                and edge.source_id in active_node_ids
-                and edge.target_id in active_node_ids
-            ]
-
-        nodes_payload = [node.to_dict() for node in active_nodes]
-        edges_payload = [edge.to_dict() for edge in active_edges]
-        decisions_payload = [
-            {
-                "id": node.node_id,
-                "category": node.properties.get("category", ""),
-                "scenario": node.properties.get("scenario", node.content),
-                "reasoning": node.properties.get("reasoning", ""),
-                "outcome": node.properties.get("outcome", ""),
-                "confidence": node.properties.get("confidence", 0.0),
-                "timestamp": node.properties.get("timestamp"),
-                "decision_maker": node.properties.get("decision_maker"),
-                "entities": node.properties.get("entities", []),
-                "valid_from": node.valid_from,
-                "valid_until": node.valid_until,
-                "metadata": dict(node.properties.get("metadata", {}) or {}),
-            }
-            for node in active_nodes
-            if isinstance(node.node_type, str) and node.node_type.lower() == "decision"
-        ]
-
-        return {
-            "timestamp": at_time.isoformat(),
-            "nodes": nodes_payload,
-            "edges": edges_payload,
-            "entities": nodes_payload,
-            "relationships": edges_payload,
-            "decisions": decisions_payload,
-        }
 
     # Decision Support Methods
     def add_decision(

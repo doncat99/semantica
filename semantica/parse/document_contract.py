@@ -37,3 +37,20 @@ def admit_document(suffix, mime_type, force_ocr):
     if expected and mime_type is not None and mime_type not in expected:
         raise UnsupportedSourceFormatError(
             f'source mimeType {mime_type} does not match {suffix}; expected one of {sorted(expected)}')
+
+
+def document_suffix(path, name, mime_type, force_ocr):
+    """Admit declared format independently of content-addressed storage names."""
+    from pathlib import Path
+    declared = [suffix for suffix in (path.suffix.lower(), Path(name).suffix.lower())
+                if suffix in MEDIA_TYPES_BY_SUFFIX]
+    for suffix in declared:
+        admit_document(suffix, mime_type, force_ocr)
+    if len(declared) == 2 and not (MEDIA_TYPES_BY_SUFFIX[declared[0]] & MEDIA_TYPES_BY_SUFFIX[declared[1]]):
+        raise UnsupportedSourceFormatError('source name does not match physical file format')
+    suffix = next(iter(declared), None)
+    if suffix is None:
+        suffix = next((key for key, types in MEDIA_TYPES_BY_SUFFIX.items()
+                       if mime_type in types), path.suffix.lower())
+    admit_document(suffix, mime_type, force_ocr)
+    return suffix

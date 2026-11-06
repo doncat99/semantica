@@ -675,6 +675,8 @@ class BaseProvider:
                     "Typed response failed schema validation",
                     code="MODEL_OUTPUT_SCHEMA_INVALID",
                     diagnostic={
+                        "outputChars": len(content) if isinstance(content, str) else 0,
+                        "responseAttempts": attempt + 1,
                         "validationErrorCount": error.error_count(),
                         "validationErrors": [
                             {"location": list(item.get("loc", ())), "type": item.get("type")}

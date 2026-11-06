@@ -1,405 +1,137 @@
+"""JSONL lifecycle guarantees shared by every native query method."""
 import io
 import json
-from copy import deepcopy
-import pytest
 from hashlib import sha256
 from pathlib import Path
 
-from semantica.semantic_query_worker import serve
-from semantica.semantic_artifact_builder import build_semantic_artifacts, parse_source_artifact
-from semantica.source import source_content_revision
-from semantica.semantic_artifact_schema import ParseSourceRequest, SemanticArtifactBuildRequest
+import pytest
 
 
-H1 = "sha256:" + "1" * 64
-H2 = "sha256:" + "2" * 64
-H3 = "sha256:" + "3" * 64
+def _digest(path):
+    return 'sha256:' + sha256(Path(path).read_bytes()).hexdigest()
 
 
-def _digest(path: Path) -> str:
-    return f"sha256:{sha256(path.read_bytes()).hexdigest()}"
+def _installation(path, digest):
+    from semantica.explorer.search_index import _file_identity
+    return dict(digest=digest, identity=':'.join(map(str, _file_identity(Path(path)))))
 
 
-def _build(tmp_path: Path, second_source=False):
-    source = tmp_path / "source.txt"
-    source.write_text(
-        "Ada Lovelace designed the Analytical Engine. Charles Babbage worked with Ada Lovelace.",
-        encoding="utf-8",
-    )
-    sources = [{"filePath": str(source), "materialRevision": source_content_revision(source), "mimeType": "text/plain", "name": source.name, "sourceId": "source-1"}]
-    if second_source:
-        source2 = tmp_path / "source2.txt"
-        source2.write_text("Ada designed machines.", encoding="utf-8")
-        sources.append({"filePath": str(source2), "materialRevision": source_content_revision(source2), "mimeType": "text/plain", "name": source2.name, "sourceId": "source-2"})
-    parsed_sources = [
-        {key: result[key] for key in ("artifactPath", "artifactDigest", "sourceId")}
-        for item in sources
-        for result in [parse_source_artifact(ParseSourceRequest.model_validate({
-            "source": item,
-            "outputDir": str(tmp_path / "parsed"),
-            "forceOcr": False,
-            "documentProcessing": {"mode": "local"},
-        }))]
-    ]
-    request = SemanticArtifactBuildRequest.model_validate({
-        "baseSnapshot": None,
-        "inputRevision": H1,
-        "outputDir": str(tmp_path),
-        "projectId": "project-1",
-        "recipe": {"forceOcrSourceIds": [], "id": "deterministic", "version": "1"},
-        "relays": {
-            "embedding": {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/embeddings", "capability": "knowledge.snapshot.embed", "modelId": "embedding-1", "receipts": "required"},
-            "model": {"authorizationEnv": "OPENAI_API_KEY", "baseUrl": "http://127.0.0.1:9021/v1/chat/completions", "capability": "knowledge.snapshot.generate", "contextWindowTokens": 500000, "maxOutputTokens": 393216, "modelId": "model-1", "receipts": "required"},
-        },
-        "release": {"artifactDigest": H2, "schemaDigest": H3, "mediaTypes": {"document-representation": "application/vnd.semantica.document-representation+json", "retrieval-index": "application/vnd.semantica.retrieval+json", "semantic-graph": "application/vnd.semantica.semantic-graph+json"}},
-        "sources": sources,
-        "parsedSources": parsed_sources,
-    })
-    return build_semantic_artifacts(request)
+def test_cancel_interrupts_active_query_and_reuses_worker(monkeypatch):
+    import threading
+    import semantica.semantic_query_worker as worker
+    from semantica.semantic_worker_context import query_cancellation
+    started = threading.Event()
+    threads = []
+    def handle(raw):
+        threads.append(threading.get_ident())
+        if raw['id'] == 'slow':
+            started.set()
+            assert query_cancellation.get().wait(1)
+            raise worker.QueryError('query canceled')
+        return dict(id=raw['id'], ok=True, result={})
+    monkeypatch.setattr(worker, 'handle_request', handle)
+    class Input(io.StringIO):
+        def readline(self, size=-1):
+            line = super().readline(size)
+            if 'cancel' in line:
+                assert started.wait(1)
+            return line
+    output = io.StringIO()
+    assert worker.serve(Input('{"id":"slow"}\n{"id":"slow","method":"cancel","protocol":"semantica.semantic-query.v1"}\n{"id":"next"}\n'), output) == 0
+    assert [(r['id'],r['ok']) for r in map(json.loads,output.getvalue().splitlines())] == [('slow',False),('next',True)]
+    assert len(set(threads)) == 1
 
 
-def _request(built, query="Ada"):
-    return {
-        "protocol": "semantica.semantic-query.v1",
-        "id": "query-1",
-        "method": "query",
-        "params": {
-            "projectId": built["snapshot"].project_id,
-            "snapshotId": built["snapshot"].id,
-            "sources": [{"sourceId": rep.source_id, "contentHash": rep.content_hash}
-                        for rep in built["snapshot"].document_representations],
-            "snapshot": {
-                "path": str(built["graph_path"]),
-                "digest": built["graph_digest"],
-                "kind": "semantic-graph",
-                "mediaType": "application/vnd.semantica.semantic-graph+json",
-            },
-            "retrieval": {
-                "path": str(built["retrieval_path"]),
-                "digest": built["retrieval_digest"],
-                "kind": "retrieval-index",
-                "mediaType": "application/vnd.semantica.retrieval+json",
-            },
-            "keywordIndex": {
-                "path": str(built["keyword_path"]), "digest": built["keyword_digest"],
-                "kind": "keyword-index", "mediaType": "application/vnd.semantica.keyword-index+sqlite3",
-            },
-            "query": query,
-            "limit": 5,
-        },
-    }
+def test_worker_startup_does_not_import_aggregate_retrieval():
+    import subprocess
+    import sys
+    result = subprocess.run([sys.executable,'-I','-B','-c',
+        "import sys;sys.path.insert(0,sys.argv[1]);import semantica.semantic_query_worker;"
+        "assert 'semantica.context.context_retriever' not in sys.modules;"
+        "assert 'semantica.vector_store.sqlite_vec_store' not in sys.modules",
+        str(Path(__file__).resolve().parents[1])],capture_output=True,text=True,timeout=15)
+    assert result.returncode == 0, result.stderr
 
 
-def test_document_keyword_uses_original_text_locations_without_loading_graph(tmp_path, monkeypatch):
-    built = _build(tmp_path, second_source=True)
-    request = _request(built, "Ada")
-    request["params"].update(target="documents", limit=1, documents=[{
-        "path": str(item["artifact_path"]), "digest": item["artifact_digest"],
-        "sourceId": item["representation"].source_id,
-        "revision": item["representation"].metadata["representation_revision"],
-    } for item in built["representation_artifacts"]])
-    import semantica.semantic_query as owner
-    monkeypatch.setattr(owner, "_load_snapshot", lambda *args: pytest.fail("must not hydrate the graph"))
-    first = _serve(request)
-    assert first["ok"], first
-    assert first["result"]["total"] == 3
-    assert first["result"]["nextOffset"] == 1
-    hit = first["result"]["contexts"][0]
-    assert hit["kind"] == "source_text"
-    assert hit["locator"]["start_char"] == 0
-    assert hit["locator"]["quote"] == "Ada"
-    request["params"]["offset"] = 1
-    second = _serve(request)
-    assert second["result"]["contexts"][0]["locator"]["start_char"] > 0
-    request["params"]["documents"][0]["revision"] = H3
-    assert _serve(request)["ok"] is False
+@pytest.mark.parametrize('ensure_ascii',[True,False])
+def test_worker_rejects_oversized_input_before_parsing(monkeypatch,ensure_ascii):
+    import semantica.semantic_query_worker as worker
+    monkeypatch.setattr(worker,'MAX_FRAME_BYTES',256)
+    monkeypatch.setattr(worker,'handle_request',lambda raw: pytest.fail('oversized frame reached handler'))
+    output = io.StringIO()
+    assert worker.serve(io.StringIO(json.dumps(dict(id='x',padding='界'*100),ensure_ascii=ensure_ascii)+'\n'),output) == 1
+    assert 'budget' in json.loads(output.getvalue())['error']['message']
 
 
-def _rewrite_artifacts(built, *, snapshot_change=None, retrieval_change=None):
-    snapshot = json.loads(built["graph_path"].read_text())
-    retrieval = json.loads(built["retrieval_path"].read_text())
-    if snapshot_change:
-        snapshot_change(snapshot)
-    if retrieval_change:
-        retrieval_change(retrieval)
-    built["retrieval_path"].write_text(json.dumps(retrieval), encoding="utf-8")
-    built["retrieval_digest"] = _digest(built["retrieval_path"])
-    for manifest in snapshot["retrieval_manifests"]:
-        if manifest["id"] == "retrieval:graph":
-            manifest["artifact_hash"] = built["retrieval_digest"]
-    for artifact in snapshot["artifact_manifest"]:
-        if artifact["artifact_type"] == "retrieval":
-            artifact["artifact_hash"] = built["retrieval_digest"]
-    from semantica.explorer.search_index import GraphSearchIndex
-    from semantica.semantic_artifact_schema import SemanticArtifact
-    built["keyword_path"].unlink()
-    built["graph_digest"], built["keyword_digest"] = GraphSearchIndex.publish_reference_index(
-        SemanticArtifact.model_validate(snapshot), built["graph_path"], built["keyword_path"])
+def test_worker_bounds_response_and_continues_session(monkeypatch):
+    import semantica.semantic_query_worker as worker
+    monkeypatch.setattr(worker,'MAX_FRAME_BYTES',256)
+    monkeypatch.setattr(worker,'handle_request',lambda raw: dict(id=raw['id'],ok=True,
+        result=dict(text='界'*(1000 if raw['id']=='large' else 1))))
+    output = io.StringIO()
+    assert worker.serve(io.StringIO('{"id":"large"}\n{"id":"small"}\n'),output) == 0
+    lines = output.getvalue().splitlines()
+    assert all(len(line.encode()) < 256 for line in lines)
+    assert not json.loads(lines[0])['ok']
+    assert json.loads(lines[1])['result']['text'] == '界'
+def test_scene_rpc_delegates_exact_scope_and_selection(monkeypatch):
+    from semantica import semantic_query_worker as worker
+    from pydantic import ValidationError
+    import pytest
+    selected = dict(kind='nodes', limit=17, maxBytes=8192)
+    calls = []
+    class Owner:
+        def read_publication_scene(self, project, generation, selection):
+            calls.append((project, generation, selection))
+            return dict(project=project, generation=generation, nodes=[], links=[], next_cursor=None)
+    monkeypatch.setattr(worker._native_store, 'borrow', lambda reference, project: Owner())
+    raw = dict(id='scene',method='scene',protocol='semantica.semantic-query.v1',
+        params=dict(projectId='project-p',semanticStore=dict(path='/tmp/semantica-scene-test',project='project-p',generation='g'),selection=selected))
+    assert worker.handle_request(raw)['result']['generation'] == 'g'
+    assert calls == [('project-p', 'g', selected)]
+    raw['params']['projectId'] = 'other'
+    with pytest.raises(ValidationError,match='project'):
+        worker.handle_request(raw)
+    assert len(calls) == 1
 
 
-def _serve(request):
-    stdout = io.StringIO()
-    assert serve(io.StringIO(json.dumps(request) + "\n"), stdout) == 0
-    return json.loads(stdout.getvalue())
+def test_classification_rpc_preserves_dimension_and_budget_and_fences_borrow(monkeypatch):
+    from semantica import semantic_query_worker as worker
+    calls, borrows = [], []
+    class Owner:
+        def read_native_classification_dimension(self, project, generation, source, dimension, **kwargs):
+            calls.append((project, generation, source, dimension, kwargs))
+            return dict(project=project, generation=generation, sourceId=source, assignments=[])
+    def borrow(reference, project):
+        borrows.append(project)
+        return Owner()
+    monkeypatch.setattr(worker._native_store, 'borrow', borrow)
+    raw = dict(id='classification', method='classification', protocol='semantica.semantic-query.v1', params=dict(
+        projectId='project-p', semanticStore=dict(path='/tmp/native-classification', project='project-p', generation='g'),
+        selection=dict(sourceId='source-s', dimensionId='framework', after='gri', limit=5, maxBytes=8192)))
+    assert worker.handle_request(raw)['result']['sourceId'] == 'source-s'
+    assert calls == [('project-p', 'g', 'source-s', 'framework', dict(after='gri', limit=5, max_bytes=8192))]
+    assert borrows == ['project-p', 'project-p']
+    raw['params']['selection']['limit'] = 129
+    with pytest.raises(ValueError):
+        worker.handle_request(raw)
+    assert len(calls) == 1
 
 
-def test_query_worker_returns_snapshot_bound_evidence(tmp_path):
-    built = _build(tmp_path)
-    stdout = io.StringIO()
-    assert serve(io.StringIO(json.dumps(_request(built)) + "\n"), stdout) == 0
-    response = json.loads(stdout.getvalue())
-    assert response["ok"] is True
-    result = response["result"]
-    assert result["snapshotId"] == built["snapshot"].id
-    assert result["retrievalManifestId"] == "retrieval:graph"
-    assert result["contexts"]
-    assert all(context["sourceIds"] == ["source-1"] for context in result["contexts"] if context["evidenceIds"])
-    assert any(context["kind"] == "evidence" and "Ada Lovelace" in context["text"] for context in result["contexts"])
-
-
-def test_cold_keyword_reads_only_index_and_matching_canonical_records(tmp_path, monkeypatch):
-    from semantica import semantic_query
-    from semantica.explorer.search_index import GraphSearchIndex
-
-    built = _build(tmp_path)
-    def forbidden(*args, **kwargs):
-        raise AssertionError("keyword query must not load or prepare the entire graph")
-    monkeypatch.setattr(semantic_query, "_load_snapshot", forbidden)
-    monkeypatch.setattr(semantic_query, "_prepare_query_snapshot", forbidden)
-    monkeypatch.setattr(GraphSearchIndex, "rebuild", forbidden)
-    response = _serve(_request(built))
-    assert response["ok"] is True
-    assert response["result"]["contexts"]
-
-
-def test_queries_prepare_only_matches_and_recheck_source_scope(tmp_path, monkeypatch):
-    from unittest.mock import Mock
-    from semantica.context import snapshot_search
-
-    built = _build(tmp_path, second_source=True)
-    source_ids = Mock(wraps=snapshot_search._source_ids)
-    monkeypatch.setattr(snapshot_search, "_source_ids", source_ids)
-    request = _request(built)
-    first = _serve(request)
-    assert first["ok"] is True
-    prepared_calls = source_ids.call_count
-    assert prepared_calls > 0
-    request["params"].update({"sourceIds": ["source-2"], "query": "machines"})
-    second = _serve(request)
-    assert second["ok"] is True
-    assert second["result"]["contexts"]
-    assert all(hit["sourceIds"] == ["source-2"] for hit in second["result"]["contexts"])
-    assert source_ids.call_count - prepared_calls < prepared_calls
-    request["params"]["sourceIds"] = []
-    assert _serve(request)["result"]["contexts"] == []
-    built["graph_path"].write_text("{}")
-    assert _serve(request)["ok"] is False
-
-
-def test_query_worker_returns_grounded_conflicts(tmp_path):
-    built = _build(tmp_path)
-    snapshot = json.loads(built["graph_path"].read_text())
-    entity_id = snapshot["entities"][0]["id"]
-    evidence_id = snapshot["evidence_spans"][0]["id"]
-    conflict = {
-        "id": "conflict:query-test",
-        "conflict_type": "identity",
-        "status": "open",
-        "entity_ids": [entity_id],
-        "assertion_ids": [],
-        "relation_ids": [],
-        "evidence_ids": [evidence_id],
-        "reason": "corroborated identity conflict",
-        "resolution": None,
-    }
-    _rewrite_artifacts(built, snapshot_change=lambda value: value["conflicts"].append(conflict))
-
-    response = _serve(_request(built, "corroborated"))
-
-    assert response["ok"] is True, response
-    hits = {context["kind"]: context for context in response["result"]["contexts"]}
-    assert hits["conflict"]["status"] == "open"
-    assert hits["conflict"]["sourceIds"] == ["source-1"]
-
-
-def test_query_worker_preserves_positive_negative_and_contradicted_fact_semantics(tmp_path):
-    built = _build(tmp_path)
-    snapshot = json.loads(built["graph_path"].read_text())
-    subject, object_entity = snapshot["entities"][:2]
-    evidence_id = subject["evidence_ids"][0]
-    original = {
-        "subject_id": subject["id"],
-        "predicate": "designed",
-        "object": object_entity["canonical_name"],
-        "object_entity_id": object_entity["id"],
-        "evidence_ids": [evidence_id],
-        "support_ids": [evidence_id],
-        "metadata": {},
-    }
-    facts = []
-    for suffix, polarity, status in (
-        ("positive", "positive", "accepted"),
-        ("negative", "negative", "accepted"),
-        ("contradicted", "positive", "contradicted"),
-    ):
-        fact = deepcopy(original)
-        fact.update({"id": f"assertion:query-{suffix}", "status": status})
-        fact["qualifiers"] = {"polarity": polarity, "condition": "at rest"}
-        fact["evidence_ids"] = [evidence_id]
-        facts.append(fact)
-
-    def add_snapshot(value):
-        value["assertions"].extend(facts)
-
-    _rewrite_artifacts(built, snapshot_change=add_snapshot)
-
-    response = _serve(_request(built, "designed"))
-
-    assert response["ok"] is True, response
-    hits = {context["id"]: context for context in response["result"]["contexts"]}
-    positive = hits["assertion:query-positive"]
-    negative = hits["assertion:query-negative"]
-    contradicted = hits["assertion:query-contradicted"]
-    assert (positive["status"], positive["polarity"]) == ("accepted", "positive")
-    assert (negative["status"], negative["polarity"]) == ("accepted", "negative")
-    assert "does not" in negative["text"]
-    assert "condition=at rest" in negative["text"]
-    assert (contradicted["status"], contradicted["polarity"]) == ("contradicted", "positive")
-    assert contradicted["text"].startswith("Contradicted fact:")
-
-
-@pytest.mark.parametrize("field", ["entities", "assertions", "relations", "identity_decisions", "conflicts", "topics", "evidence"])
-def test_query_worker_rejects_copied_snapshot_records(tmp_path, field):
-    built = _build(tmp_path)
-    _rewrite_artifacts(built, retrieval_change=lambda value: value.update({field: []}))
-    request = _request(built)
-    request["params"].update({"mode": "semantic", "embedding": {"bindingId": "binding-1", "modelId": "model-1", "vector": [1.0]}})
-    response = _serve(request)
-    assert response["ok"] is False
-    assert response["error"]["type"] == "QueryError"
-
-
-@pytest.mark.parametrize("old_format", [None, "semantica.retrieval.v0"])
-def test_query_worker_requires_current_reference_format(tmp_path, old_format):
-    built = _build(tmp_path)
-    def change(value):
-        if old_format is None:
-            value.pop("format")
-        else:
-            value["format"] = old_format
-    _rewrite_artifacts(built, retrieval_change=change)
-    request = _request(built)
-    request["params"].update({"mode": "semantic", "embedding": {"bindingId": "binding-1", "modelId": "model-1", "vector": [1.0]}})
-    response = _serve(request)
-    assert response["ok"] is False
-    assert "rebuild is required" in response["error"]["message"]
-
-
-def test_query_worker_returns_empty_contexts_without_fallback(tmp_path):
-    built = _build(tmp_path)
-    stdout = io.StringIO()
-    assert serve(io.StringIO(json.dumps(_request(built, "nonexistent-token")) + "\n"), stdout) == 0
-    response = json.loads(stdout.getvalue())
-    assert response["ok"] is True
-    assert response["result"]["contexts"] == []
-
-
-def test_query_worker_rejects_tampered_retrieval_artifact(tmp_path):
-    built = _build(tmp_path)
-    built["retrieval_path"].write_text("{}", encoding="utf-8")
-    stdout = io.StringIO()
-    request = _request(built)
-    request["params"].update({"mode": "semantic", "embedding": {"bindingId": "binding-1", "modelId": "model-1", "vector": [1.0]}})
-    assert serve(io.StringIO(json.dumps(request) + "\n"), stdout) == 0
-    response = json.loads(stdout.getvalue())
-    assert response["ok"] is False
-    assert response["error"]["type"] == "QueryError"
-    assert "digest" in response["error"]["message"]
-
-
-def test_query_worker_filters_sources_before_limit(tmp_path):
-    built = _build(tmp_path, second_source=True)
-    request = _request(built)
-    request["params"].update({"sourceIds": ["source-2"], "limit": 1, "mode": "keyword"})
-    stdout = io.StringIO()
-    assert serve(io.StringIO(json.dumps(request) + "\n"), stdout) == 0
-    response = json.loads(stdout.getvalue())
-    assert response["ok"] is True
-    assert len(response["result"]["contexts"]) == 1
-    assert response["result"]["contexts"][0]["sourceIds"] == ["source-2"]
-
-
-def test_query_worker_empty_scope_never_means_all_sources(tmp_path):
-    built = _build(tmp_path)
-    request = _request(built)
-    request["params"].update({"sourceIds": [], "limit": 1000})
-    stdout = io.StringIO()
-    assert serve(io.StringIO(json.dumps(request) + "\n"), stdout) == 0
-    response = json.loads(stdout.getvalue())
-    assert response["ok"] is True
-    assert response["result"]["contexts"] == []
-
-
-def test_query_worker_does_not_mislabel_keyword_as_semantic(tmp_path):
-    built = _build(tmp_path)
-    request = _request(built)
-    request["params"]["mode"] = "semantic"
-    stdout = io.StringIO()
-    assert serve(io.StringIO(json.dumps(request) + "\n"), stdout) == 0
-    assert json.loads(stdout.getvalue())["ok"] is False
-
-
-def _semantic_request(tmp_path):
-    built = _build(tmp_path, second_source=True)
-    retrieval = json.loads(built["retrieval_path"].read_text())
-    retrieval["embedding_space"] = {"binding_id": "binding-1", "model_id": "embedding-1", "dimensions": 2}
-    retrieval["embeddings"] = [
-        {"source_id": "source-1", "start_char": 0, "end_char": 100, "vector": [0.0, 1.0]},
-        {"source_id": "source-2", "start_char": 0, "end_char": 22, "vector": [1.0, 0.0]},
-    ]
-    built["retrieval_path"].write_text(json.dumps(retrieval))
-    built["retrieval_digest"] = _digest(built["retrieval_path"])
-    snapshot = json.loads(built["graph_path"].read_text())
-    for manifest in snapshot["retrieval_manifests"]:
-        if manifest["id"] == "retrieval:graph":
-            manifest["artifact_hash"] = built["retrieval_digest"]
-    for artifact in snapshot["artifact_manifest"]:
-        if artifact["artifact_type"] == "retrieval":
-            artifact["artifact_hash"] = built["retrieval_digest"]
-    built["graph_path"].write_text(json.dumps(snapshot))
-    built["graph_digest"] = _digest(built["graph_path"])
-    request = _request(built, "mathematical innovation")
-    request["params"].update({"mode": "semantic", "limit": 1,
-        "embedding": {"bindingId": "binding-1", "modelId": "embedding-1", "vector": [1.0, 0.0]}})
-    return request
-
-
-def test_semantic_query_finds_evidence_without_lexical_overlap(tmp_path):
-    request = _semantic_request(tmp_path)
-    stdout = io.StringIO()
-    serve(io.StringIO(json.dumps(request) + "\n"), stdout)
-    response = json.loads(stdout.getvalue())
-    assert response["ok"] is True
-    hit = response["result"]["contexts"][0]
-    assert hit["sourceIds"] == ["source-2"]
-    assert hit["score"] == 1.0
-    assert hit["evidenceIds"]
-    request["params"]["sourceIds"] = ["source-1"]
-    stdout = io.StringIO()
-    serve(io.StringIO(json.dumps(request) + "\n"), stdout)
-    assert json.loads(stdout.getvalue())["result"]["contexts"][0]["sourceIds"] == ["source-1"]
-
-
-@pytest.mark.parametrize("change", [
-    {"modelId": "wrong-model"}, {"bindingId": "wrong-binding"},
-    {"vector": [1.0]}, {"vector": [0.0, 0.0]}, {"vector": [float("nan"), 1.0]}, {"vector": [True, False]},
-])
-def test_semantic_query_rejects_incompatible_vectors_without_keyword_fallback(tmp_path, change):
-    request = _semantic_request(tmp_path)
-    request["params"]["query"] = "Ada"
-    request["params"]["embedding"].update(change)
-    stdout = io.StringIO()
-    serve(io.StringIO(json.dumps(request) + "\n"), stdout)
-    response = json.loads(stdout.getvalue())
-    assert response["ok"] is False
-    assert not response.get("result")
+def test_section_rpc_delegates_only_requested_native_ranges(monkeypatch):
+    from semantica import semantic_query_worker as worker
+    calls = []
+    class Owner:
+        def read_native_section_records(self, project, generation, selection):
+            calls.append((project, generation, selection))
+            return dict(project=project, generation=generation, sourceId=selection['sourceId'], records=[], next_cursor=None)
+    monkeypatch.setattr(worker._native_store, 'borrow', lambda reference, project: Owner())
+    selection = dict(sourceId='source-s', positions=[dict(nativeRef='#/texts/0', start=10, end=20)], limit=8, maxBytes=8192)
+    raw = dict(id='section', method='section', protocol='semantica.semantic-query.v1', params=dict(projectId='project-p',
+        semanticStore=dict(path='/tmp/native-section', project='project-p', generation='g'), selection=selection))
+    assert worker.handle_request(raw)['result']['records'] == []
+    assert calls == [('project-p', 'g', selection)]
+    raw['params']['projectId'] = 'foreign'
+    with pytest.raises(ValueError):
+        worker.handle_request(raw)
+    assert len(calls) == 1

@@ -29,8 +29,8 @@ class TestInMemoryVersionStorage:
             "author": "alice@company.com",
             "description": "Initial version",
             "checksum": "abc123",
-            "entities": [{"id": "1", "name": "Entity1"}],
-            "relationships": [{"source": "1", "target": "2", "type": "relates"}],
+            "ontology_iri": "https://example.org/ontology",
+            "structure": [{"id": "1", "name": "Entity1"}],
             "metadata": {"version": "1.0"}
         }
     
@@ -42,7 +42,7 @@ class TestInMemoryVersionStorage:
         assert retrieved is not None
         assert retrieved["label"] == "v1.0"
         assert retrieved["author"] == "alice@company.com"
-        assert len(retrieved["entities"]) == 1
+        assert len(retrieved["structure"]) == 1
     
     def test_save_snapshot_without_label_raises_error(self):
         """Test that saving snapshot without label raises ValidationError."""
@@ -86,10 +86,8 @@ class TestInMemoryVersionStorage:
         
         # Check metadata structure
         for item in result:
-            assert "entity_count" in item
-            assert "relationship_count" in item
-            assert item["entity_count"] == 1
-            assert item["relationship_count"] == 1
+            assert item["checksum"] == "abc123"
+            assert "structure" not in item
     
     def test_exists_method(self):
         """Test the exists method."""
@@ -115,11 +113,11 @@ class TestInMemoryVersionStorage:
         retrieved = self.storage.get("v1.0")
         
         # Modify retrieved data
-        retrieved["entities"].append({"id": "2", "name": "Entity2"})
+        retrieved["structure"].append({"id": "2", "name": "Entity2"})
         
         # Original should be unchanged
         retrieved_again = self.storage.get("v1.0")
-        assert len(retrieved_again["entities"]) == 1
+        assert len(retrieved_again["structure"]) == 1
 
 
 class TestSQLiteVersionStorage:
@@ -137,8 +135,8 @@ class TestSQLiteVersionStorage:
             "author": "alice@company.com",
             "description": "Initial version",
             "checksum": "abc123",
-            "entities": [{"id": "1", "name": "Entity1"}],
-            "relationships": [{"source": "1", "target": "2", "type": "relates"}],
+            "ontology_iri": "https://example.org/ontology",
+            "structure": [{"id": "1", "name": "Entity1"}],
             "metadata": {"version": "1.0"}
         }
     
@@ -170,8 +168,8 @@ class TestSQLiteVersionStorage:
         assert retrieved is not None
         assert retrieved["label"] == "v1.0"
         assert retrieved["author"] == "alice@company.com"
-        assert len(retrieved["entities"]) == 1
-        assert retrieved["entities"][0]["name"] == "Entity1"
+        assert len(retrieved["structure"]) == 1
+        assert retrieved["structure"][0]["name"] == "Entity1"
     
     def test_save_duplicate_label_raises_error(self):
         """Test that saving duplicate label raises ValidationError."""
@@ -248,7 +246,8 @@ class TestChecksumUtilities:
     def test_compute_checksum_deterministic(self):
         """Test that checksum computation is deterministic."""
         data = {
-            "entities": [{"id": "1", "name": "Entity1"}],
+            "ontology_iri": "https://example.org/ontology",
+            "structure": [{"id": "1", "name": "Entity1"}],
             "relationships": [{"source": "1", "target": "2"}],
             "metadata": {"version": "1.0"}
         }
@@ -281,7 +280,7 @@ class TestChecksumUtilities:
     
     def test_verify_checksum_valid(self):
         """Test verifying a valid checksum."""
-        data = {"entities": [{"id": "1"}], "metadata": {}}
+        data = {"structure": [{"id": "1"}], "metadata": {}}
         checksum = compute_checksum(data)
         
         snapshot = data.copy()
@@ -310,12 +309,12 @@ class TestChecksumUtilities:
     
     def test_verify_checksum_with_modified_data(self):
         """Test that verification fails when data is modified."""
-        data = {"entities": [{"id": "1"}], "metadata": {}}
+        data = {"structure": [{"id": "1"}], "metadata": {}}
         checksum = compute_checksum(data)
         
         # Modify data after computing checksum
         snapshot = data.copy()
-        snapshot["entities"].append({"id": "2"})
+        snapshot["structure"].append({"id": "2"})
         snapshot["checksum"] = checksum
         
         assert verify_checksum(snapshot) is False

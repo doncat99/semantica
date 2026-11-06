@@ -3,7 +3,7 @@ import json
 from types import SimpleNamespace
 
 import pytest
-from semantica import semantic_artifact_builder as builder
+from semantica import semantic_publication_builder as builder
 
 
 def relay(context=500_000, output=32768):

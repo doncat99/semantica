@@ -3,14 +3,14 @@ from types import SimpleNamespace
 import pytest
 from pydantic import ValidationError
 
-from semantica import semantic_artifact_builder as builder
+from semantica import semantic_publication_builder as builder
 from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest
 from semantica.semantic_extract import grounded_window
 from semantica.semantic_worker import _response
 from semantica.utils.exceptions import ProcessingError
 
 
-def test_local_relation_output_failure_keeps_entities(monkeypatch):
+def test_local_relation_output_failure_propagates_typed_failure(monkeypatch):
     from semantica.semantic_artifact_errors import ModelOutputError
     entity = object()
     monkeypatch.setattr(grounded_window, 'extract_entities_llm', lambda *a, **k: [entity])
@@ -20,11 +20,13 @@ def test_local_relation_output_failure_keeps_entities(monkeypatch):
 
     monkeypatch.setattr(grounded_window, 'extract_relations_llm', fail)
     provider = SimpleNamespace(rejections=[], receipts=[SimpleNamespace(metadata={})])
-    entities, relations, _ = grounded_window.extract_grounded_window('source', model='test', provider_instance=provider)
-    assert entities == [entity]
-    assert relations == []
-    assert provider.receipts[0].metadata['rejected_candidates'][0]['code'] == 'MODEL_OUTPUT_SCHEMA_INVALID'
+    with pytest.raises(ProcessingError) as raised:
+        grounded_window.extract_grounded_window('source', model='test', provider_instance=provider)
+    assert isinstance(raised.value.__cause__, ModelOutputError)
+    assert raised.value.__cause__.code == 'MODEL_OUTPUT_SCHEMA_INVALID'
+    assert provider.receipts[0].metadata['rejected_count'] == 1
     assert provider.rejections[0]['stage'] == 'relations'
+    assert provider.rejections[0]['action'] == 'failed_extraction'
 
 
 def test_transport_failure_is_not_discarded(monkeypatch):
@@ -60,23 +62,28 @@ def test_all_malformed_relations_are_discarded_when_rejecting_candidates():
     assert result == []
 
 
-def test_warning_page_mapping_ignores_locations_without_offsets(monkeypatch):
+def test_warning_page_mapping_ignores_locations_without_offsets(tmp_path, monkeypatch):
     from types import SimpleNamespace
-
-    monkeypatch.setattr(builder, '_text_windows', lambda _text: [(0, 2, 'ab')])
-    monkeypatch.setattr(builder, '_docling_locations', lambda *_args: [
-        {'page': 2, 'start': None, 'end': None},
-        {'page': 3, 'start': 0, 'end': 2},
-    ])
+    from tests.artifact_helpers import native_docling_fixture, native_parsed_fixture, docling_fixture_text
+    from semantica.semantic_artifact_schema import RecipeRef, DocumentProcessingProfile
+    document = dict(format='docling', document=native_docling_fixture({
+        'body':{'children':[{'$ref':'#/texts/0'}, {'$ref':'#/tables/0'}]},
+        'texts':[{'self_ref':'#/texts/0','label':'text','text':'ab','prov':[{'page_no':3}]}, {'self_ref':'#/texts/1','label':'text','text':'note','prov':[{'page_no':2}]}],
+        'tables':[{'self_ref':'#/tables/0','label':'table','footnotes':[{'$ref':'#/texts/1'}], 'data':{'table_cells':[{'text':'',
+            'start_row_offset_idx':0,'start_col_offset_idx':0}]}}]}))
+    source = SimpleNamespace(source_id='source',file_path=str(tmp_path/'source.txt'), name='source.txt',mime_type='text/plain')
+    parsed = native_parsed_fixture(source, parsed=(docling_fixture_text(document),document,'native','','docling','test'))
+    assert any(item['page'] == 2 and item['start'] is None for item in parsed.locations)
     def extract(*_args, **_kwargs):
-        receipt = SimpleNamespace(metadata={'rejected_candidates': [
-            {'code': 'MODEL_OUTPUT_EMPTY', 'stage': 'entities', 'action': 'skipped_extraction', 'diagnostic': {}}
-        ]})
+        receipt = SimpleNamespace(metadata={'rejected_count': 1})
         return ({'entities': [], 'relations': []}, [receipt], False)
     monkeypatch.setattr(builder, '_extract_window', extract)
     monkeypatch.setattr(builder, '_embed_texts', lambda texts, relay: ([[1.] for _ in texts], SimpleNamespace()))
-    request = SimpleNamespace(parallelism=1, relays={'model': None, 'embedding': None}, recipe=SimpleNamespace(extraction_spec=None))
+    model = SimpleNamespace(binding_id=None, context_window_tokens=500000, max_output_tokens=32768)
+    request = SimpleNamespace(parallelism=1, project_id='p', relays={'model': model, 'embedding': None},
+        document_processing=DocumentProcessingProfile(mode='local'), recipe=RecipeRef(id='recipe:test',version='1'),
+        parsed_sources=[SimpleNamespace(source_id='source',representation_revision=parsed.document['representation_revision'])])
     events = []
-    builder._extract_project_sources([(SimpleNamespace(source_id='source'), False, ('ab', {}))], request, events.append)
+    builder._extract_project_sources([(source, False, parsed)], request, events.append)
     warnings = [event['metadata']['warning'] for event in events if event['metadata'].get('warning')]
     assert warnings[0]['pages'] == [3]

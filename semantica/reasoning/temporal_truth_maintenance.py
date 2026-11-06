@@ -1,16 +1,12 @@
 """Opt-in projection of bitemporal graph evidence into managed reasoning."""
 
 from copy import deepcopy
-from dataclasses import dataclass
 from datetime import datetime
-from typing import Any, Dict, FrozenSet, Iterable, Optional, Tuple
+from typing import Any, Dict, FrozenSet, Iterable, Optional
 
 from ..utils.exceptions import ValidationError
 from ._temporal_support_projection import Projection, normalize_graph, timestamp
-from ._truth_maintenance_validation import (
-    build_rule_snapshots,
-    validate_fact_text,
-)
+from ._truth_maintenance_validation import build_rule_snapshots
 from .reasoner import Rule
 from .truth_maintenance import TruthMaintenanceSession
 from .truth_maintenance_types import (
@@ -19,26 +15,7 @@ from .truth_maintenance_types import (
     MaintenanceDelta,
 )
 
-__all__ = ["TemporalTruthMaintenanceAdapter", "TemporalFactSnapshot"]
-
-
-@dataclass(frozen=True)
-class TemporalFactSnapshot:
-    """Detached closure for one pair of temporal coordinates and graph revision."""
-
-    valid_at: datetime
-    known_at: datetime
-    graph_revision: int
-    facts: FrozenSet[str]
-    active_supports: Tuple[FactSupport, ...]
-    explanations: Tuple[FactExplanation, ...]
-
-    def explain(self, fact: str) -> FactExplanation:
-        canonical = validate_fact_text(fact)
-        for explanation in self.explanations:
-            if explanation.fact == canonical:
-                return explanation
-        return FactExplanation(canonical, False, (), ())
+__all__ = ["TemporalTruthMaintenanceAdapter"]
 
 
 class TemporalTruthMaintenanceAdapter:
@@ -130,19 +107,3 @@ class TemporalTruthMaintenanceAdapter:
         self._valid_at = valid_time
         self._known_at = known_time
         return delta
-
-    def query_at(self, *, valid_at: Any, known_at: Any) -> TemporalFactSnapshot:
-        """Recompute a historical closure without changing the live session."""
-        valid_time = timestamp(valid_at, "valid_at")
-        known_time = timestamp(known_at, "known_at")
-        selected = self._projection.select(valid_time, known_time)
-        historical = TruthMaintenanceSession(rules=self._rules)
-        historical.apply(assertions=selected.values())
-        return TemporalFactSnapshot(
-            valid_time,
-            known_time,
-            self._graph_revision,
-            historical.facts,
-            tuple(selected.values()),
-            tuple(historical.explain(fact) for fact in sorted(historical.facts)),
-        )

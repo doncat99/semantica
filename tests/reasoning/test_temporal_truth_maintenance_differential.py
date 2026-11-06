@@ -122,19 +122,6 @@ def test_live_and_historical_closures_match_independent_time_selection(seed):
             assert managed.explain(fact) == rebuilt.explain(fact)
         assert source == unchanged_source
 
-        historical_valid, historical_known = rng.randrange(0, 35), rng.randrange(
-            0, step + 1
-        )
-        historical = managed.query_at(
-            valid_at=moment(historical_valid), known_at=moment(historical_known)
-        )
-        expected_history, history_rebuilt = oracle(
-            rows, rules, historical_valid, historical_known
-        )
-        assert historical.facts == history_rebuilt.facts
-        assert set(historical.active_supports) == set(expected_history.values())
-        for fact in historical.facts:
-            assert historical.explain(fact) == history_rebuilt.explain(fact)
         assert managed.facts == rebuilt.facts
         assert managed.version == version
         assert managed.valid_at == moment(valid)

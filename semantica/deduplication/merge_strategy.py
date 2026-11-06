@@ -80,6 +80,8 @@ class MergeResult:
     merged_entities: List[Dict[str, Any]]
     conflicts: List[Dict[str, Any]] = field(default_factory=list)
     metadata: Dict[str, Any] = field(default_factory=dict)
+    property_sources: Dict[str, Optional[List[Any]]] = field(default_factory=dict)
+    field_sources: Dict[str, Optional[List[Any]]] = field(default_factory=dict)
 
 
 class MergeStrategyManager:
@@ -250,7 +252,12 @@ class MergeStrategyManager:
                     status="completed",
                     message="Single entity, no merge needed",
                 )
-                return MergeResult(merged_entity=entities[0], merged_entities=entities)
+                return MergeResult(merged_entity=entities[0], merged_entities=entities,
+                                   property_sources={key: [get_entity_id(entities[0])]
+                                                     for key in entities[0].get("properties", {})},
+                                   field_sources={key: [get_entity_id(entities[0])]
+                                                  if entities[0].get(key) is not None else []
+                                                  for key in ("name", "type")})
 
             # Resolve strategy
             if strategy is None:
@@ -292,7 +299,7 @@ class MergeStrategyManager:
                 total=total_steps,
                 message=f"Merging properties... ({current_step}/{total_steps}, {total_properties} properties, remaining: {remaining_steps} steps)"
             )
-            merged_properties, property_conflicts = self._merge_properties(
+            merged_properties, property_conflicts, property_sources = self._merge_properties(
                 entities, base_entity, strategy, tracking_id=tracking_id
             )
 
@@ -324,10 +331,11 @@ class MergeStrategyManager:
                 if entity_id is not None:
                     merged_from.append(entity_id)
 
+            field_sources = {}
             merged_entity = {
                 "id": get_entity_id(base_entity),
-                "name": self._merge_top_level_field("name", entities, base_entity),
-                "type": self._merge_top_level_field("type", entities, base_entity),
+                "name": self._merge_top_level_field("name", entities, base_entity, field_sources),
+                "type": self._merge_top_level_field("type", entities, base_entity, field_sources),
                 "properties": merged_properties,
                 "relationships": merged_relationships,
                 "metadata": self._merge_metadata(entities, base_entity),
@@ -350,6 +358,8 @@ class MergeStrategyManager:
                 merged_entities=entities,
                 conflicts=property_conflicts,
                 metadata={"strategy": strategy.value},
+                property_sources=property_sources,
+                field_sources=field_sources,
             )
 
         except Exception as e:
@@ -363,18 +373,22 @@ class MergeStrategyManager:
         field_name: str,
         entities: List[Dict[str, Any]],
         base_entity: Dict[str, Any],
+        sources: Dict[str, Optional[List[Any]]],
     ) -> Any:
         """Merge top-level field (name, type) respecting property rules."""
         rule = self.property_rules.get(field_name)
         if not rule:
+            sources[field_name] = [get_entity_id(base_entity)] if base_entity.get(field_name) is not None else []
             return base_entity.get(field_name)
 
         # If rule exists, merge from scratch following list order
         valid_entities = [e for e in entities if e.get(field_name) is not None]
         if not valid_entities:
+            sources[field_name] = []
             return None
 
         merged_value = valid_entities[0].get(field_name)
+        sources[field_name] = [get_entity_id(valid_entities[0])]
 
         for i in range(1, len(valid_entities)):
             val = valid_entities[i].get(field_name)
@@ -384,6 +398,14 @@ class MergeStrategyManager:
                 )
                 if conflict.get("resolved"):
                     merged_value = conflict["value"]
+                    selection = conflict["selection"]
+                    if selection == "right":
+                        sources[field_name] = [get_entity_id(valid_entities[i])]
+                    elif selection == "combined" and sources[field_name] is not None:
+                        sources[field_name] = list(dict.fromkeys([
+                            *sources[field_name], get_entity_id(valid_entities[i])]))
+                    elif selection == "derived":
+                        sources[field_name] = None
 
         return merged_value
 
@@ -412,14 +434,15 @@ class MergeStrategyManager:
         base_entity: Dict[str, Any],
         strategy: MergeStrategy,
         tracking_id: Optional[str] = None,
-    ) -> Tuple[Dict[str, Any], List[Dict[str, Any]]]:
+    ) -> Tuple[Dict[str, Any], List[Dict[str, Any]], Dict[str, Optional[List[Any]]]]:
         """Merge properties from all entities."""
         merged_properties = base_entity.get("properties", {}).copy()
         conflicts = []
+        sources = {key: [get_entity_id(base_entity)] for key in merged_properties}
 
         total_entities = len(entities) - 1  # Excluding base entity
         if total_entities <= 0:
-            return merged_properties, conflicts
+            return merged_properties, conflicts, sources
 
         for ent_idx, entity in enumerate(entities):
             if entity == base_entity:
@@ -433,6 +456,7 @@ class MergeStrategyManager:
                 if prop_name not in merged_properties:
                     # New property, add it
                     merged_properties[prop_name] = prop_value
+                    sources[prop_name] = [get_entity_id(entity)]
                 elif merged_properties[prop_name] != prop_value:
                     # Conflict - resolve using rule or strategy
                     conflict = self._resolve_property_conflict(
@@ -441,6 +465,14 @@ class MergeStrategyManager:
 
                     if conflict.get("resolved"):
                         merged_properties[prop_name] = conflict["value"]
+                        selection = conflict["selection"]
+                        if selection == "right":
+                            sources[prop_name] = [get_entity_id(entity)]
+                        elif selection == "combined" and sources[prop_name] is not None:
+                            sources[prop_name] = list(dict.fromkeys([
+                                *sources[prop_name], get_entity_id(entity)]))
+                        elif selection == "derived":
+                            sources[prop_name] = None
                     else:
                         conflicts.append(
                             {
@@ -458,7 +490,7 @@ class MergeStrategyManager:
                     progress_msg = f"Merging properties from entity {ent_idx+1}/{len(entities)}: {prop_name}"
                     self.progress_tracker.update_tracking(tracking_id, message=progress_msg)
 
-        return merged_properties, conflicts
+        return merged_properties, conflicts, sources
 
     def _resolve_property_conflict(
         self,
@@ -478,6 +510,7 @@ class MergeStrategyManager:
                     "resolved": True,
                     "value": resolved_value,
                     "resolution": "custom_rule",
+                    "selection": "derived",
                 }
             except Exception as e:
                 self.logger.warning(f"Custom conflict resolution failed: {e}")
@@ -485,24 +518,26 @@ class MergeStrategyManager:
         strategy = rule.strategy if rule else default_strategy
 
         if strategy == MergeStrategy.KEEP_FIRST:
-            return {"resolved": True, "value": value1, "resolution": "keep_first"}
+            return {"resolved": True, "value": value1, "resolution": "keep_first", "selection": "left"}
         elif strategy == MergeStrategy.KEEP_LAST:
-            return {"resolved": True, "value": value2, "resolution": "keep_last"}
+            return {"resolved": True, "value": value2, "resolution": "keep_last", "selection": "right"}
         elif strategy == MergeStrategy.MERGE_ALL:
             # Merge into list if not already
             if isinstance(value1, list):
+                value1 = value1.copy()
                 if value2 not in value1:
                     value1.append(value2)
-                return {"resolved": True, "value": value1, "resolution": "merge_all"}
+                return {"resolved": True, "value": value1, "resolution": "merge_all", "selection": "combined"}
             else:
                 return {
                     "resolved": True,
                     "value": [value1, value2],
                     "resolution": "merge_all",
+                    "selection": "combined",
                 }
         else:
             # Default: keep first
-            return {"resolved": True, "value": value1, "resolution": "default"}
+            return {"resolved": True, "value": value1, "resolution": "default", "selection": "left"}
 
     def _merge_relationships(
         self, entities: List[Dict[str, Any]], base_entity: Dict[str, Any]
@@ -562,9 +597,9 @@ class MergeStrategyManager:
                 if key not in merged_metadata:
                     merged_metadata[key] = value
                 elif isinstance(merged_metadata[key], list) and isinstance(value, list):
-                    merged_metadata[key].extend(value)
+                    merged_metadata[key] = [*merged_metadata[key], *value]
                 elif isinstance(merged_metadata[key], dict) and isinstance(value, dict):
-                    merged_metadata[key].update(value)
+                    merged_metadata[key] = {**merged_metadata[key], **value}
 
         return merged_metadata
 

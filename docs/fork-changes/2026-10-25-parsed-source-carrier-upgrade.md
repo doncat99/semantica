@@ -22,7 +22,14 @@ identity. Unknown provenance stays absent, never filled from current code.
 - Decision: extend native owner with one explicit import operation. Runtime loaders
   continue accepting v2 only; no alternate parser or legacy runtime reader.
 
-## Approach and actual changes
+## Superseded by the current single native carrier
+
+The historical importer, worker method, schema and its compatibility tests were
+physically removed in G2 on 2026-11-04. Current reads accept only the current
+native carrier with its reader address index and exact normalized processing
+recipe. Reset/rebuild is explicit; normal reads do not import historical data.
+
+## Historical approach (removed)
 
 - Add digest/identity-verified upgrade_parsed_source worker method.
 - Preserve the complete document, representation and existing producer provenance.

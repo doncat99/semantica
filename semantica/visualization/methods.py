@@ -44,7 +44,6 @@ Temporal Visualization:
     - "default": Default temporal visualization using TemporalVisualizer
     - "timeline": Timeline visualization
     - "patterns": Temporal pattern visualization
-    - "snapshot_comparison": Snapshot comparison visualization
     - "evolution": Metrics evolution visualization
 
 Algorithms Used:
@@ -485,7 +484,7 @@ def visualize_temporal(
         temporal_data: Temporal data dictionary with timestamps and changes
         output: Output type
         file_path: Output file path
-        method: Visualization method ("default", "timeline", "patterns", "snapshot_comparison", "evolution")
+        method: Visualization method ("default", "timeline", "patterns", "evolution")
         **options: Additional options
 
     Returns:
@@ -509,11 +508,6 @@ def visualize_temporal(
         patterns = options.pop("patterns", temporal_data.get("patterns", {}))
         return viz.visualize_temporal_patterns(
             patterns, output=output, file_path=file_path, **options
-        )
-    elif method == "snapshot_comparison":
-        snapshots = options.pop("snapshots", temporal_data.get("snapshots", []))
-        return viz.visualize_snapshot_comparison(
-            snapshots, output=output, file_path=file_path, **options
         )
     elif method == "evolution":
         metrics_history = temporal_data.get("metrics_history", [])

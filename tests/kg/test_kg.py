@@ -358,7 +358,7 @@ class TestTemporalGraphQuery(unittest.TestCase):
     def tearDown(self):
         self.mock_tracker_patcher.stop()
 
-    def test_query_at_time(self):
+    def test_record_active_at_time(self):
         """Test querying graph at specific time"""
         graph = {
             "entities": [{"id": "1"}, {"id": "2"}],
@@ -375,17 +375,17 @@ class TestTemporalGraphQuery(unittest.TestCase):
         }
         
         # Query in 2023
-        result_2023 = self.query_engine.query_at_time(graph, "", "2023-06-01")
+        result_2023 = {"relationships": [rel for rel in graph["relationships"] if self.query_engine._relationship_active_at_time(rel, self.query_engine._parse_time('2023-06-01'), time_axis="valid")]}
         self.assertEqual(len(result_2023["relationships"]), 1)
         self.assertEqual(result_2023["relationships"][0]["type"], "rel1")
         
         # Query in 2024
-        result_2024 = self.query_engine.query_at_time(graph, "", "2024-06-01")
+        result_2024 = {"relationships": [rel for rel in graph["relationships"] if self.query_engine._relationship_active_at_time(rel, self.query_engine._parse_time('2024-06-01'), time_axis="valid")]}
         self.assertEqual(len(result_2024["relationships"]), 1)
         self.assertEqual(result_2024["relationships"][0]["type"], "rel2")
         
         # Query in 2025 (no matches)
-        result_2025 = self.query_engine.query_at_time(graph, "", "2025-06-01")
+        result_2025 = {"relationships": [rel for rel in graph["relationships"] if self.query_engine._relationship_active_at_time(rel, self.query_engine._parse_time('2025-06-01'), time_axis="valid")]}
         self.assertEqual(len(result_2025["relationships"]), 0)
 
     def test_query_time_range(self):
@@ -435,7 +435,7 @@ class TestTemporalGraphQuery(unittest.TestCase):
         with self.assertRaises(TemporalValidationError):
             self.query_engine._parse_time("not-a-date")
 
-    def test_query_at_time_supports_open_bound_and_canonical_none_without_warning(self):
+    def test_record_active_at_time_supports_open_bound_and_canonical_none_without_warning(self):
         graph = {
             "relationships": [
                 {
@@ -457,12 +457,12 @@ class TestTemporalGraphQuery(unittest.TestCase):
 
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
-            result = self.query_engine.query_at_time(graph, "", "2026-01-01")
+            result = {"relationships": [rel for rel in graph["relationships"] if self.query_engine._relationship_active_at_time(rel, self.query_engine._parse_time('2026-01-01'), time_axis="valid")]}
 
         self.assertEqual(len(result["relationships"]), 2)
         self.assertFalse(any(item.category is DeprecationWarning for item in caught))
 
-    def test_query_at_time_supports_transaction_axis(self):
+    def test_record_active_at_time_supports_transaction_axis(self):
         graph = {
             "relationships": [
                 {
@@ -477,12 +477,8 @@ class TestTemporalGraphQuery(unittest.TestCase):
             ]
         }
 
-        result_2020 = self.query_engine.query_at_time(
-            graph, "", "2020-06-01", time_axis="transaction"
-        )
-        result_2021 = self.query_engine.query_at_time(
-            graph, "", "2021-06-01", time_axis="transaction"
-        )
+        result_2020 = {"relationships": [rel for rel in graph["relationships"] if self.query_engine._relationship_active_at_time(rel, self.query_engine._parse_time('2020-06-01'), time_axis='transaction')]}
+        result_2021 = {"relationships": [rel for rel in graph["relationships"] if self.query_engine._relationship_active_at_time(rel, self.query_engine._parse_time('2021-06-01'), time_axis='transaction')]}
 
         self.assertEqual(len(result_2020["relationships"]), 0)
         self.assertEqual(len(result_2021["relationships"]), 1)
@@ -571,7 +567,7 @@ class TestTemporalGraphQuery(unittest.TestCase):
         )
         self.assertEqual(result["stability"], 0)
 
-    def test_query_at_time_legacy_transaction_axis_uses_valid_from_when_recorded_missing(self):
+    def test_record_active_at_time_legacy_transaction_axis_uses_valid_from_when_recorded_missing(self):
         graph = {
             "relationships": [
                 {
@@ -584,9 +580,7 @@ class TestTemporalGraphQuery(unittest.TestCase):
             ]
         }
 
-        result = self.query_engine.query_at_time(
-            graph, "", "2025-06-01", time_axis="transaction"
-        )
+        result = {"relationships": [rel for rel in graph["relationships"] if self.query_engine._relationship_active_at_time(rel, self.query_engine._parse_time('2025-06-01'), time_axis='transaction')]}
 
         self.assertEqual(len(result["relationships"]), 1)
 
@@ -596,46 +590,9 @@ class TestTemporalGraphQuery(unittest.TestCase):
         )
         self.assertIs(relationship["valid_until"], TemporalBound.OPEN)
 
-    def test_reconstruct_at_time_removes_dangling_edges_and_does_not_mutate_input(self):
-        graph = {
-            "entities": [
-                {"id": "1", "valid_from": "2020-01-01", "valid_until": "2023-01-01"},
-                {"id": "2", "valid_from": "2020-01-01", "valid_until": TemporalBound.OPEN},
-                {"id": "3", "valid_from": "2025-01-01", "valid_until": TemporalBound.OPEN},
-            ],
-            "relationships": [
-                {"id": "r1", "source": "1", "target": "2", "type": "rel", "valid_from": "2022-01-01", "valid_until": TemporalBound.OPEN},
-                {"id": "r2", "source": "2", "target": "3", "type": "rel", "valid_from": "2024-01-01", "valid_until": TemporalBound.OPEN},
-            ],
-        }
-        original = {
-            "entities": [dict(entity) for entity in graph["entities"]],
-            "relationships": [dict(rel) for rel in graph["relationships"]],
-        }
 
-        reconstructed = self.query_engine.reconstruct_at_time(graph, "2024-06-01")
 
-        self.assertEqual([entity["id"] for entity in reconstructed["entities"]], ["2"])
-        self.assertEqual(reconstructed["relationships"], [])
-        self.assertEqual(graph, original)
-
-    def test_query_at_time_uses_self_consistent_reconstruction(self):
-        graph = {
-            "entities": [
-                {"id": "1", "valid_from": "2020-01-01", "valid_until": "2023-01-01"},
-                {"id": "2", "valid_from": "2020-01-01", "valid_until": TemporalBound.OPEN},
-            ],
-            "relationships": [
-                {"source": "1", "target": "2", "type": "rel", "valid_from": "2022-01-01", "valid_until": TemporalBound.OPEN},
-            ],
-        }
-
-        result = self.query_engine.query_at_time(graph, "", "2024-06-01")
-
-        self.assertEqual(result["num_entities"], 1)
-        self.assertEqual(result["num_relationships"], 0)
-
-    def test_query_at_time_treats_valid_until_as_exclusive(self):
+    def test_record_active_at_time_treats_valid_until_as_exclusive(self):
         graph = {
             "entities": [
                 {"id": "1", "valid_from": "2020-01-01", "valid_until": TemporalBound.OPEN},
@@ -646,9 +603,9 @@ class TestTemporalGraphQuery(unittest.TestCase):
             ],
         }
 
-        result = self.query_engine.query_at_time(graph, "", "2024-06-01")
+        result = {"relationships": [rel for rel in graph["relationships"] if self.query_engine._relationship_active_at_time(rel, self.query_engine._parse_time('2024-06-01'), time_axis="valid")]}
 
-        self.assertEqual(result["num_relationships"], 0)
+        self.assertEqual(len(result["relationships"]), 0)
 
     def test_validate_temporal_consistency_reports_errors_and_warnings(self):
         graph = {
@@ -819,20 +776,6 @@ class TestTemporalGraphQuery(unittest.TestCase):
         self.assertEqual(strict_result["num_paths"], 0)
         self.assertEqual(loose_result["num_paths"], 1)
 
-    def test_reconstruct_at_time_preserves_relationships_with_mixed_id_types(self):
-        graph = {
-            "entities": [
-                {"id": 1, "valid_from": "2020-01-01", "valid_until": TemporalBound.OPEN},
-                {"id": 2, "valid_from": "2020-01-01", "valid_until": TemporalBound.OPEN},
-            ],
-            "relationships": [
-                {"source": "1", "target": "2", "type": "rel", "valid_from": "2020-01-01", "valid_until": TemporalBound.OPEN},
-            ],
-        }
-
-        reconstructed = self.query_engine.reconstruct_at_time(graph, "2024-01-01")
-
-        self.assertEqual(len(reconstructed["relationships"]), 1)
 
 if __name__ == "__main__":
     unittest.main()

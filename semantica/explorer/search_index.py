@@ -8,16 +8,16 @@ import bisect
 import heapq
 import re
 import json
+import logging
 import sqlite3
-import tempfile
-from contextlib import closing, nullcontext
+import sys
+import time
+from contextlib import closing
 from hashlib import sha256
 from pathlib import Path
-from types import SimpleNamespace
 from collections import OrderedDict, defaultdict
 from dataclasses import dataclass
 from functools import cached_property
-from functools import lru_cache
 from typing import Any, DefaultDict, Dict, Iterable, List, Optional, Tuple
 
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -44,102 +44,15 @@ _CURATED_ALIAS_KEYS = (
 def _file_identity(path: Path):
     stat = path.stat()
     return (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
-
-
-@lru_cache(maxsize=4)
-def _admit_reference_file(path: Path, digest: str, identity: tuple):
-    from hashlib import file_digest
-    with path.open("rb") as stream:
-        actual = f"sha256:{file_digest(stream, 'sha256').hexdigest()}"
-    if actual != digest or _file_identity(path) != identity:
-        raise ValueError("keyword artifact digest does not match or changed during admission")
-
-
-class ReferenceGraphSearchIndex:
-    """Read-only native index; hydrate matching canonical records, never a full graph."""
-
-    def __init__(self, index_path: Path, index_digest: str, graph_path: Path, graph_digest: str,
-                 project_id: str, snapshot_id: str):
-        self.graph_path = graph_path.resolve()
-        self.graph_identity = _file_identity(self.graph_path)
-        index_path = index_path.resolve()
-        self.index_identity = _file_identity(index_path)
-        self.index_path = index_path
-        self.project_id, self.snapshot_id = project_id, snapshot_id
-        self.records = {}
-        _admit_reference_file(index_path, index_digest, self.index_identity)
-        _admit_reference_file(self.graph_path, graph_digest, self.graph_identity)
-        self.db = sqlite3.connect(f"{index_path.as_uri()}?mode=ro&immutable=1", uri=True)
-        try:
-            metadata = dict(self.db.execute("SELECT key,value FROM metadata"))
-            if (metadata.get("format") != "semantica.keyword-references.v1"
-                    or metadata.get("graph_digest") != graph_digest
-                    or metadata.get("graph_size") != str(self.graph_identity[2])
-                    or metadata.get("project_id") != project_id or metadata.get("snapshot_id") != snapshot_id):
-                raise ValueError("keyword index does not match the requested canonical artifact; rebuild is required")
-            self.graph = self.graph_path.open("rb")
-        except BaseException:
-            self.db.close()
-            raise
-
-    def close(self):
-        self.graph.close()
-        self.db.close()
-
-    def _read_record(self, field, item_id):
-        key = (field, item_id)
-        if key in self.records:
-            return self.records[key][1]
-        row = self.db.execute("SELECT ordinal,offset,length,digest FROM records WHERE field=? AND id=?", key).fetchone()
-        if row is None:
-            raise ValueError("keyword index has an unknown canonical record reference")
-        ordinal, offset, length, digest = row
-        if offset < 0 or length < 1 or offset + length > self.graph_identity[2]:
-            raise ValueError("keyword index has an invalid byte reference")
-        self.graph.seek(offset)
-        data = self.graph.read(length)
-        if sha256(data).hexdigest() != digest:
-            raise ValueError("keyword canonical record digest does not match")
-        item = json.loads(data)
-        if item_id and (not isinstance(item, dict) or item.get("id") != item_id):
-            raise ValueError("keyword canonical record identity does not match")
-        self.records[key] = (ordinal, item)
-        return item
-
-    def read_catalog(self):
-        header = {field: self._read_record(field, "") for field in ("protocol", "project_id", "snapshot_id", "lineage")}
-        if (header["protocol"] != "semantica.semantic-artifact.v1" or header["project_id"] != self.project_id
-                or header["snapshot_id"] != self.snapshot_id or not isinstance(header["lineage"], dict)):
-            raise ValueError("keyword canonical header does not match the requested artifact")
-        representations = [self._read_record("document_representations", row[0]) for row in self.db.execute(
-            "SELECT id FROM records WHERE field='document_representations' ORDER BY ordinal")]
-        return header, representations
-
-    def prepare_matches(self, words):
-        from ..context.snapshot_search import prepare_snapshot
-        words = sorted({word.lower() for word in words if word})
-        # Scan the vocabulary once, then use the postings primary key for matching terms.
-        matched = self.db.execute("""SELECT DISTINCT r.field,r.id FROM records r JOIN postings p ON r.n=p.record
-            WHERE p.term IN (SELECT n FROM terms WHERE """
-            + (" OR ".join("instr(term, ?) > 0" for _ in words) or "0") + ")", words).fetchall()
-        for field, item_id in matched:
-            item = self._read_record(field, item_id)
-            for entity_key in ("subject_id", "source_entity_id", "target_entity_id"):
-                if item.get(entity_key):
-                    self._read_record("entities", item[entity_key])
-            evidence_ids = [item_id] if field == "evidence_spans" else item.get("evidence_ids", [])
-            if not isinstance(evidence_ids, list) or any(not isinstance(ref, str) or not ref for ref in evidence_ids):
-                raise ValueError("keyword canonical evidence identities are invalid")
-            for evidence_id in evidence_ids:
-                evidence = self._read_record("evidence_spans", evidence_id)
-                self._read_record("document_representations", evidence["representation_id"])
-        if _file_identity(self.graph_path) != self.graph_identity or _file_identity(self.index_path) != self.index_identity:
-            raise ValueError("keyword artifacts changed during query")
-        fields = ("entities", "assertions", "relations", "conflicts", "topics", "evidence_spans", "document_representations")
-        sparse = SimpleNamespace(**{field: [item for _, item in sorted(
-            (value for (record_field, _), value in self.records.items() if record_field == field), key=lambda value: value[0])]
-            for field in fields})
-        return prepare_snapshot(sparse), {item_id for _, item_id in matched}
+def _original_position(start, expansions, position, end=False):
+    delta = 0
+    for char_index, folded_start, width in json.loads(expansions):
+        if position < folded_start:
+            break
+        if position < folded_start + width:
+            return start + char_index + int(end and position > folded_start)
+        delta += width - 1
+    return start + position - delta
 
 
 def _normalize_text(value: Any) -> str:
@@ -205,18 +118,237 @@ class IndexedNodeDocument:
 
 class GraphSearchIndex:
     @staticmethod
-    def document_matches(text: str, query: str, *, offset: int, limit: int) -> dict:
-        """Literal original-text occurrences; pagination never changes recall or offsets."""
-        if not query.strip() or offset < 0 or not 1 <= limit <= 1000:
-            raise ValueError("invalid document keyword query")
-        matches = []
-        total = 0
-        for match in re.finditer(re.escape(query), text, re.IGNORECASE):
-            if offset <= total < offset + limit:
-                matches.append((match.start(), match.end()))
-            total += 1
-        return {"matches": matches, "total": total,
-                "nextOffset": offset + len(matches) if offset + len(matches) < total else None}
+    def publish_native_positions(index_path, *, project, generation, readers):
+        """Maintenance traversal over native reader pages; persist lexical features only.
+
+        Reader requests carry the already installed immutable source identities.
+        No flattened document, graph or vector carrier is admitted by this owner.
+        A partial build is never returned as an installed receipt.
+        """
+        from hashlib import file_digest
+        from ..semantic_document_reader import read_document_reader
+        from ..semantic_worker_context import check_query_cancellation
+        index_path = Path(index_path)
+        if index_path.exists():
+            raise ValueError('native position publication target already exists')
+        if any(not isinstance(v, str) or not v or len(v.encode()) > 4096 for v in (project, generation)):
+            raise ValueError('native position publication identity is invalid')
+        recipe = sha256(b'GraphSearchIndex:native-scalar-literal-positions').hexdigest()
+        try:
+            with closing(sqlite3.connect(index_path)) as db, db:
+                db.execute('PRAGMA cache_size=-2048')
+                db.executescript('''
+                    CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL) WITHOUT ROWID;
+                    CREATE TABLE sources(source TEXT PRIMARY KEY,material TEXT,representation TEXT,digest TEXT) WITHOUT ROWID;
+                    CREATE TABLE terms(id INTEGER PRIMARY KEY,term TEXT NOT NULL UNIQUE);
+                    CREATE TABLE grams(gram TEXT,term INTEGER,PRIMARY KEY(gram,term)) WITHOUT ROWID;
+                    CREATE TABLE positions(source TEXT,ref TEXT,ordinal INTEGER,scalar INTEGER,term INTEGER,
+                        start INTEGER,end INTEGER,expansions TEXT,locator TEXT,
+                        PRIMARY KEY(source,ref,ordinal)) WITHOUT ROWID;
+                    CREATE INDEX positions_term ON positions(term,source,scalar,ordinal);
+                ''')
+                db.executemany('INSERT INTO metadata VALUES (?,?)',
+                    [('project', project), ('generation', generation), ('recipe', recipe)])
+                def intern(token):
+                    row = db.execute('SELECT id FROM terms WHERE term=?', (token,)).fetchone()
+                    if row:
+                        return row[0]
+                    term_id = db.execute('INSERT INTO terms(term) VALUES (?)', (token,)).lastrowid
+                    # Indexed literal substring candidates for short queries too.
+                    for width in (1, 2, 3):
+                        db.executemany('INSERT INTO grams VALUES (?,?)',
+                            ((gram, term_id) for gram in sorted({token[n:n+width] for n in range(len(token)-width+1)})))
+                    return term_id
+                for reader in readers:
+                    check_query_cancellation()
+                    source = reader.source_id
+                    db.execute('INSERT INTO sources VALUES (?,?,?,?)', (source,
+                        reader.material_revision, reader.representation_revision, reader.artifact.digest))
+                    after, active_ref, expected_start, ordinal, pending, pending_start = -1, None, 0, 0, '', 0
+                    scalar = -1
+                    pending_locator = {}
+                    def emit_token(token, start, locator):
+                        nonlocal ordinal
+                        if len(token.encode()) > 65536:
+                            raise ValueError('native positional token exceeds 64 KiB')
+                        expansion, folded = [], 0
+                        for n, char in enumerate(token):
+                            width = len(char.lower())
+                            if width != 1:
+                                expansion.append((n, folded, width))
+                            folded += width
+                        db.execute('INSERT INTO positions VALUES (?,?,?,?,?,?,?,?,?)',
+                            (source, active_ref, ordinal, scalar, intern(token.lower()), start, start+len(token),
+                             json.dumps(expansion), json.dumps(locator, ensure_ascii=False)))
+                        ordinal += 1
+                    while True:
+                        selection = reader.selection.model_copy(update={'field':'chunks', 'after':after,
+                            'limit':128, 'max_bytes':262144, 'page_number':None})
+                        page = read_document_reader(reader.model_copy(update={'selection':selection}))
+                        for item in page['items']:
+                            check_query_cancellation()
+                            locator, text = item['locator'], item['text']
+                            ref, start = locator['nativeRef'], locator['startChar']
+                            if ref != active_ref:
+                                if pending:
+                                    emit_token(pending, pending_start, pending_locator)
+                                active_ref, expected_start, ordinal, pending = ref, 0, 0, ''
+                                scalar += 1
+                            if start != expected_start:
+                                raise ValueError('native position reader ranges are not contiguous')
+                            expected_start = locator['endChar']
+                            value = pending + text
+                            base = pending_start if pending else start
+                            matches = list(re.finditer(r'\s+|\S+', value))
+                            pending = ''
+                            for n, match in enumerate(matches):
+                                if n == len(matches)-1:
+                                    pending, pending_start = match.group(), base+match.start()
+                                    pending_locator = {**locator, 'startChar':pending_start}
+                                    if len(pending.encode()) > 65536:
+                                        raise ValueError('native positional token exceeds 64 KiB')
+                                else:
+                                    emit_token(match.group(), base+match.start(), locator)
+                        if page['nextCursor'] is None:
+                            break
+                        after = page['nextCursor']
+                    if pending:
+                        emit_token(pending, pending_start, pending_locator)
+            with index_path.open('rb') as stream:
+                store_id = 'sha256:' + file_digest(stream, 'sha256').hexdigest()
+            return {'kind':'native-scalar-positions', 'store_id':store_id, 'recipe_digest':recipe}
+        except BaseException:
+            index_path.unlink(missing_ok=True)
+            raise
+
+    @classmethod
+    def open_native_positions(cls, index_path, *, project, generation, receipt, installation_identity):
+        """Admit a trusted installation using small metadata, without rehashing it."""
+        path = Path(index_path)
+        if tuple(installation_identity) != _file_identity(path):
+            raise ValueError('native position installation identity changed')
+        if (set(receipt) != {'kind','store_id','recipe_digest'}
+                or receipt['kind'] != 'native-scalar-positions'
+                or not re.fullmatch(r'sha256:[0-9a-f]{64}', receipt['store_id'])):
+            raise ValueError('native position receipt identity is invalid')
+        db = sqlite3.connect(path.resolve().as_uri() + '?mode=ro&immutable=1', uri=True)
+        try:
+            db.execute('PRAGMA cache_size=-2048')
+            metadata = dict(db.execute('SELECT key,value FROM metadata LIMIT 4'))
+            if metadata != {'project':project, 'generation':generation, 'recipe':receipt['recipe_digest']}:
+                raise ValueError('native position publication identity differs')
+            owner = cls()
+            owner._native_db, owner._native_path, owner._native_identity = db, path, tuple(installation_identity)
+            db.create_function('original_position', 3, _original_position)
+            return owner
+        except BaseException:
+            db.close()
+            raise
+
+    def close_native_positions(self):
+        self._native_db.close()
+
+    def search_native_positions(self, query, *, source_ids=None, limit=128, after=None, navigation='next'):
+        """Return exact occurrence addresses, scoped before retrieval; never bodies."""
+        from ..semantic_worker_context import check_query_cancellation
+        if (not isinstance(query, str) or not query or len(query.encode()) > 1024
+                or (source_ids is not None and (not isinstance(source_ids, (tuple,list)) or len(source_ids) > 128
+                    or any(not isinstance(s, str) or not s or len(s.encode()) > 4096 for s in source_ids)))
+                or type(limit) is not int or not 1 <= limit <= 128):
+            raise ValueError('native keyword query scope or budget is invalid')
+        if after is not None and (not isinstance(after, (tuple,list)) or len(after) != 4
+                or any(type(n) is not int or n < 0 for n in after[2:])):
+            raise ValueError('native keyword continuation is invalid')
+        if navigation not in {'next','previous','next_source','previous_source','next_page','previous_page'}:
+            raise ValueError('native keyword navigation is invalid')
+        if _file_identity(self._native_path) != self._native_identity:
+            raise ValueError('native position installation identity changed')
+        if source_ids == []:
+            return {'items':[], 'total':0, 'nextCursor':None, 'previousCursor':None, 'startOffset':0}
+        deadline = time.monotonic() + 3
+        def check():
+            check_query_cancellation()
+            if time.monotonic() > deadline:
+                raise TimeoutError('native keyword query exceeded 3 second budget')
+            return 0
+        db = self._native_db
+        try:
+            db.set_progress_handler(check, 1000)
+            pieces = re.findall(r'\s+|\S+', query.lower())
+            anchor = max(range(len(pieces)), key=lambda n:len(pieces[n]))
+            word = pieces[anchor]
+            # TEMP state is per bounded query, not durable source content.
+            db.execute('DROP TABLE IF EXISTS temp.native_candidates')
+            db.execute('CREATE TEMP TABLE native_candidates(term INTEGER,relative INTEGER,PRIMARY KEY(term,relative)) WITHOUT ROWID')
+            for term_id, term in db.execute('SELECT t.id,t.term FROM grams g JOIN terms t ON t.id=g.term WHERE g.gram=? AND instr(t.term,?)>0', (word[:3], word)):
+                check()
+                relative = term.find(word)
+                while relative >= 0:
+                    if len(pieces)==1 or (anchor==0 and relative+len(word)==len(term)) or (anchor==len(pieces)-1 and relative==0) or (0<anchor<len(pieces)-1 and term==word):
+                        db.execute('INSERT INTO native_candidates VALUES (?,?)', (term_id,relative))
+                    relative = term.find(word,relative+1)
+            predicate = '1' if source_ids is None else 'p.source IN (' + ','.join('?' for _ in source_ids) + ')'
+            params = list(source_ids or [])
+            for n, piece in enumerate(pieces):
+                role = 'substr(t.term,-length(?))=?' if n==0 else 'substr(t.term,1,length(?))=?' if n==len(pieces)-1 else 't.term=?'
+                if len(pieces)==1:
+                    break
+                predicate += ' AND EXISTS(SELECT 1 FROM positions x JOIN terms t ON t.id=x.term WHERE x.source=p.source AND x.ref=p.ref AND x.ordinal=p.ordinal+? AND '+role+')'
+                params.extend([n-anchor, piece, *([piece] if n in (0,len(pieces)-1) else [])])
+            joins = ' FROM native_candidates c CROSS JOIN positions p INDEXED BY positions_term ON p.term=c.term WHERE '+predicate
+            total = db.execute('SELECT count(*)'+joins, params).fetchone()[0]
+            backward = navigation.startswith('previous')
+            comparison = '<' if backward else '>'
+            cursor_sql, cursor_params = '', []
+            if after is not None:
+                if navigation.endswith('_source'):
+                    cursor_sql, cursor_params = ' AND p.source'+comparison+'?', [after[0]]
+                elif navigation.endswith('_page'):
+                    row = db.execute('SELECT json_extract(locator,\'$.page\') FROM positions WHERE source=? AND ref=? AND ordinal=?', after[:3]).fetchone()
+                    if row is None or row[0] is None:
+                        raise ValueError('native keyword position has no page navigation address')
+                    cursor_sql, cursor_params = (' AND p.source=? AND json_extract(p.locator,\'$.page\')'+comparison+'?', [after[0],row[0]])
+                else:
+                    scalar_row = db.execute('SELECT scalar FROM positions WHERE source=? AND ref=? AND ordinal=?',after[:3]).fetchone()
+                    if scalar_row is None:
+                        raise ValueError('native keyword cursor is not an installed position')
+                    cursor_sql, cursor_params = ' AND (p.source,p.scalar,p.ordinal,c.relative)'+comparison+'(?,?,?,?)', [after[0],scalar_row[0],*after[2:]]
+            rows = db.execute('SELECT p.source,p.ref,p.ordinal,c.relative'+joins+cursor_sql+
+                (' ORDER BY p.source DESC,p.scalar DESC,p.ordinal DESC,c.relative DESC' if backward else ' ORDER BY p.source,p.scalar,p.ordinal,c.relative')+
+                ' LIMIT ?', [*params, *cursor_params,limit]).fetchall()
+            if backward:
+                rows.reverse()
+            first_scalar = db.execute('SELECT scalar FROM positions WHERE source=? AND ref=? AND ordinal=?', rows[0][:3]).fetchone()[0] if rows else 0
+            start_offset = db.execute('SELECT count(*)'+joins+
+                ' AND (p.source,p.scalar,p.ordinal,c.relative)<(?,?,?,?)', [*params,rows[0][0],first_scalar,*rows[0][2:]]).fetchone()[0] if rows else 0
+            items, byte_count = [], 0
+            for source, ref, ordinal, relative in rows:
+                check()
+                first = db.execute('SELECT start,expansions,locator,length(t.term) FROM positions p JOIN terms t ON t.id=p.term WHERE source=? AND ref=? AND ordinal=?', (source,ref,ordinal-anchor)).fetchone()
+                last = db.execute('SELECT start,expansions FROM positions WHERE source=? AND ref=? AND ordinal=?', (source,ref,ordinal-anchor+len(pieces)-1)).fetchone()
+                start = _original_position(first[0],first[1],relative if len(pieces)==1 else first[3]-len(pieces[0]))
+                end = _original_position(last[0],last[1],relative+len(word) if len(pieces)==1 else len(pieces[-1]),True)
+                item = {'sourceId':source, 'nativeRef':ref, 'start':start, 'end':end,
+                    'locator':{**json.loads(first[2]),'nativeRef':ref,'startChar':start,'endChar':end}}
+                byte_count += len(json.dumps(item, ensure_ascii=False).encode())
+                if byte_count > 262144:
+                    raise ValueError('native keyword response exceeds byte budget')
+                item['position'] = [source,ref,ordinal,relative]
+                items.append(item)
+            return {'items':items, 'total':total,
+                'nextCursor':list(rows[-1]) if rows and start_offset+len(rows)<total else None,
+                'previousCursor':list(rows[0]) if rows and start_offset>0 else None,
+                'startOffset':start_offset}
+        finally:
+            error = sys.exc_info()[1]
+            try:
+                # Expired cancellation/deadline must not interrupt scratch cleanup.
+                db.set_progress_handler(None,0)
+                db.execute('DROP TABLE IF EXISTS temp.native_candidates')
+            except sqlite3.Error:
+                if error is None:
+                    raise
+                logging.getLogger(__name__).warning('Native keyword scratch cleanup failed', exc_info=True)
 
     def __init__(
         self,
@@ -276,107 +408,6 @@ class GraphSearchIndex:
             if any(word in token for word in terms):
                 matches.update(node_ids)
         return matches
-
-    @staticmethod
-    def publish_reference_index(snapshot, graph_path: Path, index_path: Path) -> tuple[str, str]:
-        """Replace scratch build outputs only after both canonical JSON and index are complete."""
-        with tempfile.TemporaryDirectory(dir=index_path.parent) as temporary:
-            root = Path(temporary)
-            result = GraphSearchIndex._write_reference_index(snapshot, root / "graph.json", root / "index.sqlite")
-            (root / "graph.json").replace(graph_path)
-            (root / "index.sqlite").replace(index_path)
-            return result
-
-    @staticmethod
-    def _write_reference_index(snapshot, graph_path: Path, index_path: Path, *, _existing=False) -> tuple[str, str]:
-        """Publish canonical JSON and a disposable term/byte-reference index together.
-
-        Only terms, record identities, byte ranges and hashes live in SQLite.
-        Record bodies always come from the single canonical artifact.
-        """
-        from ..context.snapshot_search import prepare_snapshot
-        prepared = prepare_snapshot(snapshot)
-        payload = snapshot.model_dump(mode="json", by_alias=True)
-        encode = lambda value: json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(",", ":")).encode("utf-8")
-        # A fresh output is required; never replace a published index in place.
-        if index_path.exists():
-            raise ValueError("keyword index output already exists")
-        with closing(sqlite3.connect(index_path)) as db, db, (nullcontext(None) if _existing else graph_path.open("wb")) as graph:
-            db.executescript("""
-                CREATE TABLE metadata(key TEXT PRIMARY KEY, value TEXT NOT NULL) WITHOUT ROWID;
-                CREATE TABLE records(n INTEGER PRIMARY KEY, field TEXT NOT NULL, id TEXT NOT NULL,
-                    ordinal INTEGER NOT NULL, offset INTEGER NOT NULL, length INTEGER NOT NULL, digest TEXT NOT NULL,
-                    UNIQUE(field, id));
-                CREATE TABLE terms(n INTEGER PRIMARY KEY, term TEXT NOT NULL UNIQUE);
-                CREATE TABLE postings(term INTEGER NOT NULL, record INTEGER NOT NULL,
-                    PRIMARY KEY(term, record)) WITHOUT ROWID;
-            """)
-            digest = sha256()
-            offset = 0
-            def write(data):
-                nonlocal offset
-                if graph is not None:
-                    graph.write(data)
-                offset += len(data)
-                digest.update(data)
-            def record(field, item_id, ordinal, value):
-                data = encode(value)
-                db.execute("INSERT INTO records(field,id,ordinal,offset,length,digest) VALUES (?,?,?,?,?,?)",
-                    (field, item_id, ordinal, offset, len(data), sha256(data).hexdigest()))
-                write(data)
-            write(b"{")
-            fields = {"entities", "assertions", "relations", "conflicts", "topics", "evidence_spans", "document_representations"}
-            for position, field in enumerate(sorted(payload)):
-                if position:
-                    write(b",")
-                write(encode(field) + b":")
-                value = payload[field]
-                if field in fields:
-                    write(b"[")
-                    for ordinal, item in enumerate(value):
-                        if ordinal:
-                            write(b",")
-                        record(field, item["id"], ordinal, item)
-                    write(b"]")
-                else:
-                    record(field, "", 0, value) if field in {"lineage", "snapshot_id", "project_id", "protocol"} else write(encode(value))
-            write(b"}")
-            graph_digest = f"sha256:{digest.hexdigest()}"
-            if _existing:
-                _admit_reference_file(graph_path, graph_digest, _file_identity(graph_path))
-            db.executemany("INSERT INTO metadata VALUES (?,?)", [
-                ("format", "semantica.keyword-references.v1"), ("graph_digest", graph_digest),
-                ("graph_size", str(offset)), ("project_id", snapshot.project_id), ("snapshot_id", snapshot.id)])
-            record_ids = {(field, item_id): n for n, field, item_id in db.execute("SELECT n,field,id FROM records WHERE id != ''")}
-            candidate_fields = {"entity": "entities", "assertion": "assertions", "relation": "relations",
-                                "conflict": "conflicts", "topic": "topics", "evidence": "evidence_spans"}
-            vocabulary = {}
-            owner = GraphSearchIndex()
-            for item in prepared.candidates:
-                document = owner._build_document({"id": item[0], "content": item[2]})
-                for term in sorted(set(document.primary_text.split()) | set(document.secondary_text.split())):
-                    if term not in vocabulary:
-                        vocabulary[term] = len(vocabulary) + 1
-                        db.execute("INSERT INTO terms VALUES (?,?)", (vocabulary[term], term))
-                    db.execute("INSERT INTO postings VALUES (?,?)", (vocabulary[term], record_ids[candidate_fields[item[1]], item[0]]))
-        with index_path.open("rb") as stream:
-            from hashlib import file_digest
-            index_digest = f"sha256:{file_digest(stream, 'sha256').hexdigest()}"
-        return graph_digest, index_digest
-
-    @staticmethod
-    def index_artifact(graph_path: Path, index_path: Path) -> tuple[str, str]:
-        """Explicit offline indexing; never rewrite existing canonical content or call models."""
-        from ..semantic_artifact_schema import SemanticArtifact
-        graph_path = graph_path.resolve()
-        if index_path.exists():
-            raise ValueError("keyword index output already exists")
-        snapshot = SemanticArtifact.model_validate_json(graph_path.read_bytes())
-        with tempfile.TemporaryDirectory(dir=index_path.parent) as temporary:
-            generated = Path(temporary) / "index.sqlite"
-            result = GraphSearchIndex._write_reference_index(snapshot, graph_path, generated, _existing=True)
-            generated.replace(index_path)
-            return result
 
     def remove(self, node_id: str, *, clear_cache: bool = True) -> None:
         self._substring_index = None

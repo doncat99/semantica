@@ -17,7 +17,7 @@ from semantica.visualization import (
     AnalyticsVisualizer,
     TemporalVisualizer
 )
-from semantica.kg import GraphBuilder, GraphAnalyzer, TemporalVersionManager
+from semantica.kg import GraphBuilder, GraphAnalyzer
 from semantica.ontology import OntologyGenerator
 from semantica.embeddings import EmbeddingGenerator
 
@@ -238,32 +238,6 @@ def run_advanced_notebook():
     assert viz1 is not None, "Timeline visualization failed"
     assert viz2 is not None, "Metrics evolution visualization failed"
     
-    # Version Manager part
-    try:
-        version_manager = TemporalVersionManager()
-        v1 = version_manager.create_version(temporal_kg, timestamp="2020-01-01", version_label="v2020")
-        temporal_kg_v2 = {
-            "entities": temporal_kg.get("entities", []),
-            "relationships": temporal_kg.get("relationships", []) + [
-                {"source": "e1", "target": "e2", "type": "collaborated_with", "valid_from": "2023-01-01"}
-            ]
-        }
-        v2 = version_manager.create_version(temporal_kg_v2, timestamp="2023-01-01", version_label="v2023")
-        snapshots = {v1["timestamp"]: v1, v2["timestamp"]: v2}
-        
-        viz3 = temporal_visualizer.visualize_snapshot_comparison(snapshots, output="interactive")
-        
-        version_history = [
-            {"version": v1.get("label"), "timestamp": v1.get("timestamp")},
-            {"version": v2.get("label"), "timestamp": v2.get("timestamp")}
-        ]
-        viz4 = temporal_visualizer.visualize_version_history(version_history, output="interactive")
-        
-        assert viz3 is not None, "Snapshot comparison failed"
-        assert viz4 is not None, "Version history visualization failed"
-    except Exception as e:
-        logger.warning(f"Temporal Version Manager part failed: {e}")
-        
     logger.info("Temporal Visualization successful")
 
 if __name__ == "__main__":

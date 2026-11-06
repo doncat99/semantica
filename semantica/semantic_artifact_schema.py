@@ -15,7 +15,6 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from .semantic_extract.schema import ExtractionSpecification
 from .semantic_extract.schemas import validate_fact_qualifiers
 
-ARTIFACT_PROTOCOL = "semantica.semantic-artifact.v1"
 WORKER_PROTOCOL = "semantica.semantic-worker.v1"
 SHA256_RE = re.compile(r"^(sha256:)?[0-9a-f]{64}$")
 MATERIAL_REVISION_PATTERN = r"^b3-[0-9a-f]{64}$"
@@ -26,11 +25,6 @@ ENV_VAR_RE = re.compile(r"^[A-Z][A-Z0-9_]{0,127}$")
 
 
 def utc_now_iso() -> str:
-    # Reconstructing a completed build must preserve its artifact bytes and identity.
-    from .project_checkpoint import active_checkpoint
-    checkpoint = active_checkpoint.get()
-    if checkpoint:
-        return checkpoint.created_at
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 
@@ -50,8 +44,6 @@ def _unique(items: List[Any], label: str) -> None:
         seen.add(item_id)
 
 
-def _missing(values: List[str], known: set[str]) -> List[str]:
-    return sorted(set(values) - known)
 
 
 def _validate_media_type(value: str, field: str) -> str:
@@ -120,6 +112,7 @@ class DigestModel(StrictModel):
 
 class DocumentLocator(StrictModel):
     representation_id: str
+    native_ref: Optional[str] = Field(default=None, alias="nativeRef", min_length=1, max_length=8192)
     origin: Literal["native", "ocr", "mixed", "derived", "external", "adapter"]
     quote: str
     start_char: Optional[int] = Field(default=None, ge=0)
@@ -134,6 +127,9 @@ class DocumentLocator(StrictModel):
 
     @model_validator(mode="after")
     def validate_span(self) -> "DocumentLocator":
+        if self.native_ref is not None and (not self.native_ref.startswith("#/")
+                or self.start_char is None or self.end_char is None):
+            raise ValueError("native locator requires a scalar reference and character range")
         has_char = self.start_char is not None or self.end_char is not None
         has_structural = (
             self.page is not None
@@ -287,6 +283,7 @@ class KnowledgeTopic(KernelModel):
     entity_ids: List[str] = Field(default_factory=list)
     assertion_ids: List[str] = Field(default_factory=list)
     evidence_ids: List[str] = Field(default_factory=list)
+    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ReportSection(StrictModel):
@@ -299,7 +296,6 @@ class KnowledgeReport(KernelModel, DigestModel):
     id: str
     report_type: Literal["overview", "concept", "community", "topic", "conflict", "retrieval", "change"]
     title: str
-    summary: str
     entity_id: Optional[str] = None
     sections: List[ReportSection] = Field(default_factory=list)
     community_id: Optional[str] = None
@@ -324,19 +320,6 @@ class KnowledgeConflict(KernelModel):
     resolution: Optional[str] = None
 
 
-class RetrievalArtifactManifest(KernelModel, DigestModel):
-    id: str
-    retrieval_type: Literal["source", "entity", "relation", "community", "graph"]
-    artifact_hash: str
-    artifact_ref_id: str
-    index_id: Optional[str] = None
-    record_count: int = Field(ge=0)
-    entity_ids: List[str] = Field(default_factory=list)
-    relation_ids: List[str] = Field(default_factory=list)
-    community_ids: List[str] = Field(default_factory=list)
-    evidence_ids: List[str] = Field(default_factory=list)
-    model_receipt_ids: List[str] = Field(default_factory=list)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
 class ModelReceipt(KernelModel, DigestModel):
@@ -351,239 +334,6 @@ class ModelReceipt(KernelModel, DigestModel):
     metadata: Dict[str, Any] = Field(default_factory=dict)
 
 
-class KernelLineage(DigestModel):
-    schema_digest: str
-    recipe_id: str
-    recipe_digest: str
-    rule_version: str
-    rule_digest: str
-    ontology_version: str
-    ontology_digest: str
-    extraction_spec_digest: Optional[str] = None
-    model_receipt_ids: List[str] = Field(default_factory=list)
-
-
-class ArtifactManifest(KernelModel, DigestModel):
-    id: str
-    artifact_type: Literal[
-        "representation",
-        "evidence",
-        "graph",
-        "community",
-        "report",
-        "retrieval",
-        "change",
-        "model-output",
-    ]
-    artifact_ref: str
-    artifact_hash: str
-    producer: str = "semantica"
-    depends_on: List[str] = Field(default_factory=list)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-
-
-class SemanticArtifact(KernelModel):
-    protocol: Literal[ARTIFACT_PROTOCOL] = ARTIFACT_PROTOCOL
-    snapshot_version: int = Field(default=1, ge=1)
-    id: str = Field(alias="snapshot_id")
-    project_id: str
-    created_at: str = Field(default_factory=utc_now_iso)
-    lineage: KernelLineage
-    artifact_manifest: List[ArtifactManifest]
-    document_representations: List[DocumentRepresentation]
-    evidence_spans: List[EvidenceSpan]
-    entity_mentions: List[KnowledgeEntity] = Field(default_factory=list)
-    entities: List[KnowledgeEntity] = Field(default_factory=list)
-    assertions: List[KnowledgeAssertion] = Field(default_factory=list)
-    relations: List[KnowledgeRelation] = Field(default_factory=list)
-    identity_registry: List[IdentityRegistryEntry] = Field(default_factory=list)
-    communities: List[KnowledgeCommunity] = Field(default_factory=list)
-    topics: List[KnowledgeTopic] = Field(default_factory=list)
-    source_relations: List[SourceRelation] = Field(default_factory=list)
-    source_classifications: List["SourceClassification"] = Field(default_factory=list)
-    classification_profile: Optional["ClassificationProfile"] = None
-    extraction_spec: Optional[ExtractionSpecification] = None
-    conflicts: List[KnowledgeConflict] = Field(default_factory=list)
-    retrieval_manifests: List[RetrievalArtifactManifest] = Field(default_factory=list)
-    model_receipts: List[ModelReceipt] = Field(default_factory=list)
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-
-    @model_validator(mode="after")
-    def validate_references(self) -> "SemanticArtifact":
-        if bool(self.extraction_spec) != bool(self.lineage.extraction_spec_digest):
-            raise ValueError("snapshot extraction specification and lineage digest must appear together")
-        if self.extraction_spec and self.extraction_spec.digest != self.lineage.extraction_spec_digest:
-            raise ValueError("snapshot extraction specification does not match lineage digest")
-        lists = {
-            "artifact": self.artifact_manifest,
-            "representation": self.document_representations,
-            "evidence": self.evidence_spans,
-            "entity_mention": self.entity_mentions,
-            "entity": self.entities,
-            "assertion": self.assertions,
-            "relation": self.relations,
-            "source_relation": self.source_relations,
-            "community": self.communities,
-            "topic": self.topics,
-            "conflict": self.conflicts,
-            "retrieval_manifest": self.retrieval_manifests,
-            "model_receipt": self.model_receipts,
-        }
-        for label, items in lists.items():
-            _unique(items, label)
-
-        artifact_ids = {item.id for item in self.artifact_manifest}
-        representation_ids = {item.id for item in self.document_representations}
-        evidence_ids = {item.id for item in self.evidence_spans}
-        entity_ids = {item.id for item in self.entities}
-        assertion_ids = {item.id for item in self.assertions}
-        relation_ids = {item.id for item in self.relations}
-        source_relation_ids = {item.id for item in self.source_relations}
-        community_ids = {item.id for item in self.communities}
-        topic_ids = {item.id for item in self.topics}
-        conflict_ids = {item.id for item in self.conflicts}
-        retrieval_ids = {item.id for item in self.retrieval_manifests}
-        model_receipt_ids = {item.id for item in self.model_receipts}
-
-        known_source_ids = {item.source_id for item in self.document_representations}
-        for source_relation in self.source_relations:
-            if source_relation.source_id not in known_source_ids or source_relation.target_id not in known_source_ids:
-                raise ValueError(f"source relation {source_relation.id} references unknown source")
-            if source_relation.source_id == source_relation.target_id:
-                raise ValueError(f"source relation {source_relation.id} must connect distinct sources")
-            if set(source_relation.evidence_ids) - evidence_ids:
-                raise ValueError(f"source relation {source_relation.id} references unknown evidence ids")
-            if set(source_relation.entity_relation_ids) - relation_ids:
-                raise ValueError(f"source relation {source_relation.id} references unknown entity relations")
-        registry_mentions = [item.mention_id for item in self.identity_registry]
-        if len(registry_mentions) != len(set(registry_mentions)):
-            raise ValueError("duplicate identity registry mention_id")
-        for entry in self.identity_registry:
-            if any(item.entity_id not in entity_ids for item in entry.unresolved_candidates):
-                raise ValueError('identity review references unknown canonical entity')
-
-        missing = _missing(self.lineage.model_receipt_ids, model_receipt_ids)
-        if missing:
-            raise ValueError(f"lineage references unknown model receipt ids: {missing}")
-        for artifact in self.artifact_manifest:
-            missing = _missing(artifact.depends_on, artifact_ids)
-            if missing:
-                raise ValueError(f"artifact {artifact.id} depends on unknown artifacts: {missing}")
-        for representation in self.document_representations:
-            if representation.artifact_ref_id not in artifact_ids:
-                raise ValueError(f"representation {representation.id} references unknown artifact_ref_id")
-        for evidence in self.evidence_spans:
-            if evidence.representation_id not in representation_ids:
-                raise ValueError(f"unknown evidence representation_id: {evidence.representation_id}")
-            if evidence.locator.representation_id != evidence.representation_id:
-                raise ValueError("evidence locator representation_id must match evidence representation_id")
-        for entity in [*self.entities, *self.entity_mentions]:
-            missing = set(entity.evidence_ids) - evidence_ids
-            if missing:
-                raise ValueError(f"entity {entity.id} references unknown evidence ids: {sorted(missing)}")
-        for assertion in self.assertions:
-            if set(assertion.support_ids) - set(assertion.evidence_ids):
-                raise ValueError("assertion support must reference its located evidence")
-            if assertion.subject_id not in entity_ids:
-                raise ValueError(f"assertion {assertion.id} references unknown subject_id: {assertion.subject_id}")
-            if assertion.object_entity_id and assertion.object_entity_id not in entity_ids:
-                raise ValueError(f"assertion {assertion.id} references unknown object_entity_id: {assertion.object_entity_id}")
-            missing = set(assertion.evidence_ids) - evidence_ids
-            if missing:
-                raise ValueError(f"assertion {assertion.id} references unknown evidence ids: {sorted(missing)}")
-        for relation in self.relations:
-            if set(relation.support_ids) - set(relation.evidence_ids):
-                raise ValueError("relation support must reference its located evidence")
-            if relation.source_entity_id not in entity_ids or relation.target_entity_id not in entity_ids:
-                raise ValueError(f"relation {relation.id} references unknown entity endpoint")
-            missing = set(relation.evidence_ids) - evidence_ids
-            if missing:
-                raise ValueError(f"relation {relation.id} references unknown evidence ids: {sorted(missing)}")
-        sources_by_representation = {item.id: item.source_id for item in self.document_representations}
-        evidence_by_id = {item.id: item for item in self.evidence_spans}
-        classified_sources = set()
-        dimensions = {item.id: item for item in self.classification_profile.dimensions} if self.classification_profile else {}
-        for classification in self.source_classifications:
-            if classification.source_id in classified_sources:
-                raise ValueError("duplicate source classification")
-            classified_sources.add(classification.source_id)
-            if classification.source_id not in set(sources_by_representation.values()):
-                raise ValueError("classification references unknown source")
-            if set(classification.model_receipt_ids) - model_receipt_ids:
-                raise ValueError("classification references unknown model receipt")
-            if not self.classification_profile or (classification.profile_id, classification.profile_version) != (self.classification_profile.id, self.classification_profile.version):
-                raise ValueError("classification does not match snapshot profile")
-            assigned = set()
-            for assignment in classification.assignments:
-                dimension = dimensions.get(assignment.dimension_id)
-                key = (assignment.dimension_id, assignment.item_id)
-                if dimension is None or assignment.item_id not in {item.id for item in dimension.vocabulary}:
-                    raise ValueError("classification invents dimension or vocabulary")
-                if key in assigned or (dimension.cardinality == "single" and any(pair[0] == dimension.id for pair in assigned)):
-                    raise ValueError("classification violates cardinality")
-                assigned.add(key)
-                if any(ref not in evidence_by_id or sources_by_representation[evidence_by_id[ref].representation_id] != classification.source_id for ref in assignment.evidence_ids):
-                    raise ValueError("classification evidence does not belong to its source")
-            if set(classification.unclassified_dimension_ids) != set(dimensions) - {item[0] for item in assigned}:
-                raise ValueError("classification has inconsistent unclassified dimensions")
-        if self.classification_profile and classified_sources != set(sources_by_representation.values()):
-            raise ValueError("classification profile requires a result for every source")
-        registry_by_mention = {item.mention_id: item.entity_id for item in self.identity_registry}
-        owner_by_mention = {}
-        for entity in self.entities:
-            mention_ids = entity.metadata.get("mention_ids", [])
-            if not isinstance(mention_ids, list) or any(not isinstance(item, str) for item in mention_ids):
-                raise ValueError("entity mention_ids must be a list of strings")
-            for mention_id in mention_ids:
-                owner_by_mention.setdefault(mention_id, entity.id)
-        for mention in self.entity_mentions:
-            registered = registry_by_mention.get(mention.id)
-            owner = owner_by_mention.get(mention.id)
-            if registered is not None and registered != owner:
-                raise ValueError(f"identity registry disagrees with live mention owner: {mention.id}")
-        for community in self.communities:
-            missing = _missing(community.entity_ids, entity_ids)
-            if missing:
-                raise ValueError(f"community {community.id} references unknown entity ids: {missing}")
-            missing = _missing(community.relation_ids, relation_ids)
-            if missing:
-                raise ValueError(f"community {community.id} references unknown relation ids: {missing}")
-            if community.parent_id and community.parent_id not in community_ids:
-                raise ValueError(f"community {community.id} references unknown parent_id")
-        for topic in self.topics:
-            for label, values, known in (
-                ("community", topic.community_ids, community_ids),
-                ("entity", topic.entity_ids, entity_ids),
-                ("assertion", topic.assertion_ids, assertion_ids),
-                ("evidence", topic.evidence_ids, evidence_ids),
-            ):
-                missing = _missing(values, known)
-                if missing:
-                    raise ValueError(f"topic {topic.id} references unknown {label} ids: {missing}")
-        for conflict in self.conflicts:
-            for label, values, known in (
-                ("entity", conflict.entity_ids, entity_ids),
-                ("assertion", conflict.assertion_ids, assertion_ids),
-                ("relation", conflict.relation_ids, relation_ids),
-                ("evidence", conflict.evidence_ids, evidence_ids),
-            ):
-                missing = _missing(values, known)
-                if missing:
-                    raise ValueError(f"conflict {conflict.id} references unknown {label} ids: {missing}")
-        for retrieval in self.retrieval_manifests:
-            if retrieval.artifact_ref_id not in artifact_ids:
-                raise ValueError(f"retrieval {retrieval.id} references unknown artifact_ref_id")
-            for label, values, known in (
-                ("entity", retrieval.entity_ids, entity_ids),
-                ("relation", retrieval.relation_ids, relation_ids),
-                ("community", retrieval.community_ids, community_ids),
-                ("evidence", retrieval.evidence_ids, evidence_ids),
-                ("model receipt", retrieval.model_receipt_ids, model_receipt_ids),
-            ):
-                missing = _missing(values, known)
-                if missing:
-                    raise ValueError(f"retrieval {retrieval.id} references unknown {label} ids: {missing}")
-        return self
 
 
 class SourceBuildInput(KernelModel):
@@ -612,26 +362,6 @@ class SourceBuildInput(KernelModel):
         return _validate_media_type(value, "source mimeType")
 
 
-class ExecutorRef(KernelModel, DigestModel):
-    id: str
-    executor_type: Literal["parser", "extractor", "reasoner", "community", "retriever", "model"]
-    artifact_hash: str
-    version: str
-    metadata: Dict[str, Any] = Field(default_factory=dict)
-
-
-class SnapshotRef(DigestModel):
-    artifact_digest: str = Field(alias="artifactDigest")
-    schema_digest: str = Field(alias="schemaDigest")
-    snapshot_id: str = Field(alias="snapshotId")
-    snapshot_path: str = Field(alias="snapshotPath")
-
-    @field_validator("snapshot_path", mode="after")
-    @classmethod
-    def validate_absolute_snapshot_path(cls, value: str) -> str:
-        if not isabs(value):
-            raise ValueError("base snapshotPath must be absolute")
-        return value
 
 
 class ClassificationVocabularyItem(StrictModel):
@@ -700,7 +430,7 @@ class RecipeRef(StrictModel):
 class RelayRef(StrictModel):
     authorization_env: str = Field(alias="authorizationEnv")
     base_url: str = Field(alias="baseUrl")
-    capability: Literal["knowledge.snapshot.embed", "knowledge.snapshot.generate"]
+    capability: Literal["knowledge.publication.embed", "knowledge.publication.generate"]
     model_id: str = Field(alias="modelId")
     binding_id: Optional[str] = Field(default=None, alias="bindingId")
     context_window_tokens: Optional[int] = Field(default=None, alias="contextWindowTokens", gt=0)
@@ -727,12 +457,12 @@ class RelayRef(StrictModel):
         ):
             raise ValueError("relay baseUrl must be an unauthenticated loopback HTTP URL")
         expected_path = {
-            "knowledge.snapshot.embed": "/v1/embeddings",
-            "knowledge.snapshot.generate": "/v1/chat/completions",
+            "knowledge.publication.embed": "/v1/embeddings",
+            "knowledge.publication.generate": "/v1/chat/completions",
         }[self.capability]
         if parsed.path.rstrip("/") != expected_path:
             raise ValueError(f"relay baseUrl path must be {expected_path} for {self.capability}")
-        if self.capability == "knowledge.snapshot.generate":
+        if self.capability == "knowledge.publication.generate":
             if self.context_window_tokens is None or self.max_output_tokens is None:
                 raise ValueError("model relay requires contextWindowTokens and maxOutputTokens")
             if self.max_output_tokens > self.context_window_tokens:
@@ -748,23 +478,14 @@ class ReleaseRef(DigestModel):
     @field_validator("media_types", mode="after")
     @classmethod
     def validate_media_types(cls, value: Dict[str, str]) -> Dict[str, str]:
-        required = {"document-representation", "retrieval-index", "semantic-graph"}
-        missing = required - set(value)
-        if missing:
-            raise ValueError(f"release mediaTypes missing required keys: {sorted(missing)}")
-        normalized = {key: _validate_media_type(media_type, f"release mediaTypes[{key}]") for key, media_type in value.items()}
-        if not normalized["document-representation"].endswith("+json"):
-            raise ValueError("document-representation artifact must be JSON")
-        if not normalized["retrieval-index"].endswith("+json"):
-            raise ValueError("retrieval-index artifact is JSON and must use a +json media type")
-        if not normalized["semantic-graph"].endswith("+json"):
-            raise ValueError("semantic-graph artifact must be JSON")
-        return normalized
+        expected = {"document-representation": "application/vnd.semantica.document-representation+json"}
+        if value != expected:
+            raise ValueError("release mediaTypes must declare only the current document-representation MIME type")
+        return value
 
 
 class DocumentProcessingProfile(StrictModel):
     mode: Literal["disabled", "native", "local", "remote"] = "local"
-    processing_revision: str = Field(default="semantica-document-processing-v1", alias="processingRevision")
     pdf_text_order: Literal["coordinates", "content"] = Field(default="coordinates", alias="pdfTextOrder")
     endpoint: Optional[str] = None
     binding_id: Optional[str] = Field(default=None, alias="bindingId")
@@ -778,26 +499,44 @@ class DocumentProcessingProfile(StrictModel):
 
 
 class ParsedSourceRef(DigestModel):
+    reader_index_path: str = Field(alias="readerIndexPath")
+    reader_index_digest: str = Field(alias="readerIndexDigest", pattern=SHA256_RE.pattern)
     artifact_digest: str = Field(alias="artifactDigest")
     artifact_path: str = Field(alias="artifactPath")
     source_id: str = Field(alias="sourceId")
+    representation_revision: str = Field(alias="representationRevision", pattern=SHA256_RE.pattern)
 
-    @field_validator("artifact_path", mode="after")
+    @field_validator("artifact_path", "reader_index_path", mode="after")
     @classmethod
     def validate_path(cls, value: str) -> str:
         if not isabs(value):
-            raise ValueError("parsed source artifactPath must be absolute")
+            raise ValueError("parsed source artifactPath and readerIndexPath must be absolute")
         return value
+
+
+class OrganizationReportsRef(DigestModel):
+    base_url: str = Field(alias="baseUrl")
+    authorization_env: str = Field(alias="authorizationEnv", pattern=ENV_VAR_RE.pattern)
+    recipe_digest: str = Field(alias="recipeDigest")
+
+    @model_validator(mode="after")
+    def validate_owner_url(self):
+        parsed = urlsplit(self.base_url)
+        if (parsed.scheme != "http" or parsed.hostname not in {"127.0.0.1", "localhost", "::1"}
+                or parsed.username or parsed.password or parsed.query or parsed.fragment
+                or parsed.path.rstrip("/") != "/v1/products/semantic-organization"):
+            raise ValueError("organizationReports must address the authenticated loopback product owner")
+        return self
 
 
 class SemanticArtifactBuildRequest(DigestModel):
     project_id: str = Field(alias="projectId")
-    base_snapshot: Optional[SnapshotRef] = Field(default=None, alias="baseSnapshot")
     input_revision: str = Field(alias="inputRevision")
     parallelism: int = Field(default=1, ge=1, le=16)
     output_dir: str = Field(alias="outputDir")
-    checkpoint_dir: Optional[str] = Field(default=None, alias="checkpointDir")
-    resume_checkpoint_dirs: List[str] = Field(default_factory=list, alias="resumeCheckpointDirs")
+    native_cache_dir: str = Field(alias="nativeCacheDir")
+    native_store_dir: str = Field(alias="nativeStoreDir")
+    organization_reports: OrganizationReportsRef = Field(alias="organizationReports")
     recipe: RecipeRef
     relays: Dict[str, RelayRef]
     release: ReleaseRef
@@ -813,10 +552,8 @@ class SemanticArtifactBuildRequest(DigestModel):
             raise ValueError("at least one source is required")
         if not isabs(self.output_dir):
             raise ValueError("outputDir must be absolute")
-        if self.checkpoint_dir is not None and not isabs(self.checkpoint_dir):
-            raise ValueError("checkpointDir must be absolute")
-        if any(not isabs(item) for item in self.resume_checkpoint_dirs):
-            raise ValueError("resumeCheckpointDirs must contain absolute paths")
+        if not isabs(self.native_cache_dir) or not isabs(self.native_store_dir):
+            raise ValueError("nativeCacheDir and nativeStoreDir must be absolute")
         source_ids = {source.source_id for source in self.sources}
         if len(source_ids) != len(self.sources):
             raise ValueError("source ids must be unique")
@@ -833,17 +570,26 @@ class SemanticArtifactBuildRequest(DigestModel):
             raise ValueError("classification requires the model recipe")
         if self.recipe.extraction_spec and self.recipe.id != "model":
             raise ValueError("typed extraction requires the model recipe")
-        if set(self.release.media_types) != {"document-representation", "retrieval-index", "semantic-graph"}:
-            raise ValueError("release media types must cover all artifact kinds")
         if set(self.relays) != {"embedding", "model"}:
             raise ValueError("relays must contain embedding and model")
         if {item.source_id for item in self.parsed_sources} != source_ids or len(self.parsed_sources) != len(source_ids):
             raise ValueError("parsed sources must match the source manifest exactly")
-        if self.relays["embedding"].capability != "knowledge.snapshot.embed":
+        if self.relays["embedding"].capability != "knowledge.publication.embed":
             raise ValueError("embedding relay capability is invalid")
-        if self.relays["model"].capability != "knowledge.snapshot.generate":
+        if self.relays["model"].capability != "knowledge.publication.generate":
             raise ValueError("model relay capability is invalid")
         return self
+
+
+class RemoteConversionTask(StrictModel):
+    task_id: str | None = Field(default=None, alias="taskId", min_length=1, max_length=1024)
+
+    @field_validator("task_id")
+    @classmethod
+    def validate_task_identity(cls, value):
+        if value is not None and (not value.strip() or len(value.encode('utf-8')) > 1024):
+            raise ValueError('remote taskId must be nonblank and at most 1024 UTF-8 bytes')
+        return value
 
 
 class ParseSourceRequest(StrictModel):
@@ -851,6 +597,7 @@ class ParseSourceRequest(StrictModel):
     output_dir: str = Field(alias="outputDir")
     force_ocr: bool = Field(alias="forceOcr")
     document_processing: DocumentProcessingProfile = Field(alias="documentProcessing")
+    remote_task: RemoteConversionTask | None = Field(default=None, alias="remoteTask")
 
     @field_validator("output_dir", mode="after")
     @classmethod
@@ -862,9 +609,11 @@ class ParseSourceRequest(StrictModel):
 
 class BindParsedSourceRequest(ParseSourceRequest):
     parsed_artifact_path: str = Field(alias="parsedArtifactPath")
-    parsed_artifact_digest: str = Field(alias="parsedArtifactDigest")
+    parsed_artifact_digest: str = Field(alias="parsedArtifactDigest", pattern=r"^sha256:[a-f0-9]{64}$")
+    parsed_reader_index_path: str = Field(alias="parsedReaderIndexPath")
+    parsed_reader_index_digest: str = Field(alias="parsedReaderIndexDigest", pattern=r"^sha256:[a-f0-9]{64}$")
 
-    @field_validator("parsed_artifact_path", mode="after")
+    @field_validator("parsed_artifact_path", "parsed_reader_index_path", mode="after")
     @classmethod
     def validate_parsed_artifact_path(cls, value: str) -> str:
         if not isabs(value):
@@ -872,26 +621,11 @@ class BindParsedSourceRequest(ParseSourceRequest):
         return value
 
 
-class UpgradeParsedSourceRequest(StrictModel):
-    artifact_path: str = Field(alias="artifactPath")
-    artifact_digest: str = Field(alias="artifactDigest", pattern=r"^sha256:[a-f0-9]{64}$")
-    representation_revision: str = Field(alias="representationRevision", pattern=r"^sha256:[a-f0-9]{64}$")
-    representation_id: str = Field(alias="representationId")
-    output_dir: str = Field(alias="outputDir")
-
-    @field_validator("artifact_path", "output_dir", mode="after")
-    @classmethod
-    def validate_absolute_path(cls, value: str) -> str:
-        if not isabs(value):
-            raise ValueError("upgrade paths must be absolute")
-        return value
-
-
 class WorkerRequest(StrictModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True, hide_input_in_errors=True)
     protocol: Literal[WORKER_PROTOCOL] = WORKER_PROTOCOL
     id: str
-    method: Literal["parse_source", "bind_parsed_source", "upgrade_parsed_source", "build_semantic_artifacts", "validate_artifact", "validate_extraction_spec", "schema", "generate_reading_reports", "explain_evidence"]
+    method: Literal["parse_source", "bind_parsed_source", "build_semantic_artifacts", "validate_extraction_spec", "schema", "explain_evidence"]
     params: Dict[str, Any] = Field(default_factory=dict)
     authorization: Optional[Dict[str, str]] = Field(default=None, repr=False, exclude=True)
     document_processing_authorization: Optional[str] = Field(default=None, alias="documentProcessingAuthorization", repr=False, exclude=True)
@@ -934,8 +668,6 @@ class WorkerResponse(StrictModel):
     error: Optional[WorkerError] = None
 
 
-def semantic_artifact_json_schema() -> Dict[str, Any]:
-    return SemanticArtifact.model_json_schema()
 
 
 def build_request_json_schema() -> Dict[str, Any]:

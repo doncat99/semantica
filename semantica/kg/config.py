@@ -103,7 +103,6 @@ class KGConfig:
             "KG_ENABLE_TEMPORAL": ("enable_temporal", bool),
             "KG_TEMPORAL_GRANULARITY": ("temporal_granularity", str),
             "KG_TRACK_HISTORY": ("track_history", bool),
-            "KG_VERSION_SNAPSHOTS": ("version_snapshots", bool),
             "KG_SIMILARITY_THRESHOLD": ("similarity_threshold", float),
             "KG_CONFLICT_STRATEGY": ("conflict_strategy", str),
         }

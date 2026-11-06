@@ -34,8 +34,8 @@ def test_declared_alias_recalls_unrelated_names_without_model_or_network(monkeyp
     def forbidden(*args, **kwargs):
         pytest.fail("native identity must not call network or model")
     monkeypatch.setattr(socket.socket, "connect", forbidden)
-    monkeypatch.setattr("semantica.semantic_artifact_builder._relay_json", forbidden)
-    monkeypatch.setattr("semantica.semantic_artifact_builder._product_json", forbidden)
+    monkeypatch.setattr("semantica.semantic_publication_builder._relay_json", forbidden)
+    monkeypatch.setattr("semantica.semantic_publication_builder._product_json", forbidden)
     rows = [entity("a", "International Business Machines", registry_number="123"),
             entity("b", "IBM", registry_number="123")]
     rows[0]["aliases"] = ["IBM"]

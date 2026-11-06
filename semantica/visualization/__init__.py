@@ -43,7 +43,6 @@ Analytics Visualization:
 Temporal Visualization:
     - Timeline Construction: Event timestamp extraction, event type classification, timeline axis generation, event positioning on timeline, event grouping by type
     - Pattern Visualization: Temporal pattern detection (trends, cycles, anomalies), pattern extraction, pattern visualization, pattern annotation
-    - Snapshot Comparison: Graph snapshot extraction at time points, snapshot difference calculation, change detection (added/removed entities/relationships), comparison visualization, diff highlighting
     - Evolution Analysis: Metrics evolution tracking over time, time series construction, trend analysis, evolution visualization, change rate calculation
 
 Layout Algorithms:
@@ -81,7 +80,7 @@ Main Classes:
     - EmbeddingVisualizer: Vector embedding projections, similarity, and clustering
     - SemanticNetworkVisualizer: Semantic network structure and type distributions
     - AnalyticsVisualizer: Graph analytics, centrality rankings, and metrics dashboards
-    - TemporalVisualizer: Temporal timeline, patterns, and snapshot comparisons
+    - TemporalVisualizer: Temporal timeline, patterns, and evolution
     - D3Visualizer: D3.js-based interactive visualizations for web dashboards
 
 Convenience Functions:

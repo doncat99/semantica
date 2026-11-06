@@ -577,26 +577,6 @@ fig = viz.visualize_temporal_patterns(
 )
 ```
 
-### Snapshot Comparison
-
-```python
-from semantica.visualization import TemporalVisualizer
-
-viz = TemporalVisualizer()
-
-snapshots = [
-    {"timestamp": "2023-01-01", "graph": {...}},
-    {"timestamp": "2023-02-01", "graph": {...}},
-    {"timestamp": "2023-03-01", "graph": {...}}
-]
-
-fig = viz.visualize_snapshot_comparison(
-    snapshots,
-    output="interactive",
-    file_path="snapshot_comparison.html"
-)
-```
-
 ### Metrics Evolution
 
 ```python
@@ -892,7 +872,6 @@ viz = KGVisualizer(layout="circular", radius=1.5)
 #### TemporalVisualizer Methods
 - `visualize_timeline(temporal_data, output, file_path, **options)`: Event timeline
 - `visualize_temporal_patterns(patterns, output, file_path, **options)`: Temporal patterns
-- `visualize_snapshot_comparison(snapshots, output, file_path, **options)`: Snapshot comparison
 - `visualize_version_history(version_history, output, file_path, **options)`: Version history
 - `visualize_metrics_evolution(metrics_history, timestamps, output, file_path, **options)`: Metrics over time
 

@@ -3,7 +3,7 @@
 
 ``ContextGraph`` guards its state with ``self._lock`` (an ``RLock``), and every
 reader on the class takes it -- ``stats``, ``density``, ``find_nodes``,
-``find_edges``, ``get_neighbors``, ``get_nodes_by_label``, ``state_at`` and
+``find_edges``, ``get_neighbors``, ``get_nodes_by_label`` and
 ``save_to_file`` all do. ``to_dict`` was the one exception: it iterated
 ``self.nodes.values()`` and ``self.edges`` unguarded, so a concurrent writer
 raised ``RuntimeError: dictionary changed size during iteration``.

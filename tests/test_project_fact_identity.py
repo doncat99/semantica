@@ -1,4 +1,5 @@
-from semantica import semantic_artifact_builder as pipeline
+from tests.artifact_helpers import build_source_fixture
+from semantica import semantic_publication_builder as pipeline
 from semantica.semantic_artifact_schema import KnowledgeAssertion, KnowledgeRelation, SourceBuildInput
 from semantica.source import source_content_revision
 
@@ -8,7 +9,7 @@ def build(tmp_path, text, extraction):
     path.write_text(text)
     source = SourceBuildInput(filePath=str(path), sourceId="source:one", name=path.name,
                              materialRevision=source_content_revision(path), mimeType="text/plain")
-    return pipeline._build_source(source, False, extraction)
+    return build_source_fixture(source, False, extraction)
 
 
 def test_homonymous_occurrences_and_typed_endpoints_are_distinct(tmp_path):

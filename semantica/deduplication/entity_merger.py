@@ -87,42 +87,56 @@ class EntityMerger:
 
     @staticmethod
     def merge_qualified_facts(facts, *, identity):
-        """Merge equal qualified facts, preserving every independent support."""
-        from copy import deepcopy
-        import json
+        """Yield equal qualified facts in canonical order with every independent support."""
         grouped = {}
         for fact in facts:
             identifier = identity(fact)
             grouped.setdefault(identifier, []).append(fact)
-        result = []
+        for identifier in sorted(grouped):
+            yield EntityMerger.merge_qualified_fact_group(identifier, grouped.pop(identifier))
+
+    @staticmethod
+    def merge_qualified_fact_group(identifier, members):
+        """Reduce one native identity cursor without retaining its input rows."""
+        from copy import deepcopy
+        import json
+
         encoded = lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-        for identifier, members in sorted(grouped.items()):
-            target = deepcopy(min(members, key=encoded))
-            target["id"] = identifier
-            observations = {}
-            for member in members:
-                metadata = member.get("metadata", {})
-                previous = metadata.get("support_observations")
-                for observation in previous if previous is not None else [member]:
-                    observations[encoded(observation)] = deepcopy(observation)
-            originals = [observations[key] for key in sorted(observations)]
-            active = [item for item in originals if item.get("status", "candidate") != "retracted"]
-            statuses = {item.get("status", "candidate") for item in active}
-            if not active:
-                target["status"] = "retracted"
-            elif "contradicted" in statuses:
-                target["status"] = "contradicted"
-            elif "rejected" in statuses:
-                target["status"] = "rejected" if statuses == {"rejected"} else "candidate"
-            else:
-                target["status"] = "accepted" if "accepted" in statuses else "candidate"
-            # A withdrawn observation remains auditable, but cannot support a live fact.
-            target["evidence_ids"] = sorted({ref for item in active or originals for ref in item.get("evidence_ids", [])})
-            target["support_ids"] = list(target["evidence_ids"])
-            # Keep even a single original status before derived conflict marking.
-            target["metadata"] = {**target.get("metadata", {}), "support_observations": originals}
-            result.append(target)
-        return result
+        representative_key = None
+        target = None
+        observations = {}
+        for member in members:
+            key = encoded(member)
+            if representative_key is None or key < representative_key:
+                representative_key = key
+                target = deepcopy({**member, "metadata": {
+                    field: value for field, value in member.get("metadata", {}).items()
+                    if field != "support_observations"}})
+            previous = member.get("metadata", {}).get("support_observations")
+            for observation in previous if previous is not None else [member]:
+                observation_key = encoded(observation)
+                if observation_key not in observations:
+                    observations[observation_key] = deepcopy(observation)
+        if target is None:
+            raise ProcessingError("Qualified fact group has no members")
+        target["id"] = identifier
+        originals = [observations[key] for key in sorted(observations)]
+        del observations
+        active = [item for item in originals if item.get("status", "candidate") != "retracted"]
+        statuses = {item.get("status", "candidate") for item in active}
+        if not active:
+            target["status"] = "retracted"
+        elif "contradicted" in statuses:
+            target["status"] = "contradicted"
+        elif "rejected" in statuses:
+            target["status"] = "rejected" if statuses == {"rejected"} else "candidate"
+        else:
+            target["status"] = "accepted" if "accepted" in statuses else "candidate"
+        # A withdrawn observation remains auditable, but cannot support a live fact.
+        target["evidence_ids"] = sorted({ref for item in active or originals for ref in item.get("evidence_ids", [])})
+        target["support_ids"] = list(target["evidence_ids"])
+        target["metadata"] = {**target.get("metadata", {}), "support_observations": originals}
+        return target
 
     def __init__(
         self,
@@ -410,6 +424,7 @@ class EntityMerger:
                 supported = source_metadata.get('description_evidence_ids')
                 if description and (supported or description.casefold() in str(entity.get("context", "")).casefold()):
                     merge_result.merged_entity["description"] = description
+                    merge_result.field_sources["description"] = [get_entity_id(entity)]
                     merge_result.merged_entity["context"] = entity["context"]
                     metadata = merge_result.merged_entity.setdefault("metadata", {})
                     metadata["description_mention_id"] = get_entity_id(entity)
@@ -561,7 +576,8 @@ class EntityMerger:
         if "provenance" not in merged_entity["metadata"]:
             merged_entity["metadata"]["provenance"] = {}
 
-        provenance = merged_entity["metadata"]["provenance"]
+        provenance = merged_entity["metadata"]["provenance"].copy()
+        merged_entity["metadata"]["provenance"] = provenance
 
         # Record source entities
         provenance["merged_from"] = [

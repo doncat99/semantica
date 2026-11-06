@@ -1,13 +1,7 @@
-"""Grounded context filtering against truth maintenance snapshots.
+"""Validate candidate dependencies through indexed reads at one session version.
 
-This module validates cached :class:`~semantica.context.context_retriever.RetrievedContext`
-items against an immutable :class:`~semantica.reasoning.TruthMaintenanceSnapshot`
-before they are ranked or merged. Candidates whose declared dependencies are no
-longer supported by the session are removed, while program-integration errors
-(wrong argument types, stale snapshots) raise explicit exceptions.
-
-The filter is deliberately decoupled from the retrieval stack: it only sees
-candidates plus a snapshot that the caller obtained from the same filter.
+The caller serializes session access. Version fences reject mutations during
+retrieval; no detached fact set or support catalog is copied for validation.
 """
 
 from __future__ import annotations
@@ -16,7 +10,7 @@ from collections.abc import Iterable, Sequence
 from copy import deepcopy
 from typing import TYPE_CHECKING, Any, List, Tuple
 
-from semantica.reasoning import TruthMaintenanceSession, TruthMaintenanceSnapshot
+from semantica.reasoning import TruthMaintenanceSession
 from semantica.reasoning._truth_maintenance_validation import validate_fact_text
 from semantica.utils.exceptions import ProcessingError, ValidationError
 
@@ -110,13 +104,10 @@ def _attachment_metadata(member: Any) -> Any:
 
 
 class TruthMaintenanceContextFilter:
-    """Validate retrieved context dependencies against truth snapshots.
+    """Validate declared dependencies against the bound session's native indexes.
 
-    The filter is bound to one :class:`TruthMaintenanceSession` and one
-    ``session_id``. ``filter_contexts`` performs pure candidate validation
-    against a snapshot; it never reads the live session state while the
-    session may still be mutating. ``assert_current`` closes the race window
-    by re-checking the session version after retrieval completed.
+    Reads obey the session's caller-serialized contract. A committed-version
+    fence before and after candidate validation rejects intervening mutations.
     """
 
     def __init__(
@@ -144,22 +135,22 @@ class TruthMaintenanceContextFilter:
 
         return self._session_id
 
-    def snapshot(self) -> TruthMaintenanceSnapshot:
-        """Return an immutable snapshot of the bound session."""
-
-        return self._session.snapshot()
+    @property
+    def version(self) -> int:
+        """Committed version to bind retrieval and dependency validation."""
+        return self._session.version
 
     def filter_contexts(
         self,
         candidates: Iterable[Any],
         *,
-        snapshot: TruthMaintenanceSnapshot,
+        version: int,
     ) -> List[RetrievedContext]:
         """Return the grounded subset of ``candidates``.
 
         Each candidate must be a :class:`RetrievedContext`. Its root
         annotation and the annotation of every graph attachment must validate
-        and be fully supported by ``snapshot``. Passing candidates are returned
+        and be fully supported at ``version``. Passing candidates are returned
         as deep copies stamped with the actual validation credentials;
         originals are never modified. Invalid annotations remove the whole
         candidate without failing the call.
@@ -167,9 +158,7 @@ class TruthMaintenanceContextFilter:
 
         from .context_retriever import RetrievedContext
 
-        active_ids = frozenset(
-            support.support_id for support in snapshot.active_supports
-        )
+        self.assert_current(version)
         results: List[RetrievedContext] = []
         for candidate in candidates:
             if not isinstance(candidate, RetrievedContext):
@@ -177,37 +166,32 @@ class TruthMaintenanceContextFilter:
                     "candidates must be RetrievedContext instances",
                     validation_context={"candidate_type": type(candidate).__name__},
                 )
-            if self._candidate_is_grounded(candidate, snapshot=snapshot, active_ids=active_ids):
+            if self._candidate_is_grounded(candidate):
                 copied = deepcopy(candidate)
                 copied.metadata["truth_maintenance_validation"] = {
                     "session_id": self._session_id,
-                    "version": snapshot.version,
+                    "version": version,
                 }
                 results.append(copied)
+        self.assert_current(version)
         return results
 
-    def assert_current(self, snapshot: TruthMaintenanceSnapshot) -> None:
-        """Raise ``ProcessingError`` if the session moved past ``snapshot``."""
-
+    def assert_current(self, version: int) -> None:
+        """Reject a read if the session changed since the caller's version."""
+        if isinstance(version, bool) or not isinstance(version, int) or version < 0:
+            raise ValidationError("version must be a non-negative integer")
         current_version = self._session.version
-        if snapshot.version != current_version:
+        if version != current_version:
             raise ProcessingError(
-                "truth maintenance session changed during retrieval; "
-                "snapshot is stale",
-                processing_context={
-                    "expected": snapshot.version,
-                    "actual": current_version,
-                },
-                expected=snapshot.version,
+                "truth maintenance session changed during retrieval; version is stale",
+                processing_context={"expected": version, "actual": current_version},
+                expected=version,
                 actual=current_version,
             )
 
     def _candidate_is_grounded(
         self,
         candidate: RetrievedContext,
-        *,
-        snapshot: TruthMaintenanceSnapshot,
-        active_ids: frozenset,
     ) -> bool:
         try:
             root_metadata = candidate.metadata
@@ -230,9 +214,9 @@ class TruthMaintenanceContextFilter:
 
         required_facts = root_facts | entity_facts | rel_facts
         required_supports = root_supports | entity_supports | rel_supports
-        if not required_facts.issubset(snapshot.facts):
+        if not all(self._session.has_fact(fact) for fact in required_facts):
             return False
-        if not required_supports.issubset(active_ids):
+        if not all(self._session.has_support(support_id) for support_id in required_supports):
             return False
         return True
 

@@ -54,11 +54,12 @@ def main(argv=None):
         prog="semantica-explorer",
         description="Semantica Knowledge Explorer — interactive dashboard for KG exploration",
     )
-    parser.add_argument(
+    source = parser.add_mutually_exclusive_group(required=True)
+    source.add_argument(
         "--graph", "-g",
-        required=True,
         help="Path to a ContextGraph JSON file to load.",
     )
+    source.add_argument('--native-endpoint', help='Scoped native owner scene relay (loopback only).')
     parser.add_argument(
         "--port", "-p",
         type=_port,
@@ -82,8 +83,14 @@ def main(argv=None):
     )
     args = parser.parse_args(argv)
 
+    # The host persists this process identity before admitting any runtime work.
+    # EOF on host death before admission exits without constructing the server.
+    if args.native_endpoint:
+        if sys.stdin.buffer.readline(64) != b"SEMANTICA_NATIVE_EXPLORER_ADMIT\n":
+            parser.error("native Explorer requires host stdin admission")
+
     import os
-    if not os.path.isfile(args.graph):
+    if args.graph and not os.path.isfile(args.graph):
         _err.print(f"[bold red]Error:[/bold red] graph file not found: {args.graph}")
         sys.exit(1)
 
@@ -99,8 +106,17 @@ def main(argv=None):
     from .session import GraphSession
     from .app import create_app
 
-    with _out.status("[dim]Loading graph…[/dim]", spinner="dots"):
-        session = GraphSession.from_file(args.graph, read_only=args.read_only)
+    native_scope = None
+    if args.native_endpoint:
+        from .native_scope import NativeScope
+        from ..context.context_graph import ContextGraph
+        native_scope = NativeScope(args.native_endpoint, os.environ.get('SEMANTICA_NATIVE_SCENE_TOKEN'),
+            os.environ.get('SEMANTICA_NATIVE_SCENE_PROJECT'),os.environ.get('SEMANTICA_NATIVE_SCENE_GENERATION'))
+        session = GraphSession(ContextGraph(advanced_analytics=False))
+        session._read_only = True
+    else:
+        with _out.status("[dim]Loading graph…[/dim]", spinner="dots"):
+            session = GraphSession.from_file(args.graph, read_only=args.read_only)
     stats = session.get_stats()
     _out.print(
         f"[bold green]✓[/bold green] Graph loaded — "
@@ -121,7 +137,7 @@ def main(argv=None):
             default_origins.append(_browser_origin(args.host, args.port))
         allowed_origins = list(dict.fromkeys(default_origins))
 
-    app = create_app(session=session, allowed_origins=allowed_origins)
+    app = create_app(session=session, allowed_origins=allowed_origins, native_scope=native_scope)
 
     # The page is served at its origin, so the URL the browser opens and the
     # banner shows is written the same way (an IPv6 host in brackets).

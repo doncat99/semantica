@@ -3,12 +3,12 @@ import numpy as np
 import pytest
 from types import SimpleNamespace
 from semantica.semantic_artifact_schema import KnowledgeEntity, KnowledgeRelation
-from semantica.semantic_artifact_builder import _semantic_organization
+from semantica.semantic_publication_builder import _semantic_organization
 from semantica.vector_store.vector_store import VectorIndexer, VectorRetriever
 from semantica.kg import CommunityDetector
 
 def test_grounded_report_preserves_assertion_state_and_long_conditions(monkeypatch):
-    from semantica import semantic_artifact_builder as pipeline
+    from semantica import semantic_publication_builder as pipeline
     condition = 'only when ' + 'explicit source condition ' * 8
     class Provider:
         receipts = []
@@ -61,7 +61,7 @@ def test_native_report_rejects_missing_prompt_evidence_before_model_call():
 ])
 def test_native_report_rejects_invalid_findings_without_builder_parser(finding):
     from pydantic import ValidationError
-    from semantica import semantic_artifact_builder as pipeline
+    from semantica import semantic_publication_builder as pipeline
     from semantica.kg.community_summarizer import CommunitySummarizer
     class Provider:
         def generate_typed(self, *args, **kwargs):
@@ -78,7 +78,7 @@ def test_native_report_rejects_invalid_findings_without_builder_parser(finding):
 
 def test_grounded_report_uses_native_packing_and_output(monkeypatch):
     from types import SimpleNamespace
-    from semantica import semantic_artifact_builder as pipeline
+    from semantica import semantic_publication_builder as pipeline
     from semantica.kg.community_summarizer import CommunitySummarizer
     seen = []
     native = CommunitySummarizer.summarize_community
@@ -122,8 +122,33 @@ def test_native_query_rejects_dimension_coercion():
 def test_organization_does_not_reinterpret_admitted_identity():
     entities = [KnowledgeEntity(id='person', canonical_name='Jordan', type='Person', metadata={'source_ids': ['one']}),
                 KnowledgeEntity(id='country', canonical_name='Jordan', type='Country', metadata={'source_ids': ['two']})]
-    communities, topics = _semantic_organization(entities, [], [], [])
+    communities = _semantic_organization({"entities": [{"id": item.id, "name": item.canonical_name} for item in entities], "relationships": []})
     assert {entity for community in communities for entity in community.entity_ids} == {"person", "country"}
+
+
+def test_organization_partitions_facts_without_rescanning_per_community(monkeypatch):
+    from semantica import semantic_publication_builder as pipeline
+    from semantica.semantic_artifact_schema import KnowledgeAssertion
+
+    class CountedRows(list):
+        visits = 0
+
+        def __iter__(self):
+            for row in super().__iter__():
+                self.visits += 1
+                yield row
+
+    entities = [KnowledgeEntity(id=f'entity:{i}', canonical_name=f'Concept {i}', type='Concept')
+                for i in range(100)]
+    edges = CountedRows([{'id': 'internal', 'source': 'entity:0', 'target': 'entity:1'},
+                         {'id': 'cross', 'source': 'entity:1', 'target': 'entity:2'}])
+    from semantica.pipeline.parallelism_manager import ParallelismManager
+    monkeypatch.setattr(ParallelismManager, 'execute_isolated_task', lambda *args, **kwargs:
+                        {'communities': [['entity:0', 'entity:1'], *[[f'entity:{i}'] for i in range(2, 100)]]})
+    communities = _semantic_organization({"entities": [{"id": item.id, "name": item.canonical_name} for item in entities], "relationships": edges})
+    assert edges.visits == len(edges)
+    assert communities[0].relation_ids == ['internal']
+    assert {ref for group in communities for ref in group.entity_ids} == {item.id for item in entities}
 
 def test_native_community_algorithm_and_isolates_are_explicit():
     import networkx as nx
@@ -133,12 +158,6 @@ def test_native_community_algorithm_and_isolates_are_explicit():
     assert result['algorithm'] == 'greedy_modularity'
     assert {frozenset(group) for group in result['communities']} == {frozenset([node]) for node in graph}
 
-def test_native_delta_covers_conflict_and_identity_deletion():
-    from semantica.change_management.managers import TemporalVersionManager
-    result = TemporalVersionManager().compare_collections(
-        {'conflicts': [{'id': 'conflict', 'status': 'open'}], 'identity': [{'id': 'split'}]},
-        {'conflicts': [], 'identity': []})
-    assert result['removed_ids'] == ['conflict', 'split']
 
 def test_native_conflict_respects_recorded_conditions():
     from semantica.conflicts import ConflictDetector
@@ -147,59 +166,6 @@ def test_native_conflict_respects_recorded_conditions():
              {'id': 'b', 'subject': 's', 'predicate': 'p', 'object': 'o',
               'qualifiers': {'polarity': 'negative', 'time': '2026'}}]
     assert ConflictDetector.qualified_polarity_groups(facts) == []
-
-def test_query_uses_native_vector_ranking(monkeypatch, tmp_path):
-    from tests.test_semantic_query_worker import _semantic_request, _serve
-    original = VectorRetriever.search_similar
-    calls = []
-    def search(self, *args, **kwargs):
-        calls.append(True)
-        return original(self, *args, **kwargs)
-    monkeypatch.setattr(VectorRetriever, 'search_similar', search)
-    assert _serve(_semantic_request(tmp_path))['ok']
-    assert calls
-
-def test_query_preserves_native_scores_and_order_without_reranking(monkeypatch, tmp_path):
-    from tests.test_semantic_query_worker import _semantic_request, _serve
-    def search(self, vector, vectors, ids, **options):
-        return [{'id': ids[0], 'score': -0.25}, {'id': ids[1], 'score': -0.75}]
-    monkeypatch.setattr(VectorRetriever, 'search_similar', search)
-    request = _semantic_request(tmp_path)
-    request['params']['limit'] = 1000
-    result = _serve(request)
-    assert result['ok']
-    hits = result['result']['contexts']
-    assert hits and hits[0]['sourceIds'] == ['source-1']
-    assert hits[0]['score'] == -0.25
-    assert hits[-1]['sourceIds'] == ['source-2']
-    assert hits[-1]['score'] == -0.75
-
-def test_query_uses_native_keyword_ranking_after_source_admission(monkeypatch, tmp_path):
-    from semantica.context.context_retriever import ContextRetriever
-    from tests.test_semantic_query_worker import _build, _request, _serve
-    original = ContextRetriever._keyword_match_entities
-    calls = []
-    def search(self, entities, query, max_results):
-        calls.append([item['id'] for item in entities])
-        return original(self, entities, query, max_results)
-    monkeypatch.setattr(ContextRetriever, '_keyword_match_entities', search)
-    request = _request(_build(tmp_path))
-    assert _serve(request)['ok']
-    assert calls and calls[0]
-    calls.clear()
-    request['params']['sourceIds'] = []
-    response = _serve(request)
-    assert response['ok'] and not response['result']['contexts']
-    assert not calls or calls == [[]]
-
-def test_query_hashes_and_parses_same_bytes(monkeypatch, tmp_path):
-    from hashlib import sha256
-    from pathlib import Path
-    from semantica.semantic_query import _load_json
-    artifact = tmp_path / 'artifact.json'
-    artifact.write_bytes(b'{"value":1}')
-    monkeypatch.setattr(Path, 'read_text', lambda *_args, **_kwargs: pytest.fail('second read may differ from hashed bytes'))
-    assert _load_json(artifact, 'sha256:' + sha256(artifact.read_bytes()).hexdigest()) == {'value': 1}
 
 def test_native_store_rejects_bad_space_before_mutation():
     from semantica.vector_store import VectorStore
@@ -281,17 +247,6 @@ def test_leiden_uses_existing_native_refinement_not_louvain(monkeypatch):
     assert set(result['node_assignments']) == set(range(4))
     assert calls[0]['resolution'] == 2.
 
-def test_retrieval_index_references_canonical_snapshot_without_copying_records(tmp_path):
-    import json
-    from tests.test_semantic_query_worker import _build, _request, _serve
-    built = _build(tmp_path)
-    retrieval = json.loads(built['retrieval_path'].read_text())
-    assert retrieval['format'] == 'semantica.retrieval-reference.v1'
-    assert 'snapshot_id' not in retrieval
-    assert not set(retrieval).intersection({'entities', 'relations', 'assertions', 'evidence', 'conflicts', 'topics'})
-    assert _serve(_request(built))['ok']
-
-
 @pytest.mark.parametrize('target_ids, expected_calls, expected_reports', [
     (None, ['overview'], 1),
     (['project'], ['overview'], 1),
@@ -303,7 +258,7 @@ def test_retrieval_index_references_canonical_snapshot_without_copying_records(t
 def test_report_targets_bound_calls_and_respect_reader_scope(
         monkeypatch, target_ids, expected_calls, expected_reports):
     from types import SimpleNamespace
-    from semantica import semantic_artifact_builder as pipeline
+    from semantica import semantic_publication_builder as pipeline
     from semantica.semantic_artifact_schema import KnowledgeCommunity, KnowledgeTopic, EvidenceSpan, DocumentLocator, ReportSection
     span = EvidenceSpan(id='ev', representation_id='rep', quote='Supported source.', locator=DocumentLocator(
         representation_id='rep', origin='native', quote='Supported source.', quality='precise', start_char=0, end_char=17))
@@ -315,33 +270,11 @@ def test_report_targets_bound_calls_and_respect_reader_scope(
         calls.append(context['target']['type'])
         return [ReportSection(title='Meaning', text='Supported explanation.', evidence_ids=['ev'])], []
     monkeypatch.setattr(pipeline, '_grounded_explanation', explain)
-    reports, receipts = pipeline._explanation_reports('project', [{'passages': [span]}], [entity], [], [],
-        [community], [topic], [span], SimpleNamespace(model_id='model'), target_ids=target_ids)
+    from tests.artifact_helpers import organization_report_owner
+    with organization_report_owner(monkeypatch):
+        reports, receipts = pipeline._explanation_reports('project', [{'passages': [span]}], [entity], [], [],
+            [community], [topic], [span], SimpleNamespace(model_id='model'), target_ids=target_ids)
     assert calls == expected_calls
     assert len(reports) == expected_reports
     if target_ids == ['community', 'topic']:
         assert 'derived_from_report_id' not in reports[-1].metadata
-
-
-def test_query_process_cache_reuses_admitted_bytes_and_rejects_file_changes(tmp_path, monkeypatch):
-    import json
-    from hashlib import sha256
-    from pathlib import Path
-    from semantica.semantic_query import _load_json, QueryError
-    file = tmp_path / 'snapshot.json'
-    original = b'{"value":1}'
-    file.write_bytes(original)
-    digest = 'sha256:' + sha256(original).hexdigest()
-    reads = []
-    read_bytes = Path.read_bytes
-    def read(path):
-        reads.append(path)
-        return read_bytes(path)
-    monkeypatch.setattr(Path, 'read_bytes', read)
-    assert _load_json(file, digest) == {'value': 1}
-    assert _load_json(file, digest) == {'value': 1}
-    assert len(reads) == 1
-    file.write_bytes(b'{"value":2}')
-    with pytest.raises(QueryError, match='digest'):
-        _load_json(file, digest)
-    assert len(reads) == 2

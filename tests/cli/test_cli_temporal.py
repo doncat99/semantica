@@ -1,6 +1,6 @@
 """Smoke tests for the 'semantica temporal' CLI subcommands (issue #1809).
 
-All five subcommands crashed on v0.7.0 because the CLI wrappers called methods
+The supported subcommands crashed on v0.7.0 because the CLI wrappers called methods
 that no longer exist on the temporal engine classes. These tests drive each
 subcommand through CliRunner against a tiny fixture graph so that class of
 drift fails loudly.
@@ -50,45 +50,6 @@ def fixture_graph(monkeypatch):
     return graph
 
 
-class TestTemporalSnapshot:
-    def test_snapshot_returns_graph_state_at_time(self, runner, fixture_graph):
-        result = runner.invoke(
-            cli_module.main, ["temporal", "snapshot", "--at", "2025-01-15T00:00:00Z"]
-        )
-        assert result.exit_code == 0
-        payload = json.loads(result.output)
-        assert "entities" in payload
-        rel_types = [r.get("type") for r in payload["relationships"]]
-        assert "knows" in rel_types
-
-    def test_snapshot_after_edge_expired_excludes_it(self, runner, fixture_graph):
-        result = runner.invoke(
-            cli_module.main, ["temporal", "snapshot", "--at", "2025-01-25T00:00:00Z"]
-        )
-        assert result.exit_code == 0
-        payload = json.loads(result.output)
-        rel_types = [r.get("type") for r in payload["relationships"]]
-        assert "knows" not in rel_types
-
-
-class TestTemporalQuery:
-    def test_query_at_time(self, runner, fixture_graph):
-        result = runner.invoke(
-            cli_module.main,
-            ["temporal", "query", "status", "--at", "2025-01-15T00:00:00Z", "--json"],
-        )
-        assert result.exit_code == 0
-        payload = json.loads(result.output)
-        assert payload["query"] == "status"
-        assert payload["num_relationships"] == 1
-
-    def test_query_defaults_to_now(self, runner, fixture_graph):
-        result = runner.invoke(
-            cli_module.main, ["temporal", "query", "status", "--json"]
-        )
-        assert result.exit_code == 0
-        payload = json.loads(result.output)
-        assert "at_time" in payload
 
 
 class TestTemporalHistory:
@@ -313,9 +274,8 @@ class TestTemporalPrecisionAndHistoryFixes:
                 "--store",
                 "neo4j",
                 "temporal",
-                "snapshot",
-                "--at",
-                "2025-01-15T00:00:00Z",
+                "history",
+                "entity_alice",
             ],
         )
         assert result.exit_code != 0

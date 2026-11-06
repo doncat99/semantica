@@ -1,0 +1,11 @@
+# Native publication point reads avoid extraction wire-schema initialization
+
+The fresh-process point-read gate includes all allocation after the native store opens. Profiling the unchanged 50,000-row fixture isolated its variable excess to importing `semantic_extract.schemas` solely for pure predicate normalization. That imported Pydantic and initialized extraction wire models on a native record read. The membership ASK added about 0.9 MB and field projection about 0.05 MB; the evidence does not support replacing this authorization query.
+
+Moved `normalize_fact_predicate` into the existing lightweight extraction types owner and changed publication imports to that owner. Its normalization and validation remain identical. The builder consumer must import the same helper from types. There is one definition and no compatibility export in schemas.
+
+The resource regression retains its original 16 MiB query and 64 MiB open limits and adds a fresh-process assertion that the native read does not import extraction wire schemas. Before the fix a direct subprocess import failed that structural assertion. After the fix the structural assertion passes. Fresh subprocess reads of the controlled 1,000 and 50,000 native-row stores passed the unchanged byte gates: query growth 7,651,328 and 1,654,784 bytes; response 1,310 bytes in both. These are warm OS cache/native process allocation checks, not a cold disk or complete ESG build capacity claim.
+
+The normal pytest fixture run is temporarily blocked by concurrent canonical membership protocol alignment; rerun its unchanged resource gate after integration. This document will record that final result separately.
+
+Final integrated validation: production resource pytest **1 passed in 2.78s**, with query high water growth **2,080,768 / 3,178,496 bytes**, open growth **10,649,600 / 11,042,816 bytes**, full process high water **56,098,816 / 57,573,376 bytes** for 1,000 / 50,000 unrelated native rows, response **1,310 bytes**. Combined publication, extraction records, identity projection and native build lifecycle suites: **47 passed in 17.71s**, no deselection. Builder consumer imports the same lightweight owner. The original resource gates are unchanged.
