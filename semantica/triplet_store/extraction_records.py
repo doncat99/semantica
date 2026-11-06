@@ -43,6 +43,12 @@ def _hash(quads):
     return hashlib.sha256("\n".join(sorted(str(q) for q in quads)).encode()).hexdigest()
 
 
+def _triple(quad):
+    # The operation fixes the graph once. Charge its RDF payload identically on
+    # insertion and verification instead of charging that URI again per row.
+    return str(quad.subject) + " " + str(quad.predicate) + " " + str(quad.object)
+
+
 def _range(text, start, end):
     if type(start) is not int or type(end) is not int or not 0 <= start < end <= len(text):
         raise ProcessingError("Extraction evidence range is invalid")
@@ -694,7 +700,7 @@ class ExtractionRecords:
         for subject in subjects:
             for quad in self.owner.store.quads_for_pattern(subject, None, None, self.graph):
                 facts.append(quad)
-                byte_count += len(str(quad).encode())
+                byte_count += len(_triple(quad).encode()) + 3
                 if len(facts) > MAX_QUADS or byte_count > MAX_BYTES:
                     raise ProcessingError("Native extraction fact read exceeds budget")
         if _hash(facts) != self.one(self.operation, "factsDigest") or len(facts) != self.one(self.operation, "quadCount"):
@@ -741,7 +747,7 @@ class ExtractionRecords:
         for key, value in self.binding.items():
             self.add(self.operation, "binding" + key[0].upper() + key[1:], value)
         self.add(self.operation, "operationDigest", _hash([q for q in self.quads if q.subject == self.operation]))
-        serialized = " .\n".join(str(q.subject) + " " + str(q.predicate) + " " + str(q.object) for q in self.quads)
+        serialized = " .\n".join(_triple(q) for q in self.quads)
         if len(serialized.encode()) > MAX_BYTES:
             raise ProcessingError("Native extraction exceeds atomic byte budget")
         self.owner.store.update("INSERT DATA { GRAPH " + str(self.graph) + " { " + serialized + " . } }")

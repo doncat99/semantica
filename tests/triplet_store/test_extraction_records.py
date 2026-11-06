@@ -22,6 +22,50 @@ def entity(name, offset, index):
     return Entity(name, "ORG", offset, offset + len(name), .7, {"mention_id": "mention:" + str(index), "span_occurrence": 0, "model": "model", "provider": "fixture", "extraction_method": "llm_typed"})
 
 
+def test_extraction_write_and_restart_use_the_same_fact_byte_budget(tmp_path):
+    from semantica.triplet_store.extraction_records import MAX_BYTES
+    store = OxigraphStore(tmp_path / 'facts')
+    bound = binding()
+    records = ExtractionRecords(store, bound, 'entities')
+    records.grounding(RANGES, TEXT)
+    values = [entity('Acme', 0, index) for index in range(280)]
+    for index, value in enumerate(values):
+        records.write_entity(value, index, TEXT, None)
+    records.add(records.operation, 'nativeGroundingDigest', records.grounding(RANGES, TEXT))
+    facts = [quad for quad in records.quads if quad.subject != records.operation]
+    triple_bytes = len(" .\n".join(str(q.subject) + " " + str(q.predicate) + " " + str(q.object) for q in records.quads).encode())
+    quad_bytes = sum(len(str(q).encode()) for q in facts)
+    assert triple_bytes < MAX_BYTES - 4096
+    assert quad_bytes > MAX_BYTES
+    receipt = records.commit(len(values), 'paid')
+    assert receipt['count'] == len(values)
+    store.close()
+    store = OxigraphStore(tmp_path / 'facts')
+    assert store.extraction_receipt(bound, 'entities') == receipt
+    assert store.read_extraction(bound, 'entities', text=TEXT, native_ranges=RANGES) == values
+    # A real missing fact remains corruption, independently of byte accounting.
+    node = ExtractionRecords(store, bound, 'entities').entity_node(values[0])
+    missing = next(store.store.quads_for_pattern(node, store._oxigraph.NamedNode(F+'name'), None, None))
+    store.store.remove(missing)
+    with pytest.raises(ProcessingError, match='facts missing or corrupt'):
+        store.extraction_receipt(bound, 'entities')
+    store.close()
+
+
+def test_extraction_atomic_payload_budget_rejects_before_writing(tmp_path):
+    store = OxigraphStore(tmp_path / 'facts')
+    bound = binding()
+    records = ExtractionRecords(store, bound, 'entities')
+    records.grounding(RANGES, TEXT)
+    for index in range(420):
+        records.write_entity(entity('Acme', 0, index), index, TEXT, None)
+    with pytest.raises(ProcessingError, match='atomic byte budget'):
+        records.commit(420, 'paid')
+    assert store.extraction_receipt(bound, 'entities') is None
+    assert not list(store.store.quads_for_pattern(None, None, None, records.graph))
+    store.close()
+
+
 def test_native_entity_attributes_profile_and_qualified_relation_roundtrip(tmp_path):
     store = OxigraphStore(tmp_path / "facts")
     spec = ExtractionSpecification.model_validate(dict(id="spec", version="1", entity_types=[dict(name="ORG", description="organization", attributes={
