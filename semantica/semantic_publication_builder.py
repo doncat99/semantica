@@ -2231,7 +2231,9 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
     # validations do not reopen the same reader range for every field.
     projection_windows: OrderedDict[int, str] = OrderedDict()
     projection_window_chars = min(TEXT_WINDOW_CHARS, 4096)
-    projection_window_limit = 64
+    # shortcut: 1 MiB per active source, bounded until projection telemetry
+    # proves a larger working set is necessary.
+    projection_window_limit = 256
 
     def read(start, end):
         if type(start) is not int or type(end) is not int or start >= end:
