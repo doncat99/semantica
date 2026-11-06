@@ -737,8 +737,9 @@ class SqliteCacheBackend(CacheBackend):
             self._read_conn.set_progress_handler(lambda: int(cancelled()), 1000)
             self._read_conn.execute("BEGIN")
             result = operation(self._read_conn)
-            if cancelled():
-                raise ProcessingError("Accepted extraction read cancelled or deadline exceeded")
+            # A scheduling pause after completed SQL must not invalidate a paid receipt.
+            if cancel_event is not None and cancel_event.is_set():
+                raise ProcessingError("Accepted extraction read cancelled")
             return result
         except ProcessingError:
             raise

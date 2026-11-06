@@ -1507,19 +1507,24 @@ def _read_source_projection_text(reader, start, end):
 
 
 def _source_passage_ranges(read, length, *, chunk_size=TEXT_WINDOW_CHARS):
-    """Traverse line-relative passage addresses with bounded source reads."""
+    """Yield passage addresses and text from one bounded source traversal."""
     segment = 0
+    chars = []
     for offset in range(0, length, chunk_size):
         for index, char in enumerate(read(offset, min(length, offset + chunk_size)), offset):
             if char == '\n':
                 if segment < index:
-                    yield segment, index
+                    yield segment, index, ''.join(chars)
+                chars.clear()
                 segment = index + 1
-            elif index + 1 - segment == 1600:
-                yield segment, index + 1
-                segment = index + 1
+            else:
+                chars.append(char)
+                if index + 1 - segment == 1600:
+                    yield segment, index + 1, ''.join(chars)
+                    chars.clear()
+                    segment = index + 1
     if segment < length:
-        yield segment, length
+        yield segment, length, ''.join(chars)
 
 
 def _source_passages(built: dict[str, Any]) -> list[EvidenceSpan]:
@@ -1529,8 +1534,7 @@ def _source_passages(built: dict[str, Any]) -> list[EvidenceSpan]:
     locations = built.get("source_locations", [])
     passages = []
     read = lambda start, end: _read_source_projection_text(text.reader, start, end)
-    for start, end in _source_passage_ranges(read, len(text)):
-        quote = read(start, end)
+    for start, end, quote in _source_passage_ranges(read, len(text)):
         if quote.strip():
             fields, metadata = _located_document_fields(locations, start, end)
             passages.append(EvidenceSpan(id=_span_id(representation.id, start, end), representation_id=representation.id,

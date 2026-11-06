@@ -248,6 +248,29 @@ def test_accept_cancellation_and_python_owner_lock_are_bounded(tmp_path):
         c.accept("entities", "closed", [1])
 
 
+def test_completed_paid_point_read_survives_scheduler_delay(tmp_path, monkeypatch):
+    owner = SqliteCacheBackend(str(tmp_path / 'cache.db'))
+    digest = owner.accept('entities', 'seed', [1])
+    clock = [0.0]
+    monkeypatch.setattr(time, 'monotonic', lambda: clock[0])
+    def read(conn):
+        result = conn.execute('SELECT digest FROM accepted_receipts WHERE namespace=? AND key=?',
+                              ('entities', 'seed')).fetchone()[0]
+        clock[0] = 1.0  # Completed SQL followed by a scheduling pause.
+        return result
+    try:
+        assert owner._accepted_read(read) == digest
+        cancelled = threading.Event()
+        def cancel_after_read(conn):
+            result = read(conn)
+            cancelled.set()
+            return result
+        with pytest.raises(ProcessingError, match='cancelled'):
+            owner._accepted_read(cancel_after_read, cancel_event=cancelled)
+    finally:
+        owner.close()
+
+
 def test_native_dataclass_accepted_and_custom_codec_rejected(tmp_path):
     from semantica.semantic_extract.types import Entity
     c = cache(tmp_path / "cache.db")

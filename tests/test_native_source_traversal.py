@@ -37,5 +37,26 @@ def test_passage_addresses_preserve_long_lines_empty_lines_and_tail(chunk_size):
                 for start in range(match.start(), match.end(), 1600)]
     actual = list(builder._source_passage_ranges(lambda start, end: text[start:end],
                                                len(text), chunk_size=chunk_size))
-    assert actual == expected
-    assert text[actual[-1][0]:actual[-1][1]] == 'last'
+    assert actual == [(start, end, text[start:end]) for start, end in expected]
+    assert actual[-1][2] == 'last'
+
+
+def test_passage_projection_reads_each_native_window_once(monkeypatch):
+    from types import SimpleNamespace
+    text = ('a\n\n界\n' * 4000) + 'tail' * 900
+    reads = []
+    def read(reader, start, end):
+        reads.append((start, end))
+        return text[start:end]
+    monkeypatch.setattr(builder, '_read_source_projection_text', read)
+    class Text:
+        reader = object()
+        def __len__(self):
+            return len(text)
+    built = dict(text=Text(), representation=SimpleNamespace(id='rep', origin='native'),
+                 source_locations=SimpleNamespace(locate=lambda start, end: None))
+    passages = builder._source_passages(built)
+    expected = list(builder._source_passage_ranges(lambda start, end: text[start:end], len(text)))
+    assert [(span.locator.start_char, span.locator.end_char, span.quote) for span in passages] == expected
+    assert reads == [(start, min(len(text), start+builder.TEXT_WINDOW_CHARS))
+                     for start in range(0, len(text), builder.TEXT_WINDOW_CHARS)]
