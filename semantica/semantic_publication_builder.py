@@ -3042,7 +3042,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
         index = identity_index = IdentityCandidateIndex(store,request.project_id,generation,identity_resolver.duplicate_detector)
         with _project_progress(progress,"entity_resolution",90):
             index.build(native_rows,resolve_candidates=request.recipe.id == 'model')
-        with publication.checkpointed(generation):
+        with publication.build_scope(generation), publication.checkpointed(generation):
             cursor = None
             while True:
                 roots = index.roots(after=cursor)

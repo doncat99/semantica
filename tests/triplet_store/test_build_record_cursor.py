@@ -109,3 +109,35 @@ def test_streamed_canonical_count_must_be_sealed_before_activation(tmp_path):
         assert store.publication_status('p')['state'] == 'ready'
     finally:
         store.close()
+
+
+def test_build_scope_reuses_plan_validation_but_never_stale_generation(tmp_path, monkeypatch):
+    from semantica.triplet_store.publication_records import PublicationRecords
+
+    store, generation, ids = staged(tmp_path, 3)
+    p = PublicationRecords(store, 'p')
+    native, plans = store.store, []
+
+    class CountPlans:
+        def __getattr__(self, key):
+            return getattr(native, key)
+
+        def query(self, query, *args, **kwargs):
+            if 'operationCount' in query and 'HAVING' in query:
+                plans.append(1)
+            return native.query(query, *args, **kwargs)
+
+    monkeypatch.setattr(store, 'store', CountPlans())
+    try:
+        with p.build_scope(generation):
+            for _ in range(20):
+                store.read_build_nodes('p', generation, ids[:1], fields=[F+'name'])
+        assert len(plans) == 2
+        with pytest.raises(ProcessingError, match='not pending'):
+            with p.build_scope(generation):
+                store.begin_publication('p', expected_generation=generation,
+                    source_count=0, canonical_count=0)
+                store.read_build_nodes('p', generation, ids[:1])
+        assert store._build_plan_scope is None
+    finally:
+        store.close()

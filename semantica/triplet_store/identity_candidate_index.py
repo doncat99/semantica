@@ -22,7 +22,7 @@ class IdentityCandidateIndex:
     def build(self, rows, *, resolve_candidates=True):
         """Rows reopen as (native Entity IRI, resolver row); no DTOs are retained."""
         p = self.publication
-        with self.owner._publication_lock:
+        with self.owner._publication_lock, p.build_scope(self.generation):
             p._build_fence(self.generation)
             self.owner._update_derived_graph(p.graph, delete='?s ?predicate ?o',
                 where=f'''GRAPH {p.graph} {{ ?s ?predicate ?o . VALUES ?predicate {{
@@ -31,8 +31,10 @@ class IdentityCandidateIndex:
                 <{P}identityComponent> <{P}identityKeyComponent> }} }}''')
             self.owner.flush()
             if resolve_candidates:
-                self.detector.disambiguator.prepare(lambda: (row for _, row in rows()),
-                    context=NativeIdentityContext(self.owner, p.project, self.generation))
+                context = NativeIdentityContext(self.owner, p.project, self.generation)
+                with context.resolution_scope(), context.publication.checkpointed(self.generation):
+                    self.detector.disambiguator.prepare(lambda: (row for _, row in rows()),
+                        context=context)
             count = 0
             pending_rows = pending_bytes = 0
 

@@ -612,9 +612,25 @@ class PublicationRecords:
         self.fence(generation)
         return result
 
+    @contextmanager
+    def build_scope(self, generation):
+        """Validate immutable inputs at handoffs; keep keyed checks per operation."""
+        with self.owner._publication_lock:
+            if getattr(self.owner, '_build_plan_scope', None) is not None:
+                raise ProcessingError('Nested native build plan scope')
+            self._build_fence(generation)
+            self.owner._build_plan_scope = (self.graph.value, generation)
+            try:
+                yield
+            finally:
+                self.owner._build_plan_scope = None
+            self._build_fence(generation)
+
     def _build_fence(self, generation):
         """A complete immutable input plan is required before any build traversal."""
         status = self.fence(generation, "pending")
+        if getattr(self.owner, '_build_plan_scope', None) == (self.graph.value, generation):
+            return
         sources = next(iter(self.owner.store.query(f"SELECT (COUNT(?source) AS ?count) WHERE {{ GRAPH {self.graph} {{ {self.head} <{P}source> ?source }} }}")))
         if int(sources['count'].value) != status['source_count']:
             raise ProcessingError("Native build source plan is incomplete")

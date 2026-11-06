@@ -228,7 +228,8 @@ def test_native_index_checkpoints_bounded_rows_and_reopens_complete(tmp_path, mo
         store.close()
 
 
-def test_identity_checkpoint_cancel_stays_unsealed_after_restart_and_retry(tmp_path):
+@pytest.mark.parametrize('resolve_candidates', [False, True])
+def test_identity_checkpoint_cancel_stays_unsealed_after_restart_and_retry(tmp_path, resolve_candidates):
     from threading import Event
     from semantica.semantic_worker_context import query_cancellation
     from semantica.triplet_store.oxigraph_store import OxigraphStore
@@ -244,7 +245,8 @@ def test_identity_checkpoint_cancel_stays_unsealed_after_restart_and_retry(tmp_p
     token = query_cancellation.set(event)
     try:
         with pytest.raises(ProcessingError, match='canceled'):
-            index.build(rows, resolve_candidates=False)
+            index.build(rows, resolve_candidates=resolve_candidates)
+        assert store._build_plan_scope is None
     finally:
         query_cancellation.reset(token)
     store.close()
@@ -260,18 +262,24 @@ def test_identity_checkpoint_cancel_stays_unsealed_after_restart_and_retry(tmp_p
         store.close()
 
 
-def test_identity_staging_cannot_cross_generation_change(tmp_path):
+@pytest.mark.parametrize('resolve_candidates', [False, True])
+def test_identity_staging_cannot_cross_generation_change(tmp_path, resolve_candidates):
     store, generation, ids = staged(tmp_path, 2)
     index = IdentityCandidateIndex(store, 'p', generation,
         EntityResolver(strategy='contextual').duplicate_detector)
+    changed = False
     def rows():
+        nonlocal changed
         yield ids[0], dict(id='0', name='A', type='ORG')
-        store.begin_publication('p', expected_generation=generation,
-            source_count=0, canonical_count=0)
+        if not changed:
+            changed = True
+            store.begin_publication('p', expected_generation=generation,
+                source_count=0, canonical_count=0)
         yield ids[1], dict(id='1', name='B', type='ORG')
     try:
         with pytest.raises(ProcessingError, match='not pending'):
-            index.build(rows, resolve_candidates=False)
+            index.build(rows, resolve_candidates=resolve_candidates)
+        assert store._build_plan_scope is None
     finally:
         store.close()
 
@@ -353,5 +361,51 @@ def test_native_component_resolution_validates_whole_plan_only_at_handoffs(tmp_p
         assert len(calls) == 2, 'whole plan validation must not run per identity lookup'
         assert context._lookup_cache is None
         assert context._lookup_bytes == 0
+    finally:
+        store.close()
+
+
+def test_native_preparation_checks_plan_at_handoffs_and_batches_durable_writes(tmp_path, monkeypatch):
+    from semantica.triplet_store.identity_context import NativeIdentityContext
+
+    store, generation, ids = staged(tmp_path, 200)
+    rows = [dict(id=str(n), name='Company '+str(n), type='ORG',
+                 context='Company '+str(n)+' operates services.',
+                 metadata={'identity_scope': 'source'}) for n in range(len(ids))]
+    resolver = EntityResolver(strategy='contextual')
+    index = IdentityCandidateIndex(store, 'p', generation, resolver.duplicate_detector)
+    prepare = resolver.duplicate_detector.disambiguator.prepare
+    context_counts = {}
+
+    def measured_prepare(entities, *, context):
+        complete, flush = context.publication._build_fence, store.flush
+        calls, flushes = [], []
+
+        def complete_plan(*args, **kwargs):
+            calls.append(1)
+            return complete(*args, **kwargs)
+
+        def durable_flush():
+            flushes.append(1)
+            return flush()
+
+        monkeypatch.setattr(context.publication, '_build_fence', complete_plan)
+        monkeypatch.setattr(store, 'flush', durable_flush)
+        try:
+            return prepare(entities, context=context)
+        finally:
+            context_counts.update(plans=len(calls), flushes=len(flushes))
+            monkeypatch.setattr(store, 'flush', flush)
+
+    monkeypatch.setattr(resolver.duplicate_detector.disambiguator, 'prepare', measured_prepare)
+    try:
+        index.build(lambda: iter(zip(ids, rows)))
+        assert context_counts['plans'] == 0, 'outer preparation scope must own complete-plan checks'
+        assert context_counts['flushes'] <= 4, 'semantic observations must use bounded durable batches'
+        context = resolver.duplicate_detector.disambiguator._native_context
+        assert isinstance(context, NativeIdentityContext)
+        assert context._resolution_depth == 0
+        assert context._lookup_cache is None
+        assert sum(len(group) for group in index.iter_components()) == len(ids)
     finally:
         store.close()
