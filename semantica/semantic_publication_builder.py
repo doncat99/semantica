@@ -1439,8 +1439,9 @@ def _window_grounding_context(locations, start, end):
 
 def _structural_evidence(item: dict[str, Any], representation_id: str, origin: str) -> EvidenceSpan:
     fields = {key: item[key] for key in ("page", "bbox", "table_id", "cell", "section_path") if item.get(key) is not None}
-    if item["start"] is not None:
-        fields.update(start_char=item["start"], end_char=item["end"])
+    start, end = item.get("start"), item.get("end")
+    if type(start) is int and type(end) is int and 0 <= start < end:
+        fields.update(start_char=start, end_char=end)
     if not any(fields.get(key) is not None for key in ("start_char", "page", "table_id")):
         raise SemanticArtifactError("structural supporting evidence has no source coordinates")
     evidence_id = (_evidence_id(["cell", representation_id, item["table_id"], item["cell"]]) if item.get("cell")
@@ -1543,6 +1544,10 @@ def _docling_cell_evidence(built: dict[str, Any]) -> list[EvidenceSpan]:
     representation = built["representation"]
     evidence = []
     for item in built['source_locations'].pages(cells_only=True):
+        # A page-only/table-only location cannot become a replayable citation.
+        # Native scalar ranges remain the only admitted evidence owner.
+        if type(item.get("start")) is not int or type(item.get("end")) is not int:
+            continue
         evidence.append(_structural_evidence(item, representation.id, representation.origin))
     return evidence
 
