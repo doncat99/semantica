@@ -154,3 +154,59 @@ def test_release_matrix_keeps_cpu_default_and_gpu_variants_separate():
     variants = module.release_matrix(True)["include"]
     assert len(variants) == 6
     assert {(v["target"], v["acceleration"]) for v in variants if v["acceleration"] == "directml"} == {("win-x64", "directml")}
+
+
+def test_single_platform_qualification_keeps_exact_target_and_rejects_unknown():
+    assert [(item["target"], item["acceleration"]) for item in
+            module.release_matrix(False, "win-x64")["include"]] == [("win-x64", "cpu")]
+    with pytest.raises(ValueError, match="unsupported qualification target"):
+        module.release_matrix(False, "typo")
+
+
+def test_single_platform_qualification_cannot_publish():
+    import yaml
+    workflow = yaml.safe_load((SCRIPT.parent.parent / "workflows/semantic-worker-native.yml").read_text())
+    assert workflow["jobs"]["publish"]["if"] == "${{ !inputs.qualification_target || inputs.qualification_target == 'all' }}"
+
+
+def test_query_acceptance_preserves_primary_exception_and_closes_diagnostics(monkeypatch):
+    from io import StringIO
+    script = SCRIPT.with_name("semantic_worker_model_acceptance.py")
+    acceptance_spec = importlib.util.spec_from_file_location("query_acceptance", script)
+    acceptance = importlib.util.module_from_spec(acceptance_spec)
+    acceptance_spec.loader.exec_module(acceptance)
+    class Process:
+        stdin, stdout = StringIO(), StringIO()
+        returncode = 1
+        def wait(self, **_kwargs): return self.returncode
+        def poll(self): return self.returncode
+    process = Process()
+    monkeypatch.setattr(acceptance.subprocess, "Popen", lambda *args, **kwargs: process)
+    diagnostic = None
+    with pytest.raises(RuntimeError, match="primary query failure"):
+        with acceptance.QuerySession() as session:
+            diagnostic = session.diagnostics
+            raise RuntimeError("primary query failure")
+    assert diagnostic.closed and process.stdout.closed
+
+
+def test_query_acceptance_empty_response_identifies_mode_and_stderr(monkeypatch):
+    from io import StringIO
+    script = SCRIPT.with_name("semantic_worker_model_acceptance.py")
+    acceptance_spec = importlib.util.spec_from_file_location("query_acceptance", script)
+    acceptance = importlib.util.module_from_spec(acceptance_spec)
+    acceptance_spec.loader.exec_module(acceptance)
+    class Process:
+        stdin, stdout = StringIO(), StringIO()
+        returncode = 1
+        def wait(self, **_kwargs): return self.returncode
+        def poll(self): return self.returncode
+    def popen(*args, **kwargs):
+        kwargs["stderr"].write("native stack evidence")
+        process = Process()
+        process.kill = lambda: None
+        return process
+    monkeypatch.setattr(acceptance.subprocess, "Popen", popen)
+    with pytest.raises(AssertionError, match="query.*semantic.*knowledge.*native stack evidence"):
+        with acceptance.QuerySession() as session:
+            session.call("query", {"mode": "semantic", "target": "knowledge"})

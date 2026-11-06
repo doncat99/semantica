@@ -5,6 +5,11 @@ on:
     tags: ['ontoscience-semantic-worker-*']
   workflow_dispatch:
     inputs:
+      qualification_target:
+        type: choice
+        default: all
+        options: [all, darwin-arm64, linux-x64, win-x64]
+        description: 'Qualify one platform without publishing; all is required for release'
       gpu_profiles:
         type: boolean
         default: false
@@ -27,9 +32,11 @@ jobs:
       - id: matrix
         env:
           INCLUDE_GPU: ${{ inputs.gpu_profiles }}
+          QUALIFICATION_TARGET: ${{ inputs.qualification_target }}
         run: |
           args=()
           if [[ "$INCLUDE_GPU" == true ]]; then args+=(--include-gpu); fi
+          args+=(--target "${QUALIFICATION_TARGET:-all}")
           echo "matrix=$(python3 .github/scripts/semantic_worker_release.py matrix "${args[@]}")" >> "$GITHUB_OUTPUT"
   wheel:
     runs-on: ubuntu-24.04
@@ -110,6 +117,7 @@ jobs:
           retention-days: 1
 
   publish:
+    if: ${{ !inputs.qualification_target || inputs.qualification_target == 'all' }}
     needs: [wheel, native]
     runs-on: ubuntu-24.04
     permissions:

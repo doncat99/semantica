@@ -23,12 +23,40 @@ def invoke(module, request):
 class QuerySession:
     """One acquired native owner per fresh query worker process."""
     def __enter__(self):
-        self.process = subprocess.Popen([sys.executable, "-I", "-B", "-m",
-            "semantica.semantic_query_worker"], stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+        # Executor futures otherwise retain uncaught exceptions until the next input.
+        bootstrap = """import faulthandler, traceback
+from semantica import semantic_query_worker as worker
+faulthandler.enable()
+faulthandler.dump_traceback_later(60, repeat=True)
+original = worker._serve_line
+def diagnosed(*args):
+    try:
+        return original(*args)
+    except BaseException:
+        traceback.print_exc()
+        raise
+worker._serve_line = diagnosed
+worker.main()
+"""
+        # A PIPE that is read only at exit can block the worker before stdout.
+        self.diagnostics = tempfile.TemporaryFile(mode="w+t", encoding="utf-8")
+        try:
+            self.process = subprocess.Popen([sys.executable, "-I", "-B", "-c", bootstrap],
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=self.diagnostics,
+                text=True, encoding="utf-8")
+        except BaseException:
+            self.diagnostics.close()
+            raise
         return self
 
+    def diagnostic_tail(self):
+        self.diagnostics.flush()
+        self.diagnostics.seek(0)
+        return self.diagnostics.read()[-12000:]
+
     def call(self, method, params):
+        context = {"method": method, "mode": params.get("mode"), "target": params.get("target")}
+        print("Native query acceptance: " + json.dumps(context), file=sys.stderr, flush=True)
         self.process.stdin.write(json.dumps({"id": "acceptance-" + method,
             "method": method, "params": params}) + "\n")
         self.process.stdin.flush()
@@ -36,24 +64,31 @@ class QuerySession:
         deadline.start()
         try:
             line = self.process.stdout.readline()
-            assert line, "native query worker exited or exceeded its 180-second deadline"
+            assert line, (f"native query worker exited or exceeded its 180-second deadline: "
+                f"{json.dumps(context)}; returncode={self.process.poll()}; {self.diagnostic_tail()}")
             response = json.loads(line)
         finally:
             deadline.cancel()
         assert response["ok"], response
         return response["result"]
 
-    def __exit__(self, *_args):
-        self.process.stdin.close()
+    def __exit__(self, exc_type, _exc, _traceback):
         try:
-            self.process.wait(timeout=30)
+            try:
+                self.process.stdin.close()
+            except BrokenPipeError:
+                pass
+            try:
+                self.process.wait(timeout=30)
+            finally:
+                if self.process.poll() is None:
+                    self.process.kill()
+                    self.process.wait(timeout=10)
+            if exc_type is None:
+                assert self.process.returncode == 0, self.diagnostic_tail()
         finally:
-            if self.process.poll() is None:
-                self.process.kill()
-                self.process.wait(timeout=10)
-        assert self.process.returncode == 0, self.process.stderr.read()
-        self.process.stdout.close()
-        self.process.stderr.close()
+            self.process.stdout.close()
+            self.diagnostics.close()
 
 
 def reader_request(parsed, source):

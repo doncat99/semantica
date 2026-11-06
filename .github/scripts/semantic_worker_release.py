@@ -35,15 +35,18 @@ def build_wheel(output: Path) -> None:
     run(["uv", "build", "--wheel", "--out-dir", str(output)])
 
 
-def release_matrix(include_gpu: bool) -> dict:
+def release_matrix(include_gpu: bool, target: str = "all") -> dict:
     config = load_config()
+    if target != "all" and target not in config["targets"]:
+        raise ValueError(f"unsupported qualification target: {target}")
+    target_filter = target
     runners = {"darwin-arm64": "macos-15", "linux-x64": "ubuntu-24.04", "win-x64": "windows-2022"}
     return {"include": [
         {"runner": runners[target], "target": target,
          "python": config["targets"][target]["python"], "acceleration": profile}
         for profile, settings in config["accelerationProfiles"].items()
         if profile == "cpu" or include_gpu
-        for target in settings["targets"]
+        for target in settings["targets"] if target_filter == "all" or target == target_filter
     ]}
 
 
@@ -90,6 +93,7 @@ def main() -> None:
 
     matrix = subparsers.add_parser("matrix")
     matrix.add_argument("--include-gpu", action="store_true")
+    matrix.add_argument("--target", default="all", choices=["all", "darwin-arm64", "linux-x64", "win-x64"])
 
     bundle = subparsers.add_parser("bundle")
     bundle.add_argument("--target", required=True)
@@ -106,7 +110,7 @@ def main() -> None:
     elif args.command == "wheel":
         build_wheel(args.output)
     elif args.command == "matrix":
-        print(json.dumps(release_matrix(args.include_gpu), separators=(",", ":")))
+        print(json.dumps(release_matrix(args.include_gpu, args.target), separators=(",", ":")))
     else:
         build_bundle(args)
 
