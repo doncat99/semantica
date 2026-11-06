@@ -104,3 +104,73 @@ count/current/duplicate/corruption rejection and changed-body rejection before
 RDF deletion. No live native/cache handle was opened, and no cleanup applied.
 Real stopped-window canonical key attribution and the final exact-count dry
 certificate remain required for physical-cleanup signoff.
+
+## Complete identity inventory gate (2026-11-07)
+
+Inspected fork revision: `2cf2e28f5cb1dd40c91429c94d924cf9f8551a9d`.
+The existing maintenance script and `tests/test_obsolete_native_retirement.py`
+remain the implementation and regression owners. Its host offline cleanup
+wrapper is the only current caller; historical scratch preparations are audit
+evidence, not runtime consumers. Native `ExtractionRecords`,
+`ClassificationRecords`, `ExtractionCache`, publication graph ownership and
+SQLite vector-space receipts were inspected and reused.
+
+The allowlist selector previously omitted unknown recipes and unowned cache
+keys. Its successful certificate could therefore only prove the named deletion
+scope, not that every result in the project native root was classified. The
+same maintenance owner now traverses **all** project binding recipes in cursor
+pages of 128, all named/default graphs, embedding-space files, durable accepted
+receipts and residual cache bodies. Unknown recipe/graph/subject/namespace/key,
+unattributed acceptance or invalid receipt/body identity blocks dry, apply and
+resume. Nothing unknown is inferred obsolete or automatically deleted.
+
+Current extraction and classification recipes are derived from the frozen
+runtime and protected. Current embedding protection requires the exact current
+binding/model/recipe space, not merely a matching recipe. Native record codecs
+verify operation identities and receipt closures; original model receipts are
+read through their canonical owners. Accepted keys are attributed through native
+operation key derivation or explicit pending scopes. Current owner keys are
+never inserted into deletion tables. A successful run therefore cannot silently
+ignore other accepted namespaces or leftover pending bodies.
+
+The complete identity certificate and native membership indexes use temporary
+disk SQLite with a 4 MiB page cache; no whole-project DTO collection is retained.
+One native operation remains subject to existing cardinality/byte limits, and
+cache body SQL projections are bounded to 1 MiB. All graph quads are streamed
+for a commutative SHA256 multiset proof; facts subject membership is checked
+against the disk index. This is an authorized offline integrity traversal, not
+a normal product read. It may take time proportional to retained native data.
+
+Plan table `inventory(kind,id,disposition,digest)` records protected and explicit
+obsolete identities; `protected_receipts(receipt_id,operation,recipe,space,
+source,receipt_digest)` exposes the current accepted model receipt closure for
+usage reconciliation without a second traversal. Here `operation` is the native
+operation URN, and `receipt_digest` hashes the full canonical compact sorted JSON
+receipt. This table does not claim exact publication dependency membership or
+count historical receipts as API attempts. Report identity additionally binds
+artifact digest, input revision and exact current embedding space.
+
+Resume checks surviving identities against the original inventory and requires
+all protected identities to remain. Only certified obsolete identities may be
+absent. The mixed project facts graph can shrink through admitted obsolete
+subjects; independent per-subject proofs preserve protected facts and the
+existing apply admission checks preserve surviving obsolete facts. The retained
+certificate includes inventory and protected receipt table digests.
+
+Verification: the new isolated full-inventory specification was red before the
+implementation (`inventory_all` absent). The focused retirement suite now has
+10 passing tests, including unknown recipe/vector/graph/accepted-key blockers,
+current result and original receipt protection, protected mutation rejection,
+physical obsolete deletion and inventory-aware resume. No live native owner
+was opened; no real data was deleted; no runtime, package recipe or frozen
+artifact changed. Product/CV qualification is intentionally not repeated for
+this maintenance-only change. Live ready/stopped dry/apply remains outstanding.
+
+The interruption fixture also removes an operation subject before its owned
+subjects and removes one projection subject before the rest of its graph.
+Resume attributes only those surviving obsolete subjects present in the retained
+certificate and rechecks their exact per-subject proofs. Projection proof lookup
+is once per distinct subject, backed by disk membership, rather than once per
+quad. New or changed subjects still block. Deletion orders each operation URN
+before its own suffixed subjects, with each subject deletion an atomic native
+update; normal readers must stay stopped through all maintenance phases.

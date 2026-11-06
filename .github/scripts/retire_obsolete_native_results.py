@@ -9,15 +9,17 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import sqlite3
+import tempfile
 from pathlib import Path
 from urllib.parse import unquote
 
 
 def digest_rows(db):
     digest = hashlib.sha256()
-    for table in ('operations', 'nodes', 'graphs', 'cache_keys', 'spaces', 'vector_audit', 'node_proofs', 'pending_audit'):
+    for table in ('operations', 'nodes', 'graphs', 'cache_keys', 'spaces', 'vector_audit', 'node_proofs', 'pending_audit', 'inventory', 'protected_receipts'):
         for row in db.execute('SELECT * FROM ' + table + ' ORDER BY 1,2'):
             digest.update(json.dumps([table, row], ensure_ascii=False, separators=(',', ':')).encode())
     return digest.hexdigest()
@@ -37,8 +39,209 @@ def create_plan(path):
       CREATE TABLE vector_audit(space TEXT,operation TEXT,receipt TEXT,accepted_digest TEXT,PRIMARY KEY(space,operation));
       CREATE TABLE pending_audit(namespace TEXT,key TEXT,binding TEXT,input_digest TEXT,digest TEXT,model_receipts TEXT,PRIMARY KEY(namespace,key));
       CREATE TABLE node_proofs(id TEXT,graph TEXT,digest TEXT,count INTEGER,PRIMARY KEY(id,graph));
+      CREATE TABLE inventory(kind TEXT,id TEXT,disposition TEXT,digest TEXT,PRIMARY KEY(kind,id));
+      CREATE TABLE protected_receipts(receipt_id TEXT,operation TEXT,recipe TEXT,space TEXT,source TEXT,receipt_digest TEXT,PRIMARY KEY(receipt_id,operation));
     ''')
     return db
+
+
+def inventory_all(owner, plan, accepted, root, project, protected, obsolete, read_text, *, resume=False, current_space=None):
+    """Classify the complete project owners before admitting any destructive write.
+
+    Maintenance traversal is incremental; membership and certificates live on disk.
+    Unknown results are blockers, never inferred obsolete from age or mismatch.
+    Resume permits only disappearance of certified obsolete identities.
+    """
+    from semantica.triplet_store.extraction_records import ExtractionRecords, BINDING, F, operation_identity
+    from semantica.triplet_store.classification_records import ClassificationRecords, BINDING as CB
+    from semantica.semantic_extract.cache import ExtractionCache, NAMESPACES
+    if protected & obsolete:
+        raise ValueError('Protected recipe cannot be obsolete')
+    ox = owner._oxigraph
+    suffix = hashlib.sha256(project.encode()).hexdigest()
+    facts = ox.NamedNode('urn:semantica:project:' + suffix)
+    publication = 'urn:semantica:publication:' + suffix
+    keys = ExtractionCache()
+    def disposition(recipe):
+        if recipe in protected:
+            return 'protected'
+        if recipe in obsolete:
+            return 'obsolete'
+        raise ValueError('Unknown native recipe: ' + str(recipe))
+    def encoded(value):
+        return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':'))
+    with tempfile.TemporaryDirectory(prefix='semantica-retirement-inventory-') as scratch:
+        db = sqlite3.connect(Path(scratch)/'inventory.sqlite')
+        try:
+            db.executescript('''
+              PRAGMA cache_size=-4096;
+              CREATE TABLE inventory(kind,id,disposition,digest,PRIMARY KEY(kind,id));
+              CREATE TABLE nodes(id TEXT PRIMARY KEY,disposition TEXT);
+              CREATE TABLE graph_owners(id TEXT PRIMARY KEY,disposition TEXT);
+              CREATE TABLE verified_projection(id TEXT,graph TEXT,PRIMARY KEY(id,graph));
+              CREATE TABLE acceptance(namespace,key,disposition,digest,PRIMARY KEY(namespace,key));
+              CREATE TABLE protected_receipts(receipt_id,operation,recipe,space,source,receipt_digest,PRIMARY KEY(receipt_id,operation));
+            ''')
+            def add(kind, identity, state, value):
+                digest = hashlib.sha256(encoded(value).encode()).hexdigest()
+                db.execute('INSERT INTO inventory VALUES(?,?,?,?)', (kind, identity, state, digest))
+            def accept(namespace, key, state, digest):
+                prior = db.execute('SELECT disposition,digest FROM acceptance WHERE namespace=? AND key=?', (namespace,key)).fetchone()
+                if prior is not None and prior != (state,digest):
+                    raise ValueError('Acceptance has conflicting native owners')
+                db.execute('INSERT OR IGNORE INTO acceptance VALUES(?,?,?,?)', (namespace,key,state,digest))
+            def protect_receipt(receipt, operation, recipe, space='', source=''):
+                if not isinstance(receipt.get('id'),str) or not receipt['id']:
+                    raise ValueError('Protected model receipt identity missing')
+                digest = hashlib.sha256(encoded(receipt).encode()).hexdigest()
+                row = (receipt['id'],operation,recipe,space,source,digest)
+                db.execute('INSERT INTO protected_receipts VALUES(?,?,?,?,?,?)',row)
+            after = ''
+            while True:
+                rows = list(owner.store.query(f'''SELECT ?op ?recipe WHERE {{ GRAPH {facts} {{
+                    ?op <{F}bindingRecipe> ?recipe . FILTER(STR(?op) > {ox.Literal(after)})
+                    }} }} ORDER BY STR(?op) LIMIT 128'''))
+                for row in rows:
+                    op = row['op']; after = op.value
+                    state = disposition(row['recipe'].value)
+                    codec = object.__new__(ExtractionRecords)
+                    codec.owner, codec.ox, codec.graph = owner, ox, facts
+                    classification = op.value.startswith('urn:semantica:classification:')
+                    binding = {field: codec.one(op, 'binding'+field[0].upper()+field[1:]) for field in (CB if classification else BINDING)}
+                    if binding['project'] != project:
+                        raise ValueError('Foreign operation inside project facts')
+                    if classification:
+                        records = ClassificationRecords(owner, binding); stage = 'classification'
+                    else:
+                        stage = next((stage for stage in ('entities','relations') if operation_identity(binding,stage) == op.value), None)
+                        if stage is None:
+                            raise ValueError('Unclassified native operation')
+                        records = ExtractionRecords(owner,binding,stage)
+                    if records.operation != op or records.receipt() is None:
+                        raise ValueError('Native operation identity or receipt differs')
+                    receipt = records.receipt()
+                    model_receipts = records.read_receipts()
+                    add('operation',op.value,state,[binding,receipt,model_receipts])
+                    if state=='protected':
+                        for model_receipt in model_receipts:
+                            protect_receipt(model_receipt,op.value,binding['recipe'],source=binding['source'])
+                    for node in (op, *records.values(op,'ownedRecord')):
+                        db.execute('INSERT INTO nodes VALUES(?,?)', (node.value,state))
+                        add('fact-node',node.value,state,node_proof(owner,node.value,facts.value))
+                    reduction = records.one(op,'classificationReduction',optional=True) if classification else None
+                    if not reduction:
+                        text = binding['context_digest'] if classification else read_text(binding)
+                        accept(stage,keys._generate_key(text,native_operation=op.value),state,receipt['accepted_digest'])
+                    if not classification:
+                        for tail in (':identity-projection',':fact-projection'):
+                            db.execute('INSERT INTO graph_owners VALUES(?,?)', (op.value+tail,state))
+                db.commit()
+                if len(rows)<128:
+                    break
+            # Graph ownership is exact. Stream every quad, including default/foreign graphs.
+            for graph in owner.store.named_graphs():
+                name = getattr(graph,'value','')
+                if name in (facts.value,publication):
+                    state = 'protected'
+                else:
+                    found = db.execute('SELECT disposition FROM graph_owners WHERE id=?',(name,)).fetchone()
+                    if found is None and resume and plan.execute('SELECT 1 FROM graphs WHERE id=?',(name,)).fetchone():
+                        found = ('obsolete',)
+                    if found is None:
+                        raise ValueError('Unclassified native graph: '+name)
+                    state = found[0]
+                total = count = 0
+                for quad in owner.store.quads_for_pattern(None,None,None,graph):
+                    subject = getattr(quad.subject,'value','')
+                    if name == facts.value and db.execute('SELECT 1 FROM nodes WHERE id=?',(subject,)).fetchone() is None:
+                        proof = plan.execute('SELECT digest,count FROM node_proofs WHERE id=? AND graph=?',(subject,name)).fetchone() if resume else None
+                        prior = plan.execute("SELECT 1 FROM inventory WHERE kind='fact-node' AND id=? AND disposition='obsolete'",(subject,)).fetchone() if resume else None
+                        if proof is None or prior is None or node_proof(owner,subject,name)!=proof:
+                            raise ValueError('Unclassified project fact subject')
+                        db.execute('INSERT INTO nodes VALUES(?,?)',(subject,'obsolete'))
+                        add('fact-node',subject,'obsolete',proof)
+                    if state=='obsolete' and resume and db.execute('SELECT 1 FROM verified_projection WHERE id=? AND graph=?',(subject,name)).fetchone() is None:
+                        proof = plan.execute('SELECT digest,count FROM node_proofs WHERE id=? AND graph=?',(subject,name)).fetchone()
+                        if proof is None or node_proof(owner,subject,name)!=proof:
+                            raise ValueError('Obsolete projection subject changed after certification')
+                        db.execute('INSERT INTO verified_projection VALUES(?,?)',(subject,name))
+                    total = (total + int.from_bytes(hashlib.sha256(str(quad).encode()).digest(),'big')) % (1<<256)
+                    count += 1
+                # Project facts contain both classes; per-operation ownership above and
+                # obsolete subject proofs protect their exact deletion closure.
+                add('graph',name,state,[count,format(total,'064x')])
+            if next(owner.store.quads_for_pattern(None,None,None,ox.DefaultGraph()),None) is not None:
+                raise ValueError('Unclassified native graph: default')
+            with os.scandir(root) as entries:
+                for entry in entries:
+                    if not entry.name.startswith('embedding-') or not entry.name.endswith('.sqlite'):
+                        continue
+                    path = Path(entry.path)
+                    if path.is_symlink() or path.resolve().parent != root.resolve():
+                        raise ValueError('Vector owner escapes admitted native root')
+                    conn = sqlite3.connect(path.resolve().as_uri()+'?mode=ro',uri=True)
+                    try:
+                        row = conn.execute('SELECT identity,dimension FROM embedding_space WHERE id=1').fetchone()
+                        identity = json.loads(row[0]); state = disposition(identity['recipe'])
+                        if set(identity)!={'binding','model','recipe'} or type(row[1]) is not int or not 1<=row[1]<=8192:
+                            raise ValueError('Vector space identity or dimension invalid')
+                        if state=='protected' and identity!=current_space:
+                            raise ValueError('Unclassified current-recipe vector space')
+                        if path.name != 'embedding-'+identity['binding'].removeprefix('sha256:')+'.sqlite':
+                            raise ValueError('Space filename and identity differ')
+                        add('space',str(path),state,row)
+                        for operation,count,digest,receipt,receipt_digest,acceptance in conn.execute('SELECT id,count,digest,receipt,receipt_digest,accepted_digest FROM embeddings_embedding_operations ORDER BY id'):
+                            if hashlib.sha256(receipt.encode()).hexdigest()!=receipt_digest:
+                                raise ValueError('Vector model receipt digest differs')
+                            add('vector-operation',encoded([str(path),operation]),state,[count,digest,receipt_digest,acceptance])
+                            accept('embedding',keys._generate_key(operation),state,acceptance)
+                            if state=='protected':
+                                protect_receipt(json.loads(receipt),operation,identity['recipe'],identity['binding'])
+                    finally:
+                        conn.close()
+            for namespace,key,digest in plan.execute('SELECT * FROM cache_keys'):
+                accept(namespace,key,'obsolete',digest)
+            for namespace,key,digest in accepted.execute('SELECT namespace,key,digest FROM accepted_receipts ORDER BY namespace,key'):
+                match = db.execute('SELECT disposition,digest FROM acceptance WHERE namespace=? AND key=?',(namespace,key)).fetchone()
+                if namespace not in NAMESPACES or match is None or match[1]!=digest:
+                    raise ValueError('Unclassified acceptance namespace/key or digest: '+encoded([namespace,key]))
+                add('acceptance',encoded([namespace,key]),match[0],digest)
+            for namespace,key in db.execute('SELECT namespace,key FROM acceptance'):
+                if accepted.execute('SELECT 1 FROM accepted_receipts WHERE namespace=? AND key=?',(namespace,key)).fetchone() is None:
+                    if not (resume and db.execute('SELECT disposition FROM acceptance WHERE namespace=? AND key=?',(namespace,key)).fetchone()==('obsolete',)):
+                        raise ValueError('Native owner acceptance receipt missing')
+            for namespace,key,body,digest in accepted.execute('SELECT namespace,key,CASE WHEN length(value)<=1048576 THEN value END,accepted_digest FROM cache ORDER BY namespace,key'):
+                match = db.execute('SELECT disposition,digest FROM acceptance WHERE namespace=? AND key=?',(namespace,key)).fetchone()
+                if namespace not in NAMESPACES or match is None or match[1]!=digest or body is None or hashlib.sha256(body).hexdigest()!=digest:
+                    raise ValueError('Unclassified or corrupt cache body: '+encoded([namespace,key]))
+                add('cache',encoded([namespace,key]),match[0],digest)
+            db.commit()
+            if resume:
+                for kind,identity,state,digest in db.execute('SELECT * FROM inventory'):
+                    prior = plan.execute('SELECT disposition,digest FROM inventory WHERE kind=? AND id=?',(kind,identity)).fetchone()
+                    # Mixed facts graph changes only through certified obsolete subjects;
+                    # apply_plan independently proves every surviving obsolete subject.
+                    if kind=='graph' and identity==facts.value:
+                        continue
+                    if kind=='graph' and state=='obsolete' and prior is not None and prior[0]=='obsolete':
+                        # A crash may leave a strict subset of certified projection
+                        # subjects. Each surviving subject was verified above.
+                        continue
+                    if prior!=(state,digest):
+                        raise ValueError('Inventory changed after certification: '+kind+':'+identity)
+                for kind,identity,state,digest in plan.execute("SELECT * FROM inventory WHERE disposition='protected'"):
+                    if kind=='graph' and identity==facts.value:
+                        continue
+                    if db.execute('SELECT disposition,digest FROM inventory WHERE kind=? AND id=?',(kind,identity)).fetchone()!=(state,digest):
+                        raise ValueError('Protected inventory disappeared or changed')
+            else:
+                for row in db.execute('SELECT * FROM inventory'):
+                    plan.execute('INSERT INTO inventory VALUES(?,?,?,?)',row)
+                for row in db.execute('SELECT * FROM protected_receipts'):
+                    plan.execute('INSERT INTO protected_receipts VALUES(?,?,?,?,?,?)',row)
+                plan.commit()
+        finally:
+            db.close()
 
 
 def add_cache_key(plan, accepted, namespace, key, digest):
@@ -361,8 +564,14 @@ def main():
     request = SemanticArtifactBuildRequest.model_validate_json(args.request.read_text())
     helper = __import__('runpy').run_path(str(Path(__file__).with_name('rebind_paid_native_results.py')))
     current = helper['source_recipe'](request, _project_processing_digest(Path(semantica.__file__).parent))
+    processing = _project_processing_digest(Path(semantica.__file__).parent)
+    protected = {current, stable_digest(dict(recipe=request.recipe.lineage_payload(),
+        processing=processing, binding=request.relays['model'].binding_id))}
+    relay = request.relays['embedding']
+    current_space = dict(binding=stable_digest(dict(binding=relay.binding_id,model=relay.model_id,recipe=current)),
+        model=relay.model_id,recipe=current)
     recipes = set(args.obsolete_recipe)
-    if current in recipes or not recipes or any(not value.startswith('sha256:') or len(value) != 71 for value in recipes):
+    if protected & recipes or not recipes or any(not value.startswith('sha256:') or len(value) != 71 for value in recipes):
         raise ValueError('Explicit obsolete recipes must exclude current recipe')
     root = Path(request.native_store_dir).resolve().parent
     cache_path = Path(request.native_cache_dir).resolve()/'accepted.sqlite'
@@ -403,8 +612,11 @@ def main():
                 if not isinstance(scopes, list) or len(scopes) > 128:
                     raise ValueError('Pending scopes exceed maintenance budget')
                 plan_pending(plan, accepted, scopes, recipes, current, lambda scope: pending_candidates(request, scope))
+        inventory_all(owner, plan, accepted, root, request.project_id, protected, recipes, read_text, resume=args.resume, current_space=current_space)
         assert_publication_spaces(owner, plan, request.project_id)
-        report = dict(project=request.project_id, requestDigest=stable_digest(request.model_dump(mode='json', by_alias=True)), currentRecipe=current, obsoleteRecipes=sorted(recipes), planDigest=digest_rows(plan), counts={table: plan.execute('SELECT count(*) FROM '+table).fetchone()[0] for table in ('operations','nodes','graphs','cache_keys','spaces','pending_audit')}, apply=False)
+        report = dict(project=request.project_id, artifactDigest=request.release.artifact_digest,
+            inputRevision=request.input_revision,currentEmbeddingSpace=current_space,
+            requestDigest=stable_digest(request.model_dump(mode='json', by_alias=True)), currentRecipe=current, protectedRecipes=sorted(protected), obsoleteRecipes=sorted(recipes), planDigest=digest_rows(plan), counts={table: plan.execute('SELECT count(*) FROM '+table).fetchone()[0] for table in ('operations','nodes','graphs','cache_keys','spaces','pending_audit','inventory','protected_receipts')}, apply=False)
         if args.apply_certificate:
             prior = json.loads(args.apply_certificate.read_text())
             if prior != report:

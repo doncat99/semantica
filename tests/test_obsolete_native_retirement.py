@@ -13,6 +13,110 @@ retirement = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(retirement)
 
 
+def test_full_inventory_protects_current_and_blocks_unclassified_owners(tmp_path):
+    from semantica.triplet_store.oxigraph_store import OxigraphStore
+    fixture = runpy.run_path(str(Path(__file__).with_name('test_native_extraction_handoff.py')))
+    child = fixture['run_child'](tmp_path, recipe='current')
+    assert child.returncode == 0, child.stderr
+    owner = OxigraphStore(tmp_path/'facts'); ox = owner._oxigraph
+    accepted = sqlite3.connect((tmp_path/'accepted.sqlite').as_uri()+'?mode=ro', uri=True)
+    plan = retirement.create_plan(tmp_path/'plan.sqlite')
+    def inventory(resume=False):
+        retirement.inventory_all(owner, plan, accepted, tmp_path, 'project-1',
+            {'current'}, {'obsolete'}, lambda binding: fixture['TEXT'], resume=resume)
+    inventory()
+    assert plan.execute("SELECT count(*) FROM inventory WHERE disposition='obsolete'").fetchone() == (0,)
+    assert plan.execute("SELECT count(*) FROM inventory WHERE kind='operation' AND disposition='protected'").fetchone() == (2,)
+    assert plan.execute('SELECT count(*) FROM cache_keys').fetchone() == (0,)
+    assert plan.execute('SELECT count(*) FROM protected_receipts').fetchone()[0] > 0
+    inventory(resume=True)
+    graph = ox.NamedNode('urn:semantica:project:' + __import__('hashlib').sha256(b'project-1').hexdigest())
+    unknown = ox.Quad(ox.NamedNode('urn:unknown-operation'),
+        ox.NamedNode('urn:semantica:field:bindingRecipe'), ox.Literal('unreviewed'), graph)
+    owner.store.add(unknown)
+    with pytest.raises(ValueError, match='Unknown native recipe'):
+        inventory(resume=True)
+    owner.store.remove(unknown)
+    orphan = ox.Quad(ox.NamedNode('urn:orphan-subject'),ox.NamedNode('urn:p'),ox.Literal('unclassified'),graph)
+    owner.store.add(orphan)
+    with pytest.raises(ValueError, match='Unclassified project fact subject'):
+        inventory(resume=True)
+    owner.store.remove(orphan)
+    foreign = ox.Quad(ox.NamedNode('urn:foreign'), ox.NamedNode('urn:p'), ox.Literal('unclassified'), ox.NamedNode('urn:foreign-graph'))
+    owner.store.add(foreign)
+    with pytest.raises(ValueError, match='Unclassified native graph'):
+        inventory(resume=True)
+    owner.store.remove(foreign)
+    owner.store.remove_graph(ox.NamedNode('urn:foreign-graph'))
+    vector = tmp_path/'embedding-unreviewed.sqlite'
+    conn = sqlite3.connect(vector)
+    conn.execute('CREATE TABLE embedding_space(id,identity,dimension)')
+    conn.execute('INSERT INTO embedding_space VALUES(1,?,2048)', (json.dumps(dict(recipe='unreviewed',binding='sha256:unreviewed',model='embedding')),))
+    conn.commit(); conn.close()
+    with pytest.raises(ValueError, match='Unknown native recipe'):
+        inventory(resume=True)
+    vector.unlink()
+    operation = plan.execute("SELECT id FROM inventory WHERE kind='operation' LIMIT 1").fetchone()[0]
+    mutation = ox.Quad(ox.NamedNode(operation),ox.NamedNode('urn:unexpected'),ox.Literal('changed'),graph)
+    owner.store.add(mutation)
+    from semantica.utils.exceptions import ProcessingError
+    with pytest.raises((ValueError,ProcessingError), match='Inventory changed after certification|receipt missing or corrupt'):
+        inventory(resume=True)
+    owner.store.remove(mutation)
+    accepted.close()
+    cache = sqlite3.connect(tmp_path/'accepted.sqlite')
+    cache.execute("INSERT INTO accepted_receipts VALUES('embedding','unknown-key','unknown-digest')")
+    cache.commit(); cache.close()
+    accepted = sqlite3.connect((tmp_path/'accepted.sqlite').as_uri()+'?mode=ro', uri=True)
+    with pytest.raises(ValueError, match='Unclassified acceptance'):
+        inventory(resume=True)
+    assert next(owner.store.quads_for_pattern(None, None, None, graph), None) is not None
+    plan.close(); accepted.close(); owner.close()
+
+
+def test_full_inventory_obsolete_cleanup_resume_keeps_audit(tmp_path):
+    from semantica.triplet_store.oxigraph_store import OxigraphStore
+    fixture = runpy.run_path(str(Path(__file__).with_name('test_native_extraction_handoff.py')))
+    child = fixture['run_child'](tmp_path, recipe='obsolete')
+    assert child.returncode == 0, child.stderr
+    owner = OxigraphStore(tmp_path/'facts')
+    accepted_path = tmp_path/'accepted.sqlite'
+    accepted = sqlite3.connect(accepted_path.as_uri()+'?mode=ro',uri=True)
+    plan = retirement.create_plan(tmp_path/'plan.sqlite')
+    ox = owner._oxigraph
+    import hashlib
+    facts = ox.NamedNode('urn:semantica:project:'+hashlib.sha256(b'project-1').hexdigest())
+    operation = next(owner.store.quads_for_pattern(None,ox.NamedNode('urn:semantica:field:bindingRecipe'),None,facts)).subject
+    projection = ox.NamedNode(operation.value+':identity-projection')
+    quads = [ox.Quad(ox.NamedNode('urn:projection:'+str(i)),ox.NamedNode('urn:p'),ox.Literal('certified'),projection) for i in range(2)]
+    for quad in quads:
+        owner.store.add(quad)
+    retirement.plan_facts(owner,plan,accepted,'project-1',{'obsolete'},lambda binding:fixture['TEXT'])
+    retirement.inventory_all(owner,plan,accepted,tmp_path,'project-1',{'current'},{'obsolete'},lambda binding:fixture['TEXT'])
+    certificate = retirement.digest_rows(plan)
+    accepted.close()
+    # Crash after atomic operation-subject deletion, before its owned subjects
+    # and acceptance keys: retained proofs must safely attribute that remainder.
+    operation, = plan.execute('SELECT id FROM operations LIMIT 1').fetchone()
+    graph, = plan.execute('SELECT graph FROM nodes WHERE id=?',(operation,)).fetchone()
+    owner.store.update(f'DELETE WHERE {{ GRAPH {owner._oxigraph.NamedNode(graph)} {{ {owner._oxigraph.NamedNode(operation)} ?p ?o }} }}')
+    owner.store.remove(quads[0])
+    accepted = sqlite3.connect(accepted_path.as_uri()+'?mode=ro',uri=True)
+    mutation = ox.Quad(quads[1].subject,ox.NamedNode('urn:new-field'),ox.Literal('uncertified'),projection)
+    owner.store.add(mutation)
+    with pytest.raises(ValueError, match='Obsolete projection subject changed'):
+        retirement.inventory_all(owner,plan,accepted,tmp_path,'project-1',{'current'},{'obsolete'},lambda binding:fixture['TEXT'],resume=True)
+    owner.store.remove(mutation)
+    retirement.inventory_all(owner,plan,accepted,tmp_path,'project-1',{'current'},{'obsolete'},lambda binding:fixture['TEXT'],resume=True)
+    accepted.close()
+    retirement.apply_plan(owner,plan,accepted_path,resume=True)
+    accepted = sqlite3.connect(accepted_path.as_uri()+'?mode=ro',uri=True)
+    retirement.inventory_all(owner,plan,accepted,tmp_path,'project-1',{'current'},{'obsolete'},lambda binding:fixture['TEXT'],resume=True)
+    assert certificate==retirement.digest_rows(plan)
+    assert plan.execute("SELECT count(*) FROM inventory WHERE kind='operation'").fetchone()==(2,)
+    accepted.close();plan.close();owner.close()
+
+
 def test_exact_operation_closure_references_and_physical_retirement(tmp_path):
     from semantica.triplet_store.oxigraph_store import OxigraphStore
     fixture = runpy.run_path(str(Path(__file__).with_name('test_native_extraction_handoff.py')))
