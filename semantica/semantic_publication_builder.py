@@ -16,7 +16,7 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
-from collections import defaultdict
+from collections import OrderedDict, defaultdict
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
 from bisect import bisect_left
@@ -2226,7 +2226,33 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
     if parsed is None:
         raise SemanticArtifactError('source projection requires native parsed-source admission')
     text, document = parsed.text, parsed.document
-    read = lambda start, end: _read_source_projection_text(parsed.reader, start, end)
+    # Projection validates many overlapping spans (occurrence ordinals, quotes,
+    # context and evidence). Keep a small bounded native-window cache so those
+    # validations do not reopen the same reader range for every field.
+    projection_windows: OrderedDict[int, str] = OrderedDict()
+    projection_window_chars = min(TEXT_WINDOW_CHARS, 4096)
+    projection_window_limit = 64
+
+    def read(start, end):
+        if type(start) is not int or type(end) is not int or start >= end:
+            return '' if start == end else _read_source_projection_text(parsed.reader, start, end)
+        parts = []
+        for offset in range((start // projection_window_chars) * projection_window_chars,
+                            end, projection_window_chars):
+            value = projection_windows.get(offset)
+            if value is None:
+                value = _read_source_projection_text(
+                    parsed.reader, offset, min(len(text), offset + projection_window_chars))
+                projection_windows[offset] = value
+                projection_windows.move_to_end(offset)
+                if len(projection_windows) > projection_window_limit:
+                    projection_windows.popitem(last=False)
+            else:
+                projection_windows.move_to_end(offset)
+            parts.append(value)
+        joined = ''.join(parts)
+        base = (start // projection_window_chars) * projection_window_chars
+        return joined[start - base:start - base + end - start]
     origin, content_hash, parser, parser_version = parsed.origin, parsed.content_hash, parsed.parser, parsed.parser_version
     representation_revision = document['representation_revision']
     representation_id = f"representation:{_safe_id(source.source_id)}:{representation_revision[7:]}"
