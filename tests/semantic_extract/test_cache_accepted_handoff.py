@@ -271,6 +271,84 @@ def test_completed_paid_point_read_survives_scheduler_delay(tmp_path, monkeypatc
         owner.close()
 
 
+def test_contended_paid_read_retries_without_model_or_receipt_rejection(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from semantica.semantic_extract import grounded_window
+
+    def no_model(*_, **__):
+        pytest.fail('restored paid result must not call a model')
+    monkeypatch.setattr(grounded_window, 'extract_entities_llm', no_model)
+    monkeypatch.setattr(grounded_window, 'extract_relations_llm', no_model)
+
+    c = cache(tmp_path / 'contended.db')
+    digest = c.accept('entities', 'source', {'values': [], 'receipts': []}, native_operation='op')
+    provider = SimpleNamespace(receipts=[], reject_last=lambda: pytest.fail('paid receipt rejected'))
+    store = SimpleNamespace(extraction_operation_id=lambda *_: 'op',
+        extraction_receipt=lambda *_: {'accepted_digest': digest},
+        read_extraction=lambda *_, **__: [], read_extraction_receipts=lambda *_: [], flush=lambda: None)
+    c._backend._read_lock.acquire()
+    release = threading.Timer(.55, c._backend._read_lock.release)
+    release.start()
+    try:
+        assert grounded_window.extract_grounded_window('source', model='test', provider_instance=provider,
+            native_store=store, accepted_cache=c, extraction_binding={'model': 'test'},
+            native_ranges=[]) == ([], [], provider)
+        assert c.accepted_digest('entities', 'source', native_operation='op') == digest
+    finally:
+        release.join()
+        c._backend.close()
+
+
+def test_contended_paid_read_cancellation_is_prompt(tmp_path):
+    owner = SqliteCacheBackend(str(tmp_path / 'cancel-read.db'))
+    cancelled = threading.Event()
+    owner._read_lock.acquire()
+    cancel = threading.Timer(.01, cancelled.set)
+    cancel.start()
+    started = time.monotonic()
+    try:
+        with pytest.raises(ProcessingError, match='cancelled') as error:
+            owner.get_accepted('entities', 'source', cancel_event=cancelled)
+        assert not getattr(error.value, 'retryable', False)
+        assert time.monotonic() - started < .1
+    finally:
+        cancel.join()
+        owner._read_lock.release()
+        owner.close()
+
+
+def test_contended_paid_read_window_and_task_retry_limits(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from semantica.semantic_extract.grounded_window import extract_grounded_window
+    from semantica.pipeline import parallelism_manager
+
+    c = cache(tmp_path / 'retry-limit.db')
+    provider = SimpleNamespace(receipts=[], reject_last=lambda: pytest.fail('paid receipt rejected'))
+    store = SimpleNamespace(extraction_operation_id=lambda *_: 'op')
+    attempts = []
+    original = c.accepted_digest
+    def read(*args, **kwargs):
+        attempts.append(None)
+        return original(*args, **kwargs)
+    monkeypatch.setattr(c, 'accepted_digest', read)
+    monkeypatch.setattr(parallelism_manager.time, 'sleep', lambda _: None)
+    c._backend._read_lock.acquire()
+    started = time.monotonic()
+    try:
+        result = parallelism_manager._execute_task(parallelism_manager.Task('window',
+            lambda: extract_grounded_window('source', model='test', provider_instance=provider,
+                native_store=store, accepted_cache=c, extraction_binding={'model': 'test'},
+                native_ranges=[]), max_attempts=2))
+        assert not result.success
+        assert result.attempts == 2
+        assert len(attempts) == 4  # Two window attempts in each of two task attempts.
+        assert getattr(result.error, 'retryable', False)
+        assert time.monotonic() - started < 3
+    finally:
+        c._backend._read_lock.release()
+        c._backend.close()
+
+
 def test_native_dataclass_accepted_and_custom_codec_rejected(tmp_path):
     from semantica.semantic_extract.types import Entity
     c = cache(tmp_path / "cache.db")

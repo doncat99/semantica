@@ -49,6 +49,12 @@ from .types import Entity, Relation, Triplet
 NAMESPACES = ("entities", "relations", "triplets", "classification", "embedding")
 
 
+class AcceptedReadContention(ProcessingError):
+    """Retry the same paid-result read after transient owner contention."""
+
+    retryable = True
+
+
 def _check_accepted_value(value: Any) -> None:
     """Bound native JSON input before copying/serializing the complete result."""
     remaining = 1024 * 1024
@@ -728,10 +734,14 @@ class SqliteCacheBackend(CacheBackend):
         deadline = time.monotonic() + 0.5
         def cancelled():
             return time.monotonic() >= deadline or (cancel_event is not None and cancel_event.is_set())
-        if cancelled():
-            raise ProcessingError("Accepted extraction read cancelled or deadline exceeded")
-        if not self._read_lock.acquire(timeout=max(0, deadline - time.monotonic())):
-            raise ProcessingError("Accepted extraction read deadline exceeded waiting for owner")
+        while True:
+            if cancel_event is not None and cancel_event.is_set():
+                raise ProcessingError("Accepted extraction read cancelled")
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise AcceptedReadContention("Accepted extraction read deadline exceeded waiting for owner")
+            if self._read_lock.acquire(timeout=min(.05, remaining)):
+                break
         try:
             self._read_conn.set_progress_handler(lambda: int(cancelled()), 1000)
             self._read_conn.execute("BEGIN")
