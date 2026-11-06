@@ -12,6 +12,57 @@ from semantica.semantic_source_artifact import _native_text
 from tests.test_native_document_reader import payload
 
 
+def test_structural_reference_replays_native_scalar_without_linear_coordinates(tmp_path):
+    from docling_core.types.doc import DoclingDocument
+    from docling_core.types.doc.document import TableData, RichTableCell, RefItem
+    from semantica.semantic_source_artifact import _NativeSourceLocations
+    from tests.test_native_document_reader import request
+
+    native = DoclingDocument(name='native')
+    native.add_text(label='text', text='Body evidence')
+    table = native.add_table(data=TableData(num_rows=1, num_cols=1, table_cells=[]))
+    note = native.add_text(label='text', text='独立😀 note', parent=table)
+    native.add_table_cell(table, RichTableCell(text='formatted mirror', ref=RefItem(cref=note.self_ref),
+        start_row_offset_idx=0, end_row_offset_idx=1, start_col_offset_idx=0, end_col_offset_idx=1))
+    path = tmp_path / 'structural.json'
+    digests = native_reader.write_reader_artifact(path,
+        payload({'format': 'docling', 'document': native.export_to_dict()}))
+    reader = request(path, digests)
+    locations = _NativeSourceLocations(reader)
+    location = next(locations.pages(cells_only=True))
+    assert location['start'] is None and location['end'] is None
+    span = builder._structural_evidence(location, 'representation:r', 'native')
+    reference = builder._EvidenceReference.from_span(span, reader)
+    assert reference.model_dump(mode='json') == span.model_dump(mode='json')
+    assert 'quote' not in reference.fields and 'quote' not in reference.fields['locator']
+    built = dict(source=SimpleNamespace(source_id='source:authorized'),
+        representation=SimpleNamespace(id='representation:r', origin='native'),
+        evidence=[reference], source_locations=locations, native_scalar_ranges=[])
+    assert [item.id for item in builder._docling_cell_evidence(built)] == [span.id]
+    from semantica.semantic_artifact_schema import KnowledgeTopic
+    positions, published = [], []
+    def read(project, generation, position, **query):
+        positions.append(position)
+        return dict(items=[dict(evidence='urn:native:evidence')], next_cursor=None)
+    store = SimpleNamespace(read_grounded_reference_page=read,
+        stage_publication_topics=lambda project, generation, rows: published.extend(rows))
+    topic = KnowledgeTopic(id='topic:one', title='Theme', entity_ids=['urn:entity'],
+        evidence_ids=[span.id], metadata=dict(organization=dict(report_id='report:one', input_digest='sha256:input')))
+    builder._publish_native_topics(SimpleNamespace(project_id='p'), store, 'g', [built], [topic])
+    assert positions == [dict(source='source:authorized',
+        nativeRef=f'#/document/document/{note.self_ref[2:]}/text', start=0, end=len(note.text))]
+    assert published[0]['evidence_ids'] == ['urn:native:evidence']
+    rejected = replace(reference, quote_digest=builder._digest_bytes(b'changed'))
+    with pytest.raises(builder.SemanticArtifactError) as error:
+        _ = rejected.quote
+    assert error.value.code == 'NATIVE_EVIDENCE_RANGE_MISMATCH'
+    missing = replace(reference, fields={**reference.fields,
+        'metadata': {**reference.metadata, 'structural_ref': '#/missing'}})
+    with pytest.raises(builder.SemanticArtifactError) as error:
+        _ = missing.quote
+    assert error.value.code == 'NATIVE_EVIDENCE_RANGE_MISSING'
+
+
 def reference_fixture(tmp_path):
     document = {'format': 'pdf-text', 'pages': [
         {'page_number': 1, 'text': 'prefix ' + '😀漢e\u0301 first\n' * 1500},

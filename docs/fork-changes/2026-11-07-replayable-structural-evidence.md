@@ -46,3 +46,26 @@ scalar coordinates.
 ## Dated follow-ups
 
 2026-11-07: implementation completed; focused tests blocked by missing `pyoxigraph` in the local environment.
+
+2026-11-06 correction (inspected revision b80cc4ff07d1017ef35843629b2c99b4b4b2c1f8):
+The skip-only repair above was insufficient. ESG source 20 failed when a model
+supporting ref cited a rich table cell without linear source coordinates. These
+records have exact native scalar `quoteAddress` coordinates and are replayable;
+discarding them would lose valid support. `_EvidenceReference` now delegates
+their replay to the existing `_NativeSourceLocations.by_ref` owner, retaining
+length and SHA256 verification and no retained quote. `_docling_cell_evidence`
+keeps these records, and `_publish_native_topics` uses the same native scalar
+address with the existing grounded-reference query. Partial coordinates and
+missing addresses still fail closed. No parser, schema, model, vector space,
+storage owner, or reader implementation was changed; paid-result adoption must
+separately certify the exact installed artifact pair before resumption.
+
+The rich-cell regression reproduced `NATIVE_EVIDENCE_RANGE_MISSING` before the
+fix. `.venv/bin/python -m pytest -q tests/test_native_evidence_reference.py
+tests/test_native_source_windows.py tests/test_native_producer_publication.py`
+then passed 33 tests in 5.60 seconds. A read-only audit of all 38 ESG native
+indexes replayed all 46 rich-cell records without linear coordinates across
+five sources with exact length/digest checks and zero model calls. These are
+focused source checks, not real publication or release acceptance. The rebuilt
+artifact and resumed real build remain unverified. Upstream was not inspected;
+retain this repair while the native replay contract requires it.

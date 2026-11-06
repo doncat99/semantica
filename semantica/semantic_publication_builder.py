@@ -150,7 +150,8 @@ class _EvidenceReference:
         fields = span.model_dump(mode='json', exclude={'quote', 'locator'})
         fields['locator'] = span.locator.model_dump(mode='json', exclude={'quote'})
         start, end = span.locator.start_char, span.locator.end_char
-        if start is None or end is None or end-start != len(span.quote):
+        structural = start is None and end is None and span.metadata.get('structural_ref')
+        if not structural and (start is None or end is None or end-start != len(span.quote)):
             raise SemanticArtifactError('build evidence requires exact native scalar coordinates',
                                         code='NATIVE_EVIDENCE_RANGE_MISSING')
         return cls(fields, reader, len(span.quote), _digest_bytes(span.quote.encode('utf-8')))
@@ -170,9 +171,17 @@ class _EvidenceReference:
     @property
     def quote(self):
         start, end = self.fields['locator']['start_char'], self.fields['locator']['end_char']
-        quote = ''.join(_read_source_projection_text(self.reader, offset,
-            min(end, offset+TEXT_WINDOW_CHARS))
-            for offset in range(start, end, TEXT_WINDOW_CHARS))
+        if start is None and end is None:
+            from .semantic_source_artifact import _NativeSourceLocations
+            item = _NativeSourceLocations(self.reader).by_ref(self.metadata['structural_ref'])
+            if item is None:
+                raise SemanticArtifactError('native structural evidence address is missing',
+                                            code='NATIVE_EVIDENCE_RANGE_MISSING')
+            quote = item['quote']
+        else:
+            quote = ''.join(_read_source_projection_text(self.reader, offset,
+                min(end, offset+TEXT_WINDOW_CHARS))
+                for offset in range(start, end, TEXT_WINDOW_CHARS))
         if len(quote) != self.quote_length or _digest_bytes(quote.encode('utf-8')) != self.quote_digest:
             raise SemanticArtifactError('native evidence differs from accepted source range',
                                         code='NATIVE_EVIDENCE_RANGE_MISMATCH')
@@ -1548,10 +1557,6 @@ def _docling_cell_evidence(built: dict[str, Any]) -> list[EvidenceSpan]:
     representation = built["representation"]
     evidence = []
     for item in built['source_locations'].pages(cells_only=True):
-        # A page-only/table-only location cannot become a replayable citation.
-        # Native scalar ranges remain the only admitted evidence owner.
-        if type(item.get("start")) is not int or type(item.get("end")) is not int:
-            continue
         evidence.append(_structural_evidence(item, representation.id, representation.origin))
     return evidence
 
@@ -2720,12 +2725,20 @@ def _publish_native_topics(request, store, generation, source_builds, topics):
             built, span = citations[evidence_id]
             locator = span.fields['locator'] if isinstance(span, _EvidenceReference) else span.locator.model_dump()
             start, end = locator['start_char'], locator['end_char']
-            if start is None or end is None or start >= end:
-                raise SemanticArtifactError('topic evidence lacks native scalar proof', code='NATIVE_TOPIC_GROUNDING_MISSING')
             source_id = built['source'].source_id
             if 'native_scalar_ranges' not in built:
                 raise SemanticArtifactError('topic source lacks native scalar addresses', code='NATIVE_TOPIC_GROUNDING_MISSING')
-            ranges = _window_native_ranges(built['native_scalar_ranges'], start, end)
+            if start is None and end is None and span.metadata.get('structural_ref'):
+                address = None
+                for item in built['source_locations'].pages(ref=span.metadata['structural_ref'], hydrate=False):
+                    address = item['quoteAddress']
+                if address is None or address['kind'] != 'native':
+                    raise SemanticArtifactError('topic evidence lacks native scalar proof', code='NATIVE_TOPIC_GROUNDING_MISSING')
+                ranges = [dict(nativeRef=address['ref'], start=address['start'], end=address['end'])]
+            else:
+                if start is None or end is None or start >= end:
+                    raise SemanticArtifactError('topic evidence lacks native scalar proof', code='NATIVE_TOPIC_GROUNDING_MISSING')
+                ranges = _window_native_ranges(built['native_scalar_ranges'], start, end)
             mapped = False
             for address in ranges:
                 after = None
