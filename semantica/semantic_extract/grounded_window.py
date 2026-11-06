@@ -88,10 +88,10 @@ def extract_grounded_window(
             if digest != receipt["accepted_digest"]:
                 raise ProcessingError("Native receipt and paid acceptance identity differ")
             values = native_store.read_extraction(extraction_binding, stage, text=text, native_ranges=native_ranges, entities=entities, extraction_spec=specification)
-            native_store.flush()
             # A released body is absent by design. Its durable acceptance digest
             # remains; only a verified native receipt makes that absence safe.
             if accepted_cache.has_accepted_body(stage, text, digest, **cache_params):
+                native_store.flush()
                 accepted_cache.release_accepted(stage, text, digest, **cache_params)
             recovered = native_store.read_extraction_receipts(extraction_binding, stage)
             restore_receipts(current_provider, recovered)

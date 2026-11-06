@@ -147,6 +147,14 @@ def test_production_durability_failure_preserves_pending_paid_work(tmp_path, fau
                                ['source-1', 'recipe-1', 'relations']]
 
 
+def test_replaying_released_native_work_does_not_flush(tmp_path):
+    completed = run_child(tmp_path)
+    assert completed.returncode == 0, completed.stderr
+    replayed = run_child(tmp_path, 'flush')
+    assert replayed.returncode == 0, replayed.stderr
+    assert len(calls(tmp_path)) == 2
+
+
 @pytest.mark.parametrize('mutation', ['missing', 'corrupt'])
 def test_production_lost_paid_work_fails_closed_without_new_model_call(tmp_path, mutation):
     first = run_child(tmp_path, 'after-accept')

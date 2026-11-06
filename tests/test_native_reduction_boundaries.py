@@ -53,6 +53,35 @@ def test_classification_never_votes_or_adds_adjudication(monkeypatch, choices, c
         assert result.assignments[0].evidence_ids == ["ev:0", "ev:1"]
 
 
+@pytest.mark.parametrize('pending', [False, True])
+def test_classification_replay_flushes_only_pending_handoff(pending):
+    events = []
+    value = object()
+    store = SimpleNamespace(
+        classification_operation_id=lambda _: 'operation',
+        classification_receipt=lambda _: {'accepted_digest': 'digest'},
+        read_classification=lambda *a, **k: value,
+        read_classification_receipts=lambda _: [],
+        flush=lambda: events.append('flush'))
+    cache = SimpleNamespace(
+        accepted_digest=lambda *a, **k: 'digest',
+        has_accepted_body=lambda *a, **k: pending,
+        release_accepted=lambda *a, **k: events.append('release'))
+    request = SimpleNamespace(project_id='project',
+        recipe=SimpleNamespace(lineage_payload=lambda: {}),
+        parsed_sources=[SimpleNamespace(source_id='source', representation_revision='representation')])
+    source = SimpleNamespace(source_id='source', material_revision='material')
+    relay = SimpleNamespace(binding_id='binding', model_id='model')
+    profile = SimpleNamespace(model_dump=lambda **k: {})
+    token = pipeline._native_build.set((request, store, cache))
+    try:
+        restored, receipts = pipeline._classify_source_batch({'source': source, 'passages': []}, profile, relay)
+    finally:
+        pipeline._native_build.reset(token)
+    assert restored is value and receipts == []
+    assert events == (['flush', 'release'] if pending else [])
+
+
 def test_native_report_batches_cover_evidence_and_scope_citations(monkeypatch):
     summarizer = CommunitySummarizer(max_tokens=2000, token_counter=len, cache_enabled=False)
     chunks = [{"id": str(i), "text": str(i) * 350} for i in range(3)]

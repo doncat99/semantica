@@ -294,6 +294,7 @@ class ExtractionRecords:
 
         Coordinates are absolute reader character addresses. Attribute values and
         identity profiles remain solely in the accepted native extraction records.
+        The source producer flushes derived projections before handing them off.
         """
         node = self._identity_member(identity)
         scalar_fields = {'identity_scope':'identityScope',
@@ -358,7 +359,6 @@ class ExtractionRecords:
             if len(serialized.encode()) > MAX_PAGE_BYTES:
                 raise ProcessingError('Identity projection exceeds byte budget')
             self.owner._update_derived_graph(graph, insert=serialized+' .')
-            self.owner.flush()
 
     def _read_identity_projection_fields(self,node):
         graph = self.identity_projection_graph
@@ -490,7 +490,7 @@ class ExtractionRecords:
 
     def write_fact_projection(self, identity, *, assertion_id, relation_id,
                               source_id, target_id, predicate, qualifiers, evidence_ids):
-        """Store derived ids and ordered support addresses; no DTO JSON or quotes."""
+        """Store derived addresses; the source producer flushes before handoff."""
         from ..semantic_extract.schemas import validate_fact_qualifiers
         validate_fact_qualifiers(qualifiers)
         node=self._fact_member(identity)
@@ -526,7 +526,6 @@ class ExtractionRecords:
                 return
             serialized=' .\n'.join(str(q.subject)+' '+str(q.predicate)+' '+str(q.object) for q in quads)
             self.owner._update_derived_graph(graph, insert=serialized+' .')
-            self.owner.flush()
 
     def read_fact_projection(self, identity, kind):
         """Hydrate exactly one source observation; canonical remapping is separate."""

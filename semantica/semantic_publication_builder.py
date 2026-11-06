@@ -1650,8 +1650,8 @@ def _classify_source_batch(built: dict[str, Any], profile: Any, relay: Any) -> t
                 raise SemanticArtifactError("classification acceptance and native receipt differ")
             value = store.read_classification(binding, profile=profile, allowed_evidence_ids=[span.id for span in passages])
             receipts = [ModelReceipt.model_validate(item) for item in store.read_classification_receipts(binding)]
-            store.flush()
             if cache.has_accepted_body("classification", binding["context_digest"], digest, **params):
+                store.flush()
                 cache.release_accepted("classification", binding["context_digest"], digest, **params)
             return value, receipts
     if digest is not None:
@@ -2927,6 +2927,8 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                             source_id=relation.source_entity_id,target_id=relation.target_entity_id,
                             predicate=relation.type,qualifiers=relation.qualifiers,evidence_ids=relation.evidence_ids)
                 del built_source['native_fact_refs']
+                # Derived addresses are replayable; paid receipts are already durable.
+                store.flush()
                 built_source['native_scalar_ranges'] = parsed.native_ranges
                 reader = parsed.reader
                 built_source['reader'] = reader
