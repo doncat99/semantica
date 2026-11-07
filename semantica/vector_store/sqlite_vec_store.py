@@ -65,6 +65,10 @@ _NATIVE_QUERY_TEMP_BYTES = 32 * 1024 * 1024
 SQLITE_VEC_AVAILABLE = importlib.util.find_spec("sqlite_vec") is not None
 
 
+class EmbeddingSpaceStaleError(ProcessingError):
+    """The acquired owner predates an explicit offline identity migration."""
+
+
 class SQLiteVecStore:
     """
     SQLite vector store using the sqlite-vec extension for similarity search.
@@ -255,6 +259,9 @@ class SQLiteVecStore:
                     id TEXT PRIMARY KEY, count INTEGER NOT NULL, digest TEXT NOT NULL,
                     receipt TEXT NOT NULL, receipt_digest TEXT NOT NULL,
                     accepted_digest TEXT NOT NULL) WITHOUT ROWID''')
+                conn.execute(f'''CREATE TABLE IF NOT EXISTS {self.table_name}_embedding_bindings (
+                    logical_id TEXT PRIMARY KEY, physical_id TEXT NOT NULL UNIQUE,
+                    binding_json TEXT NOT NULL) WITHOUT ROWID''')
                 if self.config.get('embedding_space_identity') is not None:
                     conn.execute('CREATE TABLE IF NOT EXISTS embedding_space(id INTEGER PRIMARY KEY CHECK(id=1),identity TEXT NOT NULL,dimension INTEGER NOT NULL)')
                     conn.execute('INSERT OR IGNORE INTO embedding_space VALUES(1,?,?)',
@@ -344,7 +351,93 @@ class SQLiteVecStore:
         if space is None or any(binding[k] != space[k] for k in ('model', 'recipe')) or binding['space'] != space['binding']:
             raise ValidationError('Embedding operation differs from its native space')
         with self._lock, self._get_connection() as conn:
-            return self._read_embedding(conn, identity, include_vectors=include_vectors)
+            physical = self._embedding_physical_id(conn, identity)
+            return self._read_embedding(conn, physical, include_vectors=include_vectors) if physical else None
+
+    def _embedding_physical_id(self, conn, logical_id):
+        self._assert_embedding_space(conn)
+        row = conn.execute(f'''SELECT b.physical_id,o.id FROM {self.table_name}_embedding_bindings b
+            LEFT JOIN {self.table_name}_embedding_operations o ON o.id=b.physical_id WHERE b.logical_id=?''',
+            (logical_id,)).fetchone()
+        if row and row[1] is None:
+            raise ProcessingError('Embedding identity index references a missing paid operation')
+        return row[0] if row else None
+
+    def _assert_embedding_space(self, conn):
+        expected = json.dumps(self.embedding_space_identity,sort_keys=True,separators=(',',':'))
+        if conn.execute('SELECT identity,dimension FROM embedding_space WHERE id=1').fetchone() != (expected,self.dimension):
+            raise EmbeddingSpaceStaleError('Embedding space identity is stale; reopen the current native owner')
+
+    def embedding_physical_operation_id(self, binding):
+        """Resolve the stable paid acceptance key through the current native index."""
+        identity = self.embedding_operation_id(binding)
+        space = self.embedding_space_identity
+        if binding['space'] != space['binding'] or any(binding[k] != space[k] for k in ('model','recipe')):
+            raise ValidationError('Embedding operation differs from its native space')
+        with self._lock, self._get_connection() as conn:
+            return self._embedding_physical_id(conn, identity)
+
+    def migrate_embedding_identity(self, target_space, bindings):
+        """Offline atomic reindexing; vectors, receipts and publication rows stay put.
+
+        The caller proves recipe equivalence before invoking this maintenance
+        operation. Every physical operation must be covered exactly once. Old
+        publication space receipts become explicitly stale, requiring a native
+        publication rebuild, never another paid embedding call.
+        """
+        if self.read_only or self.db_path == ':memory:':
+            raise ProcessingError('Embedding migration requires a persistent writable native owner')
+        previous_space = self.embedding_space_identity
+        if (not isinstance(target_space, dict) or set(target_space) != {'binding','model','recipe'}
+                or any(not isinstance(v,str) or not v or len(v.encode()) > 4096 for v in target_space.values())
+                or target_space['model'] != previous_space['model']):
+            raise ValidationError('Embedding migration requires the same model and an exact target space')
+        table = self.table_name + '_embedding_bindings'
+        operations = self.table_name + '_embedding_operations'
+        with self._lock, self._get_connection() as conn:
+            try:
+                conn.execute('BEGIN IMMEDIATE')
+                self._assert_embedding_space(conn)
+                conn.execute('CREATE TEMP TABLE embedding_migration(logical_id TEXT PRIMARY KEY,physical_id TEXT UNIQUE,binding_json TEXT) WITHOUT ROWID')
+                count = 0
+                for item in bindings:
+                    from ..semantic_worker_context import check_query_cancellation
+                    check_query_cancellation()
+                    if not isinstance(item,dict) or set(item) != {'previous','current'}:
+                        raise ValidationError('Embedding migration requires exact previous/current bindings')
+                    previous, current = item['previous'], item['current']
+                    old_id, new_id = self.embedding_operation_id(previous), self.embedding_operation_id(current)
+                    if any(previous[k] != current[k] for k in previous if k not in {'recipe','space'}):
+                        raise ValidationError('Embedding migration changed a paid input')
+                    for binding, space in ((previous,previous_space),(current,target_space)):
+                        if binding['space'] != space['binding'] or any(binding[k] != space[k] for k in ('model','recipe')):
+                            raise ValidationError('Embedding migration binding differs from its space')
+                    physical = self._embedding_physical_id(conn, old_id)
+                    if physical is None:
+                        # Old keys are admitted only by this explicit offline migration.
+                        physical = old_id
+                    adopted = self._read_embedding(conn, physical, include_vectors=False)
+                    if adopted is None:
+                        raise ProcessingError('Embedding migration physical operation is missing')
+                    conn.execute('INSERT INTO embedding_migration VALUES(?,?,?)',
+                        (new_id,physical,json.dumps(current,sort_keys=True,separators=(',',':'))))
+                    count += 1
+                missing = conn.execute(f'''SELECT 1 FROM {operations} o LEFT JOIN embedding_migration m
+                    ON m.physical_id=o.id WHERE m.physical_id IS NULL LIMIT 1''').fetchone()
+                if missing or conn.execute(f'SELECT count(*) FROM {operations}').fetchone()[0] != count:
+                    raise ProcessingError('Embedding migration must cover every physical operation exactly once')
+                conn.execute(f'DELETE FROM {table}')
+                conn.execute(f'INSERT INTO {table} SELECT * FROM embedding_migration')
+                conn.execute('UPDATE embedding_space SET identity=? WHERE id=1',
+                    (json.dumps(target_space,sort_keys=True,separators=(',',':')),))
+                conn.execute('DROP TABLE embedding_migration')
+                conn.commit()
+            except BaseException:
+                conn.rollback()
+                raise
+        self.embedding_space_identity = dict(target_space)
+        self.config['embedding_space_identity'] = dict(target_space)
+        return dict(operations=count, vectors_copied=0, receipts_copied=0, publications='require-rebuild')
 
     @staticmethod
     def pack_embedding_vectors(vectors, dimension, count):
@@ -399,9 +492,10 @@ class SQLiteVecStore:
         with self._lock, self._get_connection() as conn:
             try:
                 conn.execute('BEGIN IMMEDIATE')
-                existing = self._read_embedding(conn, identity, include_vectors=include_vectors)
+                physical = self._embedding_physical_id(conn, identity)
+                existing = self._read_embedding(conn, physical, include_vectors=include_vectors) if physical else None
                 if existing is not None:
-                    prior = conn.execute(f'SELECT digest,receipt_digest FROM {self.table_name}_embedding_operations WHERE id=?', (identity,)).fetchone()
+                    prior = conn.execute(f'SELECT digest,receipt_digest FROM {self.table_name}_embedding_operations WHERE id=?', (physical,)).fetchone()
                     if existing['accepted_digest'] != accepted_digest or prior != (digest, hashlib.sha256(encoded.encode()).hexdigest()):
                         raise ProcessingError('Embedding acceptance digest differs from adopted operation')
                     conn.commit()
@@ -410,6 +504,8 @@ class SQLiteVecStore:
                     ((identity + ':' + str(i), value, '{}') for i, value in enumerate(packed)))
                 conn.execute(f'INSERT INTO {self.table_name}_embedding_operations VALUES(?,?,?,?,?,?)',
                     (identity, len(packed), digest, encoded, hashlib.sha256(encoded.encode()).hexdigest(), accepted_digest))
+                conn.execute(f'INSERT INTO {self.table_name}_embedding_bindings VALUES(?,?,?)',
+                    (identity,identity,json.dumps(binding,sort_keys=True,separators=(',',':'))))
                 conn.commit()
             except Exception:
                 conn.rollback()
@@ -630,6 +726,7 @@ class SQLiteVecStore:
         table = self.table_name + '_native_ranges'
         metadata = self.table_name + '_native_publications'
         with self._lock, self._get_connection() as conn:
+            self._assert_embedding_space(conn)
             conn.executescript(f'''CREATE TABLE IF NOT EXISTS {table}(
                 project TEXT,generation TEXT,vector_id TEXT,source TEXT,material TEXT,
                 representation TEXT,ranges TEXT,PRIMARY KEY(project,vector_id)) WITHOUT ROWID;
@@ -657,7 +754,8 @@ class SQLiteVecStore:
                     space = self.embedding_space_identity
                     if binding['space'] != space['binding'] or any(binding[k] != space[k] for k in ('model','recipe')):
                         raise ValidationError('Native vector link differs from its embedding space')
-                    adopted = self._read_embedding(conn, operation)
+                    physical = self._embedding_physical_id(conn, operation)
+                    adopted = self._read_embedding(conn, physical) if physical else None
                     if adopted is None or link['vector_id'] not in adopted['ids']:
                         raise ProcessingError('Native vector link has no accepted native vector')
                     if not isinstance(ranges, list) or not 1 <= len(ranges) <= 128:
@@ -724,6 +822,7 @@ class SQLiteVecStore:
             raise ValidationError('Native vector query requires a finite matching cosine vector')
         table, metadata = self.table_name+'_native_ranges', self.table_name+'_native_publications'
         with self._lock, self._get_connection() as conn:
+            self._assert_embedding_space(conn)
             row = conn.execute(f'SELECT generation,digest,recipe FROM {metadata} WHERE project=?', (project,)).fetchone()
             if row != (generation,receipt['store_id'],receipt['recipe_digest']):
                 raise ProcessingError('Native vector publication is missing or stale')
@@ -779,6 +878,7 @@ class SQLiteVecStore:
         serialized = sqlite_vec.serialize_float32(vector)
         links = self.table_name+'_native_ranges_records'
         with self._lock, self._get_connection() as conn:
+            self._assert_embedding_space(conn)
             row = conn.execute(f'SELECT generation,digest,recipe FROM {self.table_name}_native_publications WHERE project=?',(project,)).fetchone()
             if (set(receipt) != {'kind','store_id','recipe_digest','space_id'}
                     or receipt['kind'] != 'native-sqlite-vec'
@@ -915,6 +1015,7 @@ class SQLiteVecStore:
         if set(receipt)!={'kind','store_id','recipe_digest','space_id'}:
             raise ValidationError('Invalid native evidence receipt')
         with self._lock,self._get_connection() as conn:
+            self._assert_embedding_space(conn)
             row=conn.execute(f'SELECT generation,digest,recipe FROM {self.table_name}_native_publications WHERE project=?',(project,)).fetchone()
             if (receipt['kind']!='native-sqlite-vec' or receipt['space_id']!=self.embedding_space_identity['binding']
                     or row!=(generation,receipt['store_id'],receipt['recipe_digest'])):

@@ -45,6 +45,37 @@ def create_plan(path):
     return db
 
 
+def operation_pages(owner, graph, recipes=None):
+    """Spool one indexed native traversal; group sources without retaining readers."""
+    from semantica.triplet_store.extraction_records import F
+    ox = owner._oxigraph
+    with tempfile.TemporaryDirectory(prefix='semantica-retirement-operations-') as scratch:
+        db = sqlite3.connect(Path(scratch)/'operations.sqlite')
+        try:
+            db.executescript('''PRAGMA cache_size=-4096;
+              CREATE TABLE operations(source TEXT,id TEXT PRIMARY KEY,recipe TEXT);
+              CREATE INDEX operation_order ON operations(source,id);''')
+            count = 0
+            for quad in owner.store.quads_for_pattern(None, ox.NamedNode(F+'bindingRecipe'), None, graph):
+                if recipes is not None and quad.object.value not in recipes:
+                    continue
+                sources = owner.store.quads_for_pattern(quad.subject, ox.NamedNode(F+'bindingSource'), None, graph)
+                first = next(sources, None)
+                source = first.object.value if first is not None else ''
+                if next(sources, None) is not None:
+                    raise ValueError('Native operation source is duplicated')
+                db.execute('INSERT INTO operations VALUES(?,?,?)', (source, quad.subject.value, quad.object.value))
+                count += 1
+                if count % 128 == 0:
+                    db.commit()
+            db.commit()
+            cursor = db.execute('SELECT source,id,recipe FROM operations ORDER BY source,id')
+            while rows := cursor.fetchmany(128):
+                yield [dict(source=source, op=ox.NamedNode(identity), recipe=ox.Literal(recipe)) for source, identity, recipe in rows]
+        finally:
+            db.close()
+
+
 def inventory_all(owner, plan, accepted, root, project, protected, obsolete, read_text, *, resume=False, current_space=None):
     """Classify the complete project owners before admitting any destructive write.
 
@@ -77,6 +108,7 @@ def inventory_all(owner, plan, accepted, root, project, protected, obsolete, rea
               PRAGMA cache_size=-4096;
               CREATE TABLE inventory(kind,id,disposition,digest,PRIMARY KEY(kind,id));
               CREATE TABLE nodes(id TEXT PRIMARY KEY,disposition TEXT);
+              CREATE TABLE identity_links(id TEXT,graph TEXT,operation TEXT,disposition TEXT,PRIMARY KEY(id,graph));
               CREATE TABLE graph_owners(id TEXT PRIMARY KEY,disposition TEXT);
               CREATE TABLE verified_projection(id TEXT,graph TEXT,PRIMARY KEY(id,graph));
               CREATE TABLE acceptance(namespace,key,disposition,digest,PRIMARY KEY(namespace,key));
@@ -96,13 +128,9 @@ def inventory_all(owner, plan, accepted, root, project, protected, obsolete, rea
                 digest = hashlib.sha256(encoded(receipt).encode()).hexdigest()
                 row = (receipt['id'],operation,recipe,space,source,digest)
                 db.execute('INSERT INTO protected_receipts VALUES(?,?,?,?,?,?)',row)
-            after = ''
-            while True:
-                rows = list(owner.store.query(f'''SELECT ?op ?recipe WHERE {{ GRAPH {facts} {{
-                    ?op <{F}bindingRecipe> ?recipe . FILTER(STR(?op) > {ox.Literal(after)})
-                    }} }} ORDER BY STR(?op) LIMIT 128'''))
+            for rows in operation_pages(owner, facts):
                 for row in rows:
-                    op = row['op']; after = op.value
+                    op = row['op']
                     state = disposition(row['recipe'].value)
                     codec = object.__new__(ExtractionRecords)
                     codec.owner, codec.ox, codec.graph = owner, ox, facts
@@ -113,14 +141,16 @@ def inventory_all(owner, plan, accepted, root, project, protected, obsolete, rea
                     if classification:
                         records = ClassificationRecords(owner, binding); stage = 'classification'
                     else:
-                        stage = next((stage for stage in ('entities','relations') if operation_identity(binding,stage) == op.value), None)
-                        if stage is None:
+                        stage = codec.one(op, 'extractionStage', optional=True)
+                        if stage not in ('entities','relations'):
                             raise ValueError('Unclassified native operation')
                         records = ExtractionRecords(owner,binding,stage)
                     if records.operation != op or records.receipt() is None:
                         raise ValueError('Native operation identity or receipt differs')
                     receipt = records.receipt()
                     model_receipts = records.read_receipts()
+                    db.execute('INSERT INTO identity_links VALUES(?,?,?,?)',
+                        (records.logical.value, records.index_graph.value, op.value, state))
                     add('operation',op.value,state,[binding,receipt,model_receipts])
                     if state=='protected':
                         for model_receipt in model_receipts:
@@ -136,12 +166,13 @@ def inventory_all(owner, plan, accepted, root, project, protected, obsolete, rea
                         for tail in (':identity-projection',':fact-projection'):
                             db.execute('INSERT INTO graph_owners VALUES(?,?)', (op.value+tail,state))
                 db.commit()
-                if len(rows)<128:
-                    break
             # Graph ownership is exact. Stream every quad, including default/foreign graphs.
             for graph in owner.store.named_graphs():
                 name = getattr(graph,'value','')
-                if name in (facts.value,publication):
+                identity_index = name in (facts.value+':extraction-index', facts.value+':classification-index')
+                if name == publication and plan.execute("SELECT 1 FROM graphs WHERE id=? AND kind='pending-publication'",(name,)).fetchone():
+                    state = 'obsolete'
+                elif name in (facts.value,publication) or identity_index:
                     state = 'protected'
                 else:
                     found = db.execute('SELECT disposition FROM graph_owners WHERE id=?',(name,)).fetchone()
@@ -153,6 +184,17 @@ def inventory_all(owner, plan, accepted, root, project, protected, obsolete, rea
                 total = count = 0
                 for quad in owner.store.quads_for_pattern(None,None,None,graph):
                     subject = getattr(quad.subject,'value','')
+                    if identity_index:
+                        link = db.execute('SELECT operation,disposition FROM identity_links WHERE id=? AND graph=?',(subject,name)).fetchone()
+                        if link is None and resume:
+                            proof = plan.execute('SELECT digest,count FROM node_proofs WHERE id=? AND graph=?',(subject,name)).fetchone()
+                            prior = plan.execute("SELECT 1 FROM inventory WHERE kind='identity-node' AND id=? AND disposition='obsolete'",(name+'|'+subject,)).fetchone()
+                            if proof is not None and prior and node_proof(owner,subject,name)==proof:
+                                link = (getattr(quad.object,'value',''), 'obsolete')
+                        if (link is None or quad.predicate != ox.NamedNode(F+'physicalOperation')
+                                or quad.object != ox.NamedNode(link[0])):
+                            raise ValueError('Unclassified or corrupt native identity index')
+                        add('identity-node',name+'|'+subject,link[1],node_proof(owner,subject,name))
                     if name == facts.value and db.execute('SELECT 1 FROM nodes WHERE id=?',(subject,)).fetchone() is None:
                         proof = plan.execute('SELECT digest,count FROM node_proofs WHERE id=? AND graph=?',(subject,name)).fetchone() if resume else None
                         prior = plan.execute("SELECT 1 FROM inventory WHERE kind='fact-node' AND id=? AND disposition='obsolete'",(subject,)).fetchone() if resume else None
@@ -221,7 +263,7 @@ def inventory_all(owner, plan, accepted, root, project, protected, obsolete, rea
                     prior = plan.execute('SELECT disposition,digest FROM inventory WHERE kind=? AND id=?',(kind,identity)).fetchone()
                     # Mixed facts graph changes only through certified obsolete subjects;
                     # apply_plan independently proves every surviving obsolete subject.
-                    if kind=='graph' and identity==facts.value:
+                    if kind=='graph' and identity in (facts.value,facts.value+':extraction-index',facts.value+':classification-index'):
                         continue
                     if kind=='graph' and state=='obsolete' and prior is not None and prior[0]=='obsolete':
                         # A crash may leave a strict subset of certified projection
@@ -230,7 +272,7 @@ def inventory_all(owner, plan, accepted, root, project, protected, obsolete, rea
                     if prior!=(state,digest):
                         raise ValueError('Inventory changed after certification: '+kind+':'+identity)
                 for kind,identity,state,digest in plan.execute("SELECT * FROM inventory WHERE disposition='protected'"):
-                    if kind=='graph' and identity==facts.value:
+                    if kind=='graph' and identity in (facts.value,facts.value+':extraction-index',facts.value+':classification-index'):
                         continue
                     if db.execute('SELECT disposition,digest FROM inventory WHERE kind=? AND id=?',(kind,identity)).fetchone()!=(state,digest):
                         raise ValueError('Protected inventory disappeared or changed')
@@ -335,25 +377,20 @@ def verify_pending(plan, accepted, *, resume=False):
             raise ValueError('Pending body changed after certification')
 
 
-def plan_facts(owner, plan, accepted, project, recipes, read_text):
+def plan_facts(owner, plan, accepted, project, recipes, read_text, *, pending_generation=None):
     from semantica.triplet_store.extraction_records import ExtractionRecords, BINDING, F, operation_identity
     from semantica.triplet_store.classification_records import ClassificationRecords, BINDING as CB
     from semantica.semantic_extract.cache import ExtractionCache
     ox = owner._oxigraph
     publication = ox.NamedNode('urn:semantica:publication:' + hashlib.sha256(project.encode()).hexdigest())
     for quad in owner.store.quads_for_pattern(None, None, None, publication):
-        if getattr(quad.object, 'value', '') in recipes:
+        if pending_generation is None and getattr(quad.object, 'value', '') in recipes:
             raise ValueError('Current publication still names an obsolete recipe')
     graph = ox.NamedNode('urn:semantica:project:' + hashlib.sha256(project.encode()).hexdigest())
     key_owner = ExtractionCache()
-    after = ''
-    while True:
-        values = ' '.join(str(ox.Literal(value)) for value in sorted(recipes))
-        rows = list(owner.store.query(f'''SELECT ?op ?recipe WHERE {{ GRAPH {graph} {{
-          ?op <{F}bindingRecipe> ?recipe . VALUES ?recipe {{ {values} }}
-          FILTER(STR(?op) > {ox.Literal(after)}) }} }} ORDER BY STR(?op) LIMIT 128'''))
+    for rows in operation_pages(owner, graph, recipes):
         for row in rows:
-            op = row['op']; after = op.value
+            op = row['op']
             dummy = object.__new__(ExtractionRecords); dummy.owner, dummy.ox, dummy.graph = owner, ox, graph
             classification = op.value.startswith('urn:semantica:classification:')
             fields = CB if classification else BINDING
@@ -364,17 +401,18 @@ def plan_facts(owner, plan, accepted, project, recipes, read_text):
                 records = ClassificationRecords(owner, binding)
                 stage = 'classification'
             else:
-                stage = next((stage for stage in ('entities', 'relations') if operation_identity(binding, stage) == op.value), None)
-                if stage is None:
+                stage = dummy.one(op, 'extractionStage', optional=True)
+                if stage not in ('entities', 'relations'):
                     raise ValueError('Unknown obsolete native operation')
                 records = ExtractionRecords(owner, binding, stage)
             receipt = records.receipt()
-            if receipt is None:
+            if receipt is None or records.operation != op:
                 raise ValueError('Obsolete operation receipt missing')
             model_receipts = records.read_receipts()
             plan.execute('INSERT INTO operations VALUES(?,?,?,?,?)', (op.value, binding['recipe'], json.dumps(binding, sort_keys=True), json.dumps(receipt, sort_keys=True), json.dumps(model_receipts, sort_keys=True)))
             for node in [op, *records.values(op, 'ownedRecord')]:
                 plan.execute('INSERT INTO nodes VALUES(?,?)', (node.value, graph.value))
+            plan.execute('INSERT INTO nodes VALUES(?,?)', (records.logical.value, records.index_graph.value))
             reduction = records.one(op, 'classificationReduction', optional=True) if classification else None
             if not reduction:
                 text = binding['context_digest'] if classification else read_text(binding)
@@ -394,17 +432,52 @@ def plan_facts(owner, plan, accepted, project, recipes, read_text):
                             raise ValueError('Unexpected blank projection subject')
                         plan.execute('INSERT OR IGNORE INTO nodes VALUES(?,?)', (quad.subject.value, derived.value))
         plan.commit()
-        if len(rows) < 128:
-            break
     for identity, context in plan.execute('SELECT id,graph FROM nodes ORDER BY id,graph'):
         digest, count = node_proof(owner, identity, context)
         plan.execute('INSERT INTO node_proofs VALUES(?,?,?,?)', (identity, context, digest, count))
     plan.commit()
+    if pending_generation is not None:
+        plan_pending_publication(owner, plan, project, pending_generation)
     assert_no_external_references(owner, plan)
+
+
+def plan_pending_publication(owner, plan, project, generation):
+    """Admit an explicitly named abandoned draft, never a ready publication."""
+    from semantica.triplet_store.publication_records import PublicationRecords, P
+    records = PublicationRecords(owner, project)
+    status = records.status()
+    if status is None or status['generation'] != generation or status['state'] != 'pending' or status['indexes']:
+        raise ValueError('Obsolete publication generation is not the exact pending draft')
+    operations = 0
+    for quad in owner.store.quads_for_pattern(None, owner._oxigraph.NamedNode(P+'operation'), None, records.graph):
+        if not plan.execute('SELECT 1 FROM operations WHERE id=?',(quad.object.value,)).fetchone():
+            raise ValueError('Pending publication references a protected or unknown operation')
+        operations += 1
+    if not operations:
+        raise ValueError('Pending publication operation ownership missing')
+    with plan:
+        plan.execute('INSERT INTO graphs VALUES(?,?)',(records.graph.value,'pending-publication'))
+        for quad in owner.store.quads_for_pattern(None,None,None,records.graph):
+            if not isinstance(quad.subject,owner._oxigraph.NamedNode):
+                raise ValueError('Unexpected blank pending publication subject')
+            plan.execute('INSERT OR IGNORE INTO nodes VALUES(?,?)',(quad.subject.value,records.graph.value))
+        for identity, in plan.execute('SELECT id FROM nodes WHERE graph=?',(records.graph.value,)):
+            digest,count = node_proof(owner,identity,records.graph.value)
+            plan.execute('INSERT INTO node_proofs VALUES(?,?,?,?)',(identity,records.graph.value,digest,count))
 
 
 def node_proof(owner, identity, graph):
     ox = owner._oxigraph
+    if graph.startswith('urn:semantica:publication:'):
+        # Draft membership may exceed an extraction window; prove it without a list.
+        total = count = 0
+        for quad in owner.store.quads_for_pattern(ox.NamedNode(identity),None,None,ox.NamedNode(graph)):
+            value = str(quad).encode()
+            if len(value) > 2*1024*1024:
+                raise ValueError('Cleanup publication quad exceeds native operation budget')
+            total = (total+int.from_bytes(hashlib.sha256(value).digest(),'big')) % (1<<256)
+            count += 1
+        return 'quad-sum:'+format(total,'064x'),count
     values = []
     byte_count = 0
     for quad in owner.store.quads_for_pattern(ox.NamedNode(identity), None, None, ox.NamedNode(graph)):
@@ -472,6 +545,8 @@ def plan_spaces(root, plan, accepted, recipes, current_recipe):
 def assert_publication_spaces(owner, plan, project):
     ox = owner._oxigraph
     graph = ox.NamedNode('urn:semantica:publication:' + hashlib.sha256(project.encode()).hexdigest())
+    if plan.execute("SELECT 1 FROM graphs WHERE id=? AND kind='pending-publication'",(graph.value,)).fetchone():
+        return
     spaces = set()
     recipes = {recipe for recipe, in plan.execute('SELECT DISTINCT recipe FROM operations')}
     for identity, in plan.execute('SELECT identity FROM spaces'):
@@ -486,6 +561,8 @@ def apply_plan(owner, plan, accepted_path, *, resume=False):
     ox = owner._oxigraph
     assert_no_external_references(owner, plan)
     for identity, graph, digest, count in plan.execute('SELECT * FROM node_proofs'):
+        if len(f'( {ox.NamedNode(identity)} {ox.NamedNode(graph)} )'.encode()) > 65400:
+            raise ValueError('Cleanup subject identity exceeds update byte budget')
         actual = node_proof(owner, identity, graph)
         if actual != (digest, count) and not (resume and actual[1] == 0):
             raise ValueError('Cleanup subject changed after certification')
@@ -520,8 +597,18 @@ def apply_plan(owner, plan, accepted_path, *, resume=False):
         finally:
             conn.close()
     # Admission completed for the whole closure before the first destructive write.
+    prefix = 'DELETE { GRAPH ?g { ?s ?p ?o } } WHERE { VALUES (?s ?g) { '
+    suffix = ' } GRAPH ?g { ?s ?p ?o } }'
+    rows = []; size = len((prefix+suffix).encode())
     for identity, graph in plan.execute('SELECT id,graph FROM nodes ORDER BY graph,id'):
-        owner.store.update(f'DELETE WHERE {{ GRAPH {ox.NamedNode(graph)} {{ {ox.NamedNode(identity)} ?p ?o }} }}')
+        row = f'( {ox.NamedNode(identity)} {ox.NamedNode(graph)} ) '
+        row_bytes = len(row.encode())
+        if rows and (len(rows) == 128 or size+row_bytes > 65536):
+            owner.store.update(prefix+''.join(rows)+suffix)
+            rows = []; size = len((prefix+suffix).encode())
+        rows.append(row); size += row_bytes
+    if rows:
+        owner.store.update(prefix+''.join(rows)+suffix)
     for graph, _ in plan.execute('SELECT * FROM graphs'):
         owner.store.remove_graph(ox.NamedNode(graph))
     owner.flush(); owner.store.optimize(); owner.flush()
@@ -546,7 +633,8 @@ def apply_plan(owner, plan, accepted_path, *, resume=False):
 
 def main():
     from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest, stable_digest
-    from semantica.semantic_publication_builder import _project_processing_digest, _read_source_projection_text
+    from semantica.semantic_publication_builder import _read_source_projection_text, _extraction_recipe, _classification_recipe
+    from semantica.semantic_embedding_recipe import embedding_recipe
     from semantica.semantic_source_artifact import _load_parsed_source
     from semantica.triplet_store.oxigraph_store import OxigraphStore
     parser = argparse.ArgumentParser(description=__doc__)
@@ -556,20 +644,19 @@ def main():
     parser.add_argument('--report', required=True, type=Path)
     parser.add_argument('--apply-certificate', type=Path)
     parser.add_argument('--resume', action='store_true')
+    parser.add_argument('--continue-facts-certificate', type=Path, help='Explicit incomplete facts-plan checkpoint; performs full admission, never apply')
+    parser.add_argument('--obsolete-pending-generation', help='Exact abandoned pending generation; requires no adopted project publication')
     parser.add_argument('--pending-scopes', type=Path, help='Explicit canonical obsolete pending scopes and exact counts')
     parser.add_argument('--app-db', required=True, type=Path)
     parser.add_argument('--actor-id', required=True)
     args = parser.parse_args()
-    import semantica
     request = SemanticArtifactBuildRequest.model_validate_json(args.request.read_text())
-    helper = __import__('runpy').run_path(str(Path(__file__).with_name('rebind_paid_native_results.py')))
-    current = helper['source_recipe'](request, _project_processing_digest(Path(semantica.__file__).parent))
-    processing = _project_processing_digest(Path(semantica.__file__).parent)
-    protected = {current, stable_digest(dict(recipe=request.recipe.lineage_payload(),
-        processing=processing, binding=request.relays['model'].binding_id))}
+    current = _extraction_recipe(request)
+    protected = {current, embedding_recipe(request.relays['embedding']), _classification_recipe(request.relays['model'])}
     relay = request.relays['embedding']
-    current_space = dict(binding=stable_digest(dict(binding=relay.binding_id,model=relay.model_id,recipe=current)),
-        model=relay.model_id,recipe=current)
+    vector_recipe = embedding_recipe(relay)
+    current_space = dict(binding=stable_digest(dict(binding=relay.binding_id,model=relay.model_id,recipe=vector_recipe)),
+        model=relay.model_id,recipe=vector_recipe)
     recipes = set(args.obsolete_recipe)
     if protected & recipes or not recipes or any(not value.startswith('sha256:') or len(value) != 71 for value in recipes):
         raise ValueError('Explicit obsolete recipes must exclude current recipe')
@@ -586,12 +673,19 @@ def main():
             active = db.execute("SELECT r.id FROM execution_runs r JOIN knowledge_jobs j ON j.execution_run_id=r.id WHERE j.actor_id=? AND j.resource_id=? AND r.status NOT IN ('succeeded','failed','canceled','interrupted') LIMIT 1", (args.actor_id, request.project_id)).fetchone()
             if active:
                 raise ValueError('Project worker is still active')
+            if args.obsolete_pending_generation:
+                for table,column in (('knowledge_project_snapshots','project_id'),('knowledge_understanding_publications','project'),('knowledge_publication_materials','project_id')):
+                    if db.execute('SELECT 1 FROM '+table+' WHERE '+column+'=? LIMIT 1',(request.project_id,)).fetchone():
+                        raise ValueError('Project has adopted publication dependencies')
         finally:
             db.close()
     require_idle()
     if args.resume and not args.apply_certificate:
         raise ValueError('Resume requires original dry-run certificate and retained plan')
-    plan = sqlite3.connect(args.plan.resolve().as_uri()+'?mode=ro', uri=True) if args.resume else create_plan(args.plan)
+    if args.continue_facts_certificate and (args.resume or args.apply_certificate):
+        raise ValueError('Incomplete facts checkpoint cannot authorize apply or resume')
+    plan = (sqlite3.connect(args.plan.resolve().as_uri()+'?mode=ro', uri=True) if args.resume else
+        sqlite3.connect(args.plan) if args.continue_facts_certificate else create_plan(args.plan))
     owner = OxigraphStore(request.native_store_dir)
     accepted = sqlite3.connect(cache_path.as_uri() + '?mode=ro', uri=True)
     parsed_cache = [None, None]
@@ -605,7 +699,20 @@ def main():
         return _read_source_projection_text(parsed_cache[1].reader, binding['window_start'], binding['window_end'])
     try:
         if not args.resume:
-            plan_facts(owner, plan, accepted, request.project_id, recipes, read_text)
+            if args.continue_facts_certificate:
+                checkpoint = json.loads(args.continue_facts_certificate.read_text())
+                counts = {table:plan.execute('SELECT count(*) FROM '+table).fetchone()[0] for table in ('operations','nodes','node_proofs')}
+                if (checkpoint != dict(phase='facts-planned-not-admitted',requestDigest=stable_digest(request.model_dump(mode='json',by_alias=True)),planDigest=digest_rows(plan),counts=counts)
+                        or not counts['operations'] or counts['nodes'] != counts['node_proofs']
+                        or plan.execute('SELECT 1 FROM nodes n LEFT JOIN node_proofs p ON p.id=n.id AND p.graph=n.graph WHERE p.id IS NULL LIMIT 1').fetchone()
+                        or any(recipe not in recipes for recipe, in plan.execute('SELECT DISTINCT recipe FROM operations'))
+                        or any(plan.execute('SELECT 1 FROM '+table+' LIMIT 1').fetchone() for table in ('spaces','pending_audit','inventory'))):
+                    raise ValueError('Incomplete facts checkpoint differs or is not complete')
+                if args.obsolete_pending_generation:
+                    plan_pending_publication(owner,plan,request.project_id,args.obsolete_pending_generation)
+                assert_no_external_references(owner,plan)
+            else:
+                plan_facts(owner, plan, accepted, request.project_id, recipes, read_text,pending_generation=args.obsolete_pending_generation)
             plan_spaces(root, plan, accepted, recipes, current)
             if args.pending_scopes:
                 scopes = json.loads(args.pending_scopes.read_text())
@@ -617,6 +724,9 @@ def main():
         report = dict(project=request.project_id, artifactDigest=request.release.artifact_digest,
             inputRevision=request.input_revision,currentEmbeddingSpace=current_space,
             requestDigest=stable_digest(request.model_dump(mode='json', by_alias=True)), currentRecipe=current, protectedRecipes=sorted(protected), obsoleteRecipes=sorted(recipes), planDigest=digest_rows(plan), counts={table: plan.execute('SELECT count(*) FROM '+table).fetchone()[0] for table in ('operations','nodes','graphs','cache_keys','spaces','pending_audit','inventory','protected_receipts')}, apply=False)
+        if args.obsolete_pending_generation:
+            report['obsoletePendingPublication'] = dict(generation=args.obsolete_pending_generation,
+                state='pending',adoptedDependencies=0,activeProjectRuns=0)
         if args.apply_certificate:
             prior = json.loads(args.apply_certificate.read_text())
             if prior != report:

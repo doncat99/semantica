@@ -24,6 +24,80 @@ RECEIPT = dict(id='receipt-1', operation='embedding', provider='fixture', model=
     metadata={'usage': {'input_tokens': 7}}, parameters={})
 
 
+def test_offline_identity_migration_keeps_physical_vectors_receipts_and_rowids(tmp_path):
+    owner = SQLiteVecStore.open_embedding_space(str(tmp_path/'vectors.db'), SPACE, 3)
+    before = owner.adopt_embedding(BINDING, [[1.,0.,0.],[0.,1.,0.]], RECEIPT, accepted_digest='paid')
+    physical = owner._conn.execute('SELECT id,embedding,metadata FROM embeddings ORDER BY id').fetchall()
+    rowids = owner._conn.execute('SELECT * FROM embeddings_rowids ORDER BY rowid').fetchall()
+    receipts = owner._conn.execute('SELECT * FROM embeddings_embedding_operations').fetchall()
+    # Emulate the pre-index layout. Ordinary reads must not try the old key.
+    owner._conn.execute('DELETE FROM embeddings_embedding_bindings')
+    owner._conn.commit()
+    assert owner.read_embedding(BINDING) is None
+    space = {**SPACE,'binding':'logical-space','recipe':'logical-recipe'}
+    binding = {**BINDING,'space':space['binding'],'recipe':space['recipe']}
+    mutations = []
+    def authorize(action, table, column, database, trigger):
+        if action in (sqlite3.SQLITE_INSERT,sqlite3.SQLITE_UPDATE,sqlite3.SQLITE_DELETE):
+            mutations.append(table)
+            if table.startswith('embeddings') and table != 'embeddings_embedding_bindings':
+                return sqlite3.SQLITE_DENY
+        return sqlite3.SQLITE_OK
+    owner._conn.set_authorizer(authorize)
+    result = owner.migrate_embedding_identity(space, [dict(previous=BINDING,current=binding)])
+    owner._conn.set_authorizer(None)
+    assert result == dict(operations=1,vectors_copied=0,receipts_copied=0,publications='require-rebuild')
+    assert owner.read_embedding(binding) == before
+    assert owner._conn.execute('SELECT id,embedding,metadata FROM embeddings ORDER BY id').fetchall() == physical
+    assert owner._conn.execute('SELECT * FROM embeddings_rowids ORDER BY rowid').fetchall() == rowids
+    assert owner._conn.execute('SELECT * FROM embeddings_embedding_operations').fetchall() == receipts
+    assert 'embeddings' not in mutations and 'embeddings_embedding_operations' not in mutations
+    assert owner._conn.execute('SELECT binding_json FROM embeddings_embedding_bindings').fetchone()[0] == json.dumps(binding,sort_keys=True,separators=(',',':'))
+    with pytest.raises(ValidationError,match='differs'):
+        owner.read_embedding(BINDING)
+    owner.close()
+    owner = SQLiteVecStore.open_embedding_space(str(tmp_path/'vectors.db'),space)
+    assert owner.read_embedding(binding) == before
+    owner.close()
+
+
+def test_logical_mapping_to_missing_physical_operation_fails_closed(tmp_path):
+    owner = SQLiteVecStore.open_embedding_space(str(tmp_path/'vectors.db'),SPACE,3)
+    owner.adopt_embedding(BINDING,[[1.,0.,0.],[0.,1.,0.]],RECEIPT,accepted_digest='paid')
+    owner._conn.execute('DELETE FROM embeddings_embedding_operations')
+    owner._conn.commit()
+    with pytest.raises(ProcessingError,match='missing paid operation'):
+        owner.read_embedding(BINDING)
+    with pytest.raises(ProcessingError,match='missing paid operation'):
+        owner.embedding_physical_operation_id(BINDING)
+    owner.close()
+
+
+@pytest.mark.parametrize('failure', ['incomplete','changed-input','duplicate','injected'])
+def test_identity_migration_rolls_back_every_binding_and_space(tmp_path, failure):
+    owner = SQLiteVecStore.open_embedding_space(str(tmp_path/'vectors.db'),SPACE,3)
+    owner.adopt_embedding(BINDING,[[1.,0.,0.],[0.,1.,0.]],RECEIPT,accepted_digest='paid')
+    before = owner._conn.execute('SELECT * FROM embeddings_embedding_bindings').fetchall()
+    metadata = owner._conn.execute('SELECT * FROM embedding_space').fetchall()
+    space = {**SPACE,'binding':'new-space','recipe':'new-recipe'}
+    current = {**BINDING,'space':space['binding'],'recipe':space['recipe']}
+    items = [dict(previous=BINDING,current=current)]
+    if failure == 'incomplete': items = []
+    if failure == 'changed-input': current['source'] = 'foreign'
+    if failure == 'duplicate': items *= 2
+    if failure == 'injected':
+        owner._conn.execute("CREATE TRIGGER reject_space BEFORE UPDATE ON embedding_space BEGIN SELECT RAISE(ABORT,'injected'); END")
+    owner._conn.commit()
+    with pytest.raises((ValidationError,ProcessingError,sqlite3.IntegrityError)):
+        owner.migrate_embedding_identity(space,items)
+    assert owner.embedding_space_identity == SPACE
+    assert owner._conn.execute('SELECT * FROM embedding_space').fetchall() == metadata
+    assert owner._conn.execute('SELECT * FROM embeddings_embedding_bindings').fetchall() == before
+    assert owner.read_embedding(BINDING)['accepted_digest'] == 'paid'
+    assert not owner._conn.execute("SELECT name FROM sqlite_temp_master WHERE name='embedding_migration'").fetchall()
+    owner.close()
+
+
 def child(root, fault='none'):
     from semantica.semantic_extract.cache import ExtractionCache, SqliteCacheBackend
     root = Path(root)

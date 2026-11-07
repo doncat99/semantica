@@ -11,6 +11,7 @@ import os
 import re
 import threading
 from collections import OrderedDict
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 from urllib.parse import urlparse
@@ -167,10 +168,13 @@ class OxigraphStore:
         from .publication_records import PublicationRecords
         return PublicationRecords(self, project).page(generation, canonical=True, **options)
 
-    @staticmethod
-    def extraction_operation_id(binding, stage):
-        from .extraction_records import operation_identity
-        return operation_identity(binding, stage)
+    def extraction_operation_id(self, binding, stage):
+        from .extraction_records import ExtractionRecords
+        return ExtractionRecords(self, binding, stage).operation.value
+
+    def rebind_extraction(self, previous_binding, current_binding, stage):
+        from .extraction_records import ExtractionRecords
+        return ExtractionRecords.rebind(self, previous_binding, current_binding, stage)
 
     def extraction_receipt(self, binding, stage):
         from .extraction_records import ExtractionRecords
@@ -196,10 +200,13 @@ class OxigraphStore:
         from .extraction_records import ExtractionRecords
         return ExtractionRecords(self, binding, stage).read_receipts()
 
-    @staticmethod
-    def classification_operation_id(binding):
-        from .classification_records import operation_identity
-        return operation_identity(binding)
+    def classification_operation_id(self, binding):
+        from .classification_records import ClassificationRecords
+        return ClassificationRecords(self, binding).operation.value
+
+    def rebind_classification(self, previous_binding, current_binding):
+        from .classification_records import ClassificationRecords
+        return ClassificationRecords.rebind(self, previous_binding, current_binding)
 
     def classification_receipt(self, binding):
         from .classification_records import ClassificationRecords
@@ -236,6 +243,7 @@ class OxigraphStore:
         """
         self.logger = get_logger("oxigraph_store")
         self._publication_lock = threading.RLock()
+        self._defer_flush = False
         self._extraction_proofs = OrderedDict()
         # Accept storage_path as an alias for path (matches the convention used
         # by other Semantica stores). Pop it so it isn't left in self.config.
@@ -516,9 +524,28 @@ class OxigraphStore:
                 raise ProcessingError("Oxigraph update committed but durability flush failed") from exc
         return {"success": True}
 
+    @contextmanager
+    def batch_writes(self):
+        """Flush once at a caller-bounded maintenance boundary, including on error.
+
+        This is not a rollback transaction. Release accepted recovery envelopes
+        only after this context exits successfully. Other writers are excluded.
+        """
+        with self._publication_lock:
+            if self._defer_flush:
+                raise ProcessingError("Nested native write batches are not supported")
+            self._defer_flush = True
+            try:
+                yield
+            finally:
+                self._defer_flush = False
+                self.flush()
+
     def flush(self) -> None:
-        """Flush pending writes to disk for persistent stores."""
-        self.store.flush()
+        """Flush pending writes, or defer to the enclosing maintenance boundary."""
+        with self._publication_lock:
+            if not self._defer_flush:
+                self.store.flush()
 
     def _to_quad(self, triplet: Triplet, graph_name: Any) -> Any:
         ox = self._oxigraph

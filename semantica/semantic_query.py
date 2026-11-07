@@ -219,7 +219,7 @@ def _knowledge_hits(records):
         kind=next((kinds[value] for value in types if value in kinds),None)
         if kind is None:
             raise QueryError('unsupported native candidate type')
-        words=[value['value'] for key,values in fields.items() if key in {F+'name',F+'label',F+'text',F+'predicate',F+'description'}
+        words=[value['value'] for key,values in fields.items() if key in {F+'name',F+'label',F+'text',F+'predicateName',F+'description'}
             for value in values if value['type']=='literal']
         text=' '.join(words)
         hits.append(QueryHit(id=item['id'],kind=kind,title=text[:160] or item['id'],text=text,score=item.get('score',1.),

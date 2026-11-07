@@ -86,3 +86,81 @@ def test_classification_bad_identity_or_assignment_never_publishes(tmp_path, def
         store.adopt_classification(binding, value, profile=profile, allowed_evidence_ids=allowed, accepted_digest="paid", receipts=[receipt])
     assert list(store.store) == []
     assert store.classification_receipt(binding) is None
+
+
+def test_classification_offline_recipe_rebind_preserves_paid_nodes_after_restart(tmp_path):
+    from semantica.triplet_store.classification_records import ClassificationRecords
+    profile, binding, receipt, value = inputs()
+    store = OxigraphStore(tmp_path / 'facts')
+    store.adopt_classification(binding, value, profile=profile, allowed_evidence_ids=['evidence-1'],
+                               accepted_digest='paid', receipts=[receipt])
+    original = ClassificationRecords(store, binding)
+    operation = original.operation.value
+    owned = original.values(original.operation, 'ownedRecord')
+    facts = {q for node in owned for q in store.store.quads_for_pattern(node, None, None, original.graph)}
+    target = dict(binding, recipe='semantic-producer-recipe')
+    result = store.rebind_classification(binding, target)
+    assert result['operation_id'] == operation
+    assert store.classification_operation_id(target) == operation
+    assert original.one(original.operation, 'paidRecipe') == binding['recipe']
+    assert store.classification_receipt(binding) is None
+    assert store.rebind_classification(binding, target) == result
+    assert facts == {q for node in owned for q in store.store.quads_for_pattern(node, None, None, original.graph)}
+    store.close()
+    store = OxigraphStore(tmp_path / 'facts')
+    assert store.read_classification(target, profile=profile, allowed_evidence_ids=['evidence-1']) == value
+    assert store.read_classification_receipts(target) == [receipt]
+    assert store.classification_receipt(target)['accepted_digest'] == 'paid'
+    assert store.classification_receipt(binding) is None
+    store.close()
+
+
+def test_classification_offline_rebind_admits_legacy_only_through_explicit_migration(tmp_path):
+    from semantica.triplet_store.classification_records import ClassificationRecords
+    profile, binding, receipt, value = inputs()
+    store = OxigraphStore(tmp_path / 'facts')
+    store.adopt_classification(binding, value, profile=profile, allowed_evidence_ids=['evidence-1'],
+                               accepted_digest='paid', receipts=[receipt])
+    original = ClassificationRecords(store, binding)
+    store.store.clear_graph(original.index_graph)
+    assert store.classification_receipt(binding) is None
+    with pytest.raises(ProcessingError, match='offline identity migration'):
+        store.adopt_classification(binding, value, profile=profile, allowed_evidence_ids=['evidence-1'],
+                                   accepted_digest='paid', receipts=[receipt])
+    with pytest.raises(ProcessingError, match='only recipe'):
+        store.rebind_classification(binding, dict(binding, recipe='new', context_digest='wrong-context'))
+    target = dict(binding, recipe='new')
+    store.rebind_classification(binding, target)
+    assert store.read_classification(target, profile=profile, allowed_evidence_ids=['evidence-1']) == value
+    store.close()
+
+
+@pytest.mark.parametrize('defect', ['stale-handle', 'wrong-binding', 'orphan'])
+def test_classification_identity_proofs_fail_closed(tmp_path, defect):
+    from semantica.triplet_store.classification_records import ClassificationRecords
+    from semantica.triplet_store.extraction_records import F, ExtractionIdentityStaleError
+    profile, binding, receipt, value = inputs()
+    store = OxigraphStore(tmp_path / 'facts')
+    store.adopt_classification(binding, value, profile=profile, allowed_evidence_ids=['evidence-1'],
+        accepted_digest='paid', receipts=[receipt])
+    original = ClassificationRecords(store, binding)
+    accepted = original.receipt()
+    current = dict(binding, recipe='current-producer')
+    if defect == 'stale-handle':
+        store.rebind_classification(binding, current)
+        assert store.classification_receipt(current) == accepted
+        with pytest.raises(ExtractionIdentityStaleError):
+            original.receipt()
+    elif defect == 'wrong-binding':
+        forged = ClassificationRecords(store, current)
+        store.store.add(store._oxigraph.Quad(forged.logical,
+            store._oxigraph.NamedNode(F+'physicalOperation'), original.operation, forged.index_graph))
+        assert original.receipt() == accepted
+        with pytest.raises(ExtractionIdentityStaleError, match='binding differs'):
+            store.classification_receipt(current)
+    else:
+        store.store.update('DELETE WHERE { GRAPH ' + str(original.graph)
+            + ' { ' + str(original.operation) + ' ?p ?o } }')
+        with pytest.raises(ProcessingError, match='missing paid operation'):
+            store.classification_receipt(binding)
+    store.close()

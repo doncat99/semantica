@@ -8,6 +8,39 @@ from semantica.utils.exceptions import ProcessingError, ValidationError
 from tests.vector_store.test_embedding_handoff import SPACE, BINDING, RECEIPT
 
 
+def test_identity_migration_invalidates_old_publication_and_republishes_same_vectors(tmp_path):
+    from semantica.vector_store.sqlite_vec_store import EmbeddingSpaceStaleError
+    path = str(tmp_path/'vectors.sqlite')
+    owner = SQLiteVecStore.open_embedding_space(path,SPACE,3)
+    adopted = owner.adopt_embedding(BINDING,[[1.,0.,0.],[0.,1.,0.]],RECEIPT,accepted_digest='paid')
+    def links(binding):
+        return [dict(vector_id=identity,binding=binding,
+            ranges=[dict(nativeRef='#/document/text',start=start,end=end)])
+            for identity,(start,end) in zip(adopted['ids'],BINDING['ranges'])]
+    receipt = owner.publish_native_ranges('project-1','generation-1',links(BINDING))
+    prior = owner._conn.execute('SELECT * FROM embeddings_native_publications').fetchall()
+    stale = SQLiteVecStore.open_embedding_space(path,SPACE)
+    space = {**SPACE,'binding':'new-space','recipe':'new-recipe'}
+    binding = {**BINDING,'space':space['binding'],'recipe':space['recipe']}
+    owner.migrate_embedding_identity(space,[dict(previous=BINDING,current=binding)])
+    assert owner.embedding_physical_operation_id(binding) == SQLiteVecStore.embedding_operation_id(BINDING)
+    assert owner._conn.execute('SELECT * FROM embeddings_native_publications').fetchall() == prior
+    with pytest.raises(EmbeddingSpaceStaleError):
+        stale.search_native_ranges([1.,0.,0.],project='project-1',generation='generation-1',receipt=receipt)
+    with pytest.raises(EmbeddingSpaceStaleError):
+        stale.adopt_embedding(BINDING,[[1.,0.,0.],[0.,1.,0.]],RECEIPT,accepted_digest='paid')
+    with pytest.raises(ValidationError,match='receipt differs'):
+        owner.search_native_ranges([1.,0.,0.],project='project-1',generation='generation-1',receipt=receipt)
+    current_receipt = owner.publish_native_ranges('project-1','generation-2',links(binding))
+    hits = owner.search_native_ranges([1.,0.,0.],project='project-1',generation='generation-2',receipt=current_receipt)
+    assert {hit['id'] for hit in hits} == set(adopted['ids'])
+    assert owner.read_embedding(binding) == adopted
+    assert owner.adopt_embedding(binding,[[1.,0.,0.],[0.,1.,0.]],RECEIPT,accepted_digest='paid') == adopted
+    assert owner.count() == 2
+    stale.close()
+    owner.close()
+
+
 def native_records_fixture(path, rows):
     """Accept real native operations and publish only indexed address links."""
     owner=SQLiteVecStore.open_embedding_space(str(path),SPACE,3)

@@ -262,3 +262,117 @@ def test_build_relation_page_keeps_qualifiers_supports_and_native_evidence(tmp_p
     with pytest.raises(ProcessingError, match='corrupt'):
         store.read_extraction_records(bound, 'relations')
     store.close()
+
+
+def test_recipe_rebind_preserves_owned_facts_and_paid_identity(tmp_path):
+    store = OxigraphStore(tmp_path / 'facts')
+    previous = binding()
+    current = dict(previous, recipe='producer-only')
+    receipt = store.adopt_extraction(previous, 'entities', [entity('Acme', 0, 0)],
+        text=TEXT, native_ranges=RANGES, accepted_digest='paid')
+    records = ExtractionRecords(store, previous, 'entities')
+    before = {q for node in records.values(records.operation, 'ownedRecord')
+              for q in store.store.quads_for_pattern(node, None, None, records.graph)}
+    assert store.rebind_extraction(previous, current, 'entities') == receipt
+    assert store.rebind_extraction(previous, current, 'entities') == receipt
+    assert store.extraction_operation_id(current, 'entities') == receipt['operation_id']
+    assert store.read_extraction(current, 'entities', text=TEXT, native_ranges=RANGES) == [entity('Acme', 0, 0)]
+    after = {q for node in records.values(records.operation, 'ownedRecord')
+             for q in store.store.quads_for_pattern(node, None, None, records.graph)}
+    assert before == after
+    assert store.extraction_receipt(previous, 'entities') is None
+    with pytest.raises(ProcessingError, match='recipe'):
+        store.rebind_extraction(current, dict(current, model='different'), 'entities')
+    store.close()
+    store = OxigraphStore(tmp_path / 'facts')
+    assert store.extraction_receipt(current, 'entities') == receipt
+    store.close()
+
+
+def test_rebind_relations_and_publication_keep_physical_references(tmp_path):
+    from semantica.triplet_store.publication_records import PublicationRecords
+    store = OxigraphStore(tmp_path / 'facts')
+    previous, current = binding(), dict(binding(), recipe='paid-producer')
+    acme, engine = entity('Acme', 0, 0), entity('Engine', 10, 1)
+    er = store.adopt_extraction(previous, 'entities', [acme, engine], text=TEXT, native_ranges=RANGES, accepted_digest='entities')
+    relation = Relation(acme, 'owns', engine, .8, TEXT, dict(subject_id='mention:0', object_id='mention:1', evidence_start=0, evidence_end=len(TEXT), evidence_occurrence=0, qualifiers=dict(polarity='positive'), supporting_refs=[]))
+    rr = store.adopt_extraction(previous, 'relations', [relation], text=TEXT, native_ranges=RANGES, accepted_digest='relations')
+    ids = [ExtractionRecords(store, previous, 'entities').entity_node(value).value for value in (acme, engine)]
+    generation = store.begin_publication('p', expected_generation=None, source_count=1, canonical_count=2)['generation']
+    store.stage_publication_sources('p', generation, [dict(source='s', material='m', representation='r',
+        recipe=previous['recipe'], operation_count=2, operations=[er['operation_id'], rr['operation_id']])])
+    store.stage_publication_canonical('p', generation, [dict(id='urn:canonical:'+str(i),
+        representative=identity, members=[identity], selectors=[], member_count=1, selector_count=0)
+        for i, identity in enumerate(ids)])
+    relation_id = ExtractionRecords(store, previous, 'relations').node('relation:0').value
+    store.stage_publication_facts('p', generation, [dict(id='urn:fact:owns', source='urn:canonical:0',
+        target='urn:canonical:1', representative=relation_id, members=[relation_id], member_count=1, status='accepted')])
+    indexes = dict(keyword=dict(kind='native-keyword', store_id='kw', recipe_digest='recipe'),
+        semantic=dict(kind='native-vector', store_id='vectors', recipe_digest='recipe', space_id='space'))
+    store.activate_publication('p', generation, indexes=indexes)
+    before = store.read_native_records('p', generation, ids)
+    for stage in ('entities', 'relations'):
+        store.rebind_extraction(previous, current, stage)
+    assert store.read_extraction(current, 'relations', text=TEXT, native_ranges=RANGES, entities=[acme, engine]) == [relation]
+    source = {k: current[k] for k in ('source', 'material', 'representation')}
+    assert PublicationRecords(store, 'p').verify_operation(er['operation_id'], source).receipt() == er
+    assert PublicationRecords(store, 'p').verify_operation(rr['operation_id'], source).receipt() == rr
+    assert store.read_native_records('p', generation, ids) == before
+    store.close()
+    store = OxigraphStore(tmp_path / 'facts')
+    assert store.read_native_records('p', generation, ids) == before
+    store.close()
+
+
+def test_rebind_collision_does_not_change_source(tmp_path):
+    store = OxigraphStore(tmp_path / 'facts')
+    previous, current = binding(), dict(binding(), recipe='different-paid-computation')
+    for bound in (previous, current):
+        store.adopt_extraction(bound, 'entities', [], text=TEXT, native_ranges=RANGES, accepted_digest=bound['recipe'])
+    before = set(store.store)
+    with pytest.raises(ProcessingError, match='another paid result'):
+        store.rebind_extraction(previous, current, 'entities')
+    assert set(store.store) == before
+    store.close()
+
+
+def test_preindex_results_require_explicit_migration_without_copy(tmp_path):
+    store = OxigraphStore(tmp_path / 'facts')
+    previous, current = binding(), dict(binding(), recipe='producer-only')
+    receipt = store.adopt_extraction(previous, 'entities', [], text=TEXT, native_ranges=RANGES, accepted_digest='paid')
+    records = ExtractionRecords(store, previous, 'entities')
+    store.store.update('CLEAR GRAPH ' + str(records.index_graph))
+    assert store.extraction_receipt(previous, 'entities') is None
+    with pytest.raises(ProcessingError, match='offline identity migration'):
+        store.adopt_extraction(previous, 'entities', [], text=TEXT, native_ranges=RANGES, accepted_digest='paid')
+    assert store.rebind_extraction(previous, current, 'entities') == receipt
+    store.close()
+
+
+@pytest.mark.parametrize('defect', ['stale-handle', 'wrong-binding', 'orphan'])
+def test_identity_proof_cache_never_accepts_stale_or_orphan_bindings(tmp_path, defect):
+    from semantica.triplet_store.extraction_records import ExtractionIdentityStaleError
+    store = OxigraphStore(tmp_path / 'facts')
+    previous, current = binding(), dict(binding(), recipe='current-producer')
+    receipt = store.adopt_extraction(previous, 'entities', [], text=TEXT,
+        native_ranges=RANGES, accepted_digest='paid')
+    original = ExtractionRecords(store, previous, 'entities')
+    if defect == 'stale-handle':
+        store.rebind_extraction(previous, current, 'entities')
+        assert store.extraction_receipt(current, 'entities') == receipt
+        with pytest.raises(ExtractionIdentityStaleError):
+            original.receipt()
+    elif defect == 'wrong-binding':
+        forged = ExtractionRecords(store, current, 'entities')
+        store.store.add(store._oxigraph.Quad(forged.logical,
+            store._oxigraph.NamedNode(F+'physicalOperation'), original.operation, forged.index_graph))
+        # Prime the physical proof with its legitimate logical binding.
+        assert original.receipt() == receipt
+        with pytest.raises(ExtractionIdentityStaleError, match='binding differs'):
+            store.extraction_receipt(current, 'entities')
+    else:
+        store.store.update('DELETE WHERE { GRAPH ' + str(original.graph)
+            + ' { ' + str(original.operation) + ' ?p ?o } }')
+        with pytest.raises(ProcessingError, match='missing paid operation'):
+            store.extraction_receipt(previous, 'entities')
+    store.close()

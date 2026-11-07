@@ -76,6 +76,8 @@ def test_actual_native_semantic_and_grounded_knowledge(ready):
     knowledge = query_semantic_artifact(base.model_copy(update={'target':'knowledge'}), session=session)
     assert {hit.kind for hit in knowledge.contexts} == {'entity','relation'}
     assert all(hit.evidence_ids and hit.source_ids == ['source-1'] for hit in knowledge.contexts)
+    assert all(hit.text.strip() for hit in knowledge.contexts)
+    assert next(hit for hit in knowledge.contexts if hit.kind == 'relation').text == 'designed'
 
 
 def test_native_query_rejects_stale_receipt_and_source_binding(ready):

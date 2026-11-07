@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import re
+from itertools import islice
 
 from ..semantic_extract.types import Entity, Relation
 from ..utils.exceptions import ProcessingError
@@ -23,6 +24,10 @@ MAX_QUADS = 32768
 MAX_BYTES = 2 * 1024 * 1024
 MAX_PAGE_ROWS = 128
 MAX_PAGE_BYTES = 262144
+
+
+class ExtractionIdentityStaleError(ProcessingError):
+    """An acquired operation no longer belongs to its logical input identity."""
 
 
 def operation_identity(binding, stage):
@@ -59,8 +64,14 @@ class ExtractionRecords:
         self.owner = owner
         self.ox = owner._oxigraph
         self.binding, self.stage = binding, stage
-        self.operation = self.ox.NamedNode(operation_identity(binding, stage))
+        self.logical = self.ox.NamedNode(operation_identity(binding, stage))
         self.graph = self.ox.NamedNode("urn:semantica:project:" + hashlib.sha256(binding["project"].encode()).hexdigest())
+        self.index_graph = self.ox.NamedNode(self.graph.value + ":extraction-index")
+        links = list(islice(self.owner.store.quads_for_pattern(self.logical, self.ox.NamedNode(F + "physicalOperation"), None, self.index_graph), 2))
+        if len(links) > 1 or any(not isinstance(q.object, self.ox.NamedNode) for q in links):
+            raise ProcessingError("Native extraction identity index is corrupt")
+        self.indexed = bool(links)
+        self.operation = links[0].object if links else self.logical
         self.quads = []
 
     def node(self, suffix):
@@ -165,7 +176,7 @@ class ExtractionRecords:
         mention = entity.metadata.get("mention_id")
         if not isinstance(mention, str) or not mention:
             raise ProcessingError("Native entity requires a located mention identity")
-        base = operation_identity(self.binding, "entities")
+        base = self.owner.extraction_operation_id(self.binding, "entities")
         return self.ox.NamedNode(base + ":entity:" + hashlib.sha256(mention.encode()).hexdigest())
 
     def write_entity(self, entity, index, text, specification):
@@ -660,17 +671,23 @@ class ExtractionRecords:
             self.metadata(node, usage, {"prompt_tokens": "promptTokens", "completion_tokens": "completionTokens", "total_tokens": "totalTokens", "input_tokens": "inputTokens", "output_tokens": "outputTokens"})
 
     def receipt(self):
+        if not self.indexed:
+            return None
         # Proofs contain only a bounded receipt tuple, never facts or text. Raw
         # native writes invalidate them, and reopening starts with no proofs.
         with self.owner._publication_lock:
+            links = list(islice(self.owner.store.quads_for_pattern(self.logical,
+                self.ox.NamedNode(F + "physicalOperation"), None, self.index_graph), 2))
+            if len(links) != 1 or links[0].object != self.operation:
+                raise ExtractionIdentityStaleError("Native extraction identity binding is stale or corrupt")
             proofs = self.owner._extraction_proofs
             key = (self.graph.value, self.operation.value)
-            if key in proofs:
+            if key in proofs and proofs[key][0] == self.logical.value:
                 proofs.move_to_end(key)
-                return dict(proofs[key])
+                return dict(proofs[key][1])
             value = self._verify_receipt()
             if value is not None:
-                proofs[key] = dict(value)
+                proofs[key] = (self.logical.value, dict(value))
                 while len(proofs) > 1024:
                     proofs.popitem(last=False)
             return value
@@ -678,11 +695,18 @@ class ExtractionRecords:
     def _verify_receipt(self):
         present = self.values(self.operation, RDF_TYPE)
         if not present:
+            if self.indexed:
+                raise ProcessingError("Native extraction identity index references a missing paid operation")
             return None
         if present != [self.ox.NamedNode(F + "ExtractionOperation")]:
             raise ProcessingError("Invalid native extraction receipt type")
         if self.one(self.operation, "operationIdentity") != self.operation.value:
             raise ProcessingError("Native extraction receipt identity mismatch")
+        for key, expected in self.binding.items():
+            if self.one(self.operation, "binding" + key[0].upper() + key[1:]) != expected:
+                raise ExtractionIdentityStaleError("Native extraction indexed binding differs")
+        if self.index_graph is not None and self.one(self.operation, "extractionStage", optional=True) not in {None, self.stage}:
+            raise ProcessingError("Native extraction indexed stage differs")
         operation_facts = []
         operation_digest_predicate = self.ox.NamedNode(F + "operationDigest")
         for quad in self.owner.store.quads_for_pattern(self.operation, None, None, self.graph):
@@ -707,10 +731,53 @@ class ExtractionRecords:
             raise ProcessingError("Native extraction facts missing or corrupt")
         return {"operation_id": self.operation.value, "accepted_digest": self.one(self.operation, "acceptedDigest"), "count": self.one(self.operation, "resultCount")}
 
+    @classmethod
+    def rebind(cls, owner, previous, current, stage):
+        """Offline metadata migration; owned facts and paid receipt nodes stay put."""
+        old_key, new_key = operation_identity(previous, stage), operation_identity(current, stage)
+        if any(previous[k] != current[k] for k in BINDING - {"recipe"}):
+            raise ProcessingError("Extraction migration may change only recipe identity")
+        with owner._publication_lock:
+            target = cls(owner, current, stage)
+            original = cls(owner, previous, stage)
+            if target.indexed:
+                if original.operation != target.operation and (original.indexed or original.values(original.operation, RDF_TYPE)):
+                    raise ProcessingError("Extraction migration target already owns another paid result")
+                if target.one(target.operation, "bindingRecipe") != current["recipe"]:
+                    raise ProcessingError("Extraction migration target binding differs")
+                return target.receipt()
+            # A pre-index operation is admitted only by this explicit offline API.
+            receipt = original._verify_receipt()
+            if receipt is None:
+                raise ProcessingError("Extraction migration source receipt is missing")
+            for key, value in previous.items():
+                if original.one(original.operation, "binding" + key[0].upper() + key[1:]) != value:
+                    raise ProcessingError("Extraction migration source binding differs")
+            ox = owner._oxigraph
+            replace = {ox.NamedNode(F + k) for k in ("bindingRecipe", "extractionStage", "operationDigest")}
+            prior = list(owner.store.quads_for_pattern(original.operation, None, None, original.graph))
+            kept = [q for q in prior if q.predicate not in replace]
+            changed = [ox.Quad(original.operation, ox.NamedNode(F + "bindingRecipe"), ox.Literal(current["recipe"]), original.graph),
+                       ox.Quad(original.operation, ox.NamedNode(F + "extractionStage"), ox.Literal(stage), original.graph)]
+            if original.one(original.operation, "paidRecipe", optional=True) is None:
+                changed.append(ox.Quad(original.operation, ox.NamedNode(F + "paidRecipe"), ox.Literal(previous["recipe"]), original.graph))
+            changed.append(ox.Quad(original.operation, ox.NamedNode(F + "operationDigest"), ox.Literal(_hash(kept + changed)), original.graph))
+            deletes = " . ".join(_triple(q) for q in prior if q.predicate in replace)
+            inserts = " . ".join(_triple(q) for q in changed)
+            predicate = "<" + F + "physicalOperation>"
+            owner.store.update("DELETE { GRAPH " + str(original.graph) + " { " + deletes + " } GRAPH " + str(original.index_graph) + " { <" + old_key + "> " + predicate + " ?old } } "
+                + "INSERT { GRAPH " + str(original.graph) + " { " + inserts + " } GRAPH " + str(original.index_graph) + " { <" + new_key + "> " + predicate + " " + str(original.operation) + " } } "
+                + "WHERE { OPTIONAL { GRAPH " + str(original.index_graph) + " { <" + old_key + "> " + predicate + " ?old } } }")
+            owner._extraction_proofs.pop((original.graph.value, original.operation.value), None)
+            owner.flush()
+            return cls(owner, current, stage).receipt()
+
     def adopt(self, values, *, text, accepted_digest, native_ranges, receipts=(), extraction_spec=None):
         if self.owner.path is None:
             raise ProcessingError("Paid extraction adoption requires persistent Oxigraph")
         grounding_digest = self.grounding(native_ranges, text)
+        if not self.indexed and self.values(self.operation, RDF_TYPE):
+            raise ProcessingError("Native extraction requires explicit offline identity migration")
         existing = self.receipt()
         if existing is not None:
             if existing["accepted_digest"] != accepted_digest:
@@ -739,18 +806,24 @@ class ExtractionRecords:
             raise ProcessingError("Native extraction exceeds owned record budget")
         self.add(self.operation, RDF_TYPE, self.ox.NamedNode(F + "ExtractionOperation"))
         self.add(self.operation, "operationIdentity", self.operation.value)
+        if self.index_graph is not None:
+            self.add(self.operation, "extractionStage", self.stage)
         self.add(self.operation, "acceptedDigest", accepted_digest)
         self.add(self.operation, "resultCount", result_count)
         self.add(self.operation, "ownedCount", len({q.subject for q in facts}))
         self.add(self.operation, "quadCount", len(facts))
         self.add(self.operation, "factsDigest", _hash(facts))
+        self.add(self.operation, "paidRecipe", self.binding["recipe"])
         for key, value in self.binding.items():
             self.add(self.operation, "binding" + key[0].upper() + key[1:], value)
         self.add(self.operation, "operationDigest", _hash([q for q in self.quads if q.subject == self.operation]))
         serialized = " .\n".join(_triple(q) for q in self.quads)
         if len(serialized.encode()) > MAX_BYTES:
             raise ProcessingError("Native extraction exceeds atomic byte budget")
-        self.owner.store.update("INSERT DATA { GRAPH " + str(self.graph) + " { " + serialized + " . } }")
+        index = (" GRAPH " + str(self.index_graph) + " { " + str(self.logical) + " <" + F + "physicalOperation> " + str(self.operation) + " . }"
+                 if self.index_graph is not None else "")
+        self.owner.store.update("INSERT DATA { GRAPH " + str(self.graph) + " { " + serialized + " . }" + index + " }")
+        self.indexed = True
         self.owner.flush()
         return self.receipt()
 

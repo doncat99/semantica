@@ -10,6 +10,53 @@ from types import SimpleNamespace
 import pytest
 
 
+def test_embedding_identity_ignores_publication_recipe_and_unrelated_producers(tmp_path, monkeypatch):
+    from semantica import semantic_publication_builder as builder
+    relay = SimpleNamespace(model_id='model', binding_id='binding')
+    source = dict(project='project', source='source', material='material',
+                  representation='representation', recipe='publication-a', parser='parser')
+    tokens = [
+        (builder._native_build, builder._native_build.set((SimpleNamespace(native_store_dir=tmp_path/'facts'), None, None))),
+        (builder._native_source_binding, builder._native_source_binding.set(source)),
+        (builder._native_embedding_ranges, builder._native_embedding_ranges.set([[0, 6]])),
+    ]
+    try:
+        first = builder._embedding_owner_binding(['source'], relay)
+        source['recipe'] = 'publication-b'
+        monkeypatch.setattr(builder, 'PROJECT_PROCESSING_DIGEST', 'unrelated-query-change')
+        monkeypatch.setattr(builder, '_product_json', lambda *args: 'different-generation')
+        second = builder._embedding_owner_binding(['source'], relay)
+        assert first[2:] == second[2:]
+        from semantica.semantic_embedding_recipe import embedding_recipe
+        assert first[2]['recipe'] == embedding_recipe(relay)
+        assert first[3]['recipe'] == embedding_recipe(relay)
+        # Text identity remains per operation; space is shared by one producer/model.
+        changed_text = builder._embedding_owner_binding(['SOURCE'], relay)
+        assert first[2] != changed_text[2]
+        assert first[3:] == changed_text[3:]
+    finally:
+        for variable, token in reversed(tokens):
+            variable.reset(token)
+
+
+def test_embedding_recipe_tracks_only_actual_model_binding_and_producers(monkeypatch):
+    from semantica import semantic_publication_builder as builder
+    from semantica.semantic_embedding_recipe import embedding_recipe
+    relay = SimpleNamespace(model_id='model', binding_id='binding')
+    original = embedding_recipe(relay)
+    assert embedding_recipe(SimpleNamespace(model_id='other', binding_id='binding')) != original
+    assert embedding_recipe(SimpleNamespace(model_id='model', binding_id='other')) != original
+
+    def changed_embedding_request(texts, relay):
+        return [[2.0]], None
+
+    monkeypatch.setattr(builder, '_request_embedding', changed_embedding_request)
+    # Transport/usage-receipt orchestration is outside the paid vector producer.
+    assert embedding_recipe(relay) == original
+    monkeypatch.setattr(builder, '_embedding_payload', lambda texts, model: {'input': texts, 'model': model, 'dimensions': 1024}, raising=False)
+    assert embedding_recipe(relay) != original
+
+
 def child(root, fault='none', dimension='3'):
     from semantica import semantic_publication_builder as builder
     from semantica.semantic_artifact_schema import ModelReceipt
@@ -19,8 +66,9 @@ def child(root, fault='none', dimension='3'):
     cache = ExtractionCache(backend=SqliteCacheBackend(str(root/'accepted.db')))
     request = SimpleNamespace(native_store_dir=str(root/'facts'))
     builder._native_build.set((request, None, cache))
+    # Restart after a publication-only change must retain the same physical space.
     builder._native_source_binding.set(dict(project='project',source='source',material='material',
-        representation='representation',recipe='recipe',parser='parser'))
+        representation='representation',recipe='publication-changed' if fault == 'reused' else 'recipe',parser='parser'))
     def relay(*args, **kwargs):
         with (root/'calls').open('a') as stream:
             stream.write('model\n')

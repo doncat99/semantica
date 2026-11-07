@@ -4,8 +4,9 @@ from __future__ import annotations
 import hashlib
 import json
 from urllib.parse import quote, unquote
+from itertools import islice
 
-from .extraction_records import ExtractionRecords, F, RDF_TYPE
+from .extraction_records import ExtractionRecords, F, RDF_TYPE, _hash, _triple
 from ..semantic_artifact_schema import ClassificationProfile, SourceClassification, stable_digest
 from ..utils.exceptions import ProcessingError
 
@@ -22,9 +23,57 @@ def operation_identity(binding):
 class ClassificationRecords(ExtractionRecords):
     def __init__(self, owner, binding):
         self.owner, self.ox, self.binding = owner, owner._oxigraph, binding
-        self.operation = self.ox.NamedNode(operation_identity(binding))
+        self.logical = self.ox.NamedNode(operation_identity(binding))
         self.graph = self.ox.NamedNode("urn:semantica:project:" + hashlib.sha256(binding["project"].encode()).hexdigest())
+        self.index_graph = self.ox.NamedNode(self.graph.value + ':classification-index')
+        links = list(islice(owner.store.quads_for_pattern(self.logical,
+            self.ox.NamedNode(F + 'physicalOperation'), None, self.index_graph), 2))
+        if len(links) > 1 or any(not isinstance(q.object, self.ox.NamedNode) for q in links):
+            raise ProcessingError('Native classification identity index is corrupt')
+        self.indexed = bool(links)
+        self.operation = links[0].object if links else self.logical
+        self.stage = 'classification'
         self.quads = []
+
+    @classmethod
+    def rebind(cls, owner, previous, current):
+        """Offline recipe metadata migration; paid assignment/receipt nodes stay put."""
+        old_key, new_key = operation_identity(previous), operation_identity(current)
+        if any(previous[key] != current[key] for key in BINDING - {'recipe'}):
+            raise ProcessingError('Classification migration may change only recipe identity')
+        with owner._publication_lock:
+            original, target = cls(owner, previous), cls(owner, current)
+            if target.indexed:
+                if original.operation != target.operation and (original.indexed or original.values(original.operation, RDF_TYPE)):
+                    raise ProcessingError('Classification migration target already owns another paid result')
+                if target.one(target.operation, 'bindingRecipe') != current['recipe']:
+                    raise ProcessingError('Classification migration target binding differs')
+                return target.receipt()
+            # Normal reads never admit pre-index data. The explicit offline
+            # migration verifies its complete binding/receipt before indexation.
+            if original._verify_receipt() is None:
+                raise ProcessingError('Classification migration source receipt missing')
+            for key, value in previous.items():
+                if original.one(original.operation, 'binding' + key[0].upper() + key[1:]) != value:
+                    raise ProcessingError('Classification migration source binding differs')
+            ox = owner._oxigraph
+            replace = {ox.NamedNode(F + key) for key in ('bindingRecipe', 'operationDigest')}
+            prior = list(owner.store.quads_for_pattern(original.operation, None, None, original.graph))
+            changed = [ox.Quad(original.operation, ox.NamedNode(F + 'bindingRecipe'), ox.Literal(current['recipe']), original.graph)]
+            kept = [q for q in prior if q.predicate not in replace]
+            if original.one(original.operation, 'paidRecipe', optional=True) is None:
+                changed.append(ox.Quad(original.operation, ox.NamedNode(F + 'paidRecipe'), ox.Literal(previous['recipe']), original.graph))
+            changed.append(ox.Quad(original.operation, ox.NamedNode(F + 'operationDigest'), ox.Literal(_hash(kept + changed)), original.graph))
+            deletes = ' . '.join(_triple(q) for q in prior if q.predicate in replace)
+            inserts = ' . '.join(_triple(q) for q in changed)
+            predicate = '<' + F + 'physicalOperation>'
+            owner.store.update('DELETE { GRAPH ' + str(original.graph) + ' { ' + deletes + ' } GRAPH ' + str(original.index_graph)
+                + ' { <' + old_key + '> ' + predicate + ' ?old } } INSERT { GRAPH ' + str(original.graph) + ' { ' + inserts
+                + ' } GRAPH ' + str(original.index_graph) + ' { <' + new_key + '> ' + predicate + ' ' + str(original.operation)
+                + ' } } WHERE { OPTIONAL { GRAPH ' + str(original.index_graph) + ' { <' + old_key + '> ' + predicate + ' ?old } } }')
+            owner._extraction_proofs.pop((original.graph.value, original.operation.value), None)
+            owner.flush()
+            return cls(owner, current).receipt()
 
     def reference(self, kind, identity):
         return self.ox.NamedNode("urn:semantica:reference:" + kind + ":" + quote(identity, safe=""))
@@ -45,6 +94,8 @@ class ClassificationRecords(ExtractionRecords):
             raise ProcessingError('Classification reduction dimension budget exceeded')
         root = self.node('classification-reduction')
         digest = stable_digest(dict(batches=batch_operations, profile=profile.model_dump(mode='json', by_alias=True)))
+        if not self.indexed and self.values(self.operation, RDF_TYPE):
+            raise ProcessingError('Native classification requires explicit offline identity migration')
         existing = self.receipt()
         if existing is not None:
             if existing['accepted_digest'] != digest:
@@ -158,6 +209,8 @@ class ClassificationRecords(ExtractionRecords):
         if self.owner.path is None:
             raise ProcessingError("Classification requires persistent native owner")
         value, profile = self.validate(value, profile, allowed_evidence_ids)
+        if not self.indexed and self.values(self.operation, RDF_TYPE):
+            raise ProcessingError('Native classification requires explicit offline identity migration')
         existing = self.receipt()
         if existing is not None:
             if existing["accepted_digest"] != accepted_digest:

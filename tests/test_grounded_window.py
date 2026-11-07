@@ -153,7 +153,9 @@ def test_grounded_window_records_candidate_rejections_on_model_receipt(monkeypat
         "source text", model="model-a", provider_instance=provider,
     )
 
-    assert actual_provider.receipts[-1].metadata["rejected_candidates"] == [
+    assert actual_provider.receipts[-1].metadata["rejected_count"] == 2
+    assert "rejected_candidates" not in actual_provider.receipts[-1].metadata
+    assert actual_provider.rejections == [
         {"candidate_index": 1, "kind": "schema"},
         {"candidate_index": 0, "reason": "ungrounded condition"},
     ]

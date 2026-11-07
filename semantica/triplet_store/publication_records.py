@@ -198,7 +198,12 @@ class PublicationRecords:
             if len(values) != 1:
                 raise ProcessingError("Publication operation binding incomplete")
             binding[field] = int(values[0].object.value) if field in {"window_start", "window_end"} else values[0].object.value
-        stage = next((stage for stage in ("entities", "relations") if not classification and operation_identity(binding, stage) == identity), None)
+        stage = None
+        if not classification:
+            stages = list(islice(self.owner.store.quads_for_pattern(operation, self.ox.NamedNode(F + "extractionStage"), None, self.facts), 2))
+            if len(stages) != 1 or stages[0].object.value not in {"entities", "relations"}:
+                raise ProcessingError("Publication extraction requires offline identity migration")
+            stage = stages[0].object.value
         records = ClassificationRecords(self.owner, binding) if classification else ExtractionRecords(self.owner, binding, stage) if stage else None
         if records is None or records.operation.value != identity or records.receipt() is None:
             raise ProcessingError("Publication operation has no valid native receipt")

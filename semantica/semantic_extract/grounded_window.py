@@ -23,6 +23,29 @@ def _record_rejections(provider):
         metadata["rejected_count"] = len(provider.rejections)
 
 
+def _produce_grounded_entities(text, provider_name, model, current_provider, specification,
+                               grounding_context, formula_semantics):
+    return extract_entities_llm(
+        text, provider=provider_name, model=model,
+        provider_instance=current_provider, grounding="strict",
+        max_retries=1, grounding_retries=1, extraction_spec=specification,
+        rejection_receipts=getattr(current_provider, "rejections", None),
+        grounding_context=grounding_context, formula_semantics=formula_semantics,
+    )
+
+
+def _produce_grounded_relations(text, entities, provider_name, model, current_provider,
+                                specification, grounding_context, formula_semantics):
+    return extract_relations_llm(
+        text, entities, provider=provider_name, model=model,
+        provider_instance=current_provider, grounding="strict",
+        max_retries=1, grounding_retries=1, extraction_spec=specification,
+        confidence_threshold=0, grounding_context=grounding_context,
+        formula_semantics=formula_semantics,
+        rejection_receipts=getattr(current_provider, "rejections", None),
+    )
+
+
 def extract_grounded_window(
     text: str,
     *,
@@ -124,26 +147,17 @@ def extract_grounded_window(
         if current_provider is None:
             raise ProcessingError("grounded extraction requires a provider instance")
         try:
-            entities = run_stage("entities", lambda: extract_entities_llm(
-                text, provider=provider_name, model=model,
-                provider_instance=current_provider, grounding="strict",
-                max_retries=1, grounding_retries=1, extraction_spec=specification,
-                rejection_receipts=getattr(current_provider, "rejections", None),
-                grounding_context=grounding_context,
-                formula_semantics=formula_semantics,
+            entities = run_stage("entities", lambda: _produce_grounded_entities(
+                text, provider_name, model, current_provider, specification,
+                grounding_context, formula_semantics,
             ), current_provider)
             if not entities:
                 _record_rejections(current_provider)
                 return entities, [], current_provider
             stage = "relations"
-            relations = run_stage("relations", lambda: extract_relations_llm(
-                text, entities, provider=provider_name, model=model,
-                provider_instance=current_provider, grounding="strict",
-                max_retries=1, grounding_retries=1, extraction_spec=specification,
-                confidence_threshold=0,
-                grounding_context=grounding_context,
-                formula_semantics=formula_semantics,
-                rejection_receipts=getattr(current_provider, "rejections", None),
+            relations = run_stage("relations", lambda: _produce_grounded_relations(
+                text, entities, provider_name, model, current_provider, specification,
+                grounding_context, formula_semantics,
             ), current_provider, entities)
             _record_rejections(current_provider)
             return entities, relations, current_provider

@@ -71,7 +71,7 @@ def test_classification_replay_flushes_only_pending_handoff(pending):
         recipe=SimpleNamespace(lineage_payload=lambda: {}),
         parsed_sources=[SimpleNamespace(source_id='source', representation_revision='representation')])
     source = SimpleNamespace(source_id='source', material_revision='material')
-    relay = SimpleNamespace(binding_id='binding', model_id='model')
+    relay = SimpleNamespace(binding_id='binding', model_id='model', context_window_tokens=8192, max_output_tokens=1024)
     profile = SimpleNamespace(model_dump=lambda **k: {})
     token = pipeline._native_build.set((request, store, cache))
     try:

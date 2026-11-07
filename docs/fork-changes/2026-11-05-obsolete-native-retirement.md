@@ -1,5 +1,56 @@
 # Certified offline retirement of obsolete native results
 
+## 2026-11-07 exact abandoned draft closure and bounded apply
+
+The first optimized live dry run completed 142,494 operation plans and
+4,442,778 subject proofs, then correctly blocked on an incoming reference from
+the canceled run's still-pending publication. No native deletion occurred.
+`withdraw` accepts only ready publications and retains references, so it is
+not a disposal mechanism for this pending draft.
+
+The offline owner now accepts an explicitly named pending generation only
+when the project has no active jobs or adopted publication dependencies and
+every referenced operation belongs to the obsolete closure. Its exact graph
+subjects receive proofs and remain subject to the complete external-reference
+check and pre-write CAS. Ready, changed-generation, protected and unknown
+operations fail closed. Large draft membership proofs stream individual quads;
+they do not retain a whole publication in memory.
+
+One explicit incomplete-facts checkpoint binds the request digest, complete
+plan digest, operation count and complete node/proof membership. It may avoid
+recomputing accepted input windows, but cannot authorize apply: external
+references, inventory and publication dependencies must still pass to produce
+the normal successful dry certificate. Apply still requires that certificate.
+
+Physical subject deletion now batches exact `(subject,graph)` pairs in atomic
+native updates of at most 128 pairs and 64 KiB. All admission, flush, optimize,
+acceptance reclamation and absence checks remain. Same-subject facts in other
+graphs are preserved. No App/runtime owner or frozen artifact changes.
+
+## 2026-11-07 source-grouped maintenance traversal
+
+Inspected native owner at `765c0ef2d1e868e074ca31068e9db90a0672a9c2`:
+`plan_facts` and `inventory_all` repeatedly sorted the complete operation set
+in native SPARQL pages, while hash-ordered operations continually evicted the
+single parsed-source reader. A live read-only dry run reached only 9,600
+operations in 20 minutes; five known obsolete recipes alone hold 73,925.
+
+Both traversals now reuse `operation_pages`: one predicate-indexed native
+iteration spools operation/source/recipe identities to temporary disk SQLite,
+then an index orders `(source,id)` and supplies batches of at most 128.
+SQLite cache is 4 MiB; full document bodies are never retained across sources.
+Operation/binding/receipt validation, closure checks, inventory, CAS admission
+and physical deletion remain unchanged. This is only an offline maintenance
+owner change and does not change the frozen App runtime artifact.
+
+Focused regression exercises 515 interleaved operations, recipe filtering,
+multiple pages, missing source on classification reduction, duplicate-source
+rejection and an owner that rejects SPARQL sorting. Existing retirement tests
+cover protected data, unknown owners, changed certificates and crash resume.
+Live execution outcome is recorded separately in the current cleanup evidence;
+this source change itself does not claim cleanup completion. Upstream merge
+assessment: fork-only maintenance owner; no upstream integration in this change.
+
 - Record ID: 2026-11-05-obsolete-native-retirement
 - Date / author: 2026-11-05 / Codex
 - Status: verified-in-stated-scope; live retirement not executed

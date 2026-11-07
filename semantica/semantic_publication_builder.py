@@ -31,6 +31,9 @@ from pydantic.json_schema import SkipJsonSchema
 from pydantic import BaseModel, ConfigDict, Field, StrictFloat, StrictInt, TypeAdapter, ValidationError, ValidationInfo, model_validator
 from pydantic_core import PydanticCustomError
 
+from .semantic_extraction_recipe import (
+    extraction_recipe as _extraction_recipe, classification_recipe as _classification_recipe,
+)
 from .source import source_processing_revision
 from .semantic_artifact_errors import DocumentQualityError, SemanticArtifactError, ModelOutputError
 from .semantic_source_artifact import (
@@ -129,7 +132,6 @@ _active_relay_gates: ContextVar[Any] = ContextVar("active_relay_gates", default=
 _native_build: ContextVar[Any] = ContextVar("native_build", default=None)
 _native_source_binding: ContextVar[Any] = ContextVar("native_source_binding", default=None)
 _native_source_ranges: ContextVar[Any] = ContextVar("native_source_ranges", default=None)
-EXTRACTION_CONTRACT_VERSION = "grounded-identity-profile-v3"
 
 
 # Target size for the native structural chunker.  Structure boundaries may
@@ -803,12 +805,7 @@ def _extract_project_sources(parsed_sources, request, progress):
             binding_token = _native_source_binding.set({
                 "project": request.project_id, "source": source.source_id,
                 "material": source.material_revision, "representation": ref.representation_revision,
-                "recipe": stable_digest({"recipe": request.recipe.lineage_payload(),
-                    "processing": PROJECT_PROCESSING_DIGEST,
-                    "generationBinding": request.relays["model"].binding_id,
-                    "contextWindowTokens": request.relays["model"].context_window_tokens,
-                    "maxOutputTokens": request.relays["model"].max_output_tokens,
-                    "contract": EXTRACTION_CONTRACT_VERSION}),
+                "recipe": _extraction_recipe(request),
                 "specification": request.recipe.extraction_spec.digest if request.recipe.extraction_spec else "none",
                 "parser": source_processing_revision(Path(source.file_path), name=source.name, mime_type=source.mime_type,
                     force_ocr=parsed_sources[source_index][1],
@@ -1272,23 +1269,32 @@ class _ProjectModelProvider(BaseProvider):
         payload = _generation_payload(self.relay, prompt, kwargs.get('response_schema'))
         business_context = kwargs.get("business_context")
         response, receipt = _relay_json(self.relay, payload, self.operation, business_context=business_context)
-        if response.get("model") != receipt.model or receipt.model != self.relay.model_id:
-            raise SemanticArtifactError(f"{self.operation} response model does not match the admitted relay model")
+        _validate_generation_model(response, receipt.model, self.relay.model_id, self.operation)
         if isinstance(response.get("usage"), dict):
             receipt.metadata["usage"] = response["usage"]
         if self.operation == "structured_extraction":
             receipt.metadata["extraction_stage"] = extraction_stage
         self.receipts.append(receipt)
-        choices = response.get("choices")
-        if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
-            raise ModelOutputError(f"{self.operation} response has invalid choices", code='MODEL_OUTPUT_CHOICES_INVALID')
-        message = choices[0].get("message")
-        if choices[0].get('finish_reason') != 'stop' or not isinstance(message, dict) or message.get('refusal'):
-            raise ModelOutputError(f"{self.operation} response incomplete or refused", code='MODEL_OUTPUT_INCOMPLETE')
-        content = message.get("content") if isinstance(message, dict) else None
-        if not isinstance(content, str) or not content.strip():
-            raise ModelOutputError(f"{self.operation} response has no JSON content", code='MODEL_OUTPUT_EMPTY')
-        return content
+        return _generation_content(response, self.operation)
+
+
+def _validate_generation_model(response, receipt_model, admitted_model, operation):
+    if response.get("model") != receipt_model or receipt_model != admitted_model:
+        raise SemanticArtifactError(f"{operation} response model does not match the admitted relay model")
+
+
+def _generation_content(response, operation):
+    """Validate the paid response body independently of usage/audit receipts."""
+    choices = response.get("choices")
+    if not isinstance(choices, list) or len(choices) != 1 or not isinstance(choices[0], dict):
+        raise ModelOutputError(f"{operation} response has invalid choices", code='MODEL_OUTPUT_CHOICES_INVALID')
+    message = choices[0].get("message")
+    if choices[0].get('finish_reason') != 'stop' or not isinstance(message, dict) or message.get('refusal'):
+        raise ModelOutputError(f"{operation} response incomplete or refused", code='MODEL_OUTPUT_INCOMPLETE')
+    content = message.get("content") if isinstance(message, dict) else None
+    if not isinstance(content, str) or not content.strip():
+        raise ModelOutputError(f"{operation} response has no JSON content", code='MODEL_OUTPUT_EMPTY')
+    return content
 
 def _project_model_provider(relay: Any, operation: str = "structured_extraction") -> _ProjectModelProvider:
     return _ProjectModelProvider(relay, operation)
@@ -1309,16 +1315,19 @@ def _embed_windows(windows, relay):
 
 
 def _embedding_owner_binding(texts, relay):
+    from .semantic_embedding_recipe import embedding_recipe
     from .vector_store.sqlite_vec_store import SQLiteVecStore
     native, source, ranges = _native_build.get(), _native_source_binding.get(), _native_embedding_ranges.get()
     if native is None or source is None or ranges is None or len(texts) != 1 or len(ranges) != 1:
         raise SemanticArtifactError('Embedding requires one admitted native source range')
     if len(texts[0]) != ranges[0][1] - ranges[0][0]:
         raise SemanticArtifactError('Embedding source range differs from its admitted text')
+    recipe = embedding_recipe(relay)
     space_id = stable_digest({'binding': relay.binding_id, 'model': relay.model_id,
-                              'recipe': source['recipe']})
-    space = {'binding': space_id, 'model': relay.model_id, 'recipe': source['recipe']}
-    binding = {key: source[key] for key in ('project', 'source', 'material', 'representation', 'recipe', 'parser')}
+                              'recipe': recipe})
+    space = {'binding': space_id, 'model': relay.model_id, 'recipe': recipe}
+    binding = {key: source[key] for key in ('project', 'source', 'material', 'representation', 'parser')}
+    binding['recipe'] = recipe
     binding.update(model=relay.model_id, space=space_id, ranges=ranges,
                    input_digest=stable_digest(texts))
     path = Path(native[0].native_store_dir).parent / ('embedding-' + space_id.removeprefix('sha256:') + '.sqlite')
@@ -1329,10 +1338,11 @@ def _embed_texts(texts: list[str], relay: Any) -> tuple[list[list[float] | None]
     include_vectors = _native_embedding_vectors_required.get()
     from .utils.exceptions import ValidationError
     owner_type, cache, binding, space, path = _embedding_owner_binding(texts, relay)
-    key = owner_type.embedding_operation_id(binding)
-    accepted = cache.accepted_digest('embedding', key)
     owner = owner_type.open_embedding_space(path, space)
     try:
+        key = ((owner.embedding_physical_operation_id(binding) if owner is not None else None)
+               or owner_type.embedding_operation_id(binding))
+        accepted = cache.accepted_digest('embedding', key)
         adopted = owner.read_embedding(binding, include_vectors=include_vectors) if owner is not None else None
         reused = accepted is not None or adopted is not None
         if adopted is not None:
@@ -1386,25 +1396,38 @@ def _invalid_embedding_result(message, receipt):
                     'modelReceiptId': receipt.id, 'usage': receipt.metadata.get('usage', {})})
 
 
-def _request_embedding(texts: list[str], relay: Any) -> tuple[list[list[float]], ModelReceipt]:
-    response, receipt = _relay_json(relay, {"input": texts, "model": relay.model_id}, "embedding")
-    if isinstance(response.get("usage"), dict):
-        receipt.metadata["usage"] = response["usage"]
-    if response.get("model") != relay.model_id:
-        raise _invalid_embedding_result("embedding response model does not match the admitted relay model", receipt)
+def _embedding_payload(texts, model):
+    return {"input": texts, "model": model}
+
+
+def _embedding_values(response, model, count):
+    """Pure model-result admission; audit and transport never enter vector identity."""
+    if response.get("model") != model:
+        raise ValueError("embedding response model does not match the admitted relay model")
     data = response.get("data")
-    if not isinstance(data, list) or len(data) != len(texts):
-        raise _invalid_embedding_result("embedding response has invalid data", receipt)
+    if not isinstance(data, list) or len(data) != count:
+        raise ValueError("embedding response has invalid data")
     vectors = []
     for index, item in enumerate(data):
         if not isinstance(item, dict) or item.get("index") != index:
-            raise _invalid_embedding_result("embedding response index does not match input order", receipt)
+            raise ValueError("embedding response index does not match input order")
         vector = item.get("embedding")
         if not isinstance(vector, list) or not vector or not all(not isinstance(value, bool) and isinstance(value, (int, float)) and math.isfinite(value) for value in vector):
-            raise _invalid_embedding_result("embedding response has invalid vector", receipt)
+            raise ValueError("embedding response has invalid vector")
         vectors.append([float(value) for value in vector])
     if len({len(vector) for vector in vectors}) != 1:
-        raise _invalid_embedding_result("embedding response has inconsistent dimensions", receipt)
+        raise ValueError("embedding response has inconsistent dimensions")
+    return vectors
+
+
+def _request_embedding(texts: list[str], relay: Any) -> tuple[list[list[float]], ModelReceipt]:
+    response, receipt = _relay_json(relay, _embedding_payload(texts, relay.model_id), "embedding")
+    if isinstance(response.get("usage"), dict):
+        receipt.metadata["usage"] = response["usage"]
+    try:
+        vectors = _embedding_values(response, relay.model_id, len(texts))
+    except ValueError as exc:
+        raise _invalid_embedding_result(str(exc), receipt) from exc
     return vectors, receipt
 
 
@@ -1629,6 +1652,17 @@ def _classify_source(built: dict[str, Any], profile: Any, relay: Any) -> tuple[S
         model_receipt_ids=[receipt.id for receipt in receipts]), receipts
 
 
+def _produce_source_classification(context, profile, relay, source_id):
+    result, receipts = _product_json(relay, "source_classification",
+        _CLASSIFICATION_INSTRUCTION, context, _ClassificationOutput, short_evidence_refs=True)
+    assignments = [ClassificationAssignment(dimension_id=item.dimension_id, item_id=item.item_id,
+        confidence=item.confidence, evidence_ids=sorted({citation.evidence_id for citation in item.citations}))
+        for item in result.assignments]
+    value = SourceClassification(source_id=source_id, profile_id=profile.id, profile_version=profile.version,
+        assignments=assignments, unclassified_dimension_ids=[dimension.id for dimension in profile.dimensions if not any(item.dimension_id == dimension.id for item in assignments)], model_receipt_ids=[receipt.id for receipt in receipts])
+    return value, receipts
+
+
 def _classify_source_batch(built: dict[str, Any], profile: Any, relay: Any) -> tuple[SourceClassification, list[ModelReceipt]]:
     passages = built["passages"]
     context = {"profile": profile.model_dump(mode="json", by_alias=True), "source_id": built["source"].source_id,
@@ -1642,8 +1676,7 @@ def _classify_source_batch(built: dict[str, Any], profile: Any, relay: Any) -> t
         ref = next(ref for ref in request.parsed_sources if ref.source_id == source.source_id)
         binding = dict(project=request.project_id, source=source.source_id,
             material=source.material_revision, representation=ref.representation_revision,
-            recipe=stable_digest({"recipe": request.recipe.lineage_payload(), "processing": PROJECT_PROCESSING_DIGEST,
-                "binding": relay.binding_id}), model=relay.model_id, target=source.source_id,
+            recipe=_classification_recipe(relay), model=relay.model_id, target=source.source_id,
             taxonomy=stable_digest(profile.model_dump(mode="json", by_alias=True)), context_digest=stable_digest(context))
         params = {"native_operation": store.classification_operation_id(binding)}
         built.setdefault('native_classification_bindings', {})[params['native_operation']] = binding
@@ -1666,13 +1699,7 @@ def _classify_source_batch(built: dict[str, Any], profile: Any, relay: Any) -> t
         value = SourceClassification.model_validate(accepted["value"])
         receipts = [ModelReceipt.model_validate(item) for item in accepted["receipts"]]
     else:
-        result, receipts = _product_json(relay, "source_classification",
-            _CLASSIFICATION_INSTRUCTION, context, _ClassificationOutput, short_evidence_refs=True)
-        assignments = [ClassificationAssignment(dimension_id=item.dimension_id, item_id=item.item_id,
-            confidence=item.confidence, evidence_ids=sorted({citation.evidence_id for citation in item.citations}))
-            for item in result.assignments]
-        value = SourceClassification(source_id=built["source"].source_id, profile_id=profile.id, profile_version=profile.version,
-            assignments=assignments, unclassified_dimension_ids=[dimension.id for dimension in profile.dimensions if not any(item.dimension_id == dimension.id for item in assignments)], model_receipt_ids=[receipt.id for receipt in receipts])
+        value, receipts = _produce_source_classification(context, profile, relay, built['source'].source_id)
         if native is not None:
             digest = cache.accept("classification", binding["context_digest"],
                 {"value": value.model_dump(mode="json"), "receipts": [item.model_dump(mode="json") for item in receipts]}, **params)

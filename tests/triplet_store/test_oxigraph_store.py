@@ -330,3 +330,39 @@ def test_storage_path_is_accepted_as_alias_for_path(tmp_path):
 
     reopened = OxigraphStore(storage_path=str(storage_path))
     assert len(reopened.get_triplets()) == 1
+
+
+@pytest.mark.parametrize('fail', [False, True])
+def test_durable_write_batch_flushes_once_and_survives_reopen(tmp_path, fail):
+    path = tmp_path / 'batched'
+    backend = OxigraphStore(path=path)
+    with patch.object(backend.store, 'flush', wraps=backend.store.flush) as flush:
+        try:
+            with backend.batch_writes():
+                for index in range(16):
+                    backend.execute_update(f'INSERT DATA {{ <{EX}{index}> <{EX}label> "value" }}')
+                assert flush.call_count == 0
+                if fail:
+                    raise ValueError('interrupted')
+        except ValueError as exc:
+            assert fail and str(exc) == 'interrupted'
+        assert flush.call_count == 1
+    backend.close()
+    del flush
+    gc.collect()
+    reopened = OxigraphStore(path=path)
+    assert len(reopened.store) == 16
+    reopened.close()
+
+
+def test_write_batch_flush_failure_is_not_success(tmp_path):
+    backend = OxigraphStore(path=tmp_path / 'failed-batch')
+    with patch.object(backend.store, 'flush', side_effect=OSError('disk unavailable')):
+        with pytest.raises(OSError, match='disk unavailable'):
+            with backend.batch_writes():
+                backend.execute_update(f'INSERT DATA {{ <{EX}s> <{EX}p> "value" }}')
+    # A failed boundary must restore ordinary durability semantics.
+    with patch.object(backend.store, 'flush', wraps=backend.store.flush) as flush:
+        backend.flush()
+        flush.assert_called_once()
+    backend.close()

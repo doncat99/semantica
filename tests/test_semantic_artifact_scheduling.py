@@ -30,7 +30,7 @@ def scheduling_request(tmp_path, materials, parallelism, *, window_chars=1):
         sources.append((source, False, parsed))
         refs.append(SimpleNamespace(source_id=source_id,
                                     representation_revision=parsed.document['representation_revision']))
-    relay = SimpleNamespace(binding_id='test', context_window_tokens=500000, max_output_tokens=32768)
+    relay = SimpleNamespace(binding_id='test', model_id='test-model', context_window_tokens=500000, max_output_tokens=32768)
     request = SimpleNamespace(parallelism=parallelism, project_id='fixture-project',
         parsed_sources=refs, relays={'model': relay, 'embedding': None},
         recipe=RecipeRef(id='model', version='1'),
