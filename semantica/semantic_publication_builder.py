@@ -3096,23 +3096,24 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                 for record in page['records']:
                     for kind in ('assertion','relation'):
                         yield record['id'],kind,hydrate_fact(record['id'],kind)
+                        metadata['indexedObservations'] += 1
                 cursor=page['next_cursor']
                 if cursor is None:
                     break
-        with _project_progress(progress,'fact_reconciliation',90):
+        with _project_progress(progress,'fact_reconciliation',90) as metadata, index.publication.build_scope(generation):
+            metadata.update(indexedObservations=0,completedPartitions=0,canonicalRelations=0)
             index.build(rows())
-            for claims,links,issues in index.iter_reconciled(hydrate_fact):
+            for claims,links,issues,supports in index.iter_reconciled(hydrate_fact):
                 index.stage_reconciled(claims,links)
                 for relation in links:
-                    observations=relation.metadata.get('support_observations',[])
-                    if not observations:
-                        raise SemanticArtifactError('canonical fact lacks native observations',code='NATIVE_PUBLICATION_INCOMPLETE')
-                    members,representative=index.fact_members(relation.id,observations[0],hydrate_fact)
+                    members,representative=supports[relation.id]
                     for offset in range(0,len(members),128):
                         store.stage_publication_facts(request.project_id,generation,[dict(id=relation.id,
                             source=relation.source_entity_id,target=relation.target_entity_id,
                             representative=representative,members=members[offset:offset+128],
                             member_count=len(members),status=relation.status)])
+                metadata['completedPartitions'] += 1
+                metadata['canonicalRelations'] += len(links)
 
     def semantic_organization(_):
         nonlocal communities, topics
@@ -3176,10 +3177,11 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
             return groups, _grounded_topics(list(grounded_entities.values()),list(grounded_claims.values()),
                 (span for built in source_builds for span in built['evidence'] if span.id in cited),
                 groups, reports), receipts
-        communities, topics, receipts = _project_stage(
-            "semantic_organization",
-            TypeAdapter(tuple[list[KnowledgeCommunity], list[KnowledgeTopic], list[ModelReceipt]]),
-            organize, progress, 90)
+        with fact_index.publication.build_scope(generation):
+            communities, topics, receipts = _project_stage(
+                "semantic_organization",
+                TypeAdapter(tuple[list[KnowledgeCommunity], list[KnowledgeTopic], list[ModelReceipt]]),
+                organize, progress, 90)
         model_receipts.extend(receipts)
 
     def artifact_writing(_):

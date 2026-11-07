@@ -48,8 +48,18 @@ def test_native_fact_projection_matches_source_observation_oracle(tmp_path, monk
     def verify_released(index,rows):
         assert source_results
         assert all(not ({'assertions','relations','native_fact_refs'} & result.keys()) for result in source_results)
+        assert index.owner._build_plan_scope == (index.publication.graph.value,index.generation)
         return original_index_build(index,rows)
     monkeypatch.setattr(QualifiedFactIndex,'build',verify_released)
+    original_reconcile=QualifiedFactIndex.iter_reconciled
+    def verify_reconcile(index,read,**options):
+        def scoped_read(*args):
+            assert index.owner._build_plan_scope == (index.publication.graph.value,index.generation)
+            return read(*args)
+        for group in original_reconcile(index,scoped_read,**options):
+            yield group
+            assert index.owner._build_plan_scope == (index.publication.graph.value,index.generation)
+    monkeypatch.setattr(QualifiedFactIndex,'iter_reconciled',verify_reconcile)
     build_child(tmp_path,stop_before_publication=False)
     request=SemanticArtifactBuildRequest.model_validate(_request(tmp_path/'source.txt',tmp_path/'published')['params'])
     store=OxigraphStore(request.native_store_dir)
@@ -81,6 +91,7 @@ def test_native_family_representation_matches_builder_evidence(tmp_path, monkeyp
         expected.update(item.representation_id for item in result['evidence'])
         return result
     def capture_family(index, **kwargs):
+        assert index.owner._build_plan_scope == (index.publication.graph.value,index.generation)
         assert 0 < len(kwargs['subject_ids']) <= 128
         page = original_family(index, **kwargs)
         actual.update(value for row in page['records'] for value in row['representations'])

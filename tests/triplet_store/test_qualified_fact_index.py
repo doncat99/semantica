@@ -33,12 +33,24 @@ def test_reference_index_crosses_pages_and_preserves_oracle(tmp_path):
     from semantica.triplet_store.oxigraph_store import OxigraphStore
     store = OxigraphStore(tmp_path/'facts')
     index = QualifiedFactIndex(store, 'p', generation)
-    output = list(index.iter_reconciled(lambda ref, kind, identity: lookup[ref, kind, identity],
+    reads = []
+    def read(ref, kind, identity):
+        reads.append((ref,kind,identity))
+        return lookup[ref,kind,identity]
+    output = list(index.iter_reconciled(read,
         max_group_records=300, max_group_bytes=4*1024*1024))
     expected = ConflictDetector.reconcile_qualified_facts('p',
         [KnowledgeAssertion.model_validate(item) for _, kind, item in source if kind == 'assertion'],
         [KnowledgeRelation.model_validate(item) for _, kind, item in source if kind == 'relation'])
-    assert output == [expected]
+    assert [group[:3] for group in output] == [expected]
+    assert len(reads) == len(lookup) == len(set(reads))
+    for relation in output[0][1]:
+        members,representative = output[0][3][relation.id]
+        matching = [(ref,item) for ref,kind,item in source if kind == 'relation'
+            and ConflictDetector.qualified_fact_identity('p',item,kind) == relation.id]
+        assert set(members) == {ref for ref,_ in matching}
+        assert any(ref == representative and item == relation.metadata['support_observations'][0]
+            for ref,item in matching)
     assert len(output[0][2]) == 1
     assert len(output[0][0][0].metadata['support_observations']) in {1,136}
     store.close()
@@ -89,6 +101,14 @@ def test_complete_partitions_preserve_functional_values_times_and_withdrawal(tmp
     assert actual == tuple(sorted(values,key=lambda item:item.id) for values in oracle)
     assert len(groups) == 2
     assert len(actual[2]) == 3
+    for _,links,_,supports in groups:
+        for relation in links:
+            members,representative = supports[relation.id]
+            matching = [(ref,item) for ref,kind,item in source if kind == 'relation'
+                and ConflictDetector.qualified_fact_identity('p',item,kind) == relation.id]
+            assert set(members) == {ref for ref,_ in matching}
+            assert any(ref == representative and item == relation.metadata['support_observations'][0]
+                for ref,item in matching)
     store.close()
 
 
@@ -190,7 +210,7 @@ def test_native_family_metadata_matches_complete_qualified_oracle(tmp_path):
     index.build(iter(source))
     with pytest.raises(ProcessingError,match='reconciliation incomplete'):
         index.family_page()
-    for claims,links,_ in index.iter_reconciled(lambda ref,kind,id:lookup[ref,kind,id]):
+    for claims,links,_,_ in index.iter_reconciled(lambda ref,kind,id:lookup[ref,kind,id]):
         index.stage_reconciled(claims,links)
     assert index.family_page()['records']==[dict(subject='urn:canonical:0',predicate='owns',
         representations=['r:s1','r:s2'],required=True)]
@@ -214,7 +234,7 @@ def test_native_family_seek_and_budgets_preserve_every_required_family(tmp_path)
     lookup={(ref,kind,item['id']):item for ref,kind,item in source}
     index=QualifiedFactIndex(store,'p',generation)
     index.build(iter(source))
-    for claims,links,_ in index.iter_reconciled(lambda ref,kind,id:lookup[ref,kind,id]):
+    for claims,links,_,_ in index.iter_reconciled(lambda ref,kind,id:lookup[ref,kind,id]):
         index.stage_reconciled(claims,links)
     result=[]
     cursor=None
@@ -265,7 +285,9 @@ def test_index_persists_bounded_native_batches_and_cancellation_stays_unsealed(t
     token=query_cancellation.set(event)
     try:
         with pytest.raises(ProcessingError,match='canceled'):
-            index.build(canceled_rows())
+            with index.publication.build_scope(generation):
+                index.build(canceled_rows())
+        assert store._build_plan_scope is None
     finally:
         query_cancellation.reset(token)
     store.close()
@@ -287,8 +309,37 @@ def test_index_pending_batch_cannot_cross_generation_change(tmp_path):
         store.begin_publication('p',expected_generation=generation,source_count=0,canonical_count=0)
         yield refs[0],'relation',next(value for _,kind,value in rows(refs,1) if kind=='relation')
     with pytest.raises(ProcessingError,match='not pending'):
-        index.build(replaced_rows())
+        with index.publication.build_scope(generation):
+            index.build(replaced_rows())
+    assert store._build_plan_scope is None
     store.close()
+
+
+def test_fact_scope_validates_complete_plan_only_at_stage_boundaries(tmp_path):
+    store,generation,refs,_=stage_duplicate_observations(tmp_path)
+    native=store.store
+    plan_queries=[]
+    class ObservedStore:
+        def __getattr__(self,name):
+            return getattr(native,name)
+        def query(self,query,*args,**kwargs):
+            if 'HAVING(COUNT(?operation)' in query:
+                plan_queries.append(query)
+            return native.query(query,*args,**kwargs)
+    store.store=ObservedStore()
+    source=list(rows(refs,140))
+    lookup={(ref,kind,item['id']):item for ref,kind,item in source}
+    index=QualifiedFactIndex(store,'p',generation)
+    try:
+        with index.publication.build_scope(generation):
+            index.build(iter(source))
+            for claims,links,_,_ in index.iter_reconciled(lambda *key:lookup[key]):
+                index.stage_reconciled(claims,links)
+            assert len(plan_queries)==1
+        assert len(plan_queries)==2
+        assert store._build_plan_scope is None
+    finally:
+        store.close()
 
 
 def test_native_family_ordered_subject_scope_crosses_pages_without_global_sort(tmp_path):
@@ -304,7 +355,7 @@ def test_native_family_ordered_subject_scope_crosses_pages_without_global_sort(t
     lookup={(ref,kind,item['id']):item for ref,kind,item in source}
     index=QualifiedFactIndex(store,'p',generation)
     index.build(iter(source))
-    for claims,links,_ in index.iter_reconciled(lambda ref,kind,id:lookup[ref,kind,id]):
+    for claims,links,_,_ in index.iter_reconciled(lambda ref,kind,id:lookup[ref,kind,id]):
         index.stage_reconciled(claims,links)
     actual=[]
     cursor=None

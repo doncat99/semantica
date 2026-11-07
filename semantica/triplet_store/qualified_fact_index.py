@@ -164,28 +164,9 @@ class QualifiedFactIndex:
                 raise ProcessingError('Native fact requires unique canonical endpoint membership')
             return rows[0]['source'].value,rows[0]['target'].value
 
-    def fact_members(self, identity, representative, read):
-        """Read one already bounded canonical group, preserving oracle representative."""
-        p=self.publication
-        self._fence()
-        partition=self.partition(representative,'relation')
-        members=[]
-        selected=None
-        for row in self._references(partition):
-            if row['kind']!='relation' or row['identity']!=identity:
-                continue
-            ref=row['reference']
-            members.append(ref)
-            value=read(ref,'relation',row['observation'])
-            if value==representative and selected is None:
-                selected=ref
-        if not members or selected is None:
-            raise ProcessingError('Native canonical fact support or representative missing')
-        return list(dict.fromkeys(members)),selected
-
     def iter_reconciled(self, read, *, functional_predicates=(),
                         max_group_records=4096, max_group_bytes=16*1024*1024):
-        """Yield complete oracle results; oversized partitions fail explicitly.
+        """Yield assertions, relations, conflicts and native relation support plans.
 
         `read(native_reference, kind, observation_id)` must reread the same
         current native observation and canonical endpoint binding. Limits are
@@ -203,6 +184,7 @@ class QualifiedFactIndex:
                              max_group_records=4096,max_group_bytes=16*1024*1024):
         p=self.publication
         assertions, relations, size, count = [], [], 0, 0
+        supports = {}
         for row in self._references(partition):
             count += 1
             if count > max_group_records:
@@ -219,9 +201,21 @@ class QualifiedFactIndex:
                 assertions.append(KnowledgeAssertion.model_validate(item))
             else:
                 relations.append(KnowledgeRelation.model_validate(item))
+                members, observations = supports.setdefault(row['identity'], ({}, {}))
+                members[row['reference']] = None
+                observations.setdefault(_digest(item), row['reference'])
         self._fence()
-        return ConflictDetector.reconcile_qualified_facts(p.project,assertions,relations,
+        result = ConflictDetector.reconcile_qualified_facts(p.project,assertions,relations,
             functional_predicates=functional_predicates)
+        plans = {}
+        for relation in result[1]:
+            members, observations = supports[relation.id]
+            originals = relation.metadata.get('support_observations', [])
+            representative = observations.get(_digest(originals[0])) if originals else None
+            if not members or representative is None:
+                raise ProcessingError('Native canonical fact support or representative missing')
+            plans[relation.id] = (list(members), representative)
+        return (*result, plans)
 
     @staticmethod
     def _page_budget(limit,max_bytes):
