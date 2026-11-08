@@ -4,9 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Literal
-from functools import lru_cache
 from hashlib import sha256
-from importlib.metadata import PackageNotFoundError, version
 import json
 from .project_document_quality import assess_document_quality
 from .parse.document_contract import SourceQualityError, UnsupportedSourceFormatError
@@ -31,40 +29,6 @@ def source_content_revision(path: Path) -> str:
     return "b3-" + digest.hexdigest()
 
 
-@lru_cache(maxsize=64)
-def _processing_implementation(suffix: str, mode: str) -> dict:
-    """Small immutable parser/reader recipe; never import an engine or scan a runtime."""
-    root = Path(__file__).parent
-    from .parse.document_contract import OFFICE_SUFFIXES, STRUCTURED_SUFFIXES
-    owners = ['source.py', 'parse/document_parser.py', 'parse/document_contract.py',
-        'project_document_quality.py', 'parse/document_reader.py',
-        'semantic_document_reader.py', 'semantic_source_artifact.py']
-    packages = []
-    if suffix == '.epub':
-        owners.append('parse/epub_parser.py')
-    elif suffix in OFFICE_SUFFIXES:
-        owners.append('project_office.py')
-    elif suffix in STRUCTURED_SUFFIXES:
-        if mode == 'native':
-            owners.append('parse/pdf_parser.py')
-            packages.append('PyMuPDF')
-        elif mode == 'remote':
-            owners.append('project_remote_docling.py')
-            packages.append('docling-core')
-        elif mode == 'local':
-            owners.append('parse/docling_parser.py')
-            packages.extend(('docling', 'docling-slim', 'docling-core', 'docling-ibm-models',
-                'docling-parse', 'pypdfium2', 'rapidocr', 'onnxruntime', 'Pillow'))
-    dependencies = {}
-    for name in packages:
-        try:
-            dependencies[name] = version(name)
-        except PackageNotFoundError:
-            dependencies[name] = None
-    return {'owners': {name: sha256((root / name).read_bytes()).hexdigest() for name in owners},
-            'dependencies': dependencies}
-
-
 def normalized_processing_profile(profile: dict | None) -> dict:
     from .semantic_artifact_schema import DocumentProcessingProfile
     return DocumentProcessingProfile.model_validate(profile or {}).model_dump(mode='json', by_alias=True)
@@ -72,16 +36,13 @@ def normalized_processing_profile(profile: dict | None) -> dict:
 
 def source_processing_revision(path: Path, *, mime_type: str, force_ocr: bool,
                                document_processing: dict | None = None, name: str | None = None) -> str:
-    """Bind actual inputs and installed native implementation, without a manual salt."""
+    """Bind parsing inputs and the representation contract, never implementation bytes."""
     profile = normalized_processing_profile(document_processing)
-    from .parse.document_contract import OFFICE_SUFFIXES, document_suffix
+    from .parse.document_contract import document_suffix
     suffix = document_suffix(path, name if name is not None else path.name, mime_type, False)
     recipe = {'profile': profile,
         'mimeType': mime_type, 'suffix': suffix, 'forceOcr': force_ocr,
-        'implementation': _processing_implementation(suffix, profile['mode'])}
-    if suffix in OFFICE_SUFFIXES:
-        from .project_office import office_runtime_identity
-        recipe['officeRuntime'] = office_runtime_identity()
+        'representationContract': 'semantica.parsed-source.v3'}
     return 'sha256:' + sha256(json.dumps(recipe, sort_keys=True, separators=(',', ':')).encode()).hexdigest()
 
 

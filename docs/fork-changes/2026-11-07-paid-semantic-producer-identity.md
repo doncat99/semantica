@@ -3,6 +3,8 @@
 - Record ID: 2026-11-07-paid-semantic-producer-identity
 - Date / author: 2026-11-07 / Codex
 - Status: verified-in-stated-scope
+- Current design: the source-closure approach below is historical and superseded
+  by the 2026-11-08 follow-up at the end of this record.
 - Fork base revision: 765c0ef2d1e868e074ca31068e9db90a0672a9c2
 - Upstream reference: not inspected; local fork repair
 - Related records: 2026-11-07-stable-embedding-operation-identity; offline migration changes are coordinated separately
@@ -140,3 +142,53 @@ that G4 or release acceptance has passed.
 - 2026-11-07: Removed unreachable generic chunking, ungrounded relation parsing
   and generic context-batching helpers from the native extraction recipe closure.
   Removed unused manual `EXTRACTION_CONTRACT_VERSION`; no identity uses it.
+
+### 2026-11-08: remove implementation identity completely
+
+The earlier narrowing of callable hashes was insufficient and is superseded.
+No callable source, dependency version or whole-project source digest now defines
+paid extraction/classification, vector spaces, parser reuse or publication recipe.
+Extraction uses the production prompt renderers, wire schemas, specification and
+actual model/binding/budgets; classification uses its production instruction and
+schema. Embedding uses the actual model/binding and float32 contract. Parsing uses
+format, OCR/processing parameters and representation contract. Stored parsed data
+does not have to match the current executable's revision. Integrity and artifact
+provenance remain required and are separate from business reuse.
+
+Report identity includes its actual instruction and wire schema in inputDigest;
+native and host use the same six fields. Publication uses request recipe lineage
+instead of scanning all Python files at import. No fallback reader was added.
+
+The explicit offline rebind tool verifies admitted source material/representation,
+facts, receipts and paid ledger before in-place recipe/parser metadata updates.
+Completed-window indexes move with the identity. Vector SQLite rows and rowids,
+fact ownership and paid receipts are preserved; no paid data is adopted/copied.
+Old producer semantic equivalence must be established by the operator; arbitrary
+old recipe hashes are not proof. No active user data was migrated in this work.
+
+Focused evidence: 67 passed / 26.56s (semantic identity, publication recipe,
+embedding builder, organization reports and ProjectOffice); 26 passed / 34.07s
+(offline rebind and extraction handoff). Host verification and the mandatory
+design policy are recorded in OntoScience-od's
+docs/engineering/result-identity-and-reuse.md and
+docs/ontoscience/implementation/domains/knowledgehub/code-identity-coupling-audit-2026-11-07.md.
+These are source checks, not installed-artifact or real ESG acceptance.
+
+### Real-profile migration, 2026-11-08
+
+Stopped every old packaged reader/writer. Migrated the exact 38-source ESG scope:
+14,785 extraction operations, 85 classifications, and 8,349 embeddings, in place.
+No facts, vectors, or receipts were copied. The vector DB inode, physical vector
+and operation tables (including rowids), and all 24,290 accepted ledger rows
+match pre-migration fingerprints. No before/after per-fact fingerprint was taken.
+
+The real migration exposed a parser-field guard/caller mismatch. Vector migration
+now accepts only explicit parser pairs proven against the same immutable parsed
+representation; other paid-input guards remain strict. Updated API, caller and
+fixtures: 38 focused tests passed in 8.53s.
+
+1,006 operations from another historical recipe remain untouched: 975 collide
+with current targets having different accepted digests; 31 have no target.
+They cannot be blindly merged or discarded. Publication remains pending; no
+ready build, paid calls, or packaged delivery is claimed. The old App remains
+stopped until replaced. Host audit documents evidence paths and exclusions.

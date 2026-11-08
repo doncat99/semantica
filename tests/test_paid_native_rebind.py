@@ -22,14 +22,17 @@ def fixture(tmp_path, monkeypatch):
     helper = runpy.run_path(str(Path(__file__).with_name('test_native_extraction_handoff.py')))
     child = helper['run_child'](tmp_path, recipe=OLD)
     assert child.returncode == 0, child.stderr
-    source = SimpleNamespace(source_id='source-1')
+    source = SimpleNamespace(source_id='source-1', file_path='source.txt', name='source.txt', mime_type='text/plain', material_revision='material-1')
     request = SimpleNamespace(project_id='project-1', sources=[source],
-        parsed_sources=[SimpleNamespace(source_id='source-1')], recipe=SimpleNamespace(force_ocr_source_ids=[]),
+        parsed_sources=[SimpleNamespace(source_id='source-1', representation_revision='representation-1')], recipe=SimpleNamespace(force_ocr_source_ids=[]),
         document_processing=SimpleNamespace(model_dump=lambda **_: {}),
         relays={'embedding': SimpleNamespace(binding_id='embedding', model_id='embedding')},
         native_store_dir=str(tmp_path/'facts'), native_cache_dir=str(tmp_path),
         model_dump=lambda **_: {'project': 'project-1'})
     monkeypatch.setattr(builder, '_extraction_recipe', lambda _: NEW)
+    monkeypatch.setattr(maintenance, 'parser_identity', lambda *a: 'parser')
+    import semantica.semantic_document_reader as reader
+    monkeypatch.setattr(reader, 'read_source_header', lambda *a: {'header': {'processingRevision': 'parser'}})
     monkeypatch.setattr(sources, '_load_parsed_source', lambda *a: SimpleNamespace(reader='reader'))
     monkeypatch.setattr(builder, '_read_source_projection_text', lambda reader, start, end: helper['TEXT'][start:end])
     return request
@@ -50,7 +53,7 @@ def test_migration_is_in_place_reentrant_and_keeps_paid_ledger(tmp_path, monkeyp
     if preindex:
         graph = owner._oxigraph.NamedNode('urn:semantica:project:' + hashlib.sha256(b'project-1').hexdigest() + ':extraction-index')
         owner.store.clear_graph(graph)
-    facts = {str(q) for q in owner.store if q.predicate.value not in {F+'bindingRecipe', F+'extractionStage', F+'operationDigest', F+'physicalOperation'}}
+    facts = {str(q) for q in owner.store if q.predicate.value not in {F+'bindingParser', F+'bindingRecipe', F+'extractionStage', F+'operationDigest', F+'physicalOperation'}}
     owner.close()
     dry = maintenance.migrate(request, OLD)
     assert dry['extractions'] == 2 and ledger(tmp_path) == before
@@ -59,7 +62,7 @@ def test_migration_is_in_place_reentrant_and_keeps_paid_ledger(tmp_path, monkeyp
     assert first['extractions'] == second['extractions'] == 2
     assert first['factsCopied'] == first['vectorsCopied'] == first['receiptsCopied'] == 0
     owner = OxigraphStore(request.native_store_dir)
-    after = {str(q) for q in owner.store if q.predicate.value not in {F+'bindingRecipe', F+'extractionStage', F+'operationDigest', F+'physicalOperation'}}
+    after = {str(q) for q in owner.store if q.predicate.value not in {F+'bindingParser', F+'bindingRecipe', F+'extractionStage', F+'operationDigest', F+'physicalOperation'}}
     assert after == facts
     owner.close()
     assert ledger(tmp_path) == before
@@ -94,7 +97,8 @@ def test_missing_acceptance_fails_closed(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize('preindex', [False, True])
-def test_vector_path_move_preserves_blob_receipt_and_ledger(tmp_path, monkeypatch, preindex):
+@pytest.mark.parametrize('rebind_parser', [False, True])
+def test_vector_path_move_preserves_blob_receipt_and_ledger(tmp_path, monkeypatch, preindex, rebind_parser):
     from semantica.semantic_artifact_schema import stable_digest
     from semantica.semantic_embedding_recipe import embedding_recipe
     from semantica.semantic_extract.cache import ExtractionCache, SqliteCacheBackend
@@ -106,7 +110,7 @@ def test_vector_path_move_preserves_blob_receipt_and_ledger(tmp_path, monkeypatc
     old, current = space(OLD), space(embedding_recipe(relay))
     def path(identity):
         return tmp_path / ('embedding-' + identity['binding'].removeprefix('sha256:') + '.sqlite')
-    binding = dict(project='project-1', source='source-1', material='material', representation='representation',
+    binding = dict(project='project-1', source='source-1', material='material-1', representation='representation-1',
         recipe=OLD, model=relay.model_id, space=old['binding'], parser='parser', ranges=[[0, 1]], input_digest=stable_digest(['a']))
     receipt = dict(id='receipt-embedding', operation='embedding', provider='fixture', model=relay.model_id,
         input_digest=stable_digest('input'), output_digest=stable_digest('output'))
@@ -121,8 +125,8 @@ def test_vector_path_move_preserves_blob_receipt_and_ledger(tmp_path, monkeypatc
         import semantica.semantic_publication_builder as builder
         import semantica.source as sources
         source = request.sources[0]
-        source.material_revision, source.file_path, source.name, source.mime_type = 'material', 'original.pdf', 'original.pdf', 'application/pdf'
-        request.parsed_sources[0].representation_revision = 'representation'
+        source.material_revision, source.file_path, source.name, source.mime_type = 'material-1', 'original.pdf', 'original.pdf', 'application/pdf'
+        request.parsed_sources[0].representation_revision = 'representation-1'
         monkeypatch.setattr(builder, '_source_windows', lambda parsed: iter([(0, 1, 'a')]))
         monkeypatch.setattr(sources, 'source_processing_revision', lambda *a, **k: 'parser')
         owner._conn.execute('DROP TABLE embeddings_embedding_bindings')
@@ -131,13 +135,16 @@ def test_vector_path_move_preserves_blob_receipt_and_ledger(tmp_path, monkeypatc
     cache.release_accepted('embedding', physical, digest)
     cache._backend.close()
     before_ledger = ledger(tmp_path)
+    if rebind_parser:
+        monkeypatch.setattr(maintenance, 'parser_identity', lambda *a: 'semantic-parser')
     assert maintenance.migrate(request, OLD)['embeddings'] == 1
     assert path(old).exists() and not path(current).exists()
     assert maintenance.migrate(request, OLD, apply=True)['embeddings'] == 1
     assert not path(old).exists() and path(current).exists()
     assert maintenance.migrate(request, OLD, apply=True)['embeddings'] == 1
     owner = SQLiteVecStore.open_embedding_space(str(path(current)), current)
-    updated = {**binding, 'recipe': current['recipe'], 'space': current['binding']}
+    updated = {**binding, 'recipe': current['recipe'], 'space': current['binding'],
+        'parser': 'semantic-parser' if rebind_parser else binding['parser']}
     assert owner.read_embedding(updated) == adopted
     assert owner.embedding_physical_operation_id(updated) == physical
     assert list(owner._conn.execute('SELECT id,embedding,metadata FROM embeddings ORDER BY id')) == before_vectors
@@ -150,7 +157,7 @@ def test_vector_path_move_preserves_blob_receipt_and_ledger(tmp_path, monkeypatc
     monkeypatch.setattr(builder, '_relay_json', lambda *a, **k: pytest.fail('migrated vector was requested again'))
     tokens = [
         (builder._native_build, builder._native_build.set((request, None, cache))),
-        (builder._native_source_binding, builder._native_source_binding.set({key: binding[key] for key in ('project', 'source', 'material', 'representation', 'parser')})),
+        (builder._native_source_binding, builder._native_source_binding.set({key: updated[key] for key in ('project', 'source', 'material', 'representation', 'parser')})),
         (builder._native_embedding_ranges, builder._native_embedding_ranges.set([[0, 1]])),
         (builder._native_source_ranges, builder._native_source_ranges.set([dict(nativeRef='#/document/text', start=0, end=1, windowStart=0, windowEnd=1)])),
         (builder._native_embedding_vectors_required, builder._native_embedding_vectors_required.set(False)),
@@ -203,3 +210,47 @@ def test_classification_batch_and_reduction_migrate_without_copies(tmp_path, mon
     assert reduction.read_reduced_dimension('sector') == expected
     owner.close()
     assert ledger(tmp_path) == before
+
+
+def test_parser_metadata_rebind_preserves_physical_results(tmp_path, monkeypatch):
+    from semantica.triplet_store.oxigraph_store import OxigraphStore
+    request = fixture(tmp_path, monkeypatch)
+    before = ledger(tmp_path)
+    owner = OxigraphStore(request.native_store_dir)
+    original = list(maintenance.source_bindings(owner, request.project_id, 'source-1', OLD))
+    owner.close()
+    monkeypatch.setattr(maintenance, 'parser_identity', lambda *a: 'semantic-parser')
+    maintenance.migrate(request, OLD, apply=True)
+    owner = OxigraphStore(request.native_store_dir)
+    for previous, stage, physical in original:
+        current = {**previous, 'recipe': NEW, 'parser': 'semantic-parser'}
+        assert owner.extraction_operation_id(current, stage) == physical
+        from semantica.triplet_store.extraction_records import ExtractionRecords
+        assert ExtractionRecords(owner, current, stage).receipt() is not None
+    owner.close()
+    assert ledger(tmp_path) == before
+
+
+def test_rebind_moves_completed_window_reference_without_recomputing(tmp_path, monkeypatch):
+    from semantica.triplet_store.oxigraph_store import OxigraphStore
+    from semantica.triplet_store.extraction_records import ExtractionRecords
+    request = fixture(tmp_path, monkeypatch)
+    owner = OxigraphStore(request.native_store_dir)
+    binding = next(b for b, stage, _ in maintenance.source_bindings(owner, request.project_id, 'source-1', OLD) if stage == 'entities')
+    window = {k: v for k, v in binding.items() if k != 'grounding'}
+    ExtractionRecords.window_completion(owner, window, False, [binding['grounding']])
+    owner.close()
+    maintenance.migrate(request, OLD, apply=True)
+    owner = OxigraphStore(request.native_store_dir)
+    assert ExtractionRecords.window_completion(owner, window, False) is None
+    current = {**window, 'recipe': NEW, 'parser': 'parser'}
+    assert ExtractionRecords.window_completion(owner, current, False) == [{**binding, 'recipe': NEW, 'parser': 'parser'}]
+    owner.close()
+    assert len((tmp_path/'calls.jsonl').read_text().splitlines()) == 2
+
+
+def test_migration_rejects_different_material_before_rebinding(tmp_path, monkeypatch):
+    request = fixture(tmp_path, monkeypatch)
+    request.sources[0].material_revision = 'different-material'
+    with pytest.raises(ValueError, match='admitted material'):
+        maintenance.migrate(request, OLD, apply=True)

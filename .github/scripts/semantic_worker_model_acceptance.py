@@ -121,7 +121,7 @@ def verify_model_paths(root, destination):
             payload = json.loads(self.rfile.read(int(self.headers["content-length"])))
             if self.path.startswith("/v1/products/semantic-organization/"):
                 operation = stable_digest([payload[key] for key in
-                    ("projectId", "inputRevision", "recipeDigest", "modelId", "targetId")])
+                    ("projectId", "inputRevision", "recipeDigest", "modelId", "targetId", "inputDigest")])
                 if self.path.endswith("/adopt"):
                     products[operation] = {"report": payload["report"], "receipts": payload["receipts"],
                         "operationId": operation, "digest": stable_digest(payload)}

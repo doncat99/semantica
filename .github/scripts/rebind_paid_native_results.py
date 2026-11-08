@@ -50,6 +50,13 @@ def source_bindings(store, project, source, recipe, *, classification=False):
             return
 
 
+def parser_identity(request, source):
+    from semantica.source import source_processing_revision
+    return source_processing_revision(Path(source.file_path), name=source.name, mime_type=source.mime_type,
+        force_ocr=source.source_id in request.recipe.force_ocr_source_ids,
+        document_processing=request.document_processing.model_dump(mode='json', by_alias=True))
+
+
 def embedding_bindings(request, old_recipe, old_space, target_space, owner):
     """Reproduce paid window addresses without reading vectors or model calls."""
     from semantica.semantic_artifact_schema import stable_digest
@@ -67,15 +74,19 @@ def embedding_bindings(request, old_recipe, old_space, target_space, owner):
                 raise ValueError('Embedding identity index is incomplete')
             for (raw,) in db.execute('SELECT binding_json FROM embeddings_embedding_bindings ORDER BY physical_id'):
                 previous = json.loads(raw)
-                yield dict(previous=previous, current={**previous, 'recipe': target_space['recipe'], 'space': target_space['binding']})
+                source = next((item for item in request.sources if item.source_id == previous['source']), None)
+                if source is None:
+                    raise ValueError('Explicit source admission is required for every vector binding')
+                if previous['material'] != source.material_revision or previous['representation'] != refs[source.source_id].representation_revision:
+                    raise ValueError('Vector binding differs from admitted immutable source')
+                yield dict(previous=previous, current={**previous, 'recipe': target_space['recipe'], 'space': target_space['binding'], 'parser': parser_identity(request, source)})
             return
         for source in request.sources:
             ref = refs[source.source_id]
             parsed = _load_parsed_source(source, ref, source.source_id in request.recipe.force_ocr_source_ids,
                 request.document_processing.model_dump(mode='json', by_alias=True))
-            parser = source_processing_revision(Path(source.file_path), name=source.name,
-                mime_type=source.mime_type, force_ocr=source.source_id in request.recipe.force_ocr_source_ids,
-                document_processing=request.document_processing.model_dump(mode='json', by_alias=True))
+            from semantica.semantic_document_reader import read_source_header
+            parser = read_source_header(parsed.reader)['header']['processingRevision']
             for start, end, text in _source_windows(parsed):
                 previous = dict(project=request.project_id, source=source.source_id,
                     material=source.material_revision, representation=ref.representation_revision,
@@ -83,10 +94,10 @@ def embedding_bindings(request, old_recipe, old_space, target_space, owner):
                     ranges=[[start, end]], input_digest=stable_digest([text]))
                 physical = owner.embedding_operation_id(previous)
                 if db.execute('SELECT 1 FROM embeddings_embedding_operations WHERE id=?', (physical,)).fetchone():
-                    yield dict(previous=previous, current={**previous, 'recipe': target_space['recipe'], 'space': target_space['binding']})
+                    yield dict(previous=previous, current={**previous, 'recipe': target_space['recipe'], 'space': target_space['binding'], 'parser': parser_identity(request, source)})
 
 
-def migrate(request, old_recipe, *, apply=False, old_classification_recipe=None):
+def migrate(request, old_recipe, *, apply=False, old_classification_recipe=None, old_embedding_recipe=None):
     from semantica.semantic_artifact_schema import stable_digest
     from semantica.semantic_publication_builder import _extraction_recipe
     from semantica.semantic_embedding_recipe import embedding_recipe
@@ -127,10 +138,13 @@ def migrate(request, old_recipe, *, apply=False, old_classification_recipe=None)
                                 if parsed is None:
                                     parsed = _load_parsed_source(source, refs[source.source_id], source.source_id in request.recipe.force_ocr_source_ids,
                                         request.document_processing.model_dump(mode='json', by_alias=True))
+                                if (previous['material'] != source.material_revision
+                                        or previous['representation'] != refs[source.source_id].representation_revision):
+                                    raise ValueError('Extraction migration differs from admitted material or representation')
                                 text = _read_source_projection_text(parsed.reader, previous['window_start'], previous['window_end'])
                                 verify(stage, physical, receipt['accepted_digest'], text)
                                 if apply:
-                                    store.rebind_extraction(previous, {**previous, 'recipe': current}, stage)
+                                    store.rebind_extraction(previous, {**previous, 'recipe': current, 'parser': parser_identity(request, source)}, stage)
                                 report['extractions'] += 1
             if old_classification_recipe is not None:
                 from semantica.triplet_store.classification_records import ClassificationRecords
@@ -154,7 +168,7 @@ def migrate(request, old_recipe, *, apply=False, old_classification_recipe=None)
             store.close()
         relay = request.relays['embedding']
         spaces = [dict(binding=stable_digest(dict(binding=relay.binding_id, model=relay.model_id, recipe=recipe)),
-            model=relay.model_id, recipe=recipe) for recipe in (old_recipe, embedding_recipe(relay))]
+            model=relay.model_id, recipe=recipe) for recipe in (old_embedding_recipe or old_recipe, embedding_recipe(relay))]
         root = Path(request.native_store_dir).resolve().parent
         paths = [root / ('embedding-' + space['binding'].removeprefix('sha256:') + '.sqlite') for space in spaces]
         if paths[0].exists() and paths[1].exists() and paths[0] != paths[1]:
@@ -175,7 +189,7 @@ def migrate(request, old_recipe, *, apply=False, old_classification_recipe=None)
             try:
                 def bindings():
                     count = 0
-                    for item in embedding_bindings(request, old_recipe, actual, spaces[1], owner):
+                    for item in embedding_bindings(request, old_embedding_recipe or old_recipe, actual, spaces[1], owner):
                         with owner._get_connection() as db:
                             logical = owner.embedding_operation_id(item['previous'])
                             # migrate_embedding_identity owns the nonreentrant lock while consuming this iterator.
@@ -193,7 +207,14 @@ def migrate(request, old_recipe, *, apply=False, old_classification_recipe=None)
                         raise ValueError('Migration must cover every physical embedding operation')
                     report['embeddings'] = count
                 if apply:
-                    owner.migrate_embedding_identity(spaces[1], bindings())
+                    from semantica.semantic_document_reader import read_source_header
+                    parser_rebindings = set()
+                    for source in request.sources:
+                        parsed = _load_parsed_source(source, refs[source.source_id], source.source_id in request.recipe.force_ocr_source_ids,
+                            request.document_processing.model_dump(mode='json', by_alias=True))
+                        previous_parser = read_source_header(parsed.reader)['header']['processingRevision']
+                        parser_rebindings.add((previous_parser, parser_identity(request, source)))
+                    owner.migrate_embedding_identity(spaces[1], bindings(), parser_rebindings=parser_rebindings)
                     # Only the main DB file is moved; force WAL contents durable there.
                     with owner._get_connection() as db:
                         checkpoint = db.execute('PRAGMA wal_checkpoint(TRUNCATE)').fetchone()
@@ -215,11 +236,12 @@ def main():
     parser.add_argument('--request', required=True, type=Path)
     parser.add_argument('--old-recipe', required=True)
     parser.add_argument('--old-classification-recipe')
+    parser.add_argument('--old-embedding-recipe')
     parser.add_argument('--report', required=True, type=Path)
     parser.add_argument('--apply', action='store_true')
     args = parser.parse_args()
     request = SemanticArtifactBuildRequest.model_validate_json(args.request.read_text())
-    result = migrate(request, args.old_recipe, apply=args.apply, old_classification_recipe=args.old_classification_recipe)
+    result = migrate(request, args.old_recipe, apply=args.apply, old_classification_recipe=args.old_classification_recipe, old_embedding_recipe=args.old_embedding_recipe)
     args.report.write_text(json.dumps(result, indent=2))
     print(json.dumps(result))
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from bisect import bisect_right
 from dataclasses import dataclass
 from hashlib import sha256
@@ -286,8 +287,7 @@ def bind_parsed_source_artifact(request: BindParsedSourceRequest) -> dict[str, s
         payload.get("mimeType") != source.mime_type,
         payload.get("forceOcr") is not request.force_ocr,
         payload.get('documentProcessing') != profile,
-        payload.get('processingRevision') != source_processing_revision(Path(source.file_path),
-            name=source.name, mime_type=source.mime_type, force_ocr=request.force_ocr, document_processing=profile),
+        not isinstance(payload.get('processingRevision'), str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', payload['processingRevision']),
     )):
         raise SemanticArtifactError("parsed source content or processing profile changed")
     if payload.get('contentHash') != source.material_revision or not _has_representation_identity(
@@ -472,8 +472,7 @@ def _load_parsed_source(source: Any, ref: ParsedSourceRef, force_ocr: bool, prof
         payload.get("mimeType") != source.mime_type,
         payload.get("forceOcr") is not force_ocr,
         payload.get('documentProcessing') != profile,
-        payload.get('processingRevision') != source_processing_revision(Path(source.file_path),
-            name=source.name, mime_type=source.mime_type, force_ocr=force_ocr, document_processing=profile),
+        not isinstance(payload.get('processingRevision'), str) or not re.fullmatch(r'sha256:[0-9a-f]{64}', payload['processingRevision']),
     )):
         raise SemanticArtifactError(f"parsed source identity or processing profile changed: {source.source_id}")
     document = dict(format=payload.get('format'), content_hash=payload.get('contentHash'),

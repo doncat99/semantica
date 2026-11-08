@@ -63,7 +63,7 @@ def test_extraction_uses_only_current_context(tmp_path, monkeypatch):
     source = SimpleNamespace(file_path=str(tmp_path/'source.txt'), source_id='source', name='source.txt', mime_type='text/plain')
     admitted = native_parsed_fixture(source, parsed=(docling_fixture_text(document), document, 'native', '', 'docling', 'test'))
     calls = []
-    def extract(text, relay, spec, item, context, formula_semantics):
+    def extract(text, relay, spec, item, context, formula_semantics, **kwargs):
         calls.append(context)
         return {'entities': [], 'relations': []}, [], False
     monkeypatch.setattr(b, '_extract_window_context', extract)

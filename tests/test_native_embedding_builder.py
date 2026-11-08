@@ -23,7 +23,7 @@ def test_embedding_identity_ignores_publication_recipe_and_unrelated_producers(t
     try:
         first = builder._embedding_owner_binding(['source'], relay)
         source['recipe'] = 'publication-b'
-        monkeypatch.setattr(builder, 'PROJECT_PROCESSING_DIGEST', 'unrelated-query-change')
+        monkeypatch.setattr(builder, 'PROJECT_PROCESSING_DIGEST', 'unrelated-query-change', raising=False)
         monkeypatch.setattr(builder, '_product_json', lambda *args: 'different-generation')
         second = builder._embedding_owner_binding(['source'], relay)
         assert first[2:] == second[2:]
@@ -39,7 +39,7 @@ def test_embedding_identity_ignores_publication_recipe_and_unrelated_producers(t
             variable.reset(token)
 
 
-def test_embedding_recipe_tracks_only_actual_model_binding_and_producers(monkeypatch):
+def test_embedding_recipe_tracks_actual_model_binding_not_producer_code(monkeypatch):
     from semantica import semantic_publication_builder as builder
     from semantica.semantic_embedding_recipe import embedding_recipe
     relay = SimpleNamespace(model_id='model', binding_id='binding')
@@ -54,7 +54,7 @@ def test_embedding_recipe_tracks_only_actual_model_binding_and_producers(monkeyp
     # Transport/usage-receipt orchestration is outside the paid vector producer.
     assert embedding_recipe(relay) == original
     monkeypatch.setattr(builder, '_embedding_payload', lambda texts, model: {'input': texts, 'model': model, 'dimensions': 1024}, raising=False)
-    assert embedding_recipe(relay) != original
+    assert embedding_recipe(relay) == original
 
 
 def child(root, fault='none', dimension='3'):

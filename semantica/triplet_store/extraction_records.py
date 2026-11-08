@@ -60,6 +60,56 @@ def _range(text, start, end):
 
 
 class ExtractionRecords:
+    @classmethod
+    def window_completion(cls, owner, binding, formula, groundings=None):
+        """Ordered references to the accepted batches, in the existing identity index."""
+        with owner._publication_lock:
+            if not isinstance(binding, dict) or set(binding) != BINDING - {'grounding'}:
+                raise ProcessingError('Native extraction window requires its exact input identity')
+            operation_identity({**binding, 'grounding': 'validation'}, 'entities')
+            if type(formula) is not bool:
+                raise ProcessingError('Native extraction formula identity is invalid')
+            ox = owner._oxigraph
+            identity = json.dumps([binding, formula], sort_keys=True, separators=(',', ':'))
+            node = ox.NamedNode('urn:semantica:extraction-window:' + hashlib.sha256(identity.encode()).hexdigest())
+            graph = ox.NamedNode('urn:semantica:project:' + hashlib.sha256(binding['project'].encode()).hexdigest() + ':extraction-index')
+            predicate = ox.NamedNode(F + 'completedBatches')
+            values = list(islice(owner.store.quads_for_pattern(node, predicate, None, graph), 2))
+            if len(values) > 1:
+                raise ProcessingError('Native extraction window completion is duplicated')
+            if values:
+                value = values[0].object
+                if not isinstance(value, ox.Literal) or len(value.value.encode()) > MAX_PAGE_BYTES:
+                    raise ProcessingError('Native extraction window completion exceeds budget')
+                try:
+                    accepted = json.loads(value.value)
+                except ValueError as exc:
+                    raise ProcessingError('Native extraction window completion is corrupt') from exc
+                if groundings is not None and accepted != groundings:
+                    raise ProcessingError('Native extraction window completion differs')
+            elif groundings is None:
+                return None
+            else:
+                accepted = groundings
+            if (not isinstance(accepted, list) or not 1 <= len(accepted) <= MAX_RECORDS
+                    or any(not isinstance(item, str) or re.fullmatch('sha256:[0-9a-f]{64}', item) is None for item in accepted)):
+                raise ProcessingError('Native extraction window batch references are invalid')
+            bindings = []
+            for grounding in accepted:
+                current = {**binding, 'grounding': grounding}
+                receipt = cls(owner, current, 'entities').receipt()
+                if receipt is None or (receipt['count'] and cls(owner, current, 'relations').receipt() is None):
+                    raise ProcessingError('Native extraction completed window has an incomplete batch')
+                bindings.append(current)
+            if groundings is not None and not values:
+                encoded = json.dumps(accepted, separators=(',', ':'))
+                if not 1 <= len(accepted) <= MAX_RECORDS or len(encoded.encode()) > MAX_PAGE_BYTES:
+                    raise ProcessingError('Native extraction completed window exceeds budget')
+                owner.store.update('INSERT DATA { GRAPH ' + str(graph) + ' { ' + str(node) + ' '
+                    + str(predicate) + ' ' + str(ox.Literal(encoded)) + ' } }')
+                owner.flush()
+            return bindings
+
     def __init__(self, owner, binding, stage):
         self.owner = owner
         self.ox = owner._oxigraph
@@ -411,16 +461,55 @@ class ExtractionRecords:
             return [one(ref,'referenceId') for ref in refs]
         return facts,one,addresses
 
+    def read_identity_summary(self, identity, *, max_bytes=MAX_PAGE_BYTES):
+        """Read only identity addresses and provenance, never original text.
+
+        Canonical membership consumers need names and evidence references, not
+        full entity restoration. The accepted projection is checked locally;
+        unrelated owned facts and model receipts are not traversed.
+        """
+        self._read_options(None,max_bytes)
+        node=self._identity_member(identity)
+        facts,one,addresses=self._read_identity_projection_fields(node)
+        metadata={'source_ids':[self.binding['source']]}
+        for key,predicate in {'identity_scope':'identityScope',
+                'identity_context_evidence_id':'contextEvidenceId','extraction_method':'extractionMethod',
+                'detected_label':'detectedLabel','description_mention_id':'descriptionMentionId'}.items():
+            if any(q.subject==node and q.predicate.value==F+predicate for q in facts):
+                metadata[key]=one(node,predicate)
+        result=dict(id=one(node,'buildMentionId'),canonical_name=self.one(node,'name'),
+            type=self.one(node,'entityType'),aliases=[],evidence_ids=addresses('evidenceId'),metadata=metadata)
+        if self.one(node,'identityProfile',optional=True):
+            metadata['description_evidence_ids']=addresses('descriptionEvidenceId')
+        if len(json.dumps(result,ensure_ascii=False).encode())>max_bytes:
+            raise ProcessingError('Identity summary exceeds byte budget')
+        return result
+
     def read_identity_projection(self, identity, *, read_text, max_bytes=MAX_PAGE_BYTES):
         """Hydrate one identity from accepted values and bounded canonical ranges."""
+        return self._read_identity_values(identity,read_text=read_text,max_bytes=max_bytes)
+
+    def read_identity_selection(self, identity, *, description_grounded, max_bytes=MAX_PAGE_BYTES):
+        """Read existing field values for a decision without reopening original prose.
+
+        Grounding is an observation produced during the sole source-feature read,
+        not a replacement description or a second cached entity. Profile evidence
+        stays at its native address and is restored only by its actual consumer.
+        """
+        if type(description_grounded) is not bool:
+            raise ProcessingError('Identity selection requires an exact grounding observation')
+        return self._read_identity_values(identity,read_text=None,max_bytes=max_bytes,
+            description_grounded=description_grounded)
+
+    def _read_identity_values(self, identity, *, read_text, max_bytes, description_grounded=None):
         self._read_options(None,max_bytes)
         node=self._identity_member(identity)
         facts,one,addresses=self._read_identity_projection_fields(node)
         start,end=one(node,'contextStart'),one(node,'contextEnd')
         if not 0 <= start < end or end-start>min(65536,max_bytes):
             raise ProcessingError('Identity projection context exceeds byte budget')
-        context=read_text(start,end)
-        if not isinstance(context,str) or len(context)!=end-start:
+        context=read_text(start,end) if read_text is not None else ''
+        if read_text is not None and (not isinstance(context,str) or len(context)!=end-start):
             raise ProcessingError('Identity projection source range differs')
         attrs={}
         for attr in self.values(node,'attribute'):
@@ -439,7 +528,9 @@ class ExtractionRecords:
             if any(q.subject==node and q.predicate.value==F+predicate for q in facts):
                 metadata[key]=one(node,predicate)
         description=str(attrs.get('description','')).strip()
-        if not description or description.casefold() not in context.casefold():
+        grounded=(description.casefold() in context.casefold() if read_text is not None
+            else description_grounded)
+        if not description or not grounded:
             description=''
         profile_id=self.one(node,'identityProfile',optional=True)
         if profile_id:
@@ -448,12 +539,14 @@ class ExtractionRecords:
             pe=self.one(profile,'end')+self.binding['window_start']
             if not 0 <= ps < pe or pe-ps>min(65536,max_bytes):
                 raise ProcessingError('Identity profile exceeds byte budget')
-            quote=read_text(ps,pe)
-            if not isinstance(quote,str) or len(quote)!=pe-ps:
-                raise ProcessingError('Identity profile source range differs')
             value=self.read_metadata(profile,{'description':'description','evidence_occurrence':'evidenceOccurrence',
                 'referent_kind':'referentKind','owner':'identityOwner','instance':'identityInstance'})
-            value.update(evidence_start=ps,evidence_end=pe,evidence=quote)
+            value.update(evidence_start=ps,evidence_end=pe)
+            if read_text is not None:
+                quote=read_text(ps,pe)
+                if not isinstance(quote,str) or len(quote)!=pe-ps:
+                    raise ProcessingError('Identity profile source range differs')
+                value['evidence']=quote
             metadata['identity_profile']=value
             metadata['description_evidence_ids']=addresses('descriptionEvidenceId')
             description=(value.get('description') or '').strip()
@@ -546,6 +639,19 @@ class ExtractionRecords:
 
     def read_fact_projection(self, identity, kind):
         """Hydrate exactly one source observation; canonical remapping is separate."""
+        if kind not in {'assertion', 'relation'}:
+            raise ProcessingError('Unknown native fact projection kind')
+        return self._read_fact_projections(identity, (kind,))[kind]
+
+    def read_fact_projections(self, identity):
+        """Read one immutable projection for both reducer views."""
+        return self._read_fact_projections(identity, ('assertion', 'relation'))
+
+    def read_fact_index_projections(self, identity):
+        """Read identity fields for grouping; reducer DTOs are hydrated on consumption."""
+        return self._read_fact_projections(identity, ('assertion', 'relation'), index_only=True)
+
+    def _read_fact_projections(self, identity, kinds, *, index_only=False):
         from ..semantic_artifact_schema import KnowledgeAssertion, KnowledgeRelation
         node=self._fact_member(identity)
         graph=self.fact_projection_graph
@@ -559,12 +665,6 @@ class ExtractionRecords:
             facts.append(quad)
         for quad in self.owner.store.quads_for_pattern(node,None,None,graph):
             append(quad)
-        children=[q.object for q in facts if q.predicate.value==F+'buildEvidence']
-        if not 0<len(children)<=128:
-            raise ProcessingError('Native fact projection missing evidence')
-        for child in children:
-            for quad in self.owner.store.quads_for_pattern(child,None,None,graph):
-                append(quad)
         def one(subject,key,optional=False):
             values=[q.object.value for q in facts if q.subject==subject and q.predicate.value==F+key]
             if optional and not values:
@@ -572,6 +672,32 @@ class ExtractionRecords:
             if len(values)!=1:
                 raise ProcessingError('Native fact projection field missing or duplicated')
             return values[0]
+        if index_only:
+            children=[q.object for q in facts if q.predicate.value==F+'buildEvidence']
+            if not 0<len(children)<=128:
+                raise ProcessingError('Native fact projection missing evidence')
+            evidence=[]
+            for child in children:
+                values=list(self.owner.store.quads_for_pattern(child,self.ox.NamedNode(F+'referenceId'),None,graph))
+                if len(values)!=1 or not isinstance(values[0].object,self.ox.Literal):
+                    raise ProcessingError('Native fact projection evidence address is invalid')
+                evidence.append(values[0].object.value)
+            qualifiers={key:value for key in ('polarity','condition','time','unit','value')
+                if (value:=one(node,'buildQualifier'+key[0].upper()+key[1:],True)) is not None}
+            return {
+                'relation':dict(id=one(node,'buildRelationId'),
+                    source_entity_id=one(node,'buildSourceId'),target_entity_id=one(node,'buildTargetId'),
+                    type=one(node,'buildPredicate'),qualifiers=qualifiers,evidence_ids=evidence),
+                'assertion':dict(id=one(node,'buildAssertionId'),subject_id=one(node,'buildSourceId'),
+                    object_entity_id=one(node,'buildTargetId'),predicate=one(node,'buildPredicate'),
+                    qualifiers=qualifiers,evidence_ids=evidence),
+            }
+        children=[q.object for q in facts if q.predicate.value==F+'buildEvidence']
+        if not 0<len(children)<=128:
+            raise ProcessingError('Native fact projection missing evidence')
+        for child in children:
+            for quad in self.owner.store.quads_for_pattern(child,None,None,graph):
+                append(quad)
         digest=one(node,'factProjectionDigest')
         if _hash([q for q in facts if q.predicate.value!=F+'factProjectionDigest'])!=digest:
             raise ProcessingError('Native fact projection corrupt')
@@ -581,19 +707,20 @@ class ExtractionRecords:
         evidence=[one(child,'referenceId') for child in children]
         qualifiers={key:value for key in ('polarity','condition','time','unit','value')
             if (value:=one(node,'buildQualifier'+key[0].upper()+key[1:],True)) is not None}
-        common=dict(qualifiers=qualifiers,evidence_ids=evidence,support_ids=evidence,status='candidate')
-        if kind=='relation':
-            result=KnowledgeRelation(id=one(node,'buildRelationId'),
+        result={}
+        if 'relation' in kinds:
+            fields=dict(id=one(node,'buildRelationId'),
                 source_entity_id=one(node,'buildSourceId'),target_entity_id=one(node,'buildTargetId'),
-                type=one(node,'buildPredicate'),**common)
-        elif kind=='assertion':
+                type=one(node,'buildPredicate'),qualifiers=qualifiers,evidence_ids=evidence)
+            result['relation'] = KnowledgeRelation(**fields, support_ids=evidence, status='candidate').model_dump()
+        if 'assertion' in kinds:
+            fields=dict(id=one(node,'buildAssertionId'),subject_id=one(node,'buildSourceId'),
+                object_entity_id=one(node,'buildTargetId'),predicate=one(node,'buildPredicate'),
+                qualifiers=qualifiers,evidence_ids=evidence)
             target=self.ox.NamedNode(self.one(node,'targetEntity'))
-            result=KnowledgeAssertion(id=one(node,'buildAssertionId'),subject_id=one(node,'buildSourceId'),
-                object_entity_id=one(node,'buildTargetId'),object=self.one(target,'name').strip(),
-                predicate=one(node,'buildPredicate'),**common)
-        else:
-            raise ProcessingError('Unknown native fact projection kind')
-        return result.model_dump()
+            fields['object']=self.one(target,'name').strip()
+            result['assertion']=KnowledgeAssertion(**fields, support_ids=evidence, status='candidate').model_dump()
+        return result
 
     def confidence(self, node, value):
         if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:
@@ -673,26 +800,22 @@ class ExtractionRecords:
     def receipt(self):
         if not self.indexed:
             return None
-        # Proofs contain only a bounded receipt tuple, never facts or text. Raw
-        # native writes invalidate them, and reopening starts with no proofs.
+        # The atomic, persisted operation is authoritative; payload audit is explicit.
         with self.owner._publication_lock:
             links = list(islice(self.owner.store.quads_for_pattern(self.logical,
                 self.ox.NamedNode(F + "physicalOperation"), None, self.index_graph), 2))
             if len(links) != 1 or links[0].object != self.operation:
                 raise ExtractionIdentityStaleError("Native extraction identity binding is stale or corrupt")
-            proofs = self.owner._extraction_proofs
-            key = (self.graph.value, self.operation.value)
-            if key in proofs and proofs[key][0] == self.logical.value:
-                proofs.move_to_end(key)
-                return dict(proofs[key][1])
-            value = self._verify_receipt()
-            if value is not None:
-                proofs[key] = (self.logical.value, dict(value))
-                while len(proofs) > 1024:
-                    proofs.popitem(last=False)
-            return value
+            return self._completion_receipt()
 
-    def _verify_receipt(self):
+    def audit(self):
+        """Explicit integrity maintenance, including every owned fact and digest."""
+        with self.owner._publication_lock:
+            if self.receipt() is None:
+                return None
+            return self._verify_receipt()
+
+    def _completion_receipt(self):
         present = self.values(self.operation, RDF_TYPE)
         if not present:
             if self.indexed:
@@ -705,8 +828,25 @@ class ExtractionRecords:
         for key, expected in self.binding.items():
             if self.one(self.operation, "binding" + key[0].upper() + key[1:]) != expected:
                 raise ExtractionIdentityStaleError("Native extraction indexed binding differs")
-        if self.index_graph is not None and self.one(self.operation, "extractionStage", optional=True) not in {None, self.stage}:
+        if self.stage in {"entities", "relations"} and self.one(self.operation, "extractionStage") != self.stage:
             raise ProcessingError("Native extraction indexed stage differs")
+        for field in ("operationDigest", "factsDigest"):
+            digest = self.one(self.operation, field)
+            if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+                raise ProcessingError("Native extraction completion digest is corrupt")
+        for field, maximum in (("resultCount", MAX_RECORDS), ("ownedCount", MAX_OWNED), ("quadCount", MAX_QUADS)):
+            value = self.one(self.operation, field)
+            if type(value) is not int or not 0 <= value <= maximum:
+                raise ProcessingError("Native extraction completion count is corrupt")
+        accepted = self.one(self.operation, "acceptedDigest")
+        if not isinstance(accepted, str) or not accepted:
+            raise ProcessingError("Native extraction accepted digest is corrupt")
+        return {"operation_id": self.operation.value, "accepted_digest": accepted, "count": self.one(self.operation, "resultCount")}
+
+    def _verify_receipt(self):
+        receipt = self._completion_receipt()
+        if receipt is None:
+            return None
         operation_facts = []
         operation_digest_predicate = self.ox.NamedNode(F + "operationDigest")
         for quad in self.owner.store.quads_for_pattern(self.operation, None, None, self.graph):
@@ -729,14 +869,14 @@ class ExtractionRecords:
                     raise ProcessingError("Native extraction fact read exceeds budget")
         if _hash(facts) != self.one(self.operation, "factsDigest") or len(facts) != self.one(self.operation, "quadCount"):
             raise ProcessingError("Native extraction facts missing or corrupt")
-        return {"operation_id": self.operation.value, "accepted_digest": self.one(self.operation, "acceptedDigest"), "count": self.one(self.operation, "resultCount")}
+        return receipt
 
     @classmethod
     def rebind(cls, owner, previous, current, stage):
         """Offline metadata migration; owned facts and paid receipt nodes stay put."""
         old_key, new_key = operation_identity(previous, stage), operation_identity(current, stage)
-        if any(previous[k] != current[k] for k in BINDING - {"recipe"}):
-            raise ProcessingError("Extraction migration may change only recipe identity")
+        if any(previous[k] != current[k] for k in BINDING - {"recipe", "parser"}):
+            raise ProcessingError("Extraction migration may change only verified recipe and parser identity")
         with owner._publication_lock:
             target = cls(owner, current, stage)
             original = cls(owner, previous, stage)
@@ -745,7 +885,7 @@ class ExtractionRecords:
                     raise ProcessingError("Extraction migration target already owns another paid result")
                 if target.one(target.operation, "bindingRecipe") != current["recipe"]:
                     raise ProcessingError("Extraction migration target binding differs")
-                return target.receipt()
+                return target.audit()
             # A pre-index operation is admitted only by this explicit offline API.
             receipt = original._verify_receipt()
             if receipt is None:
@@ -754,21 +894,37 @@ class ExtractionRecords:
                 if original.one(original.operation, "binding" + key[0].upper() + key[1:]) != value:
                     raise ProcessingError("Extraction migration source binding differs")
             ox = owner._oxigraph
-            replace = {ox.NamedNode(F + k) for k in ("bindingRecipe", "extractionStage", "operationDigest")}
+            replace = {ox.NamedNode(F + k) for k in ("bindingRecipe", "bindingParser", "extractionStage", "operationDigest")}
             prior = list(owner.store.quads_for_pattern(original.operation, None, None, original.graph))
             kept = [q for q in prior if q.predicate not in replace]
-            changed = [ox.Quad(original.operation, ox.NamedNode(F + "bindingRecipe"), ox.Literal(current["recipe"]), original.graph),
+            changed = [ox.Quad(original.operation, ox.NamedNode(F + "bindingParser"), ox.Literal(current["parser"]), original.graph),
+                       ox.Quad(original.operation, ox.NamedNode(F + "bindingRecipe"), ox.Literal(current["recipe"]), original.graph),
                        ox.Quad(original.operation, ox.NamedNode(F + "extractionStage"), ox.Literal(stage), original.graph)]
             if original.one(original.operation, "paidRecipe", optional=True) is None:
                 changed.append(ox.Quad(original.operation, ox.NamedNode(F + "paidRecipe"), ox.Literal(previous["recipe"]), original.graph))
             changed.append(ox.Quad(original.operation, ox.NamedNode(F + "operationDigest"), ox.Literal(_hash(kept + changed)), original.graph))
             deletes = " . ".join(_triple(q) for q in prior if q.predicate in replace)
             inserts = " . ".join(_triple(q) for q in changed)
+            window_deletes, window_inserts = [], []
+            for formula in (False, True):
+                def window_node(binding):
+                    identity = json.dumps([{k: v for k, v in binding.items() if k != 'grounding'}, formula], sort_keys=True, separators=(',', ':'))
+                    return ox.NamedNode('urn:semantica:extraction-window:' + hashlib.sha256(identity.encode()).hexdigest())
+                before, after = window_node(previous), window_node(current)
+                predicate_node = ox.NamedNode(F + 'completedBatches')
+                rows = list(islice(owner.store.quads_for_pattern(before, predicate_node, None, original.index_graph), 2))
+                targets = list(islice(owner.store.quads_for_pattern(after, predicate_node, None, original.index_graph), 2))
+                if len(rows) > 1 or len(targets) > 1 or (rows and targets and rows[0].object != targets[0].object):
+                    raise ProcessingError('Extraction migration window completion conflicts')
+                if rows and before != after:
+                    if not isinstance(rows[0].object, ox.Literal) or len(rows[0].object.value.encode()) > MAX_PAGE_BYTES:
+                        raise ProcessingError('Extraction migration window completion is invalid')
+                    window_deletes.append(_triple(rows[0]))
+                    window_inserts.append(_triple(ox.Quad(after, predicate_node, rows[0].object, original.index_graph)))
             predicate = "<" + F + "physicalOperation>"
-            owner.store.update("DELETE { GRAPH " + str(original.graph) + " { " + deletes + " } GRAPH " + str(original.index_graph) + " { <" + old_key + "> " + predicate + " ?old } } "
-                + "INSERT { GRAPH " + str(original.graph) + " { " + inserts + " } GRAPH " + str(original.index_graph) + " { <" + new_key + "> " + predicate + " " + str(original.operation) + " } } "
+            owner.store.update("DELETE { GRAPH " + str(original.graph) + " { " + deletes + " } GRAPH " + str(original.index_graph) + " { <" + old_key + "> " + predicate + " ?old . " + " . ".join(window_deletes) + " } } "
+                + "INSERT { GRAPH " + str(original.graph) + " { " + inserts + " } GRAPH " + str(original.index_graph) + " { <" + new_key + "> " + predicate + " " + str(original.operation) + " . " + " . ".join(window_inserts) + " } } "
                 + "WHERE { OPTIONAL { GRAPH " + str(original.index_graph) + " { <" + old_key + "> " + predicate + " ?old } } }")
-            owner._extraction_proofs.pop((original.graph.value, original.operation.value), None)
             owner.flush()
             return cls(owner, current, stage).receipt()
 
@@ -806,7 +962,7 @@ class ExtractionRecords:
             raise ProcessingError("Native extraction exceeds owned record budget")
         self.add(self.operation, RDF_TYPE, self.ox.NamedNode(F + "ExtractionOperation"))
         self.add(self.operation, "operationIdentity", self.operation.value)
-        if self.index_graph is not None:
+        if self.stage in {"entities", "relations"}:
             self.add(self.operation, "extractionStage", self.stage)
         self.add(self.operation, "acceptedDigest", accepted_digest)
         self.add(self.operation, "resultCount", result_count)
@@ -914,6 +1070,13 @@ class ExtractionRecords:
                     if size > max_bytes:
                         raise ProcessingError("Native extraction read exceeds byte budget")
                     record['fields'].setdefault(quad.predicate.value, []).append(value)
+            kind = self.one(node, RDF_TYPE)
+            required = {"Entity": {"position", "name", "entityType", "mentionId", "mention"},
+                        "Relation": {"position", "predicateName", "sourceEntity", "targetEntity", "relationType", "confidence", "evidence"}}.get(kind.removeprefix(F), set())
+            for field in required:
+                predicate = F + field
+                if (fields is None or predicate in fields) and len(record['fields'].get(predicate, [])) != 1:
+                    raise ProcessingError("Native extraction consumed field missing or corrupt: " + field)
             result.append(record)
         if len(json.dumps(result, ensure_ascii=False).encode()) > max_bytes:
             raise ProcessingError("Native extraction read exceeds byte budget")
@@ -922,9 +1085,8 @@ class ExtractionRecords:
     def read_nodes(self, record_ids, *, fields=None, max_bytes=MAX_PAGE_BYTES):
         """Read projected fields of owned nodes, including linked evidence/attributes.
 
-        No source text is needed or hydrated. The existing accepted-operation
-        integrity check is bounded by MAX_OWNED/MAX_QUADS/MAX_BYTES, independently
-        of the tighter returned-page budget. It is not a project traversal.
+        No source text or unread payload is hydrated. Completion is a point read;
+        validation covers only the owned records and fields being consumed.
         """
         self._read_options(fields, max_bytes)
         if not isinstance(record_ids, list) or not 1 <= len(record_ids) <= MAX_PAGE_ROWS:
@@ -951,13 +1113,17 @@ class ExtractionRecords:
             if not isinstance(after, str) or not after.startswith(prefix) or not re.fullmatch(r"0|[1-9][0-9]{0,9}", after[len(prefix):]):
                 raise ProcessingError("Native extraction cursor belongs to another operation or is invalid")
             position = int(after[len(prefix):])
-        if self.receipt() is None:
+        receipt = self.receipt()
+        if receipt is None:
             raise ProcessingError("Native extraction receipt missing")
         kind = "Entity" if self.stage == "entities" else "Relation"
         query = (f"SELECT ?record ?position WHERE {{ GRAPH {self.graph} {{ "
                  f"{self.operation} <{F}ownedRecord> ?record . ?record <{RDF_TYPE}> <{F}{kind}> ; <{F}position> ?position . "
                  f"FILTER(?position > {position}) }} }} ORDER BY ?position LIMIT {limit + 1}")
         rows = list(self.owner.store.query(query))
+        expected = min(limit + 1, max(0, receipt['count'] - position - 1))
+        if len(rows) != expected or any(int(row['position'].value) != position + i + 1 for i, row in enumerate(rows)):
+            raise ProcessingError("Native extraction page records missing or corrupt")
         selected = rows[:limit]
         result = dict(records=self._read_nodes([row['record'].value for row in selected], fields, max_bytes),
                       next_cursor=prefix + rows[limit - 1]['position'].value if len(rows) > limit else None)
@@ -973,9 +1139,18 @@ class ExtractionRecords:
     def read_receipts(self):
         if self.receipt() is None:
             raise ProcessingError("Native extraction receipt missing")
+        links = self.values(self.operation, "modelReceipt")
+        owned = list(islice(self.owner.store.query(
+            "SELECT ?node WHERE { GRAPH " + str(self.graph) + " { " + str(self.operation)
+            + " <" + F + "ownedRecord> ?node . ?node <" + RDF_TYPE + "> <" + F + "ModelReceipt> } } LIMIT " + str(MAX_RECORDS + 1)), MAX_RECORDS + 1))
+        if len(owned) > MAX_RECORDS or set(links) != {row["node"] for row in owned}:
+            raise ProcessingError("Native extraction model receipt links missing or corrupt")
         result = []
-        for node in sorted(self.values(self.operation, "modelReceipt"), key=lambda n: self.one(n, "position")):
+        for node in sorted(links, key=lambda n: self.one(n, "position")):
             data = self.read_metadata(node, {"id": "receiptId", "operation": "receiptOperation", "provider": "provider", "model": "model", "input_digest": "inputDigest", "output_digest": "outputDigest", "created_at": "createdAt"})
+            if self.one(node, RDF_TYPE) != F+'ModelReceipt' or any(not isinstance(data.get(key), str) or not data[key]
+                    for key in ('id', 'operation', 'provider', 'model', 'input_digest', 'output_digest')):
+                raise ProcessingError("Native extraction model receipt missing or corrupt")
             data["parameters"] = self.read_metadata(node, {"temperature": "temperature", "top_p": "topP", "max_tokens": "maxTokens", "max_output_tokens": "maxOutputTokens"})
             data["metadata"] = self.read_metadata(node, {"extraction_stage": "extractionStage", "rejected_count": "rejectedCount"})
             usage = self.read_metadata(node, {"prompt_tokens": "promptTokens", "completion_tokens": "completionTokens", "total_tokens": "totalTokens", "input_tokens": "inputTokens", "output_tokens": "outputTokens"})

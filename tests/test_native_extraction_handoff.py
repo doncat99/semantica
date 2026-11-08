@@ -24,7 +24,7 @@ def child(root, fault='none', fault_stage='entities', source='source-1', recipe=
     root = Path(root)
     binding = dict(project='project-1', source=source, material='material-1',
         representation='representation-1', recipe=recipe, model='model-1',
-        specification='specification-1', parser='parser-1', grounding='grounding-1',
+        specification='specification-1', parser='parser-1', grounding='sha256:' + '3' * 64,
         window_start=0, window_end=len(TEXT))
     cache = ExtractionCache(backend=SqliteCacheBackend(str(root/'accepted.sqlite')))
     store = OxigraphStore(root/'facts')
@@ -198,7 +198,7 @@ def test_production_damaged_adopted_result_never_rebuys_paid_work(tmp_path, muta
     resumed = run_child(tmp_path)
     assert resumed.returncode != 0
     assert len(calls(tmp_path)) == 2
-    assert ('corrupt' if mutation == 'fact' else 'missing') in resumed.stderr.lower()
+    assert 'missing' in resumed.stderr.lower()
 
 
 def build_child(root, stop_before_publication=True):
@@ -230,7 +230,7 @@ def build_child(root, stop_before_publication=True):
         payload = json.loads(req.data)
         if '/products/semantic-organization/' in req.full_url:
             operation = stable_digest([payload[key] for key in
-                ('projectId', 'inputRevision', 'recipeDigest', 'modelId', 'targetId')])
+                ('projectId', 'inputRevision', 'recipeDigest', 'modelId', 'targetId', 'inputDigest')])
             if req.full_url.endswith('/adopt'):
                 # This file stands for the final host business product, never a fork cache.
                 with product.open('w') as stream:

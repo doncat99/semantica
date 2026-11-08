@@ -26,7 +26,7 @@ def test_binary_office_requires_explicit_optional_capability(tmp_path, monkeypat
         parse_source(tmp_path / "source.doc", name="source.doc", mime_type="application/msword", force_ocr=False)
 
 
-def test_office_recipe_binds_small_immutable_runtime_receipt(tmp_path, monkeypatch):
+def test_office_recipe_ignores_runtime_identity(tmp_path, monkeypatch):
     import json
     from semantica.source import source_processing_revision
     root = tmp_path/'office-runtime'
@@ -38,10 +38,9 @@ def test_office_recipe_binds_small_immutable_runtime_receipt(tmp_path, monkeypat
     receipt.write_text(json.dumps({'version':'26.2.6','executable':'program/soffice','digest':'one'}))
     first = revision()
     receipt.write_text(json.dumps({'version':'26.2.6','executable':'program/soffice','digest':'two'}))
-    assert revision() != first
+    assert revision() == first
     receipt.write_bytes(b'x'*65537)
-    with pytest.raises(ValueError,match='exceeds'):
-        revision()
+    assert revision() == first
 
 
 @pytest.mark.parametrize("body,expected,locator", [
@@ -75,7 +74,7 @@ def test_adapter_parser_publication_build_reader_and_zero_copy_rebind(tmp_path, 
     from zipfile import ZipFile
     from semantica.semantic_artifact_schema import ParseSourceRequest, BindParsedSourceRequest, ParsedSourceRef, SourceBuildInput
     from semantica.semantic_source_artifact import parse_source_artifact, bind_parsed_source_artifact, _load_parsed_source
-    from semantica.source import source_content_revision, _processing_implementation
+    from semantica.source import source_content_revision
     from semantica.semantic_query_schema import DocumentReaderRequest
     from semantica.semantic_document_reader import read_document_reader
     source = tmp_path / ('source' + suffix)
@@ -133,7 +132,7 @@ def test_adapter_parser_publication_build_reader_and_zero_copy_rebind(tmp_path, 
         'parsedReaderIndexPath':parsed['readerIndexPath'],'parsedReaderIndexDigest':parsed['readerIndexDigest']}))
     assert rebound['artifactPath'] == parsed['artifactPath']
     assert not rebound_dir.exists() or not list(rebound_dir.rglob('*'))
-    assert ('parse/epub_parser.py' if suffix == '.epub' else 'project_office.py') in _processing_implementation(suffix,'local')['owners']
+    assert rebound['processingRevision'] == parsed['processingRevision']
 
 
 @pytest.mark.parametrize('suffix,target', [('.xls', 'fods'), ('.ppt', 'fodp'), ('.wpd', 'fodt')])
