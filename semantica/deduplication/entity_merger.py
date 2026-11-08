@@ -397,6 +397,21 @@ class EntityMerger:
             )
         if not self.duplicate_detector.is_group_compatible(entities):
             raise ValidationError("Entity group violates native identity/type constraints")
+        return self._materialize_entity_group(entities, strategy=strategy, **options)
+
+    def _merge_adjudicated_group(self, group: DuplicateGroup, **options) -> MergeOperation:
+        """Consume the resolver's completed decision, without deciding identity again.
+
+        This internal handoff takes the actual native group, not a public option
+        that lets arbitrary callers disable constraint checks. Public group merges
+        continue through merge_entity_group's validation.
+        """
+        return self._materialize_entity_group(group.entities, **options)
+
+    def _materialize_entity_group(self, entities, strategy=None, **options):
+        """Apply field selection/provenance after identity has been adjudicated."""
+        if len(entities) < 2:
+            raise ValidationError(f"Need at least 2 entities to merge, got {len(entities)}")
 
         # Get strategy value safely for logging
         strategy_val = "default"
@@ -422,7 +437,10 @@ class EntityMerger:
                 description = str(entity.get("description", "")).strip()
                 source_metadata = entity.get('metadata', {})
                 supported = source_metadata.get('description_evidence_ids')
-                if description and (supported or description.casefold() in str(entity.get("context", "")).casefold()):
+                features = entity.get('_identity_features')
+                grounded = (features['description_grounded'] if features is not None else
+                    bool(supported or description.casefold() in str(entity.get("context", "")).casefold()))
+                if description and grounded:
                     merge_result.merged_entity["description"] = description
                     merge_result.field_sources["description"] = [get_entity_id(entity)]
                     merge_result.merged_entity["context"] = entity["context"]

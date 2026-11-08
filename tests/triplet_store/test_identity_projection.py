@@ -76,11 +76,24 @@ def test_identity_projection_preserves_native_profile_after_restart(tmp_path):
     store=OxigraphStore(tmp_path / 'facts')
     records=ExtractionRecords(store,binding,'entities')
     try:
+        summary=records.read_identity_summary(ref)
+        assert summary['metadata']['description_evidence_ids']==['profile']
+        assert 'identity_profile' not in summary['metadata']
         result=records.read_identity_projection(ref,read_text=lambda a,b:text[a-50:b-50])
         assert result['description']=='works at ACME'
         assert result['metadata']=={**metadata,'identity_profile':{**profile,
             'evidence_start':50,'evidence_end':50+len(text)}}
         assert result['evidence_ids']==['mention-ev','context','profile']
+        selected=records.read_identity_selection(ref,description_grounded=True)
+        assert selected=={**result,'context':'','metadata':{**result['metadata'],
+            'identity_profile':{key:value for key,value in result['metadata']['identity_profile'].items()
+                if key!='evidence'}}}
+        assert selected['description']=='works at ACME'
+        # Native profile descriptions were validated on acceptance; scalar field
+        # selection does not need to ground the same quote a second time.
+        assert records.read_identity_selection(ref,description_grounded=False)==selected
+        with pytest.raises(ProcessingError,match='grounding observation'):
+            records.read_identity_selection(ref,description_grounded=1)
         with pytest.raises(ProcessingError,match='source range'):
             records.read_identity_projection(ref,read_text=lambda a,b:'')
         graph=records.identity_projection_graph
@@ -180,8 +193,8 @@ def test_withdrawal_fences_projection_consumers_without_destroying_accepted_work
         store.close()
 
 
-def test_accepted_receipt_proof_reuses_validation_until_native_mutation(tmp_path, monkeypatch):
-    """Native point hydration never re-enumerates an already validated operation."""
+def test_completion_reads_stay_bounded_across_native_mutation(tmp_path, monkeypatch):
+    """Completion reads never enumerate payloads; explicit audits detect unread damage."""
     store, records, ref, text = fixture(tmp_path)
     records.write_identity_projection(ref, mention_id='mention', representation_id='r',
         context_start=0, context_end=len(text), evidence_ids=['evidence'], metadata={'source_ids':['s'], 'identity_scope':'r', 'identity_context_evidence_id':'evidence', 'extraction_method':'model'})
@@ -204,11 +217,63 @@ def test_accepted_receipt_proof_reuses_validation_until_native_mutation(tmp_path
         # A derived writer cannot target the accepted fact graph.
         with pytest.raises(ProcessingError, match='cannot target'):
             store._update_derived_graph(records.graph, insert='')
-        # The public raw native surface must invalidate even a previously proven
-        # receipt; callers cannot hide corruption behind a positive proof cache.
+        # Completion remains a header lookup; explicit audit detects fact loss.
         quad = next(native_read(records.ox.NamedNode(ref), records.ox.NamedNode(F+'name'), None, records.graph))
         store.store.remove(quad)
+        assert records.receipt() is not None
         with pytest.raises(ProcessingError, match='corrupt'):
-            records.receipt()
+            records.audit()
+    finally:
+        store.close()
+
+
+def test_identity_summary_reads_no_original_text_attributes_or_model_receipts(tmp_path,monkeypatch):
+    store,records,ref,text=fixture(tmp_path)
+    metadata=dict(identity_scope='r',identity_context_evidence_id='context',
+        extraction_method='model',source_ids=['s'])
+    try:
+        records.write_identity_projection(ref,mention_id='mention',representation_id='r',
+            context_start=0,context_end=len(text),evidence_ids=['evidence'],metadata=metadata)
+        def forbidden(*args,**kwargs):
+            raise AssertionError('A member summary must not hydrate entity fields or text')
+        monkeypatch.setattr(records,'read_identity_projection',forbidden)
+        original_values=records.values
+        def values(node,key):
+            if key in ('attribute','modelReceipt','receipt'): forbidden()
+            return original_values(node,key)
+        monkeypatch.setattr(records,'values',values)
+        assert records.read_identity_summary(ref)==dict(id='mention',canonical_name='Ada',type='Person',
+            aliases=[],evidence_ids=['evidence'],metadata=metadata)
+        with pytest.raises(ProcessingError,match='byte budget'):
+            records.read_identity_summary(ref,max_bytes=1)
+    finally:
+        store.close()
+
+
+def test_identity_selection_uses_grounding_observation_without_reading_prose(tmp_path):
+    from semantica.semantic_extract.schema import ExtractionSpecification
+    text='Ada works at ACME.'
+    binding=dict(project='p',source='s',material='m',representation='r',recipe='recipe',
+        model='model',specification='spec',parser='parser',grounding='grounding',
+        window_start=0,window_end=len(text))
+    store=OxigraphStore(tmp_path/'facts')
+    records=ExtractionRecords(store,binding,'entities')
+    entity=Entity('Ada','Person',0,3,.9,{'mention_id':'m'},attributes={'description':'works at ACME'})
+    specification=ExtractionSpecification.model_validate(dict(id='spec',version='1',entity_types=[dict(
+        name='Person',description='person',attributes={'description':dict(type='string',description='description')})]))
+    try:
+        records.adopt([entity],text=text,accepted_digest='accepted',extraction_spec=specification,
+            native_ranges=[dict(nativeRef='#/document/text',start=0,end=len(text),windowStart=0,windowEnd=len(text))])
+        ref=records.entity_node(entity).value
+        records.write_identity_projection(ref,mention_id='m',representation_id='r',
+            context_start=0,context_end=len(text),evidence_ids=['mention'],metadata=dict(
+                source_ids=['s'],identity_scope='r',identity_context_evidence_id='mention',extraction_method='model'))
+        result=records.read_identity_selection(ref,description_grounded=True)
+        assert result['description']=='works at ACME'
+        assert result['context']==''
+        assert result['attributes']==entity.attributes
+        assert records.read_identity_selection(ref,description_grounded=False)['description']==''
+        with pytest.raises(ProcessingError,match='byte budget'):
+            records.read_identity_selection(ref,description_grounded=True,max_bytes=8)
     finally:
         store.close()

@@ -439,16 +439,15 @@ class DuplicateDetector:
             )
 
             # Detect duplicate candidates
-            candidates = (self._contextual_candidates(entities,
-                context_prepared=options.get("context_prepared", False)) if self.contextual_identity
-                          else self.detect_duplicates(entities, threshold=threshold, **options))
-
             self.progress_tracker.update_tracking(
                 tracking_id, message="Building duplicate groups..."
             )
             # Build groups using union-find approach
             # This connects entities that are duplicates into groups
-            groups = self._build_duplicate_groups(candidates)
+            groups = (self._contextual_groups(entities,
+                context_prepared=options.get("context_prepared", False)) if self.contextual_identity
+                else self._build_duplicate_groups(self.detect_duplicates(
+                    entities, threshold=threshold, **options)))
 
             self.logger.debug(f"Built {len(groups)} duplicate group(s)")
 
@@ -849,6 +848,8 @@ class DuplicateDetector:
             DuplicateCandidate object with calculated confidence and reasons
         """
         check_query_cancellation()
+        if getattr(self, '_count_identity_comparisons', False):
+            self._identity_comparison_count += 1
         reasons = []
         confidence = similarity_score
 
@@ -1024,6 +1025,16 @@ class DuplicateDetector:
         # Python int in a set (and blockers do not need tuple objects).
         neighbors = [0] * len(rows)
         blocked = [0] * len(rows)
+        internal = getattr(self, '_equivalent_decisions', {})
+        for i, row in enumerate(rows):
+            decision = internal.get(id(row))
+            if decision is not None:
+                if decision.metadata.get('decision') == 'same':
+                    neighbors[i] |= 1 << i
+                elif self._blocks_identity(decision.metadata):
+                    # Multiple distinct twins veto each other. A supported
+                    # outside bridge sees both, despite one comparison unit.
+                    blocked[i] |= 1 << i
         for i, left in enumerate(rows):
             for j in range(i + 1, len(rows)):
                 metadata = self._create_duplicate_candidate(left, rows[j], 1.0).metadata
@@ -1065,7 +1076,12 @@ class DuplicateDetector:
             joined = left | right
             for index in indices(joined):
                 memberships[index] = joined
-        groups = {tuple(indices(members)) for members in memberships.values() if members.bit_count() > 1}
+        expanded = getattr(self, '_equivalent_members', {})
+        groups = {tuple(indices(members)) for members in memberships.values()
+                  if members.bit_count() > 1 or any(
+                      len(expanded.get(id(rows[index]), ())) > 1 and
+                      internal[id(rows[index])].metadata.get('decision') == 'same'
+                      for index in indices(members))}
         return [DuplicateGroup(entities=[rows[i] for i in members],
                     similarity_scores={(self._normalize_entity_id(rows[i]), self._normalize_entity_id(rows[j])): 1.
                         for i in members for j in members if i < j and neighbors[i] & (1 << j)})
@@ -1077,6 +1093,120 @@ class DuplicateDetector:
         keys.update(("identity", name, value) for name, value in
                     self.similarity_calculator._identity_values(entity).items())
         return keys
+
+    def _decision_equivalent_mentions(self, entities):
+        """Contract only rule-equivalent mentions with identical pair relations.
+
+        Unique provenance IDs cannot overlap any other mention and are irrelevant
+        to pair predicates. Shared IDs must stay exact: changing either shared
+        source or located-evidence membership can change an identity decision.
+        Scope, trusted identifiers and candidate retrieval keys also stay exact.
+        This is decision input compression, never a name-based identity rule.
+        """
+        from collections import Counter
+
+        def relations(row):
+            metadata = row.get('metadata', {})
+            sources = metadata.get('source_ids', [])
+            sources = {sources} if isinstance(sources, str) else set(sources)
+            spans = set(row.get('evidence_ids', [])) - {
+                metadata.get('identity_context_evidence_id'),
+                *metadata.get('description_evidence_ids', [])}
+            return sources, spans
+
+        source_counts, span_counts = Counter(), Counter()
+        for row in entities:
+            check_query_cancellation()
+            sources, spans = relations(row)
+            source_counts.update(sources)
+            span_counts.update(spans)
+        buckets = {}
+        for row in sorted(entities, key=self._normalize_entity_id):
+            check_query_cancellation()
+            sources, spans = relations(row)
+            signature = (self.disambiguator.decision_signature(row),
+                str(row.get('name', '')).strip().casefold(),
+                self.disambiguator._scope(row),
+                frozenset(self.candidate_keys(row)),
+                tuple(sorted(self.similarity_calculator._identity_values(row).items())),
+                frozenset(value for value in sources if source_counts[value] > 1),
+                frozenset(value for value in spans if span_counts[value] > 1))
+            buckets.setdefault(signature, []).append(row)
+        return list(buckets.values())
+
+    def _contextual_groups(self, entities, *, context_prepared=False):
+        """Resolve distinct decision inputs, then expand original member references."""
+        if not context_prepared:
+            self.disambiguator.prepare(entities)
+        self._identity_comparison_count = 0
+        self._count_identity_comparisons = True
+        previous = getattr(self, '_equivalent_members', {})
+        previous_internal = getattr(self, '_equivalent_decisions', {})
+        try:
+            classes = self._decision_equivalent_mentions(entities)
+            representatives = [rows[0] for rows in classes]
+            expanded = {id(rows[0]): rows for rows in classes}
+            self._equivalent_members = expanded
+            internal = {id(rows[0]): self._create_duplicate_candidate(rows[0], rows[1], 1.)
+                for rows in classes if len(rows) > 1}
+            self._equivalent_decisions = internal
+            touched = set()
+
+            def candidates():
+                for candidate in self._contextual_candidates(representatives, context_prepared=True):
+                    touched.update((id(candidate.entity1), id(candidate.entity2)))
+                    yield candidate
+
+            groups = self._build_duplicate_groups(candidates())
+            groups.extend(DuplicateGroup(entities=[rows[0]]) for rows in classes
+                          if len(rows) > 1 and id(rows[0]) not in touched and
+                          internal[id(rows[0])].metadata.get('decision') == 'same')
+            for group in groups:
+                members = []
+                for row in group.entities:
+                    originals = expanded[id(row)]
+                    members.extend(originals)
+                    # Supported spanning edges retain confidence and membership
+                    # without materializing every equivalent mention pair.
+                    root_id = self._normalize_entity_id(originals[0])
+                    if internal.get(id(row)) is not None and internal[id(row)].metadata.get('decision') == 'same':
+                        group.similarity_scores.update((
+                            (root_id, self._normalize_entity_id(other)), 1.) for other in originals[1:])
+                group.entities = sorted(members, key=self._normalize_entity_id)
+            # Diagnostics remain indexed by every original mention, including
+            # equivalent members; counterparts refer to all original locations.
+            self._identity_review_ids = [self._normalize_entity_id(row) for rows in classes for row in rows]
+            ranges, offset = [], 0
+            for rows in classes:
+                ranges.append((offset, len(rows)))
+                offset += len(rows)
+            reviews, offset = {}, 0
+            for index, rows in enumerate(classes):
+                reasons = {}
+                for reason, bits in self.identity_reviews.get(index, {}).items():
+                    expanded_bits = 0
+                    while bits:
+                        bit = bits & -bits
+                        start, count = ranges[bit.bit_length() - 1]
+                        expanded_bits |= ((1 << count) - 1) << start
+                        bits ^= bit
+                    reasons[reason] = expanded_bits
+                decision = internal.get(id(rows[0]))
+                if decision is not None and decision.metadata.get('decision') == 'unknown':
+                    reason = decision.metadata['reason']
+                    reasons[reason] = reasons.get(reason, 0) | (((1 << len(rows)) - 1) << offset)
+                if reasons:
+                    for member in range(offset, offset + len(rows)):
+                        reviews[member] = reasons
+                offset += len(rows)
+            self.identity_reviews = reviews
+            self.identity_comparison_stats = {'mentions': len(entities), 'feature_groups': len(classes),
+                'pair_comparisons': self._identity_comparison_count}
+            return groups
+        finally:
+            self._equivalent_members = previous
+            self._equivalent_decisions = previous_internal
+            self._count_identity_comparisons = False
 
     def _contextual_candidates(self, entities, *, context_prepared=False) -> Iterator[DuplicateCandidate]:
         """Stream candidates retrieved by names/definitions and scoped identifiers."""
@@ -1108,22 +1238,28 @@ class DuplicateDetector:
         from heapq import nsmallest
         from itertools import chain
 
+        previous_signature, summaries = None, []
         for index, reasons in self.identity_reviews.items():
             mention_id = self._identity_review_ids[index]
             own_entity = remap[mention_id]
             count, sample = 0, []
-            for reason, bits in reasons.items():
-                candidates = set()
-                while bits:
-                    bit = bits & -bits
-                    candidate_id = remap[self._identity_review_ids[bit.bit_length() - 1]]
-                    if candidate_id != own_entity:
-                        candidates.add(candidate_id)
-                    bits ^= bit
-                count += len(candidates)
+            signature = tuple(reasons.items())
+            if signature != previous_signature:
+                summaries = []
+                for reason, bits in signature:
+                    candidates = set()
+                    while bits:
+                        bit = bits & -bits
+                        candidates.add(remap[self._identity_review_ids[bit.bit_length() - 1]])
+                        bits ^= bit
+                    # Equivalent mentions share a mask. Count it once; keep one
+                    # extra sample so excluding the current canonical stays exact.
+                    summaries.append((reason, candidates, nsmallest(9, candidates)))
+                previous_signature = signature
+            for reason, candidates, smallest in summaries:
+                count += len(candidates) - (own_entity in candidates)
                 sample = nsmallest(8, chain(sample, ((candidate_id, reason)
-                                                   for candidate_id in candidates)))
-                del candidates
+                    for candidate_id in smallest if candidate_id != own_entity)))
             yield mention_id, count, sample
 
     def is_group_compatible(self, entities: List[Dict[str, Any]]) -> bool:

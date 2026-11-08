@@ -61,8 +61,9 @@ def test_native_context_fences_stale_generation_and_oversized_semantic_group(tmp
         index = context.mapping('project_definitions')
         for n in range(128):
             index.setdefault('ambiguous', set()).add(str(n))
+        index.setdefault('ambiguous', set()).add('128')
         with pytest.raises(ProcessingError, match='resource budget'):
-            index.setdefault('ambiguous', set()).add('128')
+            context.seal()
         store.begin_publication('p', expected_generation=generation, source_count=0, canonical_count=0)
         with pytest.raises(ProcessingError, match='not pending'):
             index.get('ambiguous')

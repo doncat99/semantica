@@ -270,14 +270,18 @@ def test_canonical_member_admission_uses_reverse_point_reads(tmp_path, unrelated
         store.close()
 
 
-def test_publication_rejects_corrupt_native_facts_before_reference_admission(tmp_path):
-    store, _, receipt, identity = fixture(tmp_path)
+def test_publication_reference_admission_does_not_replace_explicit_fact_audit(tmp_path):
+    store, binding, receipt, identity = fixture(tmp_path)
     quad = next(store.store.quads_for_pattern(store._oxigraph.NamedNode(identity), store._oxigraph.NamedNode(F + "name"), None, None))
     store.store.remove(quad)
     generation = store.begin_publication("p", expected_generation=None, source_count=1, canonical_count=0)["generation"]
+    # Admission validates the atomically persisted completion and source binding;
+    # it must not traverse all owned facts during ordinary reference reuse.
+    store.stage_publication_sources("p", generation, [dict(source="s", material="m", representation="r", recipe="processing-recipe", operation_count=1, operations=[receipt["operation_id"]])])
     with pytest.raises(ProcessingError, match="corrupt"):
-        store.stage_publication_sources("p", generation, [dict(source="s", material="m", representation="r", recipe="processing-recipe", operation_count=1, operations=[receipt["operation_id"]])])
+        ExtractionRecords(store, binding, "entities").audit()
     assert store.publication_status("p")["state"] == "pending"
+    store.close()
 
 
 def test_flush_failure_still_releases_native_store_writer(tmp_path, monkeypatch):

@@ -79,7 +79,7 @@ def test_global_queue_interleaves_sources_preserves_order_and_budget(tmp_path, m
         with lock:
             active += 1
             peak = max(peak, active)
-            calls.append(item[2])
+            calls.append(text[item[0]:item[1]])
         time.sleep(.01)
         with lock:
             active -= 1

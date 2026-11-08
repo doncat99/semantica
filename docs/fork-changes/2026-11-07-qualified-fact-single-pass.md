@@ -66,3 +66,20 @@ semantic reconciliation, current running jobs or paid results.
   First affected suite: 23 passed (18.90s), before the downstream scope repair.
 - 2026-11-07: final affected selection passed after organization scope repair;
   existing active ESG job and its immutable artifact were not modified.
+- 2026-11-08: fact reconciliation now seeks one ordered `(partition, entry)` cursor
+  over the native qualified index (128 rows / 256 KiB per page), retaining only
+  the current complete partition (4,096 observations / 16 MiB default) for the
+  unchanged `ConflictDetector` reducer. This removes the separate partition
+  enumeration and one native query per partition. Reconciled statuses and
+  canonical supports batch across partitions under the existing 128-row,
+  128-member and 256-KiB checkpoint bounds; per-group forced flush was removed.
+  A 600-reference / 150-partition specification verifies five cursor queries,
+  one hydration per observation and exact oracle equivalence. Real ESG runtime
+  improvement remains unmeasured; this source result does not claim product
+  capacity qualification.
+- 2026-11-08: canonical fact staging now validates each bounded 128-member page
+  with indexed batch projections for the plan, accepted ownership, endpoints,
+  existing assignment and semantic fields. A 128-member fixture caps validation
+  at eight queries and 24 point-pattern reads while preserving wrong-plan,
+  endpoint, ownership and qualifier rejection specifications. This removes
+  per-member storage round trips; real ESG runtime speedup remains unmeasured.

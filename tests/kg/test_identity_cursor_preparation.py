@@ -7,7 +7,7 @@ from semantica.kg.entity_resolver import EntityResolver
 from tests.kg.test_contextual_identity import scoped
 
 
-def test_context_preparation_uses_repeatable_hydrated_cursor_without_object_cache():
+def test_context_preparation_opens_original_cursor_once_without_retaining_entities():
     rows = [
         scoped('a', 'Acme', 'Acme manufactures engines.'),
         scoped('b', 'Acme', 'Acme manufactures engines.'),
@@ -33,7 +33,7 @@ def test_context_preparation_uses_repeatable_hydrated_cursor_without_object_cach
     resolver = EntityResolver(strategy='contextual')
     owner = resolver.duplicate_detector.disambiguator
     owner.prepare(cursor)
-    assert len(calls) >= 6
+    assert len(calls) == 1
     assert not hasattr(owner, '_supported_facts')
     assert all(reference() is None for reference in references)
     assert owner.compare(deepcopy(rows[0]), deepcopy(rows[2])) == expected

@@ -40,7 +40,7 @@ def test_current_extraction_batch_does_not_retain_complete_page_quotes(tmp_path,
                 refs.append(weakref.ref(item['quote']))
         return result
 
-    def extract(text, relay, spec, item, context, formula):
+    def extract(text, relay, spec, item, context, formula, **kwargs):
         gc.collect()
         live = sum(ref() is not None for ref in refs)
         assert live < count // 2, f'complete page quotes retained: {live}/{count}'

@@ -79,6 +79,7 @@ class _Index:
         if cache is not None and cache_key in cache:
             result, _ = cache[cache_key]
             cache.move_to_end(cache_key)
+            self.context.observe(self.field, key, result)
             return self._value(result, default)
         result, size = set(), 0
         for quad in self.context.owner.store.quads_for_pattern(self._node(key), self.predicate, None, self.p.graph):
@@ -86,6 +87,7 @@ class _Index:
             if len(result) >= MAX_ROWS or size > MAX_BYTES:
                 raise ProcessingError('Native identity semantic group exceeds resource budget')
             result.add(_decode(json.loads(quad.object.value)))
+        self.context.observe(self.field, key, result)
         if cache is not None:
             # Keep at most 128 keyed groups and one MiB of charged storage.
             # A larger valid group is read in full and simply not cached.
@@ -122,19 +124,20 @@ class _Index:
         return _Values(self, key)
 
     def add(self, key, value):
-        self.context._lookup_cache = None
-        self.context._lookup_bytes = 0
+        cache = self.context._lookup_cache
+        if cache is not None:
+            old = cache.pop((self.field, _json(key)), None)
+            if old is not None:
+                self.context._lookup_bytes -= old[1]
         self.context.fence()
         raw = _json(value)
         if len(raw.encode()) > MAX_BYTES // 2:
             raise ProcessingError('Native identity context value exceeds byte budget')
         node = self._node(key)
         triples = [f'{node} {self.predicate} {self.p.ox.Literal(raw)} .']
-        if self.field in {'project_definitions', 'variant_groups'} or self.field.endswith('_members'):
-            triples.append(self.p.triple(node, 'identityContextKey', self.p.ox.Literal(_json(key))))
+        triples.append(self.p.triple(node, 'identityContextKey', self.p.ox.Literal(_json(key))))
+        triples.append(self.p.triple(node, 'identityContextField', self.p.ox.Literal(self.field)))
         self.p.mutate(self.context.generation, triples)
-        # Validate the complete semantic group; never silently truncate it.
-        self.get(key)
 
     def remove(self, key, value):
         self.context._lookup_cache = None
@@ -155,6 +158,8 @@ class _Index:
 
     def items(self):
         # Native iterator streams keys; no whole-project keys/values dictionary.
+        if self.context._dependencies is not None:
+            self.context.observe_digest(self.field, None, self.context.dependency_digest(self.field, None))
         for quad in self.context.owner.store.quads_for_pattern(None,
                 self.p.ox.NamedNode(P+'identityContextKey'), None, self.p.graph):
             self.context.fence()
@@ -201,6 +206,50 @@ class NativeIdentityContext:
         self._last_fence = 0.
         self._lookup_cache = None
         self._lookup_bytes = 0
+        self._dependencies = None
+        self._dependency_bytes = 0
+        self._dependency_sink = None
+
+    def observe(self, field, key, result):
+        if self._dependencies is None:
+            return
+        self.observe_digest(field, _json(key), hashlib.sha256(_json(result).encode()).hexdigest())
+
+    def observe_digest(self, field, encoded_key, digest):
+        token = (field, encoded_key)
+        size = len(field.encode()) + len((encoded_key or '').encode()) + 128
+        if size > MAX_BYTES // 2:
+            raise ProcessingError('Identity dependency key exceeds byte budget')
+        if token not in self._dependencies:
+            if len(self._dependencies) >= MAX_ROWS or self._dependency_bytes + size > MAX_BYTES // 2:
+                self.flush_dependencies()
+            self._dependency_bytes += size
+        self._dependencies[token] = digest
+
+    def flush_dependencies(self):
+        if self._dependencies:
+            self._dependency_sink(self._dependencies)
+            self._dependencies.clear()
+            self._dependency_bytes = 0
+
+    def dependency_digest(self, field, encoded_key):
+        """Hash final native keyed values, including absence and enumeration."""
+        dependencies, self._dependencies = self._dependencies, None
+        try:
+            mapping = self.mapping(field)
+            if encoded_key is not None:
+                return hashlib.sha256(_json(mapping.get(_decode(json.loads(encoded_key)), set())).encode()).hexdigest()
+            # Commutative multiset digest streams arbitrary native key counts;
+            # key+value boundaries are encoded before hashing.
+            count = xor = total = 0
+            for key, values in mapping.items():
+                item = int.from_bytes(hashlib.sha256(_json((key, frozenset(values))).encode()).digest(), 'big')
+                count += 1
+                xor ^= item
+                total = (total + item) % (1 << 256)
+            return hashlib.sha256(f'{count}:{xor}:{total}'.encode()).hexdigest()
+        finally:
+            self._dependencies = dependencies
 
     @contextmanager
     def resolution_scope(self):
@@ -259,4 +308,12 @@ class NativeIdentityContext:
     def seal(self):
         self.fence()
         p = self.publication
+        # Validate each complete observation group once, not after every insertion.
+        for quad in self.owner.store.quads_for_pattern(None,
+                p.ox.NamedNode(P+'identityContextField'), None, p.graph):
+            self.fence()
+            key = p.values(quad.subject, 'identityContextKey')
+            if len(key) != 1:
+                raise ProcessingError('Native identity context key is incomplete')
+            self.mapping(quad.object.value).get(_decode(json.loads(key[0].value)))
         p.mutate(self.generation, [p.triple(p.head, "identityContextSealed", p.ox.Literal(True))])

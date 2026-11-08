@@ -20,8 +20,18 @@ def test_native_fact_projection_survives_restart_and_matches_builder(tmp_path):
             for member in members['members']:
                 ref = member if isinstance(member,str) else member['id']
                 records = ExtractionRecords.from_fact_reference(store,request.project_id,ref)
-                relation = KnowledgeRelation.model_validate(records.read_fact_projection(ref,'relation'))
-                assertion = KnowledgeAssertion.model_validate(records.read_fact_projection(ref,'assertion'))
+                projections = records.read_fact_projections(ref)
+                indexed = records.read_fact_index_projections(ref)
+                relation = KnowledgeRelation.model_validate(projections['relation'])
+                assertion = KnowledgeAssertion.model_validate(projections['assertion'])
+                from semantica.conflicts.conflict_detector import ConflictDetector
+                assert ConflictDetector.qualified_fact_identity(request.project_id, indexed['relation'], 'relation') == \
+                    ConflictDetector.qualified_fact_identity(request.project_id, projections['relation'], 'relation')
+                assert ConflictDetector.qualified_fact_identity(request.project_id, indexed['assertion'], 'assertion') == \
+                    ConflictDetector.qualified_fact_identity(request.project_id, projections['assertion'], 'assertion')
+                assert 'support_ids' not in indexed['relation'] and 'status' not in indexed['assertion']
+                assert projections['relation'] == records.read_fact_projection(ref,'relation')
+                assert projections['assertion'] == records.read_fact_projection(ref,'assertion')
                 assert relation.evidence_ids == assertion.evidence_ids
                 assert relation.qualifiers == assertion.qualifiers
                 assert relation.type == assertion.predicate

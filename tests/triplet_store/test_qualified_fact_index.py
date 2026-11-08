@@ -56,6 +56,41 @@ def test_reference_index_crosses_pages_and_preserves_oracle(tmp_path):
     store.close()
 
 
+def test_reconciliation_pages_references_across_many_small_partitions(tmp_path):
+    store, generation, refs, _ = stage_duplicate_observations(tmp_path)
+    source = list(rows(refs, 300))
+    for number, (_, kind, item) in enumerate(source):
+        item['predicate' if kind == 'assertion' else 'type'] += ':' + str(number // 4)
+    lookup = {(ref, kind, item['id']): item for ref, kind, item in source}
+    index = QualifiedFactIndex(store, 'p', generation)
+    index.build(iter(source))
+    native, queries = store.store, []
+    class ObservedStore:
+        def __getattr__(self, name):
+            return getattr(native, name)
+        def query(self, query, *args, **kwargs):
+            if 'SELECT ?partition ?entry ?reference ?kind ?observation ?identity' in query:
+                queries.append(query)
+            return native.query(query, *args, **kwargs)
+    store.store = ObservedStore()
+    reads = []
+    try:
+        output = list(index.iter_reconciled(lambda ref, kind, identity: (
+            reads.append((ref, kind, identity)) or lookup[ref, kind, identity]
+        )))
+        expected = ConflictDetector.reconcile_qualified_facts('p',
+            [KnowledgeAssertion.model_validate(item) for _, kind, item in source if kind == 'assertion'],
+            [KnowledgeRelation.model_validate(item) for _, kind, item in source if kind == 'relation'])
+        assert len(queries) == 5
+        assert not any('SELECT DISTINCT ?partition' in query for query in queries)
+        assert len(output) == 150
+        assert len(reads) == len(set(reads)) == len(source)
+        assert sorted((item for group in output for item in group[0]), key=lambda item: item.id) == sorted(expected[0], key=lambda item: item.id)
+        assert sorted((item for group in output for item in group[1]), key=lambda item: item.id) == sorted(expected[1], key=lambda item: item.id)
+    finally:
+        store.close()
+
+
 def test_index_rejects_oversized_group_without_emitting_partial_semantics(tmp_path):
     store, generation, refs, _ = stage_duplicate_observations(tmp_path)
     source = list(rows(refs, 3))
@@ -71,6 +106,72 @@ def test_index_rejects_oversized_group_without_emitting_partial_semantics(tmp_pa
     store.begin_publication('p', expected_generation=generation, source_count=0, canonical_count=0)
     with pytest.raises(ProcessingError, match='not pending'):
         next(index.iter_reconciled(lambda ref, kind, identity: lookup[ref, kind, identity]))
+    store.close()
+
+
+def test_partition_reads_seek_before_checking_current_membership(tmp_path):
+    store, generation, refs, _ = stage_duplicate_observations(tmp_path)
+    index = QualifiedFactIndex(store, 'p', generation)
+    source = list(rows(refs, 3))
+    index.build(iter(source))
+    partition = index.partition(source[0][2], source[0][1])
+    p = index.publication
+    orphan = p.iri('urn:orphan:qualified-entry')
+    original = next(index._references(partition))
+    store.store.update('INSERT DATA { GRAPH '+str(p.graph)+' { '+ '\n'.join([
+        p.triple(orphan, 'qualifiedPartition', p.scalar(partition)),
+        *[p.triple(orphan, field, p.scalar(original[key])) for field, key in (
+            ('qualifiedReference', 'reference'), ('qualifiedKind', 'kind'),
+            ('qualifiedObservation', 'observation'), ('qualifiedIdentity', 'identity'))],
+    ])+' } }')
+    native, queries, updates = store.store, [], []
+    class ObservedStore:
+        def __getattr__(self, name):
+            return getattr(native, name)
+        def query(self, query, *args, **kwargs):
+            if 'SELECT ?entry ?reference ?kind ?observation ?identity' in query:
+                queries.append(query)
+            return native.query(query, *args, **kwargs)
+        def update(self, query, *args, **kwargs):
+            if 'qualifiedReconciledStatus' in query:
+                updates.append(query)
+            return native.update(query, *args, **kwargs)
+    store.store = ObservedStore()
+    try:
+        assert len(list(index._references(partition))) == len(source)
+        assert queries
+        assert all(query.index('qualifiedPartition') < query.index('qualifiedEntry')
+            and 'FILTER EXISTS' in query for query in queries)
+        lookup = {(ref, kind, item['id']): item for ref, kind, item in source}
+        for claims, links, _, _ in index.iter_reconciled(lambda *key: lookup[key]):
+            index.stage_reconciled(claims, links)
+        assert len(updates) == 1
+        assert all(query.index('qualifiedIdentity') < query.index('qualifiedEntry')
+            and 'FILTER EXISTS' in query for query in updates)
+    finally:
+        store.close()
+
+
+def test_reconciled_status_writes_use_the_publication_checkpoint(tmp_path, monkeypatch):
+    store, generation, refs, _ = stage_duplicate_observations(tmp_path)
+    source = list(rows(refs, 3))
+    for number, (_, kind, item) in enumerate(source):
+        item['predicate' if kind == 'assertion' else 'type'] += ':' + str(number // 2)
+    lookup = {(ref, kind, item['id']): item for ref, kind, item in source}
+    index = QualifiedFactIndex(store, 'p', generation)
+    index.build(iter(source))
+    flushes = 0
+    original_flush = store.flush
+    def count_flushes():
+        nonlocal flushes
+        flushes += 1
+        return original_flush()
+    monkeypatch.setattr(store, 'flush', count_flushes)
+    with index.publication.build_scope(generation), index.publication.checkpointed(generation):
+        for claims, links, _, _ in index.iter_reconciled(lambda ref, kind, identity: lookup[ref, kind, identity]):
+            index.stage_reconciled(claims, links)
+        assert flushes == 0
+    assert flushes == 1
     store.close()
 
 

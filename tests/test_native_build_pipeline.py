@@ -168,15 +168,7 @@ def test_native_identity_components_match_project_oracle_across_sources_and_rest
     monkeypatch.setattr(builder,'_explanation_reports',lambda *a,**kw:([],[]))
     monkeypatch.setattr(builder,'_grounded_topics',lambda *a,**kw:[])
     original=builder._build_source
-    captured,refs,staged=[],{},{}
-    original_stage=PublicationRecords.stage_canonical
-    def stage(self,generation,records):
-        for record in records:
-            combined=staged.setdefault(record['id'],{**record,'members':[],'selectors':[]})
-            combined['members'].extend(record['members'])
-            combined['selectors'].extend(record['selectors'])
-        return original_stage(self,generation,records)
-    monkeypatch.setattr(PublicationRecords,'stage_canonical',stage)
+    captured,refs=[],{}
     def capture(*args,**kwargs):
         result=original(*args,**kwargs)
         captured.extend(result['entities'])
@@ -190,16 +182,19 @@ def test_native_identity_components_match_project_oracle_across_sources_and_rest
         oracle,_,_=builder._resolve_native_entities(captured,resolver=resolver)
         assert sorted(topology['entities'],key=lambda x:x['id']) == sorted(
             ({'id':x.id,'name':x.canonical_name} for x in oracle),key=lambda x:x['id'])
+        request,store,_=builder._native_build.get()
+        generation=store.publication_status(request.project_id)['generation']
+        publication=PublicationRecords(store,request.project_id)
         for entity in oracle:
             selected=resolver.resolution_selections[entity.id]
-            actual=staged[entity.id]
+            node=publication.iri(entity.id)
+            members,selectors=publication._canonical_references(node)
+            actual=dict(representative=publication.one(node,'representative'),members=members,selectors=selectors)
             assert actual['representative']==refs[selected['representative']][0]
             assert set(actual['members'])=={ref for member in selected['members'] for ref in refs[member]}
             expected={(field,refs[origin][0]) for field,origins in selected['field_sources'].items() for origin in origins}
             for name,origins in selected['property_sources'].items():
                 for origin in origins:
-                    request,store,_=builder._native_build.get()
-                    generation=store.publication_status(request.project_id)['generation']
                     expected.add(('properties.'+name,store.publication_attribute_reference(
                         request.project_id,generation,refs[origin][0],name)))
             assert {(item['field'],item['record']) for item in actual['selectors']}==expected
@@ -210,7 +205,6 @@ def test_native_identity_components_match_project_oracle_across_sources_and_rest
     first=builder.build_semantic_artifacts(request)
     captured.clear()
     refs.clear()
-    staged.clear()
     second_result=builder.build_semantic_artifacts(request)
     assert observed[0]==observed[1]>0
     assert first['publication']['canonical_count']==second_result['publication']['canonical_count']

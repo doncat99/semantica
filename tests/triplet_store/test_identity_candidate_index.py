@@ -31,8 +31,12 @@ def test_native_components_keep_alias_bridges_identifiers_and_input_order(tmp_pa
         with pytest.raises(ProcessingError, match='cursor'):
             index.component(ids[3], after=page['next_cursor'])
         assert sorted(index.iter_components()) == sorted([ids[:3], ids[3:]])
-        assert all('First' not in str(q) and 'Bridge' not in str(q)
-                   for q in store.store.quads_for_pattern(None, None, None, index.publication.graph))
+        # Current derived identity features retain names/identity observations,
+        # not original source prose or a second full entity document.
+        for identity in ids:
+            feature = index.read_identity_features(identity)
+            assert 'context' not in feature and 'description' not in feature
+            assert '_identity_features' in feature
     finally:
         store.close()
 
@@ -321,7 +325,7 @@ def test_native_resolution_revalidates_generation_before_result_handoff(tmp_path
     index = IdentityCandidateIndex(store, 'p', generation, resolver.duplicate_detector)
     try:
         index.build(lambda: iter(zip(ids, rows)))
-        merge = resolver.entity_merger.merge_entity_group
+        merge = resolver.entity_merger._merge_adjudicated_group
 
         def invalidate_after_computation(*args, **kwargs):
             result = merge(*args, **kwargs)
@@ -329,7 +333,7 @@ def test_native_resolution_revalidates_generation_before_result_handoff(tmp_path
                                     source_count=0, canonical_count=0)
             return result
 
-        monkeypatch.setattr(resolver.entity_merger, 'merge_entity_group', invalidate_after_computation)
+        monkeypatch.setattr(resolver.entity_merger, '_merge_adjudicated_group', invalidate_after_computation)
         with pytest.raises(ProcessingError, match='stale|not pending'):
             resolver.resolve_entities(rows, context_prepared=True)
         assert resolver.duplicate_detector.disambiguator._resolution_features is None
@@ -377,7 +381,7 @@ def test_native_preparation_checks_plan_at_handoffs_and_batches_durable_writes(t
     prepare = resolver.duplicate_detector.disambiguator.prepare
     context_counts = {}
 
-    def measured_prepare(entities, *, context):
+    def measured_prepare(entities, *, context, features_prepared=False):
         complete, flush = context.publication._build_fence, store.flush
         calls, flushes = [], []
 
@@ -392,7 +396,7 @@ def test_native_preparation_checks_plan_at_handoffs_and_batches_durable_writes(t
         monkeypatch.setattr(context.publication, '_build_fence', complete_plan)
         monkeypatch.setattr(store, 'flush', durable_flush)
         try:
-            return prepare(entities, context=context)
+            return prepare(entities, context=context, features_prepared=features_prepared)
         finally:
             context_counts.update(plans=len(calls), flushes=len(flushes))
             monkeypatch.setattr(store, 'flush', flush)
@@ -407,5 +411,311 @@ def test_native_preparation_checks_plan_at_handoffs_and_batches_durable_writes(t
         assert context._resolution_depth == 0
         assert context._lookup_cache is None
         assert sum(len(group) for group in index.iter_components()) == len(ids)
+    finally:
+        store.close()
+
+
+def test_component_pages_and_hydration_do_not_rescan_members(tmp_path, monkeypatch):
+    store, generation, ids = staged(tmp_path, 257)
+    resolver = EntityResolver(strategy='contextual')
+    index = IdentityCandidateIndex(store, 'p', generation, resolver.duplicate_detector)
+    rows = [dict(id=str(n), name='Same', type='ORG') for n in range(len(ids))]
+    try:
+        index.build(lambda: iter(zip(ids, rows)))
+        visited = []
+        original = index.publication.values
+        def counted(node, predicate):
+            if predicate == 'identityNextMember':
+                visited.append(node)
+            return original(node, predicate)
+        monkeypatch.setattr(index.publication, 'values', counted)
+        cursor, actual = None, []
+        while True:
+            page = index.component(ids[0], after=cursor)
+            actual.extend(page['records'])
+            cursor = page['next_cursor']
+            if cursor is None:
+                break
+        assert actual == ids
+        assert len(visited) <= len(ids) + 3
+        visited.clear()
+        refs, _ = index.hydrate_component(ids[0], lambda ref: rows[ids.index(ref)])
+        assert refs == ids
+        assert len(visited) <= len(ids)
+    finally:
+        store.close()
+
+
+def test_native_build_reads_raw_rows_once_and_never_bulk_relabels_members(tmp_path, monkeypatch):
+    store, generation, ids = staged(tmp_path, 5)
+    resolver = EntityResolver(strategy='contextual')
+    index = IdentityCandidateIndex(store, 'p', generation, resolver.duplicate_detector)
+    rows = [dict(id=str(n), name=name, type='ORG', aliases=aliases)
+            for n, (name, aliases) in enumerate([
+                ('First', []), ('Second', []), ('Third', []),
+                ('Bridge', ['First', 'Second']), ('Last', ['Second', 'Third'])])]
+    opens = []
+    original = store._update_derived_graph
+    def update(graph, **kwargs):
+        assert kwargs.get('delete') not in ('?s ?predicate ?losing',)
+        delete = kwargs.get('delete', '')
+        assert not (delete.startswith('?s ?predicate <') and 'identityComponent' in kwargs.get('where', ''))
+        return original(graph, **kwargs)
+    def source():
+        opens.append(1)
+        yield from zip(ids, rows)
+    monkeypatch.setattr(store, '_update_derived_graph', update)
+    try:
+        index.build(source)
+        assert opens == [1]
+        assert index.read_identity_features(ids[0])['name'] == 'First'
+        with pytest.raises(ProcessingError, match='membership'):
+            index.read_identity_features('urn:foreign')
+        assert index.component(ids[0])['records'] == ids
+        from semantica.triplet_store.publication_records import P
+        for predicate in ('identityParent', 'identitySize', 'identityRepresentative', 'identityKeyParent'):
+            assert not list(store.store.quads_for_pattern(None,
+                index.publication.ox.NamedNode(P+predicate), None, index.publication.graph))
+    finally:
+        store.close()
+
+
+def test_completed_identity_survives_generation_without_copy_and_exact_dependencies(tmp_path, monkeypatch):
+    from semantica.triplet_store.publication_records import PublicationRecords, P
+    from semantica.triplet_store.oxigraph_store import OxigraphStore
+    store, generation, ids = staged(tmp_path, 3, canonical_count=None)
+    resolver = EntityResolver(strategy='contextual')
+    index = IdentityCandidateIndex(store, 'p', generation, resolver.duplicate_detector)
+    rows = [dict(id=str(n), name='Name '+str(n), type='ORG') for n in range(3)]
+    try:
+        index.build(lambda: iter(zip(ids, rows)), resolve_candidates=False)
+        p = index.publication
+        with pytest.raises(ProcessingError, match='coverage'):
+            p.seal_identity_stage(generation, 'exact-input')
+        for n, ref in enumerate(ids):
+            p.stage_canonical(generation, [dict(id='urn:canonical:'+str(n),
+                representative=ref, members=[ref], member_count=1,
+                selectors=[dict(field='name', record=ref)], selector_count=1)])
+        assert p.seal_identity_stage(generation, 'exact-input') == 3
+        before = set(q for q in store.store.quads_for_pattern(None, None, None, p.graph)
+            if q.predicate.value.startswith(P+'identity') or q.subject.value.startswith('urn:canonical:'))
+        update = store._update_derived_graph
+        def indexed_identity_retention(graph, **kwargs):
+            # Each selector lookup must bind its canonical before checking membership.
+            assert '?identityCanonical <'+P+'selector> ?s' in kwargs['where']
+            assert 'FILTER EXISTS' in kwargs['where']
+            return update(graph, **kwargs)
+        with monkeypatch.context() as patch:
+            patch.setattr(store, '_update_derived_graph', indexed_identity_retention)
+            next_generation = store.begin_publication('p', expected_generation=generation,
+                source_count=1, canonical_count=None)['generation']
+        assert p.identity_stage_status(next_generation, 'changed-input') is None
+        assert p.identity_stage_status(next_generation, 'exact-input')['canonical_count'] == 3
+        after = set(q for q in store.store.quads_for_pattern(None, None, None, p.graph)
+            if q.predicate.value.startswith(P+'identity') or q.subject.value.startswith('urn:canonical:'))
+        assert before == after
+        assert len(p.values(p.head, 'canonical')) == 3
+        assert not p.values(p.head, 'canonicalCount')
+        with pytest.raises(ProcessingError, match='stale'):
+            p.identity_stage_status(generation, 'exact-input')
+        store.close()
+        store = OxigraphStore(tmp_path / 'facts')
+        p = PublicationRecords(store, 'p')
+        assert p.identity_stage_status(next_generation, 'exact-input')['canonical_count'] == 3
+        retry = store.begin_publication('p', expected_generation=next_generation,
+            source_count=1, canonical_count=None)['generation']
+        assert p.identity_stage_status(retry, 'exact-input')['canonical_count'] == 3
+        p.reset_identity_stage(retry)
+        assert p.identity_stage_status(retry, 'exact-input') is None
+        assert not p.values(p.head, 'canonical')
+    finally:
+        store.close()
+
+
+def test_unfinished_identity_never_survives_generation(tmp_path):
+    store, generation, ids = staged(tmp_path, 2)
+    resolver = EntityResolver(strategy='contextual')
+    index = IdentityCandidateIndex(store, 'p', generation, resolver.duplicate_detector)
+    try:
+        index.build(lambda: iter(zip(ids, [dict(id=str(n), name='Same', type='ORG') for n in range(2)])),
+                    resolve_candidates=False)
+        generation = store.begin_publication('p', expected_generation=generation,
+            source_count=1, canonical_count=None)['generation']
+        assert not index.publication.values(index.publication.head, 'identityIndexSealed')
+        assert store.identity_stage_status('p', generation, 'exact-input') is None
+    finally:
+        store.close()
+
+
+def test_native_identity_features_exclude_unrelated_property_payloads(tmp_path):
+    store, generation, ids = staged(tmp_path, 1)
+    resolver = EntityResolver(strategy='contextual', deduplication={'similarity': {
+        'property_schema': {'lei': {'identity': True, 'scope': ['jurisdiction']}}}})
+    index = IdentityCandidateIndex(store, 'p', generation, resolver.duplicate_detector)
+    row = dict(id='one', name='Acme', type='ORG', properties={
+        'lei': '123', 'jurisdiction': 'HK', 'unrelated_body': 'x' * (2 * 1024 * 1024)})
+    try:
+        index.build(lambda: iter([(ids[0], row)]))
+        feature = index.read_identity_features(ids[0])
+        assert feature['properties'] == {'lei': '123', 'jurisdiction': 'HK'}
+    finally:
+        store.close()
+
+
+def test_component_reuse_tracks_absent_context_and_preserves_untouched_selectors(tmp_path):
+    store, generation, ids = staged(tmp_path, 3, canonical_count=None)
+    resolver = EntityResolver(strategy='contextual')
+    index = IdentityCandidateIndex(store, 'p', generation, resolver.duplicate_detector)
+    rows = [dict(id=str(n), name='Unique '+str(n), type='ORG',
+                 metadata={'identity_scope': 'scope'+str(n)}) for n in range(3)]
+    try:
+        assert index.build(lambda: iter(zip(ids, rows)), policy_key='identity-rules')['retained_components'] == 0
+        p = index.publication
+        for n, ref in enumerate(ids):
+            with index.resolution_scope(ref):
+                if n == 0:
+                    assert index._context.mapping('project_definitions').get('xyz') is None
+                p.stage_canonical(generation, [dict(id='urn:decision:'+str(n), representative=ref,
+                    members=[ref], member_count=1, selectors=[dict(field='name', record=ref)], selector_count=1)])
+                index.seal_component(ref, ['urn:decision:'+str(n)])
+        p.seal_identity_stage(generation, 'first')
+        untouched = p.ox.NamedNode('urn:decision:1')
+        before = set(store.store.quads_for_pattern(untouched, None, None, p.graph))
+        selector = p.values(untouched, 'selector')[0]
+        before_selector = set(store.store.quads_for_pattern(selector, None, None, p.graph))
+        # A newly available definition invalidates a prior ABSENT read even
+        # though neither the mention nor its candidate membership changed.
+        from semantica.semantic_extract.types import Entity
+        from semantica.triplet_store.extraction_records import ExtractionRecords
+        source_node = p.values(p.head, 'source')[0]
+        old_operation = p.one(source_node, 'operation')
+        binding = dict(project='p', source='new', material='new-material', representation='new-repr',
+            recipe='recipe', model='model', specification='spec', parser='parser', grounding='grounding',
+            window_start=0, window_end=3)
+        entity = Entity('XYZ', 'ORG', 0, 3, .9, {'mention_id': 'new'})
+        receipt = store.adopt_extraction(binding, 'entities', [entity], text='XYZ',
+            native_ranges=[dict(nativeRef='#/document/text', start=0, end=3, windowStart=0, windowEnd=3)],
+            accepted_digest='new-paid')
+        new_ref = ExtractionRecords(store, binding, 'entities').entity_node(entity).value
+        generation = store.begin_publication('p', expected_generation=generation,
+            source_count=2, canonical_count=None)['generation']
+        p.stage_sources(generation, [dict(source='s', material='m', representation='r',
+            recipe='recipe', operation_count=1, operations=[old_operation]),
+            dict(source='new', material='new-material', representation='new-repr',
+                recipe='recipe', operation_count=1, operations=[receipt['operation_id']])])
+        index = IdentityCandidateIndex(store, 'p', generation, resolver.duplicate_detector)
+        new_row = dict(id='new', name='A new definition', type='ORG',
+            metadata={'identity_scope':'new-scope'})
+        new_row = resolver.duplicate_detector.disambiguator.identity_projection(new_row)
+        new_row['_identity_features']['grounded_definitions'] = [('xyz', 'x y z')]
+        result = index.build(lambda: iter([*zip(ids, rows), (new_ref, new_row)]), policy_key='identity-rules')
+        assert result == dict(retained_canonical_count=2, retained_components=2)
+        assert index.roots(affected_only=True)['records'] == [ids[0], new_ref]
+        assert set(p.values(p.head, 'canonical')) == {untouched, p.ox.NamedNode('urn:decision:2')}
+        assert set(store.store.quads_for_pattern(untouched, None, None, p.graph)) == before
+        assert set(store.store.quads_for_pattern(selector, None, None, p.graph)) == before_selector
+        assert p.status()['state'] == 'pending'
+    finally:
+        store.close()
+
+
+def test_rebuild_invalidates_old_completion_before_resealing_index(tmp_path, monkeypatch):
+    store, generation, ids = staged(tmp_path, 2)
+    resolver = EntityResolver(strategy='contextual')
+    index = IdentityCandidateIndex(store, 'p', generation, resolver.duplicate_detector)
+    publication = index.publication
+    rows = [dict(id=str(n), name='Same', type='ORG') for n in range(2)]
+    try:
+        index.build(lambda: iter(zip(ids, rows)), policy_key='identity-rules')
+        publication.mutate(generation, [
+            publication.triple(publication.head, 'identityStageInput', publication.scalar('old-input')),
+            publication.triple(publication.head, 'identityStageCount', publication.ox.Literal(0))])
+
+        def interrupt(_):
+            assert publication.values(publication.head, 'identityIndexSealed')
+            raise ProcessingError('canceled before decision reconciliation')
+
+        monkeypatch.setattr(index, '_reconcile_decisions', interrupt)
+        with pytest.raises(ProcessingError, match='canceled'):
+            index.build(lambda: iter(zip(ids, rows)), policy_key='identity-rules')
+        assert publication.identity_stage_status(generation, 'old-input') is None
+        assert not publication.values(publication.head, 'identityStageCount')
+    finally:
+        store.close()
+
+
+def test_component_dependencies_stream_beyond_single_write_budget(tmp_path):
+    import json
+    from semantica.triplet_store.publication_records import P, MAX_BYTES
+    store, generation, ids = staged(tmp_path, 1, canonical_count=None)
+    resolver = EntityResolver(strategy='contextual')
+    index = IdentityCandidateIndex(store, 'p', generation, resolver.duplicate_detector)
+    try:
+        index.build(lambda: iter([(ids[0], dict(id='one', name='Unique', type='ORG'))]), policy_key='rules')
+        p = index.publication
+        with index.resolution_scope(ids[0]):
+            for n in range(700):
+                key = str(n) + 'x' * 2048
+                index._context.mapping('project_definitions').get(key)
+            # Enumeration must be captured too, including an empty map.
+            assert list(index._context.mapping('project_definitions').items()) == []
+            p.stage_canonical(generation, [dict(id='urn:decision:large', representative=ids[0],
+                members=ids, member_count=1, selectors=[dict(field='name', record=ids[0])], selector_count=1)])
+            index.seal_component(ids[0], ['urn:decision:large'])
+        group = p.values(p.head, 'identityDecisionGroup')[0]
+        dependencies = [q.object.value for q in store.store.quads_for_pattern(group,
+            p.ox.NamedNode(P+'identityDecisionDependencies'), None, p.graph)]
+        assert len(dependencies) == 701
+        assert sum(len(value.encode()) for value in dependencies) > MAX_BYTES
+        assert all(len(value.encode()) < MAX_BYTES for value in dependencies)
+        assert all(index._context.dependency_digest(field, key) == digest
+            for field, key, digest in map(json.loads, dependencies))
+        assert index._reconcile_decisions(True)['retained_components'] == 1
+        index._context.mapping('project_definitions').add('new-definition', 'value')
+        assert index._reconcile_decisions(True)['retained_components'] == 0
+    finally:
+        store.close()
+
+
+def test_identity_seal_checks_coverage_with_member_point_reads(tmp_path, monkeypatch):
+    from semantica.triplet_store.publication_records import P
+    store, generation, ids = staged(tmp_path, 3, canonical_count=None)
+    resolver = EntityResolver(strategy='contextual')
+    index = IdentityCandidateIndex(store, 'p', generation, resolver.duplicate_detector)
+    try:
+        index.build(lambda: iter(zip(ids, [dict(id=str(n), name='Name '+str(n), type='ORG')
+            for n in range(3)])), resolve_candidates=False)
+        p, native = index.publication, store.store
+        ox = store._oxigraph
+        for n, ref in enumerate(ids):
+            p.stage_canonical(generation, [dict(id='urn:canonical:'+str(n),
+                representative=ref, members=[ref], member_count=1,
+                selectors=[], selector_count=0)])
+        member = ox.NamedNode(P+'member')
+        canonical = ox.NamedNode(P+'canonical')
+        reads = []
+        class IndexedCoverage:
+            def __getattr__(self, key):
+                return getattr(native, key)
+            def query(self, query):
+                assert 'FILTER NOT EXISTS' not in query, 'coverage must not join every canonical per mention'
+                return native.query(query)
+            def quads_for_pattern(self, s, pred, o, graph):
+                if pred == member:
+                    assert s is None and o is not None
+                    reads.append(o)
+                yield from native.quads_for_pattern(s, pred, o, graph)
+        monkeypatch.setattr(store, 'store', IndexedCoverage())
+        # A reference from an unregistered canonical must not satisfy coverage.
+        target = ox.NamedNode('urn:canonical:2')
+        quad = ox.Quad(p.head, canonical, target, p.graph)
+        native.remove(quad)
+        with pytest.raises(ProcessingError, match='coverage'):
+            p.seal_identity_stage(generation, 'input')
+        assert not p.values(p.head, 'identityStageInput')
+        native.add(quad)
+        reads.clear()
+        assert p.seal_identity_stage(generation, 'input') == 3
+        assert len(reads) == 3
     finally:
         store.close()

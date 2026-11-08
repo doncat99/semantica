@@ -69,3 +69,64 @@ def test_late_oversize_is_rejected_before_any_classification_request(monkeypatch
         builder._classify_source({'source': SimpleNamespace(source_id='source'), 'passages': passages}, profile, object())
     assert error.value.code == 'MODEL_CONTEXT_BUDGET_EXCEEDED'
     assert error.value.retryable is False
+
+
+def test_native_classification_warm_reuse_reads_quotes_once_without_payloads(tmp_path, monkeypatch):
+    from semantica.triplet_store.oxigraph_store import OxigraphStore
+    from semantica.triplet_store.classification_records import ClassificationRecords
+    from semantica.semantic_extract.cache import ExtractionCache, SqliteCacheBackend
+    from semantica.semantic_artifact_schema import ModelReceipt
+
+    profile = ClassificationProfile(id='profile', version='1', label='Profile', description='Profile',
+        dimensions=[dict(id='purpose', label='Purpose', cardinality='single', vocabulary=[])])
+    reads, calls = [], []
+    class Passage:
+        def __init__(self, identity):
+            self.id = identity
+        @property
+        def quote(self):
+            reads.append(self.id)
+            return 'source evidence ' * 20
+    passages = [Passage(str(index)) for index in range(20)]
+    source = SimpleNamespace(source_id='source', material_revision='material')
+    request = SimpleNamespace(project_id='project',
+        parsed_sources=[SimpleNamespace(source_id='source', representation_revision='representation')])
+    relay = SimpleNamespace(binding_id='binding', model_id='model', context_window_tokens=6000, max_output_tokens=1000)
+    store = OxigraphStore(tmp_path / 'facts')
+    backend = SqliteCacheBackend(str(tmp_path / 'accepted.sqlite'))
+    cache = ExtractionCache(backend=backend)
+    def produce(context, profile, relay, source_id):
+        calls.append(context)
+        receipt = ModelReceipt(id=f'receipt-{len(calls)}', operation='source_classification',
+            provider='fixture', model='model', input_digest='sha256:' + 'a' * 64, output_digest='sha256:' + 'b' * 64,
+            parameters={}, metadata={})
+        return SourceClassification(source_id=source_id, profile_id=profile.id, profile_version=profile.version,
+            assignments=[], unclassified_dimension_ids=['purpose'], model_receipt_ids=[receipt.id]), [receipt]
+    monkeypatch.setattr(builder, '_produce_source_classification', produce)
+    def run():
+        built = dict(source=source, passages=passages, native_operations=[])
+        token = builder._native_build.set((request, store, cache))
+        try:
+            result = builder._classify_source(built, profile, relay)
+            return result, built['native_classification_reduction']
+        finally:
+            builder._native_build.reset(token)
+    try:
+        (_, receipts), reduction = run()
+        assert receipts and calls
+        before = set(store.store)
+        calls.clear()
+        reads.clear()
+        def forbidden(*args, **kwargs):
+            pytest.fail('warm classification hydrated, recovered or repurchased data')
+        monkeypatch.setattr(store, 'read_classification', forbidden)
+        monkeypatch.setattr(store, 'read_classification_receipts', forbidden)
+        monkeypatch.setattr(ClassificationRecords, 'read_reduced_dimension', forbidden)
+        monkeypatch.setattr(cache, 'accepted_digest', forbidden)
+        (value, receipts), restored = run()
+        assert value is None and receipts == [] and restored == reduction and calls == []
+        assert reads == [span.id for span in passages]
+        assert set(store.store) == before
+    finally:
+        store.close()
+        backend.close()

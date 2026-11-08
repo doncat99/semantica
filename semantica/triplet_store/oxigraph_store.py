@@ -10,7 +10,6 @@ import json
 import os
 import re
 import threading
-from collections import OrderedDict
 from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
@@ -22,12 +21,8 @@ from ..utils.logging import get_logger
 from . import sparql_escaping
 
 
-class _TrackedNativeStore:
-    """Keep accepted-operation validation proofs coherent with raw native writes.
-
-    Every public native mutator invalidates proofs, including failed writes.
-    Reads and the backing Store remain native; no RDF facts are cached here.
-    """
+class _LockedNativeStore:
+    """Serialize raw native writes with short completion reads and publication edits."""
     _MUTATORS = frozenset({'add', 'add_graph', 'bulk_extend', 'bulk_load', 'clear',
         'clear_graph', 'extend', 'load', 'remove', 'remove_graph', 'update'})
 
@@ -40,7 +35,6 @@ class _TrackedNativeStore:
             return method
         def mutate(*args, **kwargs):
             with self._owner._publication_lock:
-                self._owner._extraction_proofs.clear()
                 return method(*args, **kwargs)
         return mutate
 
@@ -79,6 +73,18 @@ class OxigraphStore:
     def begin_publication(self, project, **options):
         from .publication_records import PublicationRecords
         return PublicationRecords(self, project).begin(**options)
+
+    def identity_stage_status(self, project, generation, input_key):
+        from .publication_records import PublicationRecords
+        return PublicationRecords(self, project).identity_stage_status(generation, input_key)
+
+    def reset_identity_stage(self, project, generation):
+        from .publication_records import PublicationRecords
+        return PublicationRecords(self, project).reset_identity_stage(generation)
+
+    def seal_identity_stage(self, project, generation, input_key):
+        from .publication_records import PublicationRecords
+        return PublicationRecords(self, project).seal_identity_stage(generation, input_key)
 
     def stage_publication_sources(self, project, generation, sources):
         from .publication_records import PublicationRecords
@@ -180,6 +186,10 @@ class OxigraphStore:
         from .extraction_records import ExtractionRecords
         return ExtractionRecords(self, binding, stage).receipt()
 
+    def audit_extraction(self, binding, stage):
+        from .extraction_records import ExtractionRecords
+        return ExtractionRecords(self, binding, stage).audit()
+
     def adopt_extraction(self, binding, stage, values, **options):
         from .extraction_records import ExtractionRecords
         return ExtractionRecords(self, binding, stage).adopt(values, **options)
@@ -244,7 +254,6 @@ class OxigraphStore:
         self.logger = get_logger("oxigraph_store")
         self._publication_lock = threading.RLock()
         self._defer_flush = False
-        self._extraction_proofs = OrderedDict()
         # Accept storage_path as an alias for path (matches the convention used
         # by other Semantica stores). Pop it so it isn't left in self.config.
         if path is None and "storage_path" in config:
@@ -273,7 +282,7 @@ class OxigraphStore:
             self.path = store_path
 
         try:
-            self.store = _TrackedNativeStore(self._oxigraph.Store(store_path), self)
+            self.store = _LockedNativeStore(self._oxigraph.Store(store_path), self)
         except Exception as exc:
             location = store_path or "memory"
             raise ProcessingError(

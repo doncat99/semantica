@@ -74,6 +74,24 @@ def test_small_context_keeps_exact_checkpoint_input():
     assert list(pipeline._extraction_context_batches("report", context, 6000)) == [context]
 
 
+def test_context_admission_encodes_each_record_once_not_each_growing_prefix(monkeypatch):
+    context = [dict(ref=str(i), quote='漢😀"\\\n' * 30) for i in range(200)]
+    encode = pipeline._context_size
+    visited = 0
+    def observe(value):
+        nonlocal visited
+        if isinstance(value, dict) and 'structure' in value:
+            visited += len(value['structure'])
+        elif isinstance(value, dict) and 'ref' in value:
+            visited += 1
+        return encode(value)
+    monkeypatch.setattr(pipeline, '_context_size', observe)
+    expected_bytes = encode(dict(text='report', structure=context))
+    assert list(pipeline._extraction_context_batches('report', context, expected_bytes)) == [context]
+    assert visited <= len(context)
+    assert len(list(pipeline._extraction_context_batches('report', context, expected_bytes - 1))) > 1
+
+
 def test_indivisible_row_has_typed_nonretryable_local_failure():
     with pytest.raises(pipeline.SemanticArtifactError) as failure:
         list(pipeline._extraction_context_batches("report", [cell(0, 0, quote="x" * 9_000)], max_bytes=2_000))
@@ -87,7 +105,8 @@ def test_batched_window_keeps_local_entity_ids_and_relation_endpoints_disjoint(m
     context = contexts()
     monkeypatch.setattr(pipeline, "_window_grounding_context", lambda *_: context)
     calls = []
-    def extract(text, relay, spec, item, context, formula_semantics):
+    def extract(text, relay, spec, item, context, formula_semantics, *, references_only=False):
+        assert references_only is False
         assert formula_semantics is False
         calls.append(context)
         a = Entity("AEP", "ORG", 0, 3, metadata={"mention_id": "a"})
@@ -154,7 +173,8 @@ def test_complete_request_overhead_refines_only_unsatisfied_evidence_batches(mon
     context = contexts()
     monkeypatch.setattr(pipeline, '_window_grounding_context', lambda *_: context)
     admitted, rejected = [], []
-    def extract(text, relay, spec, item, records, formula):
+    def extract(text, relay, spec, item, records, formula, *, references_only=False):
+        assert references_only is False
         size = pipeline._context_size({'text': item[2], 'structure': records}) + 3000
         if size > 10000:
             rejected.append(records)

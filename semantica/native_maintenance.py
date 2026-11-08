@@ -105,7 +105,7 @@ def verify_native_installation(request, *, cancelled=lambda: False, progress=lam
                     if len(values) != 1:
                         raise ProcessingError('Native accepted operation binding incomplete')
                     source[field] = values[0]
-                publication.verify_operation(operation.value,source)
+                publication.verify_operation(operation.value,source).audit()
                 counts['acceptedOperations'] += 1
             operation_after = operations[-1]['operation'].value
             progress(dict(counts))

@@ -158,9 +158,85 @@ class PublicationRecords:
             triples.append(self.triple(self.head, "canonicalCount", self.ox.Literal(canonical_count)))
         guard = (f"GRAPH {self.graph} {{ {self.head} <{P}generation> {self.scalar(expected_generation)} }}" if expected_generation is not None
                  else f"FILTER NOT EXISTS {{ GRAPH {self.graph} {{ {self.head} <{P}generation> ?generation }} }}")
-        self.owner._update_derived_graph(self.graph, delete="?s ?p ?o", insert=" ".join(triples), where=f"{guard} OPTIONAL {{ GRAPH {self.graph} {{ ?s ?p ?o }} }}")
+        # Completed identity decisions are immutable references independent of
+        # publication generation. Keep them in place while replacing all other
+        # derived output; incomplete stages are discarded atomically.
+        reusable = (len(self.values(self.head, 'identityStageInput')) == 1
+                    and len(self.values(self.head, 'identityStageCount')) == 1
+                    and len(self.values(self.head, 'identityIndexSealed')) == 1)
+        discard = ('FILTER(!(' + self._identity_selection('?s', '?p') + '))') if reusable else ''
+        self.owner._update_derived_graph(self.graph, delete="?s ?p ?o", insert=" ".join(triples),
+            where=f"{guard} OPTIONAL {{ GRAPH {self.graph} {{ ?s ?p ?o }} {discard} }}")
         self.owner.flush()
         return self.fence(generation, "pending")
+
+    def _identity_selection(self, subject, predicate):
+        """The sole native identity-stage ownership boundary inside this graph."""
+        return f"""STRSTARTS(STR({predicate}), "{P}identity") ||
+            ({subject} = {self.head} && {predicate} = <{P}canonical>) ||
+            EXISTS {{ GRAPH {self.graph} {{ {self.head} <{P}canonical> {subject} }} }} ||
+            EXISTS {{ GRAPH {self.graph} {{ ?identityCanonical <{P}selector> {subject} }}
+                FILTER EXISTS {{ GRAPH {self.graph} {{ {self.head} <{P}canonical> ?identityCanonical }} }} }}"""
+
+    @_locked
+    def identity_stage_status(self, generation, input_key):
+        """Point-read a complete decision stage; never restore or audit entities."""
+        self.fence(generation, 'pending')
+        self.scalar(input_key)
+        values = self.values(self.head, 'identityStageInput')
+        if not values:
+            return None
+        if len(values) != 1:
+            raise ProcessingError('Invalid native identity completion marker')
+        if values[0].value != input_key:
+            return None
+        if not self.values(self.head, 'identityIndexSealed'):
+            raise ProcessingError('Native identity completion lacks sealed index')
+        return dict(input_key=input_key,
+                    canonical_count=int(self.one(self.head, 'identityStageCount')))
+
+    @_locked
+    def reset_identity_stage(self, generation):
+        """Invalidate only identity output after an explicit dependency mismatch."""
+        self.fence(generation, 'pending')
+        self.owner._update_derived_graph(self.graph, delete='?s ?predicate ?o',
+            where=f"""GRAPH {self.graph} {{ ?s ?predicate ?o }}
+                FILTER({self._identity_selection('?s', '?predicate')} ||
+                    (?s = {self.head} && ?predicate = <{P}canonicalCount>))""")
+        self.owner.flush()
+        self.fence(generation, 'pending')
+
+    @_locked
+    def seal_identity_stage(self, generation, input_key):
+        """Commit completion only after every decision reference is durable."""
+        self.fence(generation, 'pending')
+        self.scalar(input_key)
+        if self.values(self.head, 'identityStageInput'):
+            raise ProcessingError('Native identity stage already sealed')
+        if not self.values(self.head, 'identityIndexSealed'):
+            raise ProcessingError('Native identity candidate index is not sealed')
+        for field, count in [('member', 'memberCount'), ('selector', 'selectorCount')]:
+            incomplete = self.owner.store.query(f"""SELECT ?canonical WHERE {{ GRAPH {self.graph} {{
+                {self.head} <{P}canonical> ?canonical . ?canonical <{P+count}> ?expected .
+                OPTIONAL {{ ?canonical <{P+field}> ?ref }} }} }} GROUP BY ?canonical ?expected
+                HAVING(COUNT(?ref) != ?expected) LIMIT 1""")
+            if next(iter(incomplete), None) is not None:
+                raise ProcessingError('Canonical identity '+field+' plan is incomplete')
+        member, canonical = self.ox.NamedNode(P+'member'), self.ox.NamedNode(P+'canonical')
+        for mention in self.owner.store.quads_for_pattern(
+                self.head, self.ox.NamedNode(P+'identityMember'), None, self.graph):
+            check_query_cancellation()
+            # Reverse member lookup avoids joining every canonical for each mention.
+            if not any(next(self.owner.store.quads_for_pattern(
+                    self.head, canonical, reference.subject, self.graph), None) is not None
+                    for reference in self.owner.store.quads_for_pattern(
+                        None, member, mention.object, self.graph)):
+                raise ProcessingError('Canonical identity membership coverage is incomplete')
+        count = int(next(iter(self.owner.store.query(f"""SELECT (COUNT(?canonical) AS ?count)
+            WHERE {{ GRAPH {self.graph} {{ {self.head} <{P}canonical> ?canonical }} }}""")))['count'].value)
+        self.mutate(generation, [self.triple(self.head, 'identityStageInput', self.scalar(input_key)),
+            self.triple(self.head, 'identityStageCount', self.ox.Literal(count))])
+        return count
 
     @_locked
     def seal_canonical_count(self, generation, count):
@@ -181,7 +257,7 @@ class PublicationRecords:
             raise ProcessingError("Publication batch must contain 1..128 records")
 
     def verify_operation(self, identity, source):
-        """Verify the accepted native receipt, shared by publish and offline audit."""
+        """Verify native completion and source binding; offline maintenance calls audit."""
         operation = self.iri(identity)
         for field, expected in dict(project=self.project, **{k: source[k] for k in ("source", "material", "representation")}).items():
             predicate = self.ox.NamedNode(F + "binding" + field[0].upper() + field[1:])
@@ -439,10 +515,16 @@ class PublicationRecords:
         self.batch(records)
         triples, plans, assigned = [], {}, {}
         required = {"id", "source", "target", "representative", "members", "member_count", "status"}
+        member_count = 0
+        plan_rows = []
+        expected_members = {}
         for record in records:
             if not isinstance(record, dict) or set(record) != required:
                 raise ProcessingError("Canonical fact requires exact reference membership")
             self.batch(record["members"])
+            member_count += len(record["members"])
+            if member_count > MAX_ROWS:
+                raise ProcessingError("Canonical fact staging exceeds the member page limit")
             if (type(record["member_count"]) is not int
                     or not len(record["members"]) <= record["member_count"] <= 1000000
                     or len(set(record["members"])) != len(record["members"])
@@ -455,45 +537,129 @@ class PublicationRecords:
             if record["id"] in plans and plans[record["id"]] != fields:
                 raise ProcessingError("Canonical fact plan changed")
             plans[record["id"]] = fields
-            for field, value in fields.items():
-                current = self.values(node, field)
-                if current and (len(current) != 1 or current[0].value != value):
-                    raise ProcessingError("Canonical fact plan changed")
-            for field in ("source", "target"):
-                ref = self.iri(record[field])
-                if not bool(self.owner.store.query(f'ASK {{ GRAPH {self.graph} {{ {self.head} <{P}canonical> {ref} }} }}')):
-                    raise ProcessingError("Canonical fact endpoint outside publication")
-            representative = self.iri(record["representative"])
-            self.member(representative)
-            identity_fields = ("predicateName", "polarity", "condition", "time", "unit", "qualifiedValue")
-            def native_fields(member, field):
-                values = {q.object for q in self.owner.store.quads_for_pattern(member, self.ox.NamedNode(F+field), None, self.facts)}
-                if field == "predicateName":
-                    if len(values) != 1 or not isinstance(next(iter(values)), self.ox.Literal):
-                        raise ProcessingError("Native fact predicate missing or duplicated")
-                    return {normalize_fact_predicate(value.value) for value in values}
-                return values
-            representative_fields = {field: native_fields(representative, field) for field in identity_fields}
+            self.scalar(record["source"])
+            self.scalar(record["target"])
+            self.scalar(record["representative"])
+            self.iri(record["source"])
+            self.iri(record["target"])
+            self.iri(record["representative"])
+            self.scalar(record["id"])
+            self.scalar(record["status"])
+            plan_rows.append('('+ ' '.join((str(node), str(self.iri(record["source"])),
+                str(self.iri(record["target"])), str(self.iri(record["representative"])),
+                str(self.ox.Literal(fields["memberCount"])), str(self.scalar(record["status"])))) + ')')
             for identity in record["members"]:
                 member = self.iri(identity)
-                self.member(member)
-                if not bool(self.owner.store.query(f'ASK {{ GRAPH {self.facts} {{ {member} <{RDF_TYPE}> <{F}Relation> }} }}')):
-                    raise ProcessingError("Canonical fact member must be a native Relation")
-                if any(native_fields(member, field) != representative_fields[field] for field in identity_fields):
-                    raise ProcessingError("Canonical fact member qualifier or predicate differs")
-                for native, canonical in (("sourceEntity", "source"), ("targetEntity", "target")):
-                    if not bool(self.owner.store.query(f'ASK {{ GRAPH {self.graph} {{ {self.iri(record[canonical])} <{P}member> ?entity }} GRAPH {self.facts} {{ {member} <{F+native}> ?entity }} }}')):
-                        raise ProcessingError("Canonical fact member endpoint differs")
-                previous = assigned.get(identity)
-                existing = list(self.owner.store.query(f'SELECT ?fact WHERE {{ GRAPH {self.graph} {{ {self.head} <{P}fact> ?fact . ?fact <{P}member> {member} }} }} LIMIT 2'))
-                if (previous is not None and previous != record["id"]) or any(r["fact"].value != record["id"] for r in existing):
+                if identity in assigned:
                     raise ProcessingError("Native Relation already belongs to another canonical fact")
                 assigned[identity] = record["id"]
+                expected_members[identity] = dict(source=record["source"], target=record["target"],
+                    fact=record["id"], representative=record["representative"])
                 triples.append(self.triple(node, "member", member))
             triples.append(self.triple(self.head, "fact", node))
             for field, value in fields.items():
                 term = self.iri(value) if field in {"source", "target", "representative"} else self.scalar(value)
                 triples.append(self.triple(node, field, term))
+
+        plan_query = f'''SELECT ?fact ?field ?value WHERE {{
+            VALUES (?fact ?source ?target ?representative ?memberCount ?status) {{ {' '.join(plan_rows)} }}
+            OPTIONAL {{ GRAPH {self.graph} {{ ?fact ?field ?value .
+                VALUES ?field {{ <{P}source> <{P}target> <{P}representative> <{P}memberCount> <{P}status> }} }} }}
+        }}'''
+        existing_plans = {}
+        for row in self.owner.store.query(plan_query):
+            if row['field'] is not None:
+                existing_plans.setdefault(row['fact'].value, {}).setdefault(row['field'].value, set()).add(row['value'].value)
+        for fact, fields in plans.items():
+            current = existing_plans.get(fact, {})
+            if any(len(current.get(P+field, set())) > 1 or
+                    (current.get(P+field) and next(iter(current[P+field])) != value)
+                    for field, value in fields.items()):
+                raise ProcessingError("Canonical fact plan changed")
+
+        identity_fields = ("predicateName", "polarity", "condition", "time", "unit", "qualifiedValue")
+        field_values = ' '.join(f'<{F}{field}>' for field in identity_fields)
+        fact_rows = []
+        for identity, expected in expected_members.items():
+            fact_rows.extend((
+                '('+' '.join((str(self.iri(identity)), str(self.iri(identity)), '"member"'))+')',
+                '('+' '.join((str(self.iri(identity)), str(self.iri(expected['representative'])), '"representative"'))+')',
+            ))
+        fact_rows_text = ' '.join(fact_rows)
+        if len(fact_rows_text.encode()) > MAX_BYTES:
+            raise ProcessingError("Canonical fact validation input exceeds byte budget")
+        member_query = f'''SELECT DISTINCT ?member ?side ?field ?value WHERE {{
+            VALUES (?member ?record ?side) {{ {fact_rows_text} }}
+            GRAPH {self.facts} {{
+                ?record <{RDF_TYPE}> <{F}Relation> ; ?field ?value .
+                VALUES ?field {{ {field_values} }}
+            }}
+        }}'''
+        observed = {}
+        projected_bytes = 0
+        for row in self.owner.store.query(member_query):
+            identity = row['member'].value
+            value = observed.setdefault(identity, dict(fields={field: set() for field in identity_fields},
+                representative_fields={field: set() for field in identity_fields}))
+            projected_bytes += sum(len(str(row[key]).encode()) for key in ('member', 'side', 'field', 'value'))
+            if projected_bytes > MAX_BYTES:
+                raise ProcessingError("Canonical fact validation projection exceeds byte budget")
+            field = row['field'].value.removeprefix(F)
+            key = 'fields' if row['side'].value == 'member' else 'representative_fields'
+            value[key][field].add(row['value'])
+        if set(observed) != set(expected_members):
+            raise ProcessingError("Canonical fact member is not a current native Relation")
+        expected_owned = set(expected_members) | {value['representative'] for value in expected_members.values()}
+        owner_values = ' '.join(str(self.iri(identity)) for identity in expected_owned)
+        if len(owner_values.encode()) > MAX_BYTES:
+            raise ProcessingError("Canonical fact ownership scope exceeds byte budget")
+        owner_query = f'''SELECT DISTINCT ?member WHERE {{
+            VALUES ?member {{ {owner_values} }}
+            GRAPH {self.graph} {{ {self.head} <{P}source> ?sourceOwner . ?sourceOwner <{P}operation> ?operation }}
+            GRAPH {self.facts} {{ ?operation <{F}ownedRecord> ?member }}
+        }}'''
+        owned = {row['member'].value for row in self.owner.store.query(owner_query)}
+        if owned != expected_owned:
+            raise ProcessingError("Canonical fact member is outside the current publication")
+        endpoint_values = []
+        for identity, expected in expected_members.items():
+            endpoint_values.append('('+ ' '.join((str(self.iri(identity)), str(self.iri(expected['source'])),
+                str(self.iri(expected['target'])))) + ')')
+        endpoint_query = f'''SELECT DISTINCT ?member ?source ?target WHERE {{
+            VALUES (?member ?expectedSource ?expectedTarget) {{ {' '.join(endpoint_values)} }}
+            GRAPH {self.facts} {{ ?member <{F}sourceEntity> ?nativeSource ; <{F}targetEntity> ?nativeTarget }}
+            GRAPH {self.graph} {{ ?expectedSource <{P}member> ?nativeSource .
+                ?expectedTarget <{P}member> ?nativeTarget }}
+            BIND(?expectedSource AS ?source)
+            BIND(?expectedTarget AS ?target)
+        }}'''
+        endpoint_rows = list(self.owner.store.query(endpoint_query))
+        endpoints = {row['member'].value: (row['source'].value, row['target'].value) for row in endpoint_rows}
+        if endpoints != {identity: (value['source'], value['target']) for identity, value in expected_members.items()}:
+            raise ProcessingError("Canonical fact member endpoint differs")
+        existing_query = f'''SELECT DISTINCT ?member ?existingFact WHERE {{
+            VALUES ?member {{ {' '.join(str(self.iri(identity)) for identity in expected_members)} }}
+            GRAPH {self.graph} {{ {self.head} <{P}fact> ?existingFact . ?existingFact <{P}member> ?member }}
+        }}'''
+        existing = {}
+        for row in self.owner.store.query(existing_query):
+            existing.setdefault(row['member'].value, set()).add(row['existingFact'].value)
+        for identity, value in observed.items():
+            expected = expected_members[identity]
+            if existing.get(identity) and existing[identity] != {expected['fact']}:
+                raise ProcessingError("Native Relation already belongs to another canonical fact")
+            if len(value['fields']['predicateName']) != 1 or not isinstance(
+                    next(iter(value['fields']['predicateName'])), self.ox.Literal):
+                raise ProcessingError("Native fact predicate missing or duplicated")
+            if len(value['representative_fields']['predicateName']) != 1:
+                raise ProcessingError("Native fact predicate missing or duplicated")
+            if not isinstance(next(iter(value['representative_fields']['predicateName'])), self.ox.Literal):
+                raise ProcessingError("Native fact predicate missing or duplicated")
+            def normalize(fields):
+                return {field: (frozenset(normalize_fact_predicate(item.value) for item in values)
+                    if field == 'predicateName' else frozenset(values)) for field, values in fields.items()}
+            if normalize(value['fields']) != normalize(value['representative_fields']):
+                raise ProcessingError("Canonical fact member qualifier or predicate differs")
         self.mutate(generation, triples)
 
     @_locked
@@ -601,13 +767,31 @@ class PublicationRecords:
             FILTER NOT EXISTS {{ ?fact <{P}member> ?representative }} }} }}""")
         if bool(invalid):
             raise ProcessingError("Canonical fact representative is not a member")
-        missing = self.owner.store.query(f"""ASK {{ GRAPH {self.graph} {{
-            {self.head} <{P}source> ?membership . ?membership <{P}operation> ?operation }}
-            GRAPH {self.facts} {{ ?operation <{F}ownedRecord> ?relation .
-                ?relation <{RDF_TYPE}> <{F}Relation> }}
-            FILTER NOT EXISTS {{ GRAPH {self.graph} {{ {self.head} <{P}fact> ?fact .
-                ?fact <{P}member> ?relation }} }} }}""")
-        if bool(missing):
+        invalid_member = self.owner.store.query(f"""ASK {{ GRAPH {self.graph} {{
+            {self.head} <{P}fact> ?fact . ?fact <{P}member> ?relation }}
+            FILTER NOT EXISTS {{ GRAPH {self.facts} {{
+                ?operation <{F}ownedRecord> ?relation . ?relation <{RDF_TYPE}> <{F}Relation> }}
+                GRAPH {self.graph} {{ {self.head} <{P}source> ?sourceOwner .
+                    ?sourceOwner <{P}operation> ?operation }} }} }}""")
+        if bool(invalid_member):
+            raise ProcessingError("Canonical fact member is outside the current publication")
+        duplicate_member = self.owner.store.query(f"""ASK {{ GRAPH {self.graph} {{
+            {self.head} <{P}fact> ?left, ?right . ?left <{P}member> ?relation .
+            ?right <{P}member> ?relation . FILTER(?left != ?right) }} }}""")
+        if bool(duplicate_member):
+            raise ProcessingError("Native Relation belongs to multiple canonical facts")
+        relation_scope = f"""GRAPH {self.graph} {{ {self.head} <{P}source> ?membership .
+            ?membership <{P}operation> ?operation }} GRAPH {self.facts} {{
+            ?operation <{F}ownedRecord> ?relation . ?relation <{RDF_TYPE}> <{F}Relation> }}"""
+        owned_count = next(iter(self.owner.store.query(f"SELECT (COUNT(DISTINCT ?relation) AS ?count) WHERE {{ {relation_scope} }}")))["count"]
+        # stage_facts admits only owned relations and forbids cross-fact assignment;
+        # the check above verifies each fact's actual membership count. Their sum
+        # therefore proves exact coverage without joining every relation again.
+        planned_count = next(iter(self.owner.store.query(f"""SELECT (COALESCE(SUM(xsd:integer(?expected)), 0) AS ?count) WHERE {{
+            GRAPH {self.graph} {{ {self.head} <{P}fact> ?fact .
+                ?fact <{P}memberCount> ?expected }} }}""", prefixes={"xsd": "http://www.w3.org/2001/XMLSchema#"})))["count"]
+        check_query_cancellation()
+        if int(owned_count.value) != int(planned_count.value):
             raise ProcessingError("Canonical fact coverage is incomplete")
         body = " ".join(triples)
         self.owner._update_derived_graph(self.graph, delete=f"{self.head} <{P}state> 'pending'", insert=f"{self.head} <{P}state> 'ready' . {body}", where=f"GRAPH {self.graph} {{ {self.head} <{P}generation> {self.scalar(generation)} ; <{P}state> 'pending' }}")

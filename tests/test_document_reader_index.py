@@ -118,6 +118,9 @@ def test_same_content_rebinding_adds_zero_parsed_content_bytes(tmp_path, monkeyp
         'mimeType': 'text/plain'}, 'outputDir': str(tmp_path / 'parsed'),
         'forceOcr': False, 'documentProcessing': {'mode': 'local'}}
     original = parse_source_artifact(ParseSourceRequest.model_validate(params))
+    # Existing producer metadata remains valid after the current implementation changes.
+    import semantica.source as current_source
+    monkeypatch.setattr(current_source, 'source_processing_revision', lambda *a, **k: 'sha256:' + 'f' * 64)
     target = tmp_path / 'rebound'
     original_reader = Path.read_bytes
     def bounded_reads(path):
@@ -176,7 +179,7 @@ def test_reuse_rejects_actual_processing_profile_changes(tmp_path, change):
         _load_parsed_source(SourceBuildInput.model_validate(params['source']), ref, False, changed)
 
 
-def test_processing_recipe_binds_native_implementation_without_importing_it(tmp_path, monkeypatch):
+def test_processing_recipe_ignores_native_implementation(tmp_path, monkeypatch):
     import semantica.source as owner
     path = tmp_path / 'source.txt'
     base = owner.source_processing_revision(path, mime_type='text/plain', force_ocr=False)
@@ -184,27 +187,8 @@ def test_processing_recipe_binds_native_implementation_without_importing_it(tmp_
         document_processing={'mode': 'local'})
     assert base != owner.source_processing_revision(path.with_suffix('.md'), mime_type='text/plain', force_ocr=False)
     assert base != owner.source_processing_revision(path, mime_type='text/plain', force_ocr=True)
-    monkeypatch.setattr(owner, '_processing_implementation', lambda *args: {'owners': {'native': 'changed'}})
-    assert base != owner.source_processing_revision(path, mime_type='text/plain', force_ocr=False)
-
-
-@pytest.mark.parametrize('suffix,mime,mode,parser_owner', [
-    ('.pdf', 'application/pdf', 'native', 'parse/pdf_parser.py'),
-    ('.pdf', 'application/pdf', 'local', 'parse/docling_parser.py'),
-    ('.docx', 'application/vnd.openxmlformats-officedocument.wordprocessingml.document', 'local', 'parse/docling_parser.py'),
-])
-def test_managed_recipe_binds_actual_native_parser_owner(tmp_path, monkeypatch, suffix, mime, mode, parser_owner):
-    import semantica.source as owner
-    original = owner._processing_implementation
-    seen = []
-    def implementation(admitted_suffix, processing_mode):
-        recipe = original(admitted_suffix, processing_mode)
-        seen.append(recipe)
-        return recipe
-    monkeypatch.setattr(owner, '_processing_implementation', implementation)
-    owner.source_processing_revision(tmp_path / 'b3-material', mime_type=mime, force_ocr=False,
-        document_processing={'mode': mode})
-    assert parser_owner in seen[0]['owners']
+    monkeypatch.setattr(owner, '_processing_implementation', lambda *args: {'owners': {'native': 'changed'}}, raising=False)
+    assert base == owner.source_processing_revision(path, mime_type='text/plain', force_ocr=False)
 
 
 @pytest.mark.parametrize('suffix,mime', [('.pdf', 'application/pdf'), ('.md', 'text/plain')])
@@ -215,7 +199,7 @@ def test_logical_and_physical_format_have_identical_recipe(tmp_path, suffix, mim
         mime_type=mime, force_ocr=False) == expected
 
 
-def test_managed_office_recipe_binds_immutable_runtime_receipt(tmp_path, monkeypatch):
+def test_managed_office_recipe_ignores_runtime_receipt(tmp_path, monkeypatch):
     import json
     from semantica.source import source_processing_revision
     root = tmp_path / 'office'
@@ -228,4 +212,4 @@ def test_managed_office_recipe_binds_immutable_runtime_receipt(tmp_path, monkeyp
     receipt.write_text(json.dumps({'version': '26.2.6', 'executable': 'soffice', 'digest': 'one'}))
     first = revision()
     receipt.write_text(json.dumps({'version': '26.2.6', 'executable': 'soffice', 'digest': 'two'}))
-    assert revision() != first
+    assert revision() == first

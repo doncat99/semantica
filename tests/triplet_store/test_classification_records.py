@@ -24,6 +24,28 @@ def test_classification_typed_roundtrip_and_receipts(tmp_path):
     assert all("quote" not in q.predicate.value and "payload" not in q.predicate.value for q in store.store)
 
 
+def test_classification_completion_uses_classification_binding_not_extraction_stage(tmp_path):
+    from semantica.triplet_store.classification_records import ClassificationRecords
+    from semantica.triplet_store.extraction_records import F, _hash
+    profile, binding, receipt, value = inputs()
+    store = OxigraphStore(tmp_path / 'facts')
+    store.adopt_classification(binding, value, profile=profile, allowed_evidence_ids=['evidence-1'],
+        accepted_digest='paid', receipts=[receipt])
+    owner = ClassificationRecords(store, binding)
+    ox = store._oxigraph
+    # Classification's persisted contract has its own binding, not entities/relations stage.
+    for field in ('extractionStage', 'operationDigest'):
+        for quad in list(store.store.quads_for_pattern(owner.operation, ox.NamedNode(F + field), None, owner.graph)):
+            store.store.remove(quad)
+    facts = list(store.store.quads_for_pattern(owner.operation, None, None, owner.graph))
+    store.store.add(ox.Quad(owner.operation, ox.NamedNode(F + 'operationDigest'), ox.Literal(_hash(facts)), owner.graph))
+    before = set(store.store)
+    assert owner.receipt()['accepted_digest'] == 'paid'
+    assert owner.audit() == owner.receipt()
+    assert store.read_classification(binding, profile=profile, allowed_evidence_ids=['evidence-1']) == value
+    assert set(store.store) == before
+
+
 def test_native_reduction_references_batches_preserves_conflict_minimum_and_union(tmp_path):
     import gc
     from semantica.triplet_store.classification_records import ClassificationRecords

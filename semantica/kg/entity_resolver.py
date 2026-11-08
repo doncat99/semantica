@@ -200,9 +200,11 @@ class EntityResolver:
                 # Merge the duplicate group into a single canonical entity
                 if self.resolution_strategy in ("exact", "contextual"):
                     merge_operations = [
-                        self.entity_merger.merge_entity_group(
-                            group.entities, **self.config
+                        self.entity_merger._merge_adjudicated_group(
+                            group, **self.config
                         )
+                        if self.resolution_strategy == "contextual"
+                        else self.entity_merger.merge_entity_group(group.entities, **self.config)
                     ]
                 else:
                     merge_operations = self.entity_merger.merge_duplicates(

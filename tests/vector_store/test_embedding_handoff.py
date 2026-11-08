@@ -61,6 +61,20 @@ def test_offline_identity_migration_keeps_physical_vectors_receipts_and_rowids(t
     owner.close()
 
 
+def test_parser_rebind_requires_explicit_equivalence_and_preserves_paid_result(tmp_path):
+    owner = SQLiteVecStore.open_embedding_space(str(tmp_path/'vectors.db'), SPACE, 3)
+    before = owner.adopt_embedding(BINDING, [[1.,0.,0.],[0.,1.,0.]], RECEIPT, accepted_digest='paid')
+    current = {**BINDING, 'parser': 'semantic-parser'}
+    items = [dict(previous=BINDING, current=current)]
+    with pytest.raises(ValidationError, match='changed a paid input'):
+        owner.migrate_embedding_identity(SPACE, items)
+    assert owner.read_embedding(BINDING) == before
+    owner.migrate_embedding_identity(SPACE, items, parser_rebindings={(BINDING['parser'], current['parser'])})
+    assert owner.read_embedding(current) == before
+    assert owner._conn.execute('SELECT count(*) FROM embeddings_embedding_operations').fetchone()[0] == 1
+    owner.close()
+
+
 def test_logical_mapping_to_missing_physical_operation_fails_closed(tmp_path):
     owner = SQLiteVecStore.open_embedding_space(str(tmp_path/'vectors.db'),SPACE,3)
     owner.adopt_embedding(BINDING,[[1.,0.,0.],[0.,1.,0.]],RECEIPT,accepted_digest='paid')

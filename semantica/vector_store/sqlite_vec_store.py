@@ -377,11 +377,12 @@ class SQLiteVecStore:
         with self._lock, self._get_connection() as conn:
             return self._embedding_physical_id(conn, identity)
 
-    def migrate_embedding_identity(self, target_space, bindings):
+    def migrate_embedding_identity(self, target_space, bindings, *, parser_rebindings=()):
         """Offline atomic reindexing; vectors, receipts and publication rows stay put.
 
         The caller proves recipe equivalence before invoking this maintenance
-        operation. Every physical operation must be covered exactly once. Old
+        operation. Parser rebindings must be explicitly proven against the same
+        immutable parsed representation. Every physical operation must be covered exactly once. Old
         publication space receipts become explicitly stale, requiring a native
         publication rebuild, never another paid embedding call.
         """
@@ -407,7 +408,10 @@ class SQLiteVecStore:
                         raise ValidationError('Embedding migration requires exact previous/current bindings')
                     previous, current = item['previous'], item['current']
                     old_id, new_id = self.embedding_operation_id(previous), self.embedding_operation_id(current)
-                    if any(previous[k] != current[k] for k in previous if k not in {'recipe','space'}):
+                    allowed = {'recipe', 'space'}
+                    if (previous['parser'], current['parser']) in parser_rebindings:
+                        allowed.add('parser')
+                    if any(previous[k] != current[k] for k in previous if k not in allowed):
                         raise ValidationError('Embedding migration changed a paid input')
                     for binding, space in ((previous,previous_space),(current,target_space)):
                         if binding['space'] != space['binding'] or any(binding[k] != space[k] for k in ('model','recipe')):

@@ -30,6 +30,9 @@ License: MIT
 """
 
 import re
+import hashlib
+import json
+from tempfile import TemporaryFile
 from contextlib import contextmanager
 from ..semantic_worker_context import check_query_cancellation
 from typing import Any, Dict, List, Optional
@@ -409,13 +412,16 @@ class EntityDisambiguator:
         # The caller owns the bounded, immutable component for this scope.
         previous = getattr(self, '_resolution_features', None)
         previous_bytes = getattr(self, '_resolution_feature_bytes', 0)
+        previous_rows = getattr(self, '_identity_projection_rows', None)
         self._resolution_features = {}
+        self._identity_projection_rows = {}
         self._resolution_feature_bytes = 0
         try:
             yield
         finally:
             self._resolution_features = previous
             self._resolution_feature_bytes = previous_bytes
+            self._identity_projection_rows = previous_rows
 
     def disambiguate(self, entity_name: str, **context) -> Dict[str, Any]:
         """
@@ -544,6 +550,8 @@ class EntityDisambiguator:
 
     @classmethod
     def _description_key(cls, entity):
+        if '_identity_features' in entity:
+            return frozenset(entity['_identity_features']['description_key'])
         value = str(entity.get('description') or '')
         supported = entity.get('metadata', {}).get('description_evidence_ids')
         if value and (supported or value.casefold() in str(entity.get('context', '')).casefold()):
@@ -552,6 +560,8 @@ class EntityDisambiguator:
 
     @classmethod
     def _context_definition(cls, entity):
+        if '_identity_features' in entity:
+            return frozenset(entity['_identity_features']['context_definition'])
         name = str(entity.get('name', ''))
         match = re.search(r'(?<!\w)' + re.escape(name) +
             r'(?:\s*\([\"“”\w -]+\))?\s+is\s+((?:not\s+)?(?:an?|the)\s+[^.!?;\n]+)',
@@ -565,6 +575,8 @@ class EntityDisambiguator:
         Different hints request review; they never prove different identities.
         Other prose is missing information, including ordinary reporting activity.
         """
+        if '_identity_features' in entity:
+            return frozenset(entity['_identity_features']['context_fact'])
         name = str(entity.get('name', ''))
         text = str(entity.get('context', ''))
         definition = cls._context_definition(entity)
@@ -577,6 +589,10 @@ class EntityDisambiguator:
 
     @_resolution_feature
     def _explicit_owner(self, entity):
+        if '_identity_features' in entity:
+            owner = entity['_identity_features']['explicit_owner']
+            definitions = self._owner_aliases.get((self._scope(entity), owner), set())
+            return next(iter(definitions)) if len(definitions) == 1 else owner
         owner = self._owner(entity)
         if owner:
             return owner
@@ -609,6 +625,8 @@ class EntityDisambiguator:
 
     @_resolution_feature
     def _instance(self, entity):
+        if '_identity_features' in entity:
+            return entity['_identity_features']['instance']
         profile = self._profile(entity)
         value = profile.get('instance')
         if value and value in str(profile.get('evidence', '')):
@@ -656,15 +674,138 @@ class EntityDisambiguator:
             return max(observed, key=lambda words: (len(words), tuple(sorted(words))))
         return frozenset()
 
-    def prepare(self, entities, *, context=None):
+    def identity_projection(self, entity):
+        """Read prose once; subsequent rule passes consume only grounded observations."""
+        if '_identity_features' in entity:
+            return entity
+        projected_rows = getattr(self, '_identity_projection_rows', None)
+        if projected_rows is not None and id(entity) in projected_rows:
+            return projected_rows[id(entity)][1]
+        name = str(entity.get('name', '')).strip()
+        text = str(entity.get('context', ''))
+        normalized = self._identity_name(text)
+        grounded, local, abbreviations = set(), set(), set()
+        if re.fullmatch(r'[A-Z][A-Z0-9-]{1,15}', name):
+            pattern = (r'(?<!\w)([A-Z][\w&.-]*(?:[ \t]+(?:[A-Z][\w&.-]*|of|for|and|the)){1,15})'
+                       r'\s*\(["“]?' + re.escape(name) + r'["”]?\)')
+            for match in re.finditer(pattern, text):
+                if self._abbreviation(match[1], name):
+                    grounded.add((name.casefold(), self._referent_name(match[1])))
+        full = re.sub(r'\s*\([A-Z][A-Z0-9-]+\)$', '', name).strip()
+        if len(full.split()) >= 2:
+            pattern = r'(?<!\w)' + re.escape(full) + r'\s*\(["“]?([A-Z][A-Z0-9-]+)["”]?\)'
+            for match in re.finditer(pattern, text):
+                preceding = re.search(r'([A-Z][\w&.-]*)[ \t]+$', text[:match.start()])
+                if preceding and preceding[1] not in {'The', 'A', 'An', 'Our', 'Its', 'Their', 'This'}:
+                    continue
+                if self._abbreviation(full, match[1]):
+                    grounded.add((match[1].casefold(), self._referent_name(full)))
+        # Keep exact parenthetical suffix bindings, not the surrounding paragraph.
+        for match in re.finditer(r'\(\s*["“]?([a-z][a-z0-9-]*)["”]?\s*\)', normalized):
+            short = match[1]
+            if len(re.findall(r'(?<!\w)' + re.escape(short) + r'(?!\w)', normalized)) != 1:
+                continue
+            prefix = normalized[:match.start()].rstrip()
+            for start in (m.start() for m in re.finditer(r'(?<!\w)\w', prefix)):
+                full = prefix[start:]
+                local.add((short, full))
+        for match in re.finditer(r'\(\s*([a-z][a-z0-9-]*)\s*\)', text, re.I):
+            short = match[1]
+            if len(re.findall(r'(?<!\w)' + re.escape(short) + r'(?!\w)', text, re.I)) != 1:
+                continue
+            prefix = text[:match.start()].rstrip()
+            for start in (m.start() for m in re.finditer(r'(?<!\w)\w', prefix)):
+                full = prefix[start:]
+                words = re.findall(r'[^\W_]+', full, re.UNICODE)
+                if len(words) >= 2 and ''.join(word[0] for word in words).casefold() == short.casefold():
+                    abbreviations.add((full.casefold(), short.casefold()))
+        profile = self._profile(entity)
+        owner_aliases = set()
+        pattern = r'(?<!\w)([A-Z][\w&.-]*(?:[ \t]+[A-Z][\w&.-]*)*)\s*\(["“]?([\w -]+)["”]?\)'
+        owner = self._identity_name(profile.get('owner') or '')
+        for match in re.finditer(pattern, str(profile.get('evidence') or '')):
+            full, short = self._identity_name(match[1]), self._identity_name(match[2])
+            if owner and owner in {full, short} and self._abbreviation(full, short):
+                owner_aliases.update(((full, full), (short, full)))
+        # Explicit owner extraction must not accidentally use an earlier run's aliases.
+        aliases = self._owner_aliases
+        self._owner_aliases = {}
+        try:
+            explicit_owner = self._explicit_owner(entity)
+        finally:
+            self._owner_aliases = aliases
+        role = re.search(r'\bchief\s+(?:\w+\s+){0,4}officer\b', text, re.I)
+        metadata = {k: v for k, v in entity.get('metadata', {}).items()
+                    if k in {'identity_scope', 'source_ids', 'identity_context_evidence_id', 'description_evidence_ids'}}
+        metadata['identity_profile'] = {'referent_kind': profile.get('referent_kind')}
+        projected = {k: entity[k] for k in ('id', 'name', 'type', 'properties', 'aliases', 'evidence_ids') if k in entity} | {
+            'metadata': metadata, '_identity_features': {
+                'occurrence_count': len(re.findall(r'(?<!\w)' + re.escape(name) + r'(?!\w)', text, re.I)) if name else 0,
+                'context_definition': sorted(self._context_definition(entity)),
+                'context_fact': sorted(self._context_fact(entity)),
+                'description_key': sorted(self._description_key(entity)),
+                'description_grounded': bool(str(entity.get('description') or '').strip() and (
+                    entity.get('metadata', {}).get('description_evidence_ids') or
+                    str(entity['description']).strip().casefold() in text.casefold())),
+                'explicit_owner': explicit_owner, 'instance': self._instance(entity),
+                'role': self._identity_name(role[0]) if role else '',
+                'grounded_definitions': sorted(grounded), 'local_definitions': sorted(local),
+                'owner_aliases': sorted(owner_aliases), 'abbreviation_definitions': sorted(abbreviations),
+                'context_key': hashlib.sha256(text.encode()).hexdigest(),
+            }}
+        if projected_rows is not None:
+            charge = len(json.dumps(projected, ensure_ascii=False).encode()) * 4
+            if self._resolution_feature_bytes + charge > 16 * 1024 * 1024:
+                raise ProcessingError('Identity component features exceed byte budget')
+            self._resolution_feature_bytes += charge
+            projected_rows[id(entity)] = (entity, projected)
+        return projected
+
+    def decision_signature(self, entity):
+        """All unary rule inputs; the caller must additionally preserve pair relations."""
+        row = self.identity_projection(entity)
+        features = row['_identity_features']
+        referent = self._referent(row)
+        return (self._identity_name(row.get('name', '')), str(row.get('type', '')).upper(),
+                self._profile(row).get('referent_kind'), bool(features['occurrence_count']),
+                self._effective_owner(row), self._instance(row), referent,
+                tuple(sorted(self._description_key(row))), tuple(sorted(self._context_definition(row))),
+                tuple(sorted(self._supported_fact(row))), self._dependent(row, referent),
+                self._grounded_full_definition(row, referent),
+                tuple(sorted(self._definitions(row, self._identity_name(row.get('name', ''))))),
+                features['role'], tuple(map(tuple, features['abbreviation_definitions'])))
+
+    def prepare(self, entities, *, context=None, features_prepared=False):
+        if not callable(entities):
+            return self._prepare_features([self.identity_projection(row) for row in entities], context=context)
+        if features_prepared:
+            return self._prepare_features(entities, context=context)
+        with TemporaryFile(mode='w+b') as features:
+            for row in entities():
+                check_query_cancellation()
+                payload = json.dumps(self.identity_projection(row), ensure_ascii=False).encode()
+                if len(payload) > 1024 * 1024:
+                    raise ProcessingError('Identity feature exceeds byte budget')
+                features.write(payload + b'\n')
+            def rows():
+                features.seek(0)
+                for payload in features:
+                    yield json.loads(payload)
+            return self._prepare_features(rows, context=context)
+
+    def _prepare_features(self, entities, *, context=None):
         """Index source-grounded definitions once per resolution, never across runs.
 
         Scope records provenance, not an entity identity boundary.
         Only an extracted full name actually followed by its parenthetical
         abbreviation supplies a binding; old canonical aliases do not supply one.
-        A callable supplies a fresh native cursor for each semantic indexing pass.
+        Dependency passes reopen compact observations, never original entities.
         """
-        rows = entities if callable(entities) else lambda: iter(entities)
+        if callable(entities):
+            rows = entities
+        else:
+            projected = [self.identity_projection(entity) for entity in entities]
+            rows = lambda: iter(projected)
         if context is None:
             self._native_context = None
             self._context_prepared = False
@@ -686,31 +827,7 @@ class EntityDisambiguator:
             scope = self._scope(entity)
             if not scope:
                 continue
-            name = str(entity.get("name", "")).strip()
-            if re.fullmatch(r'[A-Z][A-Z0-9-]{1,15}', name):
-                pattern = (r'(?<!\w)([A-Z][\w&.-]*(?:[ \t]+(?:[A-Z][\w&.-]*|of|for|and|the)){1,15})'
-                           r'\s*\(["“]?' + re.escape(name) + r'["”]?\)')
-                for match in re.finditer(pattern, str(entity.get('context', ''))):
-                    full = match[1]
-                    if self._abbreviation(full, name):
-                        referent = self._referent_name(full)
-                        self._scope_definitions.setdefault((scope, name.casefold()), set()).add(referent)
-                        self._project_definitions.setdefault(name.casefold(), set()).add(referent)
-                        self._defined_referents.add(referent)
-            full = re.sub(r"\s*\([A-Z][A-Z0-9-]+\)$", "", name).strip()
-            if len(full.split()) < 2:
-                continue
-            pattern = r"(?<!\w)" + re.escape(full) + r"\s*\([\"“]?([A-Z][A-Z0-9-]+)[\"”]?\)"
-            for match in re.finditer(pattern, str(entity.get("context", ""))):
-                short, referent = match[1].casefold(), self._referent_name(full)
-                prefix = str(entity.get('context', ''))[:match.start()]
-                preceding = re.search(r'([A-Z][\w&.-]*)[ \t]+$', prefix)
-                if preceding and preceding[1] not in {'The', 'A', 'An', 'Our', 'Its', 'Their', 'This'}:
-                    # An extracted suffix inside a longer proper name is not
-                    # a second definition of that name's abbreviation.
-                    continue
-                if not self._abbreviation(full, short):
-                    continue
+            for short, referent in self.identity_projection(entity)['_identity_features']['grounded_definitions']:
                 self._scope_definitions.setdefault((scope, short), set()).add(referent)
                 self._project_definitions.setdefault(short, set()).add(referent)
                 self._defined_referents.add(referent)
@@ -748,17 +865,13 @@ class EntityDisambiguator:
             definitions = self._project_definitions.get(name, set())
             if not scope or not definitions:
                 continue
-            text_context = self._identity_name(entity.get("context", ""))
-            if len(re.findall(r"(?<!\w)" + re.escape(name) + r"(?!\w)", text_context)) != 1:
-                continue
-            local = {full for full in definitions if re.search(
-                r"(?<!\w)" + re.escape(full) + r"\s*\(\s*[\"“]?" + re.escape(name) + r"[\"”]?\s*\)", text_context)}
-            # With one acronym occurrence, nested suffix matches describe the
-            # same definition span; only its longest grounded name is local.
+            features = self.identity_projection(entity)['_identity_features']
+            bindings = {tuple(pair) for pair in features['local_definitions']}
+            local = {full for full in definitions if (name, full) in bindings}
             local = {full for full in local if not any(
                 other.endswith(' ' + full) for other in local if other != full)}
             if local:
-                self._context_definitions[(scope, entity.get("context", ""), name)] = local
+                self._context_definitions[(scope, features["context_key"], name)] = local
                 # A located definition is valid even when extraction retained
                 # only the acronym mention. Reuse it within this source.
                 self._scope_definitions.setdefault((scope, name), set()).update(local)
@@ -768,16 +881,8 @@ class EntityDisambiguator:
         # suffix is never stripped globally.
         for entity in rows():
             check_query_cancellation()
-            owner = str(self._profile(entity).get('owner') or '')
-            quote = str(self._profile(entity).get('evidence') or '')
-            if not owner:
-                continue
-            pattern = r'(?<!\w)([A-Z][\w&.-]*(?:[ \t]+[A-Z][\w&.-]*)*)\s*\(["“]?([\w -]+)["”]?\)'
-            for match in re.finditer(pattern, quote):
-                full, short = self._identity_name(match[1]), self._identity_name(match[2])
-                if self._identity_name(owner) in {full, short} and self._abbreviation(full, short):
-                    self._owner_aliases.setdefault((self._scope(entity), full), set()).add(full)
-                    self._owner_aliases.setdefault((self._scope(entity), short), set()).add(full)
+            for alias, full in self.identity_projection(entity)['_identity_features']['owner_aliases']:
+                self._owner_aliases.setdefault((self._scope(entity), alias), set()).add(full)
         for entity in rows():
             check_query_cancellation()
             referent = self._referent(entity)
@@ -808,7 +913,7 @@ class EntityDisambiguator:
 
     @_resolution_feature
     def _definitions(self, entity, name):
-        definitions = self._context_definitions.get((self._scope(entity), entity.get("context", ""), name), set())
+        definitions = self._context_definitions.get((self._scope(entity), self.identity_projection(entity)["_identity_features"]["context_key"], name), set())
         if definitions:
             return {self._definition_variants.get(full, full) for full in definitions}
         # A material-local located expansion is stronger than the project-wide
@@ -872,11 +977,10 @@ class EntityDisambiguator:
             return {**result, "decision": "different", "reason": "identity_conflict"}
         if identity.get("matches"):
             return {"decision": "same", "confidence": 1.0, "reason": "trusted_identifier"}
+        left, right = self.identity_projection(left), self.identity_projection(right)
         names = [str(row.get("name", "")).strip() for row in (left, right)]
-        contexts = [str(row.get("context", "")) for row in (left, right)]
-        # Support must contain the actual mention, not merely an assigned label.
-        occurrences = [len(re.findall(r"(?<!\w)" + re.escape(name) + r"(?!\w)", text, re.I))
-                       if name else 0 for name, text in zip(names, contexts)]
+        features = [row['_identity_features'] for row in (left, right)]
+        occurrences = [item['occurrence_count'] for item in features]
         if not all(occurrences):
             return result
         if self._identity_name(names[0]) == self._identity_name(names[1]):
@@ -987,8 +1091,8 @@ class EntityDisambiguator:
                     "ORG", "ORGANIZATION", "COMPANY", "GPE", "LOC", "LOCATION",
                     "FAC", "FACILITY", "PRODUCT", "EVENT", "LAW", "WORK_OF_ART", "CONCEPT"}
                 if types == {'PERSON'} and scope == self._scope(right):
-                    roles = [re.search(r'\bchief\s+(?:\w+\s+){0,4}officer\b', text, re.I) for text in contexts]
-                    if all(roles) and self._identity_name(roles[0][0]) == self._identity_name(roles[1][0]):
+                    roles = [item['role'] for item in features]
+                    if all(roles) and roles[0] == roles[1]:
                         return {"decision": "same", "confidence": .9, "reason": "local_person_role"}
                 if defined or named_type:
                     return {"decision": "same", "confidence": .9,
@@ -998,12 +1102,8 @@ class EntityDisambiguator:
                 words = re.findall(r"[^\W_]+", full, re.UNICODE)
                 if len(words) < 2 or "".join(word[0] for word in words).casefold() != short.casefold():
                     continue
-                definition = re.compile(r"(?<!\w)" + re.escape(full) + r"\s*\(\s*" + re.escape(short) + r"\s*\)", re.I)
-                # Both mentions must carry the definition; an acronym elsewhere
-                # in the project may refer to a different organization.
-                if all(definition.search(text) and len(re.findall(
-                        r"(?<!\w)" + re.escape(short) + r"(?!\w)", text, re.I)) == 1
-                       for text in contexts):
+                binding = (full.casefold(), short.casefold())
+                if all(binding in set(map(tuple, item['abbreviation_definitions'])) for item in features):
                     return {"decision": "same", "confidence": 1.0, "reason": "grounded_abbreviation_definition"}
         return result
 

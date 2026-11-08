@@ -48,7 +48,7 @@ class ClassificationRecords(ExtractionRecords):
                     raise ProcessingError('Classification migration target already owns another paid result')
                 if target.one(target.operation, 'bindingRecipe') != current['recipe']:
                     raise ProcessingError('Classification migration target binding differs')
-                return target.receipt()
+                return target.audit()
             # Normal reads never admit pre-index data. The explicit offline
             # migration verifies its complete binding/receipt before indexation.
             if original._verify_receipt() is None:
@@ -71,7 +71,6 @@ class ClassificationRecords(ExtractionRecords):
                 + ' { <' + old_key + '> ' + predicate + ' ?old } } INSERT { GRAPH ' + str(original.graph) + ' { ' + inserts
                 + ' } GRAPH ' + str(original.index_graph) + ' { <' + new_key + '> ' + predicate + ' ' + str(original.operation)
                 + ' } } WHERE { OPTIONAL { GRAPH ' + str(original.index_graph) + ' { <' + old_key + '> ' + predicate + ' ?old } } }')
-            owner._extraction_proofs.pop((original.graph.value, original.operation.value), None)
             owner.flush()
             return cls(owner, current).receipt()
 

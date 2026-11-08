@@ -15,7 +15,7 @@ from semantica.semantic_artifact_schema import stable_digest
 def test_adoption_rejects_unbound_or_changed_ack(monkeypatch, damage):
     from semantica import semantic_publication_builder as b
     from semantica.semantic_artifact_schema import KnowledgeReport, ModelReceipt
-    identity = dict(projectId='项目/ESG😀', inputRevision='input', recipeDigest='recipe', modelId='model', targetId='target')
+    identity = dict(projectId='项目/ESG😀', inputRevision='input', recipeDigest='recipe', modelId='model', targetId='target', inputDigest='input-digest')
     report = KnowledgeReport(id='report:overview:' + b.sha256(b'target').hexdigest()[:24], report_type='overview',
         title='Title', model_receipt_ids=['receipt:r'], content_hash='sha256:' + 'a' * 64, metadata={'number': 1, 'tiny': 1e-7})
     receipts = [ModelReceipt(id='receipt:r', operation='knowledge_explanation', provider='fixture', model='model',
@@ -52,7 +52,7 @@ def test_paid_report_adoption_survives_worker_exit_and_revalidates_grounding(tmp
         def do_POST(self):
             assert self.headers['Authorization'] == 'Bearer fixture-token'
             payload = json.loads(self.rfile.read(int(self.headers['Content-Length'])))
-            key = stable_digest([payload[name] for name in ('projectId', 'inputRevision', 'recipeDigest', 'modelId', 'targetId')])
+            key = stable_digest([payload[name] for name in ('projectId', 'inputRevision', 'recipeDigest', 'modelId', 'targetId', 'inputDigest')])
             if self.path.endswith('/adopt'):
                 saved[key] = dict(report=payload['report'], receipts=payload['receipts'], operationId=key, digest='sha256:' + 'a' * 64)
             body = json.dumps(saved.get(key, {'report': None})).encode()

@@ -110,33 +110,17 @@ class QualifiedFactIndex:
             self._fence(False)
             p.mutate(self.generation, [p.triple(p.head, 'qualifiedIndexSealed', p.ox.Literal(count))])
 
-    def _partitions(self):
-        p, after = self.publication, ''
-        while True:
-            with self.owner._publication_lock:
-                self._fence()
-                page = list(self.owner.store.query(f'''SELECT DISTINCT ?partition WHERE {{
-                    GRAPH {p.graph} {{ {p.head} <{P}qualifiedEntry> ?entry .
-                        ?entry <{P}qualifiedPartition> ?partition .
-                        FILTER(STR(?partition) > {p.ox.Literal(after)}) }}
-                    }} ORDER BY ?partition LIMIT {MAX_ROWS}'''))
-            for row in page:
-                yield row['partition'].value
-            if len(page) < MAX_ROWS:
-                return
-            after = page[-1]['partition'].value
-
     def _references(self, partition):
         p, after = self.publication, ''
         while True:
             with self.owner._publication_lock:
                 self._fence()
                 page = list(self.owner.store.query(f'''SELECT ?entry ?reference ?kind ?observation ?identity WHERE {{
-                    GRAPH {p.graph} {{ {p.head} <{P}qualifiedEntry> ?entry .
-                        ?entry <{P}qualifiedPartition> {p.scalar(partition)} ;
+                    GRAPH {p.graph} {{ ?entry <{P}qualifiedPartition> {p.scalar(partition)} ;
                         <{P}qualifiedReference> ?reference ; <{P}qualifiedKind> ?kind ;
                         <{P}qualifiedObservation> ?observation ; <{P}qualifiedIdentity> ?identity .
-                        FILTER(STR(?entry) > {p.ox.Literal(after)}) }}
+                        FILTER(STR(?entry) > {p.ox.Literal(after)})
+                        FILTER EXISTS {{ {p.head} <{P}qualifiedEntry> ?entry }} }}
                     }} ORDER BY ?entry LIMIT {MAX_ROWS}'''))
             size = 0
             for row in page:
@@ -148,6 +132,39 @@ class QualifiedFactIndex:
             if len(page) < MAX_ROWS:
                 return
             after = page[-1]['entry'].value
+
+    def _reference_pages(self):
+        """Read all indexed observations in bounded partition order."""
+        p = self.publication
+        after_partition = after_entry = None
+        while True:
+            cursor = ''
+            if after_partition is not None:
+                partition = p.scalar(after_partition)
+                entry = p.scalar(after_entry)
+                cursor = (f'FILTER(STR(?partition) > {partition} || '
+                    f'(STR(?partition) = {partition} && STR(?entry) > {entry}))')
+            with self.owner._publication_lock:
+                self._fence()
+                page = list(self.owner.store.query(f'''SELECT ?partition ?entry ?reference ?kind ?observation ?identity WHERE {{
+                    GRAPH {p.graph} {{ ?entry <{P}qualifiedPartition> ?partition ;
+                        <{P}qualifiedReference> ?reference ; <{P}qualifiedKind> ?kind ;
+                        <{P}qualifiedObservation> ?observation ; <{P}qualifiedIdentity> ?identity .
+                        {cursor} FILTER EXISTS {{ {p.head} <{P}qualifiedEntry> ?entry }} }}
+                    }} ORDER BY ?partition ?entry LIMIT {MAX_ROWS}'''))
+            size = 0
+            values = []
+            for row in page:
+                value = {key: row[key].value for key in ('partition', 'entry', 'reference', 'kind', 'observation', 'identity')}
+                size += len(json.dumps(value, ensure_ascii=False).encode())
+                if size > MAX_BYTES:
+                    raise ProcessingError('Native qualified reference page byte budget exceeded')
+                values.append(value)
+            if values:
+                yield values
+                after_partition, after_entry = values[-1]['partition'], values[-1]['entry']
+            if len(page) < MAX_ROWS:
+                return
 
     def canonical_endpoints(self, reference):
         """Read the unique current canonical membership of two native endpoints."""
@@ -176,16 +193,28 @@ class QualifiedFactIndex:
             raise ProcessingError('Invalid qualified fact group budget')
         p = self.publication
         functional_predicates = tuple(functional_predicates)
-        for partition in self._partitions():
-            yield self._reconcile_partition(partition,read,functional_predicates,
-                max_group_records,max_group_bytes)
+        partition = None
+        references = []
+        for page in self._reference_pages():
+            for row in page:
+                if partition is not None and row['partition'] != partition:
+                    yield self._reconcile_partition(partition, read, functional_predicates,
+                        max_group_records, max_group_bytes, references)
+                    references = []
+                partition = row['partition']
+                references.append(row)
+                if len(references) > max_group_records:
+                    raise ProcessingError('Native qualified fact group record budget exceeded')
+        if partition is not None:
+            yield self._reconcile_partition(partition, read, functional_predicates,
+                max_group_records, max_group_bytes, references)
 
     def _reconcile_partition(self,partition,read,functional_predicates=(),
-                             max_group_records=4096,max_group_bytes=16*1024*1024):
+                             max_group_records=4096,max_group_bytes=16*1024*1024,references=None):
         p=self.publication
         assertions, relations, size, count = [], [], 0, 0
         supports = {}
-        for row in self._references(partition):
+        for row in self._references(partition) if references is None else references:
             count += 1
             if count > max_group_records:
                 raise ProcessingError('Native qualified fact group record budget exceeded')
@@ -309,16 +338,46 @@ class QualifiedFactIndex:
         p=self.publication
         with self.owner._publication_lock:
             self._fence()
+            pending, pending_bytes = [], 0
+            def flush():
+                nonlocal pending, pending_bytes
+                if not pending:
+                    return
+                self._fence()
+                values=' '.join(pending)
+                size=len(values.encode())
+                checkpoint=getattr(p,'_checkpoint',None)
+                if checkpoint is not None and checkpoint['bytes']+size>MAX_BYTES:
+                    self.owner.flush()
+                    checkpoint.update(writes=0,bytes=0)
+                self.owner.store.update(f'''INSERT {{ GRAPH {p.graph} {{
+                    ?entry <{P}qualifiedReconciledStatus> ?status }} }} WHERE {{
+                    VALUES (?identity ?kind ?status) {{ {values} }}
+                    GRAPH {p.graph} {{ ?entry <{P}qualifiedIdentity> ?identity ;
+                        <{P}qualifiedKind> ?kind .
+                        FILTER EXISTS {{ {p.head} <{P}qualifiedEntry> ?entry }} }} }}''')
+                if checkpoint is None:
+                    self.owner.flush()
+                else:
+                    checkpoint['writes']+=1
+                    checkpoint['bytes']+=size
+                    if checkpoint['writes']>=MAX_ROWS:
+                        self.owner.flush()
+                        checkpoint.update(writes=0,bytes=0)
+                pending, pending_bytes = [], 0
             for kind,items in (('assertion',assertions),('relation',relations)):
                 for item in items:
-                    # All observations supporting this canonical identity share
-                    # the exact reducer's final status. No semantic rule lives here.
-                    self.owner.store.update(f'''INSERT {{ GRAPH {p.graph} {{
-                        ?entry <{P}qualifiedReconciledStatus> {p.scalar(item.status)} }} }} WHERE {{
-                        GRAPH {p.graph} {{ {p.head} <{P}qualifiedEntry> ?entry .
-                            ?entry <{P}qualifiedKind> {p.scalar(kind)} ;
-                            <{P}qualifiedIdentity> {p.scalar(item.id)} }} }}''')
-            self.owner.flush()
+                    row='('+str(p.scalar(item.id))+' '+str(p.scalar(kind))+' '+str(p.scalar(item.status))+')'
+                    size=len(row.encode())+1
+                    if pending and (len(pending)>=MAX_ROWS or pending_bytes+size>MAX_BYTES):
+                        flush()
+                    if size>MAX_BYTES:
+                        raise ProcessingError('Qualified reconciliation status exceeds byte budget')
+                    pending.append(row)
+                    pending_bytes+=size
+            flush()
+            if getattr(p, '_checkpoint', None) is None:
+                self.owner.flush()
 
     def family_page(self,*,after=None,limit=MAX_ROWS,max_bytes=MAX_BYTES,
                     max_family_sources=4096,subject_ids=None):

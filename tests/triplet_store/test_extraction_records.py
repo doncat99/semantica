@@ -47,8 +47,11 @@ def test_extraction_write_and_restart_use_the_same_fact_byte_budget(tmp_path):
     node = ExtractionRecords(store, bound, 'entities').entity_node(values[0])
     missing = next(store.store.quads_for_pattern(node, store._oxigraph.NamedNode(F+'name'), None, None))
     store.store.remove(missing)
+    assert store.extraction_receipt(bound, 'entities') == receipt
     with pytest.raises(ProcessingError, match='facts missing or corrupt'):
-        store.extraction_receipt(bound, 'entities')
+        store.audit_extraction(bound, 'entities')
+    with pytest.raises(ProcessingError, match='missing'):
+        store.read_extraction(bound, 'entities', text=TEXT, native_ranges=RANGES)
     store.close()
 
 
@@ -164,8 +167,11 @@ def test_missing_native_fact_is_a_recovery_error(tmp_path):
     quad = next(q for q in store.store if q.predicate.value == "urn:semantica:field:name")
     store.store.remove(quad)
     store.flush()
+    assert store.extraction_receipt(bound, "entities") is not None
     with pytest.raises(ProcessingError, match="corrupt"):
-        store.extraction_receipt(bound, "entities")
+        store.audit_extraction(bound, "entities")
+    with pytest.raises(ProcessingError, match="missing"):
+        store.read_extraction(bound, "entities", text=TEXT, native_ranges=RANGES)
 
 
 def test_receipt_model_mismatch_does_not_publish(tmp_path):
@@ -183,7 +189,7 @@ def test_receipt_link_loss_cannot_silently_drop_model_audit(tmp_path):
     quad = next(q for q in store.store if q.predicate.value == "urn:semantica:field:modelReceipt")
     store.store.remove(quad)
     store.flush()
-    with pytest.raises(ProcessingError, match="operation receipt missing or corrupt"):
+    with pytest.raises(ProcessingError, match="model receipt links missing or corrupt"):
         store.read_extraction_receipts(bound, "entities")
 
 
@@ -375,4 +381,24 @@ def test_identity_proof_cache_never_accepts_stale_or_orphan_bindings(tmp_path, d
             + ' { ' + str(original.operation) + ' ?p ?o } }')
         with pytest.raises(ProcessingError, match='missing paid operation'):
             store.extraction_receipt(previous, 'entities')
+    store.close()
+
+
+def test_completion_lookup_after_restart_never_scans_owned_facts(tmp_path, monkeypatch):
+    store = OxigraphStore(tmp_path / 'facts')
+    bound = binding()
+    expected = store.adopt_extraction(bound, 'entities', [entity('Acme', 0, 0)],
+        text=TEXT, native_ranges=RANGES, accepted_digest='paid')
+    store.close()
+    store = OxigraphStore(tmp_path / 'facts')
+    original = store.store.quads_for_pattern
+    def point_reads_only(subject, predicate, value, graph):
+        assert predicate is not None, 'completion lookup scanned fact payloads'
+        assert predicate.value != F+'ownedRecord', 'completion lookup enumerated owned records'
+        return original(subject, predicate, value, graph)
+    monkeypatch.setattr(store.store, 'quads_for_pattern', point_reads_only)
+    assert store.extraction_receipt(bound, 'entities') == expected
+    # An unrelated write must not make the next hit scan facts either.
+    store.begin_publication('p', expected_generation=None, source_count=0, canonical_count=0)
+    assert store.extraction_receipt(bound, 'entities') == expected
     store.close()
