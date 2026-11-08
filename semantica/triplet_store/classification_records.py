@@ -36,6 +36,41 @@ class ClassificationRecords(ExtractionRecords):
         self.quads = []
 
     @classmethod
+    def source_completion(cls, owner, binding, *, reduction=None):
+        """Index an accepted reduction by immutable source inputs, before quotes."""
+        with owner._publication_lock:
+            if set(binding) != BINDING - {'context_digest'}:
+                raise ProcessingError('Classification source requires exact immutable binding')
+            probe=cls(owner,{**binding,'context_digest':'source-completion'})
+            key=probe.ox.NamedNode(probe.logical.value+':source')
+            predicate=probe.ox.NamedNode(F+'completedReduction')
+            links=list(islice(owner.store.quads_for_pattern(key,predicate,None,probe.index_graph),2))
+            if len(links)>1 or any(not isinstance(q.object,probe.ox.NamedNode) for q in links):
+                raise ProcessingError('Native classification source completion is duplicated')
+            if links:
+                operation=links[0].object
+                actual={field:probe.one(operation,'binding'+field[0].upper()+field[1:]) for field in BINDING}
+                if any(actual[field]!=value for field,value in binding.items()):
+                    raise ProcessingError('Native classification source completion binding differs')
+                result=cls(owner,actual)
+                if result.operation!=operation or result.receipt() is None or not result.one(operation,'classificationReduction',optional=True):
+                    raise ProcessingError('Native classification source completion is incomplete')
+                if reduction is not None and reduction.operation!=operation:
+                    raise ProcessingError('Native classification source already has another result')
+                return result.operation.value
+            if reduction is None:
+                return None
+            if (any(reduction.binding[field]!=value for field,value in binding.items()) or reduction.receipt() is None
+                or not reduction.one(reduction.operation,'classificationReduction',optional=True)):
+                raise ProcessingError('Classification source requires an accepted matching reduction')
+            from ..semantic_worker_context import check_query_cancellation
+            check_query_cancellation()
+            owner.flush()
+            owner.store.add(probe.ox.Quad(key,predicate,reduction.operation,probe.index_graph))
+            owner.flush()
+            return reduction.operation.value
+
+    @classmethod
     def rebind(cls, owner, previous, current):
         """Offline recipe metadata migration; paid assignment/receipt nodes stay put."""
         old_key, new_key = operation_identity(previous), operation_identity(current)

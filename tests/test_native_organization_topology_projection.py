@@ -50,7 +50,7 @@ def _inputs():
         id=ref, source_entity_id="entity:" + source, target_entity_id="entity:" + target, type="supports",
         qualifiers={"polarity": "positive", "time": "2025", "condition": "only on approval"},
         evidence_ids=["support"], support_ids=["support"], status="accepted",
-        metadata={"support_observations": [{"quote": "A supports B.", "source_id": "source"}]},
+        metadata={"support_observation_ids": ["observation-1"]},
     ) for ref, source, target in (
         ("ab", "a", "b"), ("ab-again", "a", "b"), ("ba", "b", "a"),
         ("loop", "b", "b"), ("cd", "c", "d"),

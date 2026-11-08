@@ -32,7 +32,7 @@ def test_merge_status_is_order_independent_and_withdrawn_support_is_not_live():
         merged, _, _ = reconcile_qualified_facts("scope:one", list(ordering), [])
         assert merged[0].status == "accepted"
         assert merged[0].support_ids == ["evidence:import", "evidence:reviewed"]
-        assert len(merged[0].metadata["support_observations"]) == 3
+        assert len(merged[0].metadata["support_observation_ids"]) == 3
         expected = expected or merged
         assert merged == expected
     assert reconcile_qualified_facts("scope:one", expected, [])[0] == expected

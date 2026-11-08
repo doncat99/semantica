@@ -203,8 +203,41 @@ def test_native_identity_components_match_project_oracle_across_sources_and_rest
     monkeypatch.setattr(builder,'_semantic_organization',verify)
     request=SemanticArtifactBuildRequest.model_validate(raw)
     first=builder.build_semantic_artifacts(request)
-    captured.clear()
-    refs.clear()
+    monkeypatch.setattr(builder,'_build_source',lambda *a,**k:pytest.fail('completed source projection must be reused'))
     second_result=builder.build_semantic_artifacts(request)
     assert observed[0]==observed[1]>0
     assert first['publication']['canonical_count']==second_result['publication']['canonical_count']
+
+
+def test_fact_reconciliation_restores_each_observation_once_then_reuses_completion(tmp_path,monkeypatch):
+    from collections import Counter
+    from semantica.triplet_store.extraction_records import ExtractionRecords
+    from semantica.triplet_store.qualified_fact_index import QualifiedFactIndex
+    reads=Counter()
+    active=False
+    iterate=QualifiedFactIndex.iter_reconciled
+    original=ExtractionRecords.read_fact_projections
+    def reconciled(self,*args,**kwargs):
+        nonlocal active
+        active=True
+        try:
+            yield from iterate(self,*args,**kwargs)
+        finally:
+            active=False
+    def read(self,reference):
+        if active:
+            reads[reference]+=1
+        return original(self,reference)
+    monkeypatch.setattr(QualifiedFactIndex,'iter_reconciled',reconciled)
+    monkeypatch.setattr(ExtractionRecords,'read_fact_projections',read)
+    import urllib.request
+    from tests.test_native_extraction_handoff import build_child
+    monkeypatch.setattr(urllib.request,'urlopen',urllib.request.urlopen)
+    build_child(tmp_path,stop_before_publication=False)
+    assert reads and set(reads.values())=={1}
+    def forbidden(*args,**kwargs):
+        pytest.fail('unchanged input must not rebuild facts or source projections')
+    monkeypatch.setattr(QualifiedFactIndex,'build',forbidden)
+    monkeypatch.setattr(QualifiedFactIndex,'iter_reconciled',forbidden)
+    monkeypatch.setattr(builder,'_build_source',forbidden)
+    build_child(tmp_path,stop_before_publication=False)

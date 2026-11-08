@@ -61,6 +61,113 @@ def _range(text, start, end):
 
 class ExtractionRecords:
     @classmethod
+    def source_projection(cls,owner,project,input_key,records=None):
+        """Persist derived addresses only; completion follows durable projections."""
+        with owner._publication_lock:
+            from ..semantic_worker_context import check_query_cancellation
+            if not isinstance(project,str) or not project or not re.fullmatch('sha256:[0-9a-f]{64}',input_key):
+                raise ProcessingError('Invalid native source projection identity')
+            ox=owner._oxigraph
+            node=ox.NamedNode('urn:semantica:source-projection:'+hashlib.sha256(
+                json.dumps([project,input_key],separators=(',',':')).encode()).hexdigest())
+            graph=ox.NamedNode(node.value+':addresses')
+            def validate(value,number):
+                from ..semantic_artifact_schema import DocumentRepresentation, EvidenceSpan
+                from pydantic import ValidationError
+                try:
+                    if not isinstance(value,dict):
+                        raise ValueError('address is not an object')
+                    if number==0:
+                        if set(value)!={'representation','artifact_id','operations'}:
+                            raise ValueError('header fields differ')
+                        representation=DocumentRepresentation.model_validate(value['representation'])
+                        if representation.artifact_ref_id!=value['artifact_id']:
+                            raise ValueError('representation artifact differs')
+                        operations=value['operations']
+                        if (not isinstance(operations,list) or len(operations)>100000 or
+                            any(not isinstance(v,str) or not v.startswith('urn:semantica:extraction:') or len(v)>4096 for v in operations)):
+                            raise ValueError('operation references invalid')
+                    else:
+                        if set(value)!={'fields','quote_length','quote_digest','passage'}:
+                            raise ValueError('evidence fields differ')
+                        fields=value['fields']
+                        if not isinstance(fields,dict) or 'quote' in fields or 'quote' in fields.get('locator',{}):
+                            raise ValueError('address includes a quote')
+                        EvidenceSpan.model_validate({**fields,'quote':'','locator':{**fields['locator'],'quote':''}})
+                        if (type(value['quote_length']) is not int or value['quote_length']<0 or
+                            type(value['passage']) is not bool or not isinstance(value['quote_digest'],str) or
+                            not re.fullmatch('sha256:[0-9a-f]{64}',value['quote_digest'])):
+                            raise ValueError('quote address invalid')
+                except (ValueError,TypeError,KeyError,ValidationError) as exc:
+                    raise ProcessingError('Native source projection address schema invalid') from exc
+                return value
+            completed=ox.NamedNode(F+'completedProjection')
+            values=list(islice(owner.store.quads_for_pattern(node,completed,None,graph),2))
+            if len(values)>1:
+                raise ProcessingError('Native source projection completion duplicated')
+            if values:
+                if records is not None:
+                    raise ProcessingError('Native source projection already complete')
+                try:
+                    if not isinstance(values[0].object,ox.Literal) or values[0].object.datatype!=ox.NamedNode('http://www.w3.org/2001/XMLSchema#integer'):
+                        raise ValueError('completion is not an integer literal')
+                    count=int(values[0].object.value)
+                except (TypeError,ValueError) as exc:
+                    raise ProcessingError('Native source projection completion corrupt') from exc
+                if not 1<=count<=100000:
+                    raise ProcessingError('Native source projection count invalid')
+                def read():
+                    total=0
+                    for number in range(count):
+                        check_query_cancellation()
+                        field=ox.NamedNode(node.value+':'+str(number))
+                        rows=list(islice(owner.store.quads_for_pattern(field,ox.NamedNode(F+'address'),None,graph),2))
+                        if len(rows)!=1 or not isinstance(rows[0].object,ox.Literal) or len(rows[0].object.value.encode())>MAX_PAGE_BYTES:
+                            raise ProcessingError('Native source projection address missing or oversized')
+                        total+=len(rows[0].object.value.encode())
+                        if total>16*1024*1024:
+                            raise ProcessingError('Native source projection byte budget exceeded')
+                        try:
+                            yield validate(json.loads(rows[0].object.value),number)
+                        except ValueError as exc:
+                            raise ProcessingError('Native source projection address corrupt') from exc
+                return read()
+            if records is None:
+                return None
+            # A canceled write has no complete owner; discard only its partial addresses.
+            owner.store.update('CLEAR SILENT GRAPH '+str(graph))
+            batch=[]
+            batch_bytes=0
+            total=count=0
+            for value in records:
+                check_query_cancellation()
+                validate(value,count)
+                encoded=json.dumps(value,ensure_ascii=False,separators=(',',':'))
+                size=len(encoded.encode())
+                total+=size
+                if size>MAX_PAGE_BYTES or total>16*1024*1024 or count>=100000:
+                    raise ProcessingError('Native source projection address budget exceeded')
+                if batch and batch_bytes+size>MAX_PAGE_BYTES:
+                    owner.store.extend(batch)
+                    batch=[]
+                    batch_bytes=0
+                batch_bytes+=size
+                batch.append(ox.Quad(ox.NamedNode(node.value+':'+str(count)),ox.NamedNode(F+'address'),ox.Literal(encoded),graph))
+                count+=1
+                if len(batch)>=MAX_PAGE_ROWS:
+                    owner.store.extend(batch)
+                    batch=[]
+                    batch_bytes=0
+            if not count:
+                raise ProcessingError('Native source projection has no addresses')
+            owner.store.extend(batch)
+            owner.flush()
+            check_query_cancellation()
+            owner.store.add(ox.Quad(node,completed,ox.Literal(count),graph))
+            owner.flush()
+            return None
+
+    @classmethod
     def window_completion(cls, owner, binding, formula, groundings=None):
         """Ordered references to the accepted batches, in the existing identity index."""
         with owner._publication_lock:

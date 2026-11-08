@@ -186,3 +186,29 @@ def test_classification_identity_proofs_fail_closed(tmp_path, defect):
         with pytest.raises(ProcessingError, match='missing paid operation'):
             store.classification_receipt(binding)
     store.close()
+
+
+def test_source_completion_survives_restart_and_rejects_corrupt_link(tmp_path):
+    from semantica.triplet_store.classification_records import ClassificationRecords
+    from semantica.triplet_store.extraction_records import F
+    profile,binding,receipt,value=inputs()
+    store=OxigraphStore(tmp_path/'facts')
+    batch=ClassificationRecords(store,binding)
+    batch.adopt(value,profile=profile,allowed_evidence_ids=['evidence-1'],accepted_digest='paid',receipts=[receipt])
+    reduction=ClassificationRecords(store,dict(binding,context_digest='reduced'))
+    reduction.adopt_reduction([batch.operation.value],profile=profile)
+    source={key:value for key,value in binding.items() if key!='context_digest'}
+    expected=reduction.operation.value
+    assert ClassificationRecords.source_completion(store,source,reduction=reduction)==expected
+    before=set(store.store)
+    store.close()
+    store=OxigraphStore(tmp_path/'facts')
+    assert ClassificationRecords.source_completion(store,source)==expected
+    assert set(store.store)==before
+    assert ClassificationRecords.source_completion(store,dict(source,model='another')) is None
+    quad=next(store.store.quads_for_pattern(None,store._oxigraph.NamedNode(F+'completedReduction'),None,None))
+    store.store.remove(quad)
+    store.store.add(store._oxigraph.Quad(quad.subject,quad.predicate,store._oxigraph.Literal('broken'),quad.graph_name))
+    with pytest.raises(ProcessingError):
+        ClassificationRecords.source_completion(store,source)
+    store.close()

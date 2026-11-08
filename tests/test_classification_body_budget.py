@@ -71,7 +71,7 @@ def test_late_oversize_is_rejected_before_any_classification_request(monkeypatch
     assert error.value.retryable is False
 
 
-def test_native_classification_warm_reuse_reads_quotes_once_without_payloads(tmp_path, monkeypatch):
+def test_native_classification_warm_reuse_reads_no_quotes_or_payloads(tmp_path, monkeypatch):
     from semantica.triplet_store.oxigraph_store import OxigraphStore
     from semantica.triplet_store.classification_records import ClassificationRecords
     from semantica.semantic_extract.cache import ExtractionCache, SqliteCacheBackend
@@ -125,8 +125,35 @@ def test_native_classification_warm_reuse_reads_quotes_once_without_payloads(tmp
         monkeypatch.setattr(cache, 'accepted_digest', forbidden)
         (value, receipts), restored = run()
         assert value is None and receipts == [] and restored == reduction and calls == []
-        assert reads == [span.id for span in passages]
+        assert reads == []
         assert set(store.store) == before
     finally:
         store.close()
         backend.close()
+
+
+def test_context_batch_boundaries_match_greedy_with_linear_serialized_work(monkeypatch):
+    records=[('evidence',dict(id=str(i),quote='漢字"\\'*(1+i%17))) for i in range(2000)]
+    base={'source':'source','evidence':[]}
+    budget=8000
+    expected=[]
+    current={**base,'evidence':[]}
+    for key,record in records:
+        candidate={**current,key:[*current[key],record]}
+        if builder._context_size(candidate)>budget:
+            expected.append(current)
+            current={**base,'evidence':[record]}
+        else:
+            current=candidate
+    expected.append(current)
+    original=builder._context_size
+    serialized=0
+    def observed(value):
+        nonlocal serialized
+        amount=original(value)
+        serialized+=amount
+        return amount
+    monkeypatch.setattr(builder,'_context_size',observed)
+    actual=list(builder._context_batches(base,iter(records),budget))
+    assert actual==expected
+    assert serialized<30*sum(original(row) for row in records)

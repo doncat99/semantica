@@ -402,3 +402,39 @@ def test_completion_lookup_after_restart_never_scans_owned_facts(tmp_path, monke
     store.begin_publication('p', expected_generation=None, source_count=0, canonical_count=0)
     assert store.extraction_receipt(bound, 'entities') == expected
     store.close()
+
+
+@pytest.mark.parametrize('defect',['cancel','missing-address','invalid-address'])
+def test_source_projection_completion_is_durable_and_rejects_corruption(tmp_path,monkeypatch,defect):
+    from semantica.semantic_artifact_schema import DocumentRepresentation
+    key='sha256:'+'a'*64
+    revision='b3-'+'a'*64
+    header=dict(representation=DocumentRepresentation(id='rep',source_id='ss',material_revision_id=revision,
+        input_revision=revision,media_type='text/plain',content_hash=revision,parser='fixture',parser_version='1',
+        recipe_id='fixture',recipe_digest='a'*64,origin='native',artifact_ref_id='artifact').model_dump(),
+        artifact_id='artifact',operations=[])
+    store=OxigraphStore(tmp_path/'projection')
+    if defect=='cancel':
+        def interrupted():
+            yield header
+            raise ProcessingError('canceled')
+        with pytest.raises(ProcessingError,match='canceled'):
+            ExtractionRecords.source_projection(store,'p',key,interrupted())
+        assert ExtractionRecords.source_projection(store,'p',key) is None
+        ExtractionRecords.source_projection(store,'p',key,[header])
+    else:
+        ExtractionRecords.source_projection(store,'p',key,[header])
+    store.close()
+    store=OxigraphStore(tmp_path/'projection')
+    try:
+        assert list(ExtractionRecords.source_projection(store,'p',key))==[header]
+        if defect!='cancel':
+            ox=store._oxigraph
+            address=next(store.store.quads_for_pattern(None,ox.NamedNode(F+'address'),None,None))
+            store.store.remove(address)
+            if defect=='invalid-address':
+                store.store.add(ox.Quad(address.subject,address.predicate,ox.Literal('{}'),address.graph_name))
+            with pytest.raises(ProcessingError):
+                list(ExtractionRecords.source_projection(store,'p',key))
+    finally:
+        store.close()

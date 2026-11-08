@@ -104,24 +104,19 @@ class EntityMerger:
         encoded = lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
         representative_key = None
         target = None
-        observations = {}
+        observations = []
         for member in members:
             key = encoded(member)
             if representative_key is None or key < representative_key:
                 representative_key = key
-                target = deepcopy({**member, "metadata": {
-                    field: value for field, value in member.get("metadata", {}).items()
-                    if field != "support_observations"}})
-            previous = member.get("metadata", {}).get("support_observations")
-            for observation in previous if previous is not None else [member]:
-                observation_key = encoded(observation)
-                if observation_key not in observations:
-                    observations[observation_key] = deepcopy(observation)
+                target = member
+            observations.append(member)
         if target is None:
             raise ProcessingError("Qualified fact group has no members")
+        target = deepcopy(target)
+        representative_id = target.get("metadata", {}).get("representative_observation_id", target["id"])
         target["id"] = identifier
-        originals = [observations[key] for key in sorted(observations)]
-        del observations
+        originals = observations
         active = [item for item in originals if item.get("status", "candidate") != "retracted"]
         statuses = {item.get("status", "candidate") for item in active}
         if not active:
@@ -135,7 +130,8 @@ class EntityMerger:
         # A withdrawn observation remains auditable, but cannot support a live fact.
         target["evidence_ids"] = sorted({ref for item in active or originals for ref in item.get("evidence_ids", [])})
         target["support_ids"] = list(target["evidence_ids"])
-        target["metadata"] = {**target.get("metadata", {}), "support_observations": originals}
+        target["metadata"] = {**target.get("metadata", {}), "support_observation_ids": sorted({ref for item in originals for ref in item.get("metadata", {}).get("support_observation_ids", [item["id"]])}),
+            "representative_observation_id": representative_id}
         return target
 
     def __init__(

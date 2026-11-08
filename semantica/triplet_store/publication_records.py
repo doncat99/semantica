@@ -101,7 +101,8 @@ class PublicationRecords:
         """Durably checkpoint streaming pending writes without retaining DTOs.
 
         Every mutation remains immediately visible under the publication lock.
-        Flush at 128 writes or 256KiB of serialized triples, and on scope exit.
+        Each write is at most 256KiB; flush every 128 writes (at most 32MiB)
+        and on scope exit. Transport size is not a durability checkpoint.
         The caller seals/activates only after this scope has completed.
         """
         with self.owner._publication_lock:
@@ -109,7 +110,7 @@ class PublicationRecords:
                 raise ProcessingError('Nested publication checkpoint scope')
             check_query_cancellation()
             self.fence(generation, 'pending')
-            self._checkpoint = dict(generation=generation, writes=0, bytes=0)
+            self._checkpoint = dict(generation=generation, writes=0)
             try:
                 yield self
                 check_query_cancellation()
@@ -118,7 +119,8 @@ class PublicationRecords:
             finally:
                 self._checkpoint = None
 
-    def mutate(self, generation, triples, *, state="pending", extra=""):
+    @_locked
+    def mutate(self, generation, triples, *, state="pending"):
         body = "\n".join(triples)
         if len(body.encode()) > MAX_BYTES:
             raise ProcessingError("Publication atomic write exceeds byte budget")
@@ -128,18 +130,14 @@ class PublicationRecords:
         if checkpoint is not None:
             if checkpoint['generation'] != generation or state != 'pending':
                 raise ProcessingError('Publication checkpoint generation changed')
-            if checkpoint['bytes'] + len(body.encode()) > MAX_BYTES:
-                self.owner.flush()
-                checkpoint.update(writes=0, bytes=0)
-        self.owner._update_derived_graph(self.graph, insert=body, where=f"GRAPH {self.graph} {{ {self.head} <{P}generation> {self.scalar(generation)} ; <{P}state> {self.scalar(state)} . }} {extra}")
+        self.owner._update_derived_graph(self.graph, insert=body, where=f"GRAPH {self.graph} {{ {self.head} <{P}generation> {self.scalar(generation)} ; <{P}state> {self.scalar(state)} . }}")
         if checkpoint is None:
             self.owner.flush()
         else:
             checkpoint['writes'] += 1
-            checkpoint['bytes'] += len(body.encode())
             if checkpoint['writes'] >= MAX_ROWS:
                 self.owner.flush()
-                checkpoint.update(writes=0, bytes=0)
+                checkpoint.update(writes=0)
         self.fence(generation, state)
 
     @_locked
@@ -164,7 +162,10 @@ class PublicationRecords:
         reusable = (len(self.values(self.head, 'identityStageInput')) == 1
                     and len(self.values(self.head, 'identityStageCount')) == 1
                     and len(self.values(self.head, 'identityIndexSealed')) == 1)
-        discard = ('FILTER(!(' + self._identity_selection('?s', '?p') + '))') if reusable else ''
+        selections = [self._identity_selection('?s', '?p')] if reusable else []
+        if reusable and len(self.values(self.head,'factStageInput')) == 1 and len(self.values(self.head,'qualifiedIndexSealed')) == 1:
+            selections.append(self._fact_selection('?s','?p'))
+        discard = 'FILTER(!(' + ' || '.join(selections) + '))' if selections else ''
         self.owner._update_derived_graph(self.graph, delete="?s ?p ?o", insert=" ".join(triples),
             where=f"{guard} OPTIONAL {{ GRAPH {self.graph} {{ ?s ?p ?o }} {discard} }}")
         self.owner.flush()
@@ -177,6 +178,87 @@ class PublicationRecords:
             EXISTS {{ GRAPH {self.graph} {{ {self.head} <{P}canonical> {subject} }} }} ||
             EXISTS {{ GRAPH {self.graph} {{ ?identityCanonical <{P}selector> {subject} }}
                 FILTER EXISTS {{ GRAPH {self.graph} {{ {self.head} <{P}canonical> ?identityCanonical }} }} }}"""
+
+    def _fact_selection(self, subject, predicate):
+        return f'''STRSTARTS(STR({predicate}), "{P}qualified") ||
+            ({subject} = {self.head} && {predicate} IN (<{P}fact>, <{P}factStageInput>)) ||
+            EXISTS {{ GRAPH {self.graph} {{ {self.head} <{P}fact> {subject} }} }}'''
+
+    @_locked
+    def fact_stage_status(self, generation, input_key):
+        self.fence(generation,'pending')
+        self.scalar(input_key)
+        values=self.values(self.head,'factStageInput')
+        if not values:
+            return False
+        if len(values)!=1:
+            raise ProcessingError('Native fact completion marker is duplicated')
+        if values[0].value!=input_key:
+            return False
+        if len(self.values(self.head,'qualifiedIndexSealed'))!=1:
+            raise ProcessingError('Native fact completion lacks sealed index')
+        return True
+
+    @_locked
+    def reset_fact_stage(self,generation):
+        self.fence(generation,'pending')
+        self.owner._update_derived_graph(self.graph,delete='?s ?p ?o',
+            where=f'GRAPH {self.graph} {{ ?s ?p ?o }} FILTER({self._fact_selection("?s","?p")})')
+        self.owner.flush()
+
+    @_locked
+    def seal_fact_stage(self,generation,input_key):
+        self.fence(generation,'pending')
+        self.scalar(input_key)
+        if self.values(self.head,'factStageInput') or len(self.values(self.head,'qualifiedIndexSealed'))!=1:
+            raise ProcessingError('Native fact stage is not sealable')
+        # Follow committed addresses once; correlated NOT EXISTS materialized cross-products.
+        count=0
+        for link in self.owner.store.quads_for_pattern(self.head,
+                self.ox.NamedNode(P+'qualifiedEntry'),None,self.graph):
+            check_query_cancellation()
+            entry=link.object
+            if not self.values(entry,'qualifiedReconciledStatus') or not self.values(entry,'qualifiedDecision'):
+                raise ProcessingError('Native fact reconciliation incomplete')
+            status=self.one(entry,'qualifiedReconciledStatus')
+            address=self.one(entry,'qualifiedDecision')
+            decision=self.iri(address)
+            if not next(self.owner.store.quads_for_pattern(self.head,
+                    self.ox.NamedNode(P+'qualifiedDecision'),decision,self.graph),None):
+                raise ProcessingError('Native fact reconciliation incomplete')
+            identity=self.one(entry,'qualifiedIdentity')
+            kind=self.one(entry,'qualifiedKind')
+            selected=self.iri(self.one(decision,'qualifiedSelectedEntry'))
+            if (self.one(decision,'qualifiedSelectedIdentity')!=identity
+                    or self.one(decision,'qualifiedSelectedKind')!=kind
+                    or self.one(decision,'qualifiedSelectedStatus')!=status
+                    or not next(self.owner.store.quads_for_pattern(self.head,
+                        self.ox.NamedNode(P+'qualifiedEntry'),selected,self.graph),None)
+                    or self.one(selected,'qualifiedIdentity')!=identity
+                    or self.one(selected,'qualifiedKind')!=kind
+                    or self.one(selected,'qualifiedObservation')!=self.one(decision,'qualifiedSelectedObservation')
+                    or self.one(selected,'qualifiedReference')!=self.one(decision,'qualifiedSelectedReference')):
+                raise ProcessingError('Native fact reconciliation incomplete')
+            count+=1
+        if count!=int(self.one(self.head,'qualifiedIndexSealed')):
+            raise ProcessingError('Native fact reconciliation incomplete')
+        incomplete=self.owner.store.query(f'''SELECT ?fact WHERE {{ GRAPH {self.graph} {{
+            {self.head} <{P}fact> ?fact . ?fact <{P}memberCount> ?expected .
+            OPTIONAL {{ ?fact <{P}member> ?ref }} }} }} GROUP BY ?fact ?expected
+            HAVING(COUNT(?ref) != xsd:integer(?expected)) LIMIT 1''',
+            prefixes={'xsd':'http://www.w3.org/2001/XMLSchema#'})
+        if next(iter(incomplete),None) is not None:
+            raise ProcessingError('Native fact membership incomplete')
+        indexed=next(iter(self.owner.store.query(f'''SELECT (COUNT(DISTINCT ?ref) AS ?count) WHERE {{
+            GRAPH {self.graph} {{ {self.head} <{P}qualifiedEntry> ?entry .
+                ?entry <{P}qualifiedKind> "relation" ; <{P}qualifiedReference> ?ref }} }}''')))['count']
+        planned=next(iter(self.owner.store.query(f'''SELECT (COALESCE(SUM(xsd:integer(?expected)),0) AS ?count) WHERE {{
+            GRAPH {self.graph} {{ {self.head} <{P}fact> ?fact . ?fact <{P}memberCount> ?expected }} }}''',
+            prefixes={'xsd':'http://www.w3.org/2001/XMLSchema#'})))['count']
+        if int(indexed.value)!=int(planned.value):
+            raise ProcessingError('Native fact coverage incomplete')
+        self.owner.flush()
+        self.mutate(generation,[self.triple(self.head,'factStageInput',self.scalar(input_key))])
 
     @_locked
     def identity_stage_status(self, generation, input_key):
@@ -516,7 +598,6 @@ class PublicationRecords:
         triples, plans, assigned = [], {}, {}
         required = {"id", "source", "target", "representative", "members", "member_count", "status"}
         member_count = 0
-        plan_rows = []
         expected_members = {}
         for record in records:
             if not isinstance(record, dict) or set(record) != required:
@@ -545,9 +626,6 @@ class PublicationRecords:
             self.iri(record["representative"])
             self.scalar(record["id"])
             self.scalar(record["status"])
-            plan_rows.append('('+ ' '.join((str(node), str(self.iri(record["source"])),
-                str(self.iri(record["target"])), str(self.iri(record["representative"])),
-                str(self.ox.Literal(fields["memberCount"])), str(self.scalar(record["status"])))) + ')')
             for identity in record["members"]:
                 member = self.iri(identity)
                 if identity in assigned:
@@ -561,15 +639,8 @@ class PublicationRecords:
                 term = self.iri(value) if field in {"source", "target", "representative"} else self.scalar(value)
                 triples.append(self.triple(node, field, term))
 
-        plan_query = f'''SELECT ?fact ?field ?value WHERE {{
-            VALUES (?fact ?source ?target ?representative ?memberCount ?status) {{ {' '.join(plan_rows)} }}
-            OPTIONAL {{ GRAPH {self.graph} {{ ?fact ?field ?value .
-                VALUES ?field {{ <{P}source> <{P}target> <{P}representative> <{P}memberCount> <{P}status> }} }} }}
-        }}'''
-        existing_plans = {}
-        for row in self.owner.store.query(plan_query):
-            if row['field'] is not None:
-                existing_plans.setdefault(row['fact'].value, {}).setdefault(row['field'].value, set()).add(row['value'].value)
+        existing_plans = {identity:{P+field:{term.value for term in self.values(self.iri(identity),field)}
+            for field in fields} for identity,fields in plans.items()}
         for fact, fields in plans.items():
             current = existing_plans.get(fact, {})
             if any(len(current.get(P+field, set())) > 1 or
@@ -578,76 +649,45 @@ class PublicationRecords:
                 raise ProcessingError("Canonical fact plan changed")
 
         identity_fields = ("predicateName", "polarity", "condition", "time", "unit", "qualifiedValue")
-        field_values = ' '.join(f'<{F}{field}>' for field in identity_fields)
-        fact_rows = []
-        for identity, expected in expected_members.items():
-            fact_rows.extend((
-                '('+' '.join((str(self.iri(identity)), str(self.iri(identity)), '"member"'))+')',
-                '('+' '.join((str(self.iri(identity)), str(self.iri(expected['representative'])), '"representative"'))+')',
-            ))
-        fact_rows_text = ' '.join(fact_rows)
-        if len(fact_rows_text.encode()) > MAX_BYTES:
-            raise ProcessingError("Canonical fact validation input exceeds byte budget")
-        member_query = f'''SELECT DISTINCT ?member ?side ?field ?value WHERE {{
-            VALUES (?member ?record ?side) {{ {fact_rows_text} }}
-            GRAPH {self.facts} {{
-                ?record <{RDF_TYPE}> <{F}Relation> ; ?field ?value .
-                VALUES ?field {{ {field_values} }}
-            }}
-        }}'''
-        observed = {}
-        projected_bytes = 0
-        for row in self.owner.store.query(member_query):
-            identity = row['member'].value
-            value = observed.setdefault(identity, dict(fields={field: set() for field in identity_fields},
-                representative_fields={field: set() for field in identity_fields}))
-            projected_bytes += sum(len(str(row[key]).encode()) for key in ('member', 'side', 'field', 'value'))
-            if projected_bytes > MAX_BYTES:
-                raise ProcessingError("Canonical fact validation projection exceeds byte budget")
-            field = row['field'].value.removeprefix(F)
-            key = 'fields' if row['side'].value == 'member' else 'representative_fields'
-            value[key][field].add(row['value'])
-        if set(observed) != set(expected_members):
-            raise ProcessingError("Canonical fact member is not a current native Relation")
         expected_owned = set(expected_members) | {value['representative'] for value in expected_members.values()}
-        owner_values = ' '.join(str(self.iri(identity)) for identity in expected_owned)
-        if len(owner_values.encode()) > MAX_BYTES:
-            raise ProcessingError("Canonical fact ownership scope exceeds byte budget")
-        owner_query = f'''SELECT DISTINCT ?member WHERE {{
-            VALUES ?member {{ {owner_values} }}
-            GRAPH {self.graph} {{ {self.head} <{P}source> ?sourceOwner . ?sourceOwner <{P}operation> ?operation }}
-            GRAPH {self.facts} {{ ?operation <{F}ownedRecord> ?member }}
-        }}'''
-        owned = {row['member'].value for row in self.owner.store.query(owner_query)}
-        if owned != expected_owned:
-            raise ProcessingError("Canonical fact member is outside the current publication")
-        endpoint_values = []
-        for identity, expected in expected_members.items():
-            endpoint_values.append('('+ ' '.join((str(self.iri(identity)), str(self.iri(expected['source'])),
-                str(self.iri(expected['target'])))) + ')')
-        endpoint_query = f'''SELECT DISTINCT ?member ?source ?target WHERE {{
-            VALUES (?member ?expectedSource ?expectedTarget) {{ {' '.join(endpoint_values)} }}
-            GRAPH {self.facts} {{ ?member <{F}sourceEntity> ?nativeSource ; <{F}targetEntity> ?nativeTarget }}
-            GRAPH {self.graph} {{ ?expectedSource <{P}member> ?nativeSource .
-                ?expectedTarget <{P}member> ?nativeTarget }}
-            BIND(?expectedSource AS ?source)
-            BIND(?expectedTarget AS ?target)
-        }}'''
-        endpoint_rows = list(self.owner.store.query(endpoint_query))
-        endpoints = {row['member'].value: (row['source'].value, row['target'].value) for row in endpoint_rows}
-        if endpoints != {identity: (value['source'], value['target']) for identity, value in expected_members.items()}:
-            raise ProcessingError("Canonical fact member endpoint differs")
-        existing_query = f'''SELECT DISTINCT ?member ?existingFact WHERE {{
-            VALUES ?member {{ {' '.join(str(self.iri(identity)) for identity in expected_members)} }}
-            GRAPH {self.graph} {{ {self.head} <{P}fact> ?existingFact . ?existingFact <{P}member> ?member }}
-        }}'''
-        existing = {}
-        for row in self.owner.store.query(existing_query):
-            existing.setdefault(row['member'].value, set()).add(row['existingFact'].value)
+        fields_by_record={}
+        projected_bytes=0
+        for identity in expected_owned:
+            check_query_cancellation()
+            node=self.iri(identity)
+            self.member(node)
+            fields={}
+            for field in (*identity_fields,RDF_TYPE):
+                predicate=field if field==RDF_TYPE else F+field
+                values=set()
+                for quad in self.owner.store.quads_for_pattern(node,self.ox.NamedNode(predicate),None,self.facts):
+                    projected_bytes+=len(str(quad.object).encode())
+                    if len(values)>=MAX_ROWS or projected_bytes>MAX_BYTES:
+                        raise ProcessingError('Canonical fact validation projection exceeds byte or row budget')
+                    values.add(quad.object)
+                fields[field]=values
+            if fields[RDF_TYPE]!={self.ox.NamedNode(F+'Relation')}:
+                raise ProcessingError('Canonical fact member is not a current native Relation')
+            fields_by_record[identity]=fields
+        observed={identity:dict(fields=fields_by_record[identity],
+            representative_fields=fields_by_record[value['representative']])
+            for identity,value in expected_members.items()}
+        for identity,expected in expected_members.items():
+            node=self.iri(identity)
+            for field,canonical in (('sourceEntity',expected['source']),('targetEntity',expected['target'])):
+                endpoints=list(islice(self.owner.store.quads_for_pattern(node,
+                    self.ox.NamedNode(F+field),None,self.facts),2))
+                if len(endpoints)!=1 or not next(self.owner.store.quads_for_pattern(
+                        self.iri(canonical),self.ox.NamedNode(P+'member'),endpoints[0].object,self.graph),None):
+                    raise ProcessingError('Canonical fact member endpoint differs')
+            for link in self.owner.store.quads_for_pattern(None,self.ox.NamedNode(P+'member'),node,self.graph):
+                check_query_cancellation()
+                if next(self.owner.store.quads_for_pattern(self.head,
+                        self.ox.NamedNode(P+'fact'),link.subject,self.graph),None):
+                    if link.subject.value!=expected['fact']:
+                        raise ProcessingError('Native Relation already belongs to another canonical fact')
         for identity, value in observed.items():
             expected = expected_members[identity]
-            if existing.get(identity) and existing[identity] != {expected['fact']}:
-                raise ProcessingError("Native Relation already belongs to another canonical fact")
             if len(value['fields']['predicateName']) != 1 or not isinstance(
                     next(iter(value['fields']['predicateName'])), self.ox.Literal):
                 raise ProcessingError("Native fact predicate missing or duplicated")

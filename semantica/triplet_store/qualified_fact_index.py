@@ -1,6 +1,7 @@
 """Reference-only native partitions for the current qualified-fact owner."""
 import hashlib
 import json
+from itertools import islice
 
 from ..conflicts.conflict_detector import ConflictDetector
 from ..semantic_extract.types import normalize_fact_predicate
@@ -53,9 +54,9 @@ class QualifiedFactIndex:
             # with a partial previous attempt.
             self.owner.store.update(f'''DELETE {{ GRAPH {p.graph} {{ ?entry ?field ?value }} }}
                 WHERE {{ GRAPH {p.graph} {{ ?entry ?field ?value . VALUES ?field {{
-                <{P}qualifiedEntry> <{P}qualifiedPartition> <{P}qualifiedReference>
+                <{P}qualifiedPartitionNode> <{P}qualifiedPartitionEntry> <{P}qualifiedEntry> <{P}qualifiedPartition> <{P}qualifiedReference>
                 <{P}qualifiedKind> <{P}qualifiedObservation> <{P}qualifiedIdentity>
-                <{P}qualifiedIndexSealed> <{P}qualifiedSubject> <{P}qualifiedEvidence> <{P}qualifiedPredicate> <{P}qualifiedRepresentation> <{P}qualifiedReconciledStatus> }} }} }}''')
+                <{P}qualifiedIndexSealed> <{P}qualifiedSubject> <{P}qualifiedEvidence> <{P}qualifiedPredicate> <{P}qualifiedRepresentation> <{P}qualifiedReconciledStatus> <{P}qualifiedDecision> <{P}qualifiedSelectedObservation> <{P}qualifiedSelectedStatus> <{P}qualifiedSelectedEvidence> <{P}qualifiedSelectedSupport> <{P}qualifiedSelectedEntry> <{P}qualifiedSelectedKind> <{P}qualifiedSelectedReference> <{P}qualifiedSelectedIdentity> }} }} }}''')
             self.owner.flush()
             count = 0
             pending, pending_ids, pending_bytes = [], set(), 0
@@ -65,47 +66,71 @@ class QualifiedFactIndex:
                     self._fence(False)
                     p.mutate(self.generation,pending)
                     pending, pending_ids, pending_bytes = [], set(), 0
-            for reference, kind, item in rows:
+            def batches():
+                batch, size = [], 0
+                for row in rows:
+                    amount=len(json.dumps(row,ensure_ascii=False).encode())
+                    if amount>MAX_BYTES:
+                        raise ProcessingError('Native qualified input exceeds byte budget')
+                    if batch and (len(batch)>=MAX_ROWS or size+amount>MAX_BYTES):
+                        yield batch
+                        batch, size = [], 0
+                    batch.append(row)
+                    size+=amount
+                if batch:
+                    yield batch
+            for batch in batches():
+                representations={}
+                verified=set()
                 self._fence(False)
-                native = p.iri(reference)
-                p.member(native)
-                if not next(self.owner.store.quads_for_pattern(native, p.ox.NamedNode(RDF_TYPE),
-                        p.ox.NamedNode(F+'Relation'), p.facts), None):
-                    raise ProcessingError('Qualified index requires a native Relation')
-                identity = ConflictDetector.qualified_fact_identity(p.project, item, kind)
-                # The accepted identity projection owns the builder representation
-                # identity; the extraction binding carries only its input revision.
-                endpoints=list(self.owner.store.quads_for_pattern(native,
-                    p.ox.NamedNode(F+'sourceEntity'),None,p.facts))
-                if len(endpoints)!=1 or not isinstance(endpoints[0].object,p.ox.NamedNode):
-                    raise ProcessingError('Native qualified source identity missing')
-                source=endpoints[0].object
-                records=ExtractionRecords.from_identity_reference(self.owner,p.project,source.value)
-                _,one,_=records._read_identity_projection_fields(source)
-                representation=one(source,'buildRepresentationId')
-                entry = p.iri(P+'qualified-entry:'+_digest([reference, kind, item['id']]))
-                if entry.value in pending_ids or p.values(entry, 'qualifiedReference'):
-                    raise ProcessingError('Duplicate qualified fact observation')
-                triples = [
-                    p.triple(p.head, 'qualifiedEntry', entry),
-                    p.triple(entry, 'qualifiedPartition', p.scalar(self.partition(item,kind))),
-                    p.triple(entry, 'qualifiedReference', p.iri(reference)),
-                    p.triple(entry, 'qualifiedKind', p.scalar(kind)),
-                    p.triple(entry, 'qualifiedObservation', p.scalar(item['id'])),
-                    p.triple(entry, 'qualifiedIdentity', p.scalar(identity)),
-                    p.triple(entry,'qualifiedRepresentation',p.scalar(representation)),
-                    p.triple(entry,'qualifiedPredicate',p.scalar(item['predicate'] if kind=='assertion' else item['type'])),
-                    p.triple(entry, 'qualifiedSubject', p.scalar(item['subject_id'] if kind=='assertion' else item['source_entity_id'])),
-                    *[p.triple(entry, 'qualifiedEvidence', p.scalar(value)) for value in item['evidence_ids']]]
-                size=len('\n'.join(triples).encode())
-                if size>MAX_BYTES:
-                    raise ProcessingError('Publication atomic write exceeds byte budget')
-                if pending and (len(pending_ids)>=MAX_ROWS or pending_bytes+1+size>MAX_BYTES):
-                    flush()
-                pending_bytes+=size+(1 if pending else 0)
-                pending.extend(triples)
-                pending_ids.add(entry.value)
-                count += 1
+                for reference,kind,item in batch:
+                    check_query_cancellation()
+                    native = p.iri(reference)
+                    if reference not in verified:
+                        p.member(native)
+                    if reference not in verified and not next(self.owner.store.quads_for_pattern(native, p.ox.NamedNode(RDF_TYPE),
+                            p.ox.NamedNode(F+'Relation'), p.facts), None):
+                        raise ProcessingError('Qualified index requires a native Relation')
+                    identity = ConflictDetector.qualified_fact_identity(p.project, item, kind)
+                    # The accepted identity projection owns the builder representation
+                    # identity; the extraction binding carries only its input revision.
+                    endpoints=list(self.owner.store.quads_for_pattern(native,
+                        p.ox.NamedNode(F+'sourceEntity'),None,p.facts))
+                    if len(endpoints)!=1 or not isinstance(endpoints[0].object,p.ox.NamedNode):
+                        raise ProcessingError('Native qualified source identity missing')
+                    source=endpoints[0].object
+                    if source.value not in representations:
+                        records=ExtractionRecords.from_identity_reference(self.owner,p.project,source.value)
+                        _,one,_=records._read_identity_projection_fields(source)
+                        representations[source.value]=one(source,'buildRepresentationId')
+                    representation=representations[source.value]
+                    verified.add(reference)
+                    entry = p.iri(P+'qualified-entry:'+_digest([reference, kind, item['id']]))
+                    if entry.value in pending_ids or p.values(entry, 'qualifiedReference'):
+                        raise ProcessingError('Duplicate qualified fact observation')
+                    partition=p.iri(P+'qualified-partition:'+self.partition(item,kind))
+                    triples = [
+                        p.triple(p.head, 'qualifiedPartitionNode', partition),
+                        p.triple(partition, 'qualifiedPartitionEntry', entry),
+                        p.triple(p.head, 'qualifiedEntry', entry),
+                        p.triple(entry, 'qualifiedPartition', p.scalar(self.partition(item,kind))),
+                        p.triple(entry, 'qualifiedReference', p.iri(reference)),
+                        p.triple(entry, 'qualifiedKind', p.scalar(kind)),
+                        p.triple(entry, 'qualifiedObservation', p.scalar(item['id'])),
+                        p.triple(entry, 'qualifiedIdentity', p.scalar(identity)),
+                        p.triple(entry,'qualifiedRepresentation',p.scalar(representation)),
+                        p.triple(entry,'qualifiedPredicate',p.scalar(item['predicate'] if kind=='assertion' else item['type'])),
+                        p.triple(entry, 'qualifiedSubject', p.scalar(item['subject_id'] if kind=='assertion' else item['source_entity_id'])),
+                        *[p.triple(entry, 'qualifiedEvidence', p.scalar(value)) for value in item['evidence_ids']]]
+                    size=len('\n'.join(triples).encode())
+                    if size>MAX_BYTES:
+                        raise ProcessingError('Publication atomic write exceeds byte budget')
+                    if pending and (len(pending_ids)>=MAX_ROWS or pending_bytes+1+size>MAX_BYTES):
+                        flush()
+                    pending_bytes+=size+(1 if pending else 0)
+                    pending.extend(triples)
+                    pending_ids.add(entry.value)
+                    count += 1
             flush()
             self._fence(False)
             p.mutate(self.generation, [p.triple(p.head, 'qualifiedIndexSealed', p.ox.Literal(count))])
@@ -134,52 +159,79 @@ class QualifiedFactIndex:
             after = page[-1]['entry'].value
 
     def _reference_pages(self):
-        """Read all indexed observations in bounded partition order."""
+        """Traverse the native partition adjacency once, without global sorting."""
         p = self.publication
-        after_partition = after_entry = None
-        while True:
-            cursor = ''
-            if after_partition is not None:
-                partition = p.scalar(after_partition)
-                entry = p.scalar(after_entry)
-                cursor = (f'FILTER(STR(?partition) > {partition} || '
-                    f'(STR(?partition) = {partition} && STR(?entry) > {entry}))')
-            with self.owner._publication_lock:
-                self._fence()
-                page = list(self.owner.store.query(f'''SELECT ?partition ?entry ?reference ?kind ?observation ?identity WHERE {{
-                    GRAPH {p.graph} {{ ?entry <{P}qualifiedPartition> ?partition ;
-                        <{P}qualifiedReference> ?reference ; <{P}qualifiedKind> ?kind ;
-                        <{P}qualifiedObservation> ?observation ; <{P}qualifiedIdentity> ?identity .
-                        {cursor} FILTER EXISTS {{ {p.head} <{P}qualifiedEntry> ?entry }} }}
-                    }} ORDER BY ?partition ?entry LIMIT {MAX_ROWS}'''))
-            size = 0
-            values = []
-            for row in page:
-                value = {key: row[key].value for key in ('partition', 'entry', 'reference', 'kind', 'observation', 'identity')}
-                size += len(json.dumps(value, ensure_ascii=False).encode())
-                if size > MAX_BYTES:
-                    raise ProcessingError('Native qualified reference page byte budget exceeded')
-                values.append(value)
-            if values:
-                yield values
-                after_partition, after_entry = values[-1]['partition'], values[-1]['entry']
-            if len(page) < MAX_ROWS:
-                return
+        self._fence()
+        visited=0
+        partitions=self.owner.store.quads_for_pattern(p.head,
+            p.ox.NamedNode(P+'qualifiedPartitionNode'),None,p.graph)
+        for link in partitions:
+            if not isinstance(link.object,p.ox.NamedNode):
+                raise ProcessingError('Native qualified partition address invalid')
+            page, size = [], 0
+            for member in self.owner.store.quads_for_pattern(link.object,
+                    p.ox.NamedNode(P+'qualifiedPartitionEntry'),None,p.graph):
+                check_query_cancellation()
+                entry=member.object
+                if not isinstance(entry,p.ox.NamedNode) or not next(self.owner.store.quads_for_pattern(
+                        p.head,p.ox.NamedNode(P+'qualifiedEntry'),entry,p.graph),None):
+                    raise ProcessingError('Native qualified partition member invalid')
+                value={key:p.one(entry,field) for key,field in (
+                    ('partition','qualifiedPartition'),('reference','qualifiedReference'),
+                    ('kind','qualifiedKind'),('observation','qualifiedObservation'),('identity','qualifiedIdentity'))}
+                if link.object!=p.iri(P+'qualified-partition:'+value['partition']):
+                    raise ProcessingError('Native qualified partition binding differs')
+                amount=len(json.dumps(value,ensure_ascii=False).encode())
+                if amount>MAX_BYTES:
+                    raise ProcessingError('Native qualified reference exceeds byte budget')
+                if page and (len(page)>=MAX_ROWS or size+amount>MAX_BYTES):
+                    self._fence()
+                    yield page
+                    page, size = [], 0
+                page.append(value)
+                visited+=1
+                size+=amount
+            if page:
+                yield page
+        if visited!=int(p.one(p.head,'qualifiedIndexSealed')):
+            raise ProcessingError('Native qualified partition coverage incomplete')
 
     def canonical_endpoints(self, reference):
-        """Read the unique current canonical membership of two native endpoints."""
+        return self.canonical_endpoint_page([reference])[reference]
+
+    def canonical_endpoint_page(self, references):
+        """Resolve one bounded page by native address seeks, preserving unique membership."""
+        if not isinstance(references,list) or len(references)>MAX_ROWS or len(set(references))!=len(references):
+            raise ProcessingError('Invalid native endpoint page')
+        if not references:
+            return {}
         p=self.publication
         with self.owner._publication_lock:
             self._fence(False)
-            p.member(p.iri(reference))
-            rows=list(self.owner.store.query(f"""SELECT ?source ?target WHERE {{
-                GRAPH {p.facts} {{ {p.iri(reference)} <{F}sourceEntity> ?s ; <{F}targetEntity> ?t }}
-                GRAPH {p.graph} {{ {p.head} <{P}canonical> ?source, ?target .
-                    ?source <{P}member> ?s . ?target <{P}member> ?t }}
-                }} LIMIT 2"""))
-            if len(rows)!=1:
-                raise ProcessingError('Native fact requires unique canonical endpoint membership')
-            return rows[0]['source'].value,rows[0]['target'].value
+            native=[p.iri(reference) for reference in references]
+            for node in native:
+                p.member(node)
+            result={}
+            for node in native:
+                endpoints=[]
+                for field in ('sourceEntity','targetEntity'):
+                    mentions=list(islice(self.owner.store.quads_for_pattern(node,
+                        p.ox.NamedNode(F+field),None,p.facts),2))
+                    if len(mentions)!=1:
+                        raise ProcessingError('Native fact requires unique canonical endpoint membership')
+                    selected=None
+                    for link in self.owner.store.quads_for_pattern(None,p.ox.NamedNode(P+'member'),mentions[0].object,p.graph):
+                        check_query_cancellation()
+                        if next(self.owner.store.quads_for_pattern(p.head,
+                                p.ox.NamedNode(P+'canonical'),link.subject,p.graph),None):
+                            if selected is not None:
+                                raise ProcessingError('Native fact requires unique canonical endpoint membership')
+                            selected=link.subject.value
+                    if selected is None:
+                        raise ProcessingError('Native fact requires unique canonical endpoint membership')
+                    endpoints.append(selected)
+                result[node.value]=tuple(endpoints)
+            return result
 
     def iter_reconciled(self, read, *, functional_predicates=(),
                         max_group_records=4096, max_group_bytes=16*1024*1024):
@@ -214,11 +266,14 @@ class QualifiedFactIndex:
         p=self.publication
         assertions, relations, size, count = [], [], 0, 0
         supports = {}
-        for row in self._references(partition) if references is None else references:
+        selections = {}
+        # Consume both logical views consecutively so one observation is restored once.
+        rows=list(self._references(partition)) if references is None else references
+        for row in sorted(rows,key=lambda value:(value['reference'],value['kind'])):
             count += 1
             if count > max_group_records:
                 raise ProcessingError('Native qualified fact group record budget exceeded')
-            self._fence()
+            check_query_cancellation()
             item = read(row['reference'], row['kind'], row['observation'])
             size += len(json.dumps(item, ensure_ascii=False, separators=(',',':')).encode())
             if size > max_group_bytes:
@@ -226,25 +281,28 @@ class QualifiedFactIndex:
             if (item['id'] != row['observation'] or self.partition(item,row['kind']) != partition
                 or ConflictDetector.qualified_fact_identity(p.project,item,row['kind']) != row['identity']):
                 raise ProcessingError('Native qualified fact observation identity changed')
+            key=(row['kind'],row['identity'])
+            choice=(json.dumps(item,sort_keys=True,ensure_ascii=False,separators=(',',':')),row['reference'])
+            if key not in selections or choice<selections[key]:
+                selections[key]=choice
             if row['kind'] == 'assertion':
                 assertions.append(KnowledgeAssertion.model_validate(item))
             else:
                 relations.append(KnowledgeRelation.model_validate(item))
                 members, observations = supports.setdefault(row['identity'], ({}, {}))
                 members[row['reference']] = None
-                observations.setdefault(_digest(item), row['reference'])
+                observations.setdefault(item['id'], row['reference'])
         self._fence()
         result = ConflictDetector.reconcile_qualified_facts(p.project,assertions,relations,
             functional_predicates=functional_predicates)
         plans = {}
         for relation in result[1]:
             members, observations = supports[relation.id]
-            originals = relation.metadata.get('support_observations', [])
-            representative = observations.get(_digest(originals[0])) if originals else None
+            representative = selections['relation',relation.id][1]
             if not members or representative is None:
                 raise ProcessingError('Native canonical fact support or representative missing')
             plans[relation.id] = (list(members), representative)
-        return (*result, plans)
+        return (*result, plans, {key:value[1] for key,value in selections.items()})
 
     @staticmethod
     def _page_budget(limit,max_bytes):
@@ -280,12 +338,7 @@ class QualifiedFactIndex:
     def canonical_page(self,kind,read,*,after=None,limit=MAX_ROWS,max_bytes=MAX_BYTES,
                        subject_ids=None,evidence_ids=None,predicates=None,functional_predicates=(),
                        max_group_records=4096,max_group_bytes=16*1024*1024):
-        """Select canonical identities natively, reduce only complete selected groups.
-
-        Admission filters select identities through any supporting observation.
-        All evidence and conflict peers in their partition remain in reduction.
-        No DTO state is persisted or retained between calls.
-        """
+        """Read committed field selections; never execute semantic reduction."""
         self._page_budget(limit,max_bytes)
         if kind not in {'assertion','relation'}:
             raise ProcessingError('Unknown qualified fact kind')
@@ -312,19 +365,32 @@ class QualifiedFactIndex:
                     {' '.join(filters)} {cursor} }}
                 }} ORDER BY ?identity LIMIT {limit+1}'''))
         values=[]
-        functional_predicates=tuple(functional_predicates)
-        # Reuse only the most recent bounded group, never a project DTO cache.
-        current_partition=None
-        reduced=None
         for row in rows[:limit]:
-            partition,identity=row['partition'].value,row['identity'].value
-            if partition!=current_partition:
-                reduced=self._reconcile_partition(partition,read,functional_predicates,
-                    max_group_records,max_group_bytes)[0 if kind=='assertion' else 1]
-                current_partition=partition
-            item=next((value for value in reduced if value.id==identity),None)
-            if item is None:
-                raise ProcessingError('Native canonical identity missing from reducer')
+            identity = row['identity'].value
+            decision = p.iri(P+'qualified-decision:'+_digest([identity,kind]))
+            observation = p.one(decision,'qualifiedSelectedObservation')
+            reference = p.one(decision,'qualifiedSelectedReference')
+            item = dict(read(reference,kind,observation))
+            if item['id']!=observation or ConflictDetector.qualified_fact_identity(p.project,item,kind)!=identity:
+                raise ProcessingError('Native canonical selected observation identity changed')
+            def selected(field):
+                result, size = [], 0
+                for q in self.owner.store.quads_for_pattern(decision,p.ox.NamedNode(P+field),None,p.graph):
+                    if not isinstance(q.object,p.ox.Literal):
+                        raise ProcessingError('Native canonical selection value invalid')
+                    size+=len(q.object.value.encode())
+                    if len(result)>=4096 or size>max_bytes:
+                        raise ProcessingError('Native canonical selection exceeds byte budget')
+                    result.append(q.object.value)
+                return sorted(result)
+            item.update(id=identity,status=p.one(decision,'qualifiedSelectedStatus'),
+                evidence_ids=selected('qualifiedSelectedEvidence'))
+            item['evidence_ids'].sort()
+            item['support_ids']=list(item['evidence_ids'])
+            item['metadata']={**item.get('metadata',{}),
+                'representative_observation_id':observation,
+                'support_observation_ids':selected('qualifiedSelectedSupport')}
+            item=(KnowledgeAssertion if kind=='assertion' else KnowledgeRelation).model_validate(item)
             if len(json.dumps([value.model_dump() for value in values]+[item.model_dump()],ensure_ascii=False).encode())>max_bytes:
                 if not values:
                     raise ProcessingError('Native canonical item exceeds byte budget')
@@ -333,48 +399,71 @@ class QualifiedFactIndex:
         self._fence()
         return dict(records=values,next_cursor=values[-1].id if len(rows)>len(values) else None)
 
-    def stage_reconciled(self,assertions,relations):
+    def stage_reconciled(self,assertions,relations,*,references):
         """Store only final status scalars on existing native observation keys."""
         p=self.publication
         with self.owner._publication_lock:
             self._fence()
             pending, pending_bytes = [], 0
+            selections, selection_bytes = [], 0
+            def flush_selections():
+                nonlocal selections, selection_bytes
+                if selections:
+                    p.mutate(self.generation,selections)
+                    selections, selection_bytes = [], 0
             def flush():
                 nonlocal pending, pending_bytes
                 if not pending:
                     return
                 self._fence()
-                values=' '.join(pending)
-                size=len(values.encode())
-                checkpoint=getattr(p,'_checkpoint',None)
-                if checkpoint is not None and checkpoint['bytes']+size>MAX_BYTES:
-                    self.owner.flush()
-                    checkpoint.update(writes=0,bytes=0)
-                self.owner.store.update(f'''INSERT {{ GRAPH {p.graph} {{
-                    ?entry <{P}qualifiedReconciledStatus> ?status }} }} WHERE {{
-                    VALUES (?identity ?kind ?status) {{ {values} }}
-                    GRAPH {p.graph} {{ ?entry <{P}qualifiedIdentity> ?identity ;
-                        <{P}qualifiedKind> ?kind .
-                        FILTER EXISTS {{ {p.head} <{P}qualifiedEntry> ?entry }} }} }}''')
-                if checkpoint is None:
-                    self.owner.flush()
-                else:
-                    checkpoint['writes']+=1
-                    checkpoint['bytes']+=size
-                    if checkpoint['writes']>=MAX_ROWS:
-                        self.owner.flush()
-                        checkpoint.update(writes=0,bytes=0)
+                p.mutate(self.generation,pending)
                 pending, pending_bytes = [], 0
             for kind,items in (('assertion',assertions),('relation',relations)):
                 for item in items:
-                    row='('+str(p.scalar(item.id))+' '+str(p.scalar(kind))+' '+str(p.scalar(item.status))+')'
-                    size=len(row.encode())+1
-                    if pending and (len(pending)>=MAX_ROWS or pending_bytes+size>MAX_BYTES):
-                        flush()
-                    if size>MAX_BYTES:
-                        raise ProcessingError('Qualified reconciliation status exceeds byte budget')
-                    pending.append(row)
-                    pending_bytes+=size
+                    observation=item.metadata.get('representative_observation_id')
+                    supports=item.metadata.get('support_observation_ids')
+                    if not observation or not supports or observation not in supports:
+                        raise ProcessingError('Native canonical decision lacks observation selection')
+                    decision=p.iri(P+'qualified-decision:'+_digest([item.id,kind]))
+                    triples=[p.triple(p.head,'qualifiedDecision',decision),
+                        p.triple(decision,'qualifiedSelectedKind',p.scalar(kind)),
+                        p.triple(decision,'qualifiedSelectedEntry',p.iri(P+'qualified-entry:'+_digest([references[kind,item.id],kind,observation]))),
+                        p.triple(decision,'qualifiedSelectedIdentity',p.scalar(item.id)),
+                        p.triple(decision,'qualifiedSelectedReference',p.iri(references[kind,item.id])),
+                        p.triple(decision,'qualifiedSelectedObservation',p.scalar(observation)),
+                        p.triple(decision,'qualifiedSelectedStatus',p.scalar(item.status)),
+                        *[p.triple(decision,'qualifiedSelectedEvidence',p.scalar(value)) for value in item.evidence_ids],
+                        *[p.triple(decision,'qualifiedSelectedSupport',p.scalar(value)) for value in supports]]
+                    # Selections are immutable in this index, never overwritten by reads.
+                    if p.values(decision,'qualifiedSelectedObservation'):
+                        raise ProcessingError('Native canonical decision already staged')
+                    for triple in triples:
+                        amount=len(triple.encode())+1
+                        if amount>MAX_BYTES:
+                            raise ProcessingError('Native canonical selection exceeds byte budget')
+                        if selections and (len(selections)>=MAX_ROWS or selection_bytes+amount>MAX_BYTES):
+                            flush_selections()
+                        selections.append(triple)
+                        selection_bytes+=amount
+                    for link in self.owner.store.quads_for_pattern(None,
+                            p.ox.NamedNode(P+'qualifiedIdentity'),p.scalar(item.id),p.graph):
+                        entry=link.subject
+                        if p.one(entry,'qualifiedKind')!=kind:
+                            continue
+                        if not next(self.owner.store.quads_for_pattern(p.head,
+                                p.ox.NamedNode(P+'qualifiedEntry'),entry,p.graph),None):
+                            continue
+                        for field,value in (('qualifiedReconciledStatus',p.scalar(item.status)),
+                                            ('qualifiedDecision',decision)):
+                            triple=p.triple(entry,field,value)
+                            size=len(triple.encode())+1
+                            if pending and (len(pending)>=MAX_ROWS or pending_bytes+size>MAX_BYTES):
+                                flush()
+                            if size>MAX_BYTES:
+                                raise ProcessingError('Qualified reconciliation status exceeds byte budget')
+                            pending.append(triple)
+                            pending_bytes+=size
+            flush_selections()
             flush()
             if getattr(p, '_checkpoint', None) is None:
                 self.owner.flush()

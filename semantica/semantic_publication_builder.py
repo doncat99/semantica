@@ -328,21 +328,58 @@ def _context_batches(base: dict[str, Any], records: Iterable[tuple[str, Any]], m
     if size(base) > max_bytes:
         raise SemanticArtifactError("fixed model context exceeds the production budget",
                                     code="MODEL_CONTEXT_BUDGET_EXCEEDED")
-    current, emitted = dict(base), False
-    for key, record in records:
-        candidate = {**current, key: [*current.get(key, []), record]}
-        if size(candidate) > max_bytes:
-            if current != base:
-                yield current
-                emitted = True
-            current = {**base, key: [record]}
-            if size(current) > max_bytes:
-                raise SemanticArtifactError(f"indivisible {key} record exceeds the production budget",
-                                            code="MODEL_CONTEXT_BUDGET_EXCEEDED")
-        else:
-            current = candidate
-    if current != base or not emitted:
-        yield current
+    # Grow geometrically, then locate the exact boundary. Serializing every
+    # growing prefix made large first-time classifications quadratic.
+    stream=iter(records)
+    pending=[]
+    emitted=False
+    exhausted=False
+    def assemble(rows):
+        value={key:list(items) if isinstance(items,list) else items for key,items in base.items()}
+        for key,record in rows:
+            value.setdefault(key,[]).append(record)
+        return value
+    while True:
+        if not exhausted:
+            extra=[]
+            extra_bytes=0
+            for _ in range(max(1,len(pending))):
+                try:
+                    record=next(stream)
+                except StopIteration:
+                    exhausted=True
+                    break
+                record_bytes=_context_size(record)
+                if record_bytes>max_bytes:
+                    raise SemanticArtifactError('indivisible context record exceeds the production budget',
+                        code='MODEL_CONTEXT_BUDGET_EXCEEDED')
+                extra.append(record)
+                extra_bytes+=record_bytes
+                if extra_bytes>=max_bytes:
+                    break
+            pending.extend(extra)
+        if not pending:
+            if not emitted:
+                yield dict(base)
+            return
+        if size(assemble(pending))<=max_bytes:
+            if not exhausted:
+                continue
+            yield assemble(pending)
+            return
+        low,high=0,len(pending)
+        while low+1<high:
+            middle=(low+high)//2
+            if size(assemble(pending[:middle]))<=max_bytes:
+                low=middle
+            else:
+                high=middle
+        if not low:
+            raise SemanticArtifactError(f"indivisible {pending[0][0]} record exceeds the production budget",
+                                        code="MODEL_CONTEXT_BUDGET_EXCEEDED")
+        yield assemble(pending[:low])
+        emitted=True
+        pending=pending[low:]
 
 
 def _native_parallel_map(items: list[Any], handler: Any, parallelism: int, on_complete: Any = None,
@@ -1621,6 +1658,22 @@ _CLASSIFICATION_INSTRUCTION = (
 
 
 def _classify_source(built: dict[str, Any], profile: Any, relay: Any) -> tuple[SourceClassification | None, list[ModelReceipt]]:
+    native = _native_build.get()
+    source_binding = None
+    if native is not None:
+        from .triplet_store.classification_records import ClassificationRecords
+        request, owner, _ = native
+        source=built['source']
+        ref=next(ref for ref in request.parsed_sources if ref.source_id==source.source_id)
+        source_binding=dict(project=request.project_id,source=source.source_id,
+            material=source.material_revision,representation=ref.representation_revision,
+            recipe=_classification_recipe(relay),model=relay.model_id,target=source.source_id,
+            taxonomy=stable_digest(profile.model_dump(mode='json',by_alias=True)))
+        completed=ClassificationRecords.source_completion(owner,source_binding)
+        if completed is not None:
+            built.setdefault('native_operations',[]).append(completed)
+            built['native_classification_reduction']=completed
+            return None,[]
     base = {"profile": profile.model_dump(mode="json", by_alias=True), "source_id": built["source"].source_id}
     schema = _ClassificationOutput.model_json_schema()
     def batches():
@@ -1655,6 +1708,7 @@ def _classify_source(built: dict[str, Any], profile: Any, relay: Any) -> tuple[S
         binding['context_digest'] = stable_digest(dict(batch_operations=operations, profile=profile.model_dump(mode='json', by_alias=True)))
         reduction = ClassificationRecords(owner, binding)
         reduction.adopt_reduction(operations, profile=profile)
+        ClassificationRecords.source_completion(owner,source_binding,reduction=reduction)
         built['native_operations'].append(reduction.operation.value)
         built['native_classification_reduction'] = reduction.operation.value
         return None, receipts
@@ -3075,6 +3129,37 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
             if request.recipe.id == "model":
                 model_result, embeddings, source_receipts = _extract_project_sources(
                     [(source, force_ocr, parsed)], request, source_progress if progress else None)[0]
+            store = _native_build.get()[1]
+            projection_key=stable_digest(dict(source=source.model_dump(mode='json',by_alias=True),
+                representation=parsed_refs[source.source_id].representation_revision,
+                mode=request.recipe.id,force_ocr=force_ocr,
+                operations=sorted(set((model_result or {}).get('native_operations',[]))) if request.recipe.id=='model' else []))
+            addresses=ExtractionRecords.source_projection(store,request.project_id,projection_key)
+            if addresses is not None:
+                header=next(addresses)
+                if set(header)!={'representation','artifact_id','operations'}:
+                    raise SemanticArtifactError('native source projection header differs')
+                built_source=dict(source=source,
+                    representation=DocumentRepresentation.model_validate(header['representation']),
+                    artifact_id=header['artifact_id'],native_operations=header['operations'],
+                    native_extraction_operations=tuple(header['operations']),
+                    native_scalar_ranges=parsed.native_ranges,reader=parsed.reader,evidence=[],passages=[])
+                if request.recipe.id=='model':
+                    built_source['embeddings']=embeddings
+                    model_receipts.extend(source_receipts)
+                for address in addresses:
+                    if set(address)!={'fields','quote_length','quote_digest','passage'}:
+                        raise SemanticArtifactError('native source projection evidence differs')
+                    span=_EvidenceReference(address['fields'],parsed.reader,address['quote_length'],address['quote_digest'])
+                    built_source['evidence'].append(span)
+                    if address['passage']:
+                        built_source['passages'].append(span)
+                if not built_source['passages']:
+                    raise SemanticArtifactError('native source projection has no passages')
+                source_builds.append(built_source)
+                source_progress(dict(stage='source_projection',percent=100,detail='source_projection',metadata=dict(reused=True)))
+                del document,parsed
+                continue
             with _project_progress(source_progress if progress else None, "source_projection", 90):
                 if request.recipe.id == "model":
                     built_source = _build_source(source, force_ocr, model_result, parsed)
@@ -3121,6 +3206,15 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                 built_source['passages'] = [references[span.id] for span in built_source['passages']]
                 built_source['evidence'] = list(references.values())
                 del built_source['document'], built_source['text'], built_source['source_locations']
+                built_source['native_extraction_operations'] = tuple(built_source['native_operations'])
+                def projection_addresses():
+                    yield dict(representation=built_source['representation'].model_dump(mode='json',by_alias=True),
+                        artifact_id=built_source['artifact_id'],operations=built_source['native_operations'])
+                    passages={span.id for span in built_source['passages']}
+                    for span in built_source['evidence']:
+                        yield dict(fields=span.fields,quote_length=span.quote_length,
+                            quote_digest=span.quote_digest,passage=span.id in passages)
+                ExtractionRecords.source_projection(store,request.project_id,projection_key,projection_addresses())
                 source_builds.append(built_source)
             # Do not keep the previous source alive while loading the next one.
             del document, parsed
@@ -3240,7 +3334,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                     material=built['source'].material_revision,
                     representation=next(ref.representation_revision for ref in request.parsed_sources
                         if ref.source_id == built['source'].source_id),
-                    operations=sorted(set(built['native_operations']))) for built in source_builds),
+                    operations=sorted(set(built['native_extraction_operations']))) for built in source_builds),
                     key=lambda source: source['source'])))
             completed = publication.identity_stage_status(generation, input_key)
             if completed is not None:
@@ -3326,10 +3420,11 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
             cursor=None
             while True:
                 page=store.read_build_records(request.project_id,generation,kind='Relation',fields=['urn:semantica:field:predicateName'],after=cursor,limit=128)
+                endpoints_by_ref=index.canonical_endpoint_page([record['id'] for record in page['records']])
                 for record in page['records']:
                     records=ExtractionRecords.from_fact_reference(store,request.project_id,record['id'])
                     projections=records.read_fact_index_projections(record['id'])
-                    endpoints=fact_index.canonical_endpoints(record['id'])
+                    endpoints=endpoints_by_ref[record['id']]
                     for kind in ('assertion','relation'):
                         yield record['id'],kind,hydrate_fact(record['id'],kind,
                             projection=projections[kind],endpoints=endpoints)
@@ -3339,16 +3434,23 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                     break
         with _project_progress(progress,'fact_reconciliation',90) as metadata, index.publication.build_scope(generation), index.publication.checkpointed(generation):
             metadata.update(indexedObservations=0,completedPartitions=0,canonicalRelations=0)
+            input_key=stable_digest(dict(identity=index.publication.one(index.publication.head,'identityStageInput')))
+            if index.publication.fact_stage_status(generation,input_key):
+                metadata.update(reused=True)
+                return
+            index.publication.reset_fact_stage(generation)
             index.build(rows())
+            pending_references={}
             pending_claims=[]
             pending_links=[]
             pending_facts=[]
             pending_members=0
             pending_bytes=0
             def flush_statuses():
-                nonlocal pending_claims,pending_links
+                nonlocal pending_claims,pending_links,pending_references
                 if pending_claims or pending_links:
-                    index.stage_reconciled(pending_claims,pending_links)
+                    index.stage_reconciled(pending_claims,pending_links,references=pending_references)
+                    pending_references={}
                     pending_claims=[]
                     pending_links=[]
             def flush_facts():
@@ -3358,7 +3460,20 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                     pending_facts=[]
                     pending_members=0
                     pending_bytes=0
-            for claims,links,issues,supports in index.iter_reconciled(hydrate_fact):
+            current_ref=None
+            current_views=None
+            def read_observation(ref,kind,observation):
+                nonlocal current_ref,current_views
+                if current_ref!=ref:
+                    records=ExtractionRecords.from_fact_reference(store,request.project_id,ref)
+                    projections=records.read_fact_projections(ref)
+                    endpoints=index.canonical_endpoints(ref)
+                    current_views={view:hydrate_fact(ref,view,projection=projection,endpoints=endpoints)
+                        for view,projection in projections.items()}
+                    current_ref=ref
+                return current_views[kind]
+            for claims,links,issues,supports,selections in index.iter_reconciled(read_observation):
+                pending_references.update(selections)
                 pending_claims.extend(claims)
                 pending_links.extend(links)
                 if len(pending_claims)+len(pending_links)>=128:
@@ -3383,6 +3498,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                 metadata['canonicalRelations'] += len(links)
             flush_statuses()
             flush_facts()
+            index.publication.seal_fact_stage(generation,input_key)
 
     def semantic_organization(_):
         nonlocal communities, topics

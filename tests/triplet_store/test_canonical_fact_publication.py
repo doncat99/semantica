@@ -109,7 +109,7 @@ def test_fact_staging_rejects_relation_outside_publication_before_sealing_covera
     store.store.update(f'''INSERT DATA {{ GRAPH {publication.graph} {{
         {source} <{P}operationCount> "1" . }} }}''')
 
-    with pytest.raises(ProcessingError, match='outside the current publication'):
+    with pytest.raises(ProcessingError, match='outside (the )?current publication'):
         store.stage_publication_facts('p', generation, [{**plan, 'members':relations}])
     store.close()
 
@@ -157,7 +157,7 @@ def test_activation_rejects_equal_count_foreign_member_replacement(tmp_path):
     store.store.update(f'''INSERT DATA {{ GRAPH {publication.graph} {{
         {fact} <{P}member> {foreign} . }} }}''')
 
-    with pytest.raises(ProcessingError, match='outside the current publication'):
+    with pytest.raises(ProcessingError, match='outside (the )?current publication'):
         store.activate_publication('p', generation, indexes=indexes())
     assert store.publication_status('p')['state'] == 'pending'
     store.close()
@@ -217,7 +217,7 @@ def test_fact_staging_validates_a_full_member_page_with_bounded_store_reads(tmp_
     store, generation, relations, plan = stage_duplicate_observations(
         tmp_path, source_ids=tuple(f'source-{number}' for number in range(128)))
     native = store.store
-    calls = {'patterns': 0, 'queries': 0}
+    calls = {'patterns': 0, 'queries': 0, 'rows':0}
     class CountedStore:
         def __getattr__(self, name):
             return getattr(native, name)
@@ -226,11 +226,14 @@ def test_fact_staging_validates_a_full_member_page_with_bounded_store_reads(tmp_
             return native.query(query, **kwargs)
         def quads_for_pattern(self, *args, **kwargs):
             calls['patterns'] += 1
-            yield from native.quads_for_pattern(*args, **kwargs)
+            for row in native.quads_for_pattern(*args, **kwargs):
+                calls['rows']+=1
+                yield row
     monkeypatch.setattr(store, 'store', CountedStore())
     try:
         store.stage_publication_facts('p', generation, [{**plan, 'member_count':len(relations), 'members':relations}])
-        assert calls['queries'] <= 8
-        assert calls['patterns'] <= 24
+        assert calls['queries'] == 0
+        assert calls['patterns'] <= 16*len(relations)+64
+        assert calls['rows'] <= 25*len(relations)+64
     finally:
         store.close()
