@@ -1,6 +1,7 @@
 """Reference-only native partitions for the current qualified-fact owner."""
 import hashlib
 import json
+import uuid
 from itertools import islice
 
 from ..conflicts.conflict_detector import ConflictDetector
@@ -50,14 +51,11 @@ class QualifiedFactIndex:
         p = self.publication
         with self.owner._publication_lock:
             self._fence(False)
-            # The current generation's index is rebuilt explicitly, never mixed
-            # with a partial previous attempt.
-            self.owner.store.update(f'''DELETE {{ GRAPH {p.graph} {{ ?entry ?field ?value }} }}
-                WHERE {{ GRAPH {p.graph} {{ ?entry ?field ?value . VALUES ?field {{
-                <{P}qualifiedPartitionNode> <{P}qualifiedPartitionEntry> <{P}qualifiedEntry> <{P}qualifiedPartition> <{P}qualifiedReference>
-                <{P}qualifiedKind> <{P}qualifiedObservation> <{P}qualifiedIdentity>
-                <{P}qualifiedIndexSealed> <{P}qualifiedSubject> <{P}qualifiedEvidence> <{P}qualifiedPredicate> <{P}qualifiedRepresentation> <{P}qualifiedReconciledStatus> <{P}qualifiedDecision> <{P}qualifiedSelectedObservation> <{P}qualifiedSelectedStatus> <{P}qualifiedSelectedEvidence> <{P}qualifiedSelectedSupport> <{P}qualifiedSelectedEntry> <{P}qualifiedSelectedKind> <{P}qualifiedSelectedReference> <{P}qualifiedSelectedIdentity> }} }} }}''')
-            self.owner.flush()
+            # Completion belongs to immutable input, not this publication attempt.
+            # Dirty partitions survive cancellation until their decisions are sealed.
+            self.owner.store.update(f'DELETE WHERE {{ GRAPH {p.graph} {{ {p.head} <{P}factStageInput> ?value }} }}')
+            self.owner.store.update(f'DELETE WHERE {{ GRAPH {p.graph} {{ {p.head} <{P}qualifiedIndexSealed> ?value }} }}')
+            seen=p.scalar(uuid.uuid4().hex)
             count = 0
             pending, pending_ids, pending_bytes = [], set(), 0
             def flush():
@@ -106,10 +104,31 @@ class QualifiedFactIndex:
                     representation=representations[source.value]
                     verified.add(reference)
                     entry = p.iri(P+'qualified-entry:'+_digest([reference, kind, item['id']]))
-                    if entry.value in pending_ids or p.values(entry, 'qualifiedReference'):
+                    if entry.value in pending_ids or p.values(entry,'qualifiedSeen')==[seen]:
                         raise ProcessingError('Duplicate qualified fact observation')
                     partition=p.iri(P+'qualified-partition:'+self.partition(item,kind))
+                    previous=p.values(entry,'qualifiedPartition')
+                    same=(previous==[p.scalar(self.partition(item,kind))]
+                        and p.values(entry,'qualifiedIdentity')==[p.scalar(identity)]
+                        and p.values(entry,'qualifiedRepresentation')==[p.scalar(representation)]
+                        and p.values(entry,'qualifiedRawStatus')==[p.scalar(item.get('status','candidate'))]
+                        and {q.object.value for q in self.owner.store.quads_for_pattern(entry,
+                            p.ox.NamedNode(P+'qualifiedEvidence'),None,p.graph)}==set(item['evidence_ids']))
+                    if previous:
+                        if not same:
+                            self._dirty(p.iri(P+'qualified-partition:'+p.one(entry,'qualifiedPartition')))
+                            self.owner.store.update(f'DELETE WHERE {{ GRAPH {p.graph} {{ ?partition <{P}qualifiedPartitionEntry> {entry} }} }}')
+                            self.owner.store.update(f'DELETE WHERE {{ GRAPH {p.graph} {{ {entry} ?field ?value }} }}')
+                        else:
+                            self.owner.store.update(f'DELETE WHERE {{ GRAPH {p.graph} {{ {entry} <{P}qualifiedSeen> ?value }} }}')
+                            p.mutate(self.generation,[p.triple(entry,'qualifiedSeen',seen)])
+                            if not p.values(entry,'qualifiedDecision'):
+                                self._dirty(partition)
+                            count+=1
+                            continue
+                    self._dirty(partition)
                     triples = [
+                        p.triple(entry,'qualifiedSeen',seen),
                         p.triple(p.head, 'qualifiedPartitionNode', partition),
                         p.triple(partition, 'qualifiedPartitionEntry', entry),
                         p.triple(p.head, 'qualifiedEntry', entry),
@@ -119,6 +138,7 @@ class QualifiedFactIndex:
                         p.triple(entry, 'qualifiedObservation', p.scalar(item['id'])),
                         p.triple(entry, 'qualifiedIdentity', p.scalar(identity)),
                         p.triple(entry,'qualifiedRepresentation',p.scalar(representation)),
+                        p.triple(entry,'qualifiedRawStatus',p.scalar(item.get('status','candidate'))),
                         p.triple(entry,'qualifiedPredicate',p.scalar(item['predicate'] if kind=='assertion' else item['type'])),
                         p.triple(entry, 'qualifiedSubject', p.scalar(item['subject_id'] if kind=='assertion' else item['source_entity_id'])),
                         *[p.triple(entry, 'qualifiedEvidence', p.scalar(value)) for value in item['evidence_ids']]]
@@ -132,8 +152,47 @@ class QualifiedFactIndex:
                     pending_ids.add(entry.value)
                     count += 1
             flush()
+            # Removed observations invalidate their old conflict scope too.
+            for link in self.owner.store.quads_for_pattern(p.head,p.ox.NamedNode(P+'qualifiedEntry'),None,p.graph):
+                entry=link.object
+                if p.values(entry,'qualifiedSeen')!=[seen]:
+                    self._dirty(p.iri(P+'qualified-partition:'+p.one(entry,'qualifiedPartition')))
+                    self.owner.store.update(f'DELETE WHERE {{ GRAPH {p.graph} {{ ?partition <{P}qualifiedPartitionEntry> {entry} }} }}')
+                    self.owner.store.update(f'DELETE WHERE {{ GRAPH {p.graph} {{ {p.head} <{P}qualifiedEntry> {entry} }} }}')
+                    self.owner.store.update(f'DELETE WHERE {{ GRAPH {p.graph} {{ {entry} ?field ?value }} }}')
+            self._discard_dirty_decisions()
             self._fence(False)
             p.mutate(self.generation, [p.triple(p.head, 'qualifiedIndexSealed', p.ox.Literal(count))])
+
+    def _dirty(self,partition):
+        p=self.publication
+        if next(self.owner.store.quads_for_pattern(partition,p.ox.NamedNode(P+'qualifiedDirty'),None,p.graph),None):
+            return
+        partition_id=partition.value.removeprefix(P+'qualified-partition:')
+        self.owner.store.update(f"""INSERT {{ GRAPH {p.graph} {{ {partition} <{P}qualifiedDirtyDecision> ?decision }} }}
+            WHERE {{ GRAPH {p.graph} {{ ?entry <{P}qualifiedPartition> {p.scalar(partition_id)} ; <{P}qualifiedDecision> ?decision }} }}""")
+        p.mutate(self.generation,[p.triple(partition,'qualifiedDirty',p.ox.Literal(True))])
+
+    def _discard_dirty_decisions(self):
+        """Replace only the actual old/new dependency closure, never other facts."""
+        p=self.publication
+        # Bind decisions by selected entry OR current members: a selected entry
+        # can have moved or been withdrawn since the previous completed decision.
+        for link in self.owner.store.quads_for_pattern(None,p.ox.NamedNode(P+'qualifiedDirty'),None,p.graph):
+            partition=link.subject
+            if not p.values(partition,'qualifiedDirtyDecision'):
+                continue
+            partition_id=partition.value.removeprefix(P+'qualified-partition:')
+            pattern=f'{partition} <{P}qualifiedDirtyDecision> ?decision .'
+            self.owner.store.update(f"""DELETE {{ GRAPH {p.graph} {{ {p.head} <{P}fact> ?fact . ?fact ?field ?value }} }}
+                WHERE {{ GRAPH {p.graph} {{ {pattern}
+                ?decision <{P}qualifiedSelectedKind> "relation" ; <{P}qualifiedSelectedIdentity> ?id .
+                BIND(IRI(?id) AS ?fact) ?fact ?field ?value }} }}""")
+            self.owner.store.update(f"""DELETE {{ GRAPH {p.graph} {{ {p.head} <{P}qualifiedDecision> ?decision . ?decision ?field ?value }} }}
+                WHERE {{ GRAPH {p.graph} {{ {pattern} ?decision ?field ?value }} }}""")
+            self.owner.store.update(f"""DELETE {{ GRAPH {p.graph} {{ ?entry ?field ?value }} }}
+                WHERE {{ GRAPH {p.graph} {{ ?entry <{P}qualifiedPartition> {p.scalar(partition_id)} ; ?field ?value .
+                VALUES ?field {{ <{P}qualifiedDecision> <{P}qualifiedReconciledStatus> }} }} }}""")
 
     def _references(self, partition):
         p, after = self.publication, ''
@@ -188,8 +247,11 @@ class QualifiedFactIndex:
                     self._fence()
                     yield page
                     page, size = [], 0
-                page.append(value)
                 visited+=1
+                if not next(self.owner.store.quads_for_pattern(link.object,
+                        p.ox.NamedNode(P+'qualifiedDirty'),None,p.graph),None):
+                    continue
+                page.append(value)
                 size+=amount
             if page:
                 yield page
@@ -244,7 +306,23 @@ class QualifiedFactIndex:
         if any(type(value) is not int or value < 1 for value in (max_group_records,max_group_bytes)):
             raise ProcessingError('Invalid qualified fact group budget')
         p = self.publication
-        functional_predicates = tuple(functional_predicates)
+        functional_predicates = p.functional_policy(functional_predicates)
+        policy=p.scalar(json.dumps(functional_predicates,separators=(',',':')))
+        previous=p.values(p.head,'qualifiedFunctionalPredicates')
+        if len(previous)>1:
+            raise ProcessingError('Native functional predicate policy duplicated')
+        if previous != [policy]:
+            old=set(json.loads(previous[0].value)) if previous else set()
+            changed=old.symmetric_difference(functional_predicates)
+            with self.owner._publication_lock:
+                self._fence()
+                self.owner.store.update(f'DELETE WHERE {{ GRAPH {p.graph} {{ {p.head} <{P}factStageInput> ?value }} }}')
+                for link in self.owner.store.quads_for_pattern(p.head,p.ox.NamedNode(P+'qualifiedEntry'),None,p.graph):
+                    if p.one(link.object,'qualifiedPredicate') in changed:
+                        self._dirty(p.iri(P+'qualified-partition:'+p.one(link.object,'qualifiedPartition')))
+                self._discard_dirty_decisions()
+                self.owner.store.update(f'DELETE WHERE {{ GRAPH {p.graph} {{ {p.head} <{P}qualifiedFunctionalPredicates> ?value }} }}')
+                p.mutate(self.generation,[p.triple(p.head,'qualifiedFunctionalPredicates',policy)])
         partition = None
         references = []
         for page in self._reference_pages():
@@ -335,15 +413,22 @@ class QualifiedFactIndex:
             values.append(value)
         return dict(records=values,next_cursor=values[-1]['id'] if len(rows)>len(values) else None)
 
-    def canonical_page(self,kind,read,*,after=None,limit=MAX_ROWS,max_bytes=MAX_BYTES,
-                       subject_ids=None,evidence_ids=None,predicates=None,functional_predicates=(),
-                       max_group_records=4096,max_group_bytes=16*1024*1024):
+    def _selected_observation(self,reference,kind,observation):
+        records=ExtractionRecords.from_fact_reference(self.owner,self.publication.project,reference)
+        item=records.read_fact_projection(reference,kind)
+        source,target=self.canonical_endpoints(reference)
+        if kind=='assertion':
+            item.update(subject_id=source,object_entity_id=target)
+        else:
+            item.update(source_entity_id=source,target_entity_id=target)
+        return item
+
+    def canonical_page(self,kind,*,after=None,limit=MAX_ROWS,max_bytes=MAX_BYTES,
+                       subject_ids=None,evidence_ids=None,predicates=None):
         """Read committed field selections; never execute semantic reduction."""
         self._page_budget(limit,max_bytes)
         if kind not in {'assertion','relation'}:
             raise ProcessingError('Unknown qualified fact kind')
-        if any(type(v) is not int or v<1 for v in (max_group_records,max_group_bytes)):
-            raise ProcessingError('Invalid qualified fact group budget')
         p=self.publication
         filters=[]
         for field,values in (('qualifiedSubject',subject_ids),('qualifiedEvidence',evidence_ids),('qualifiedPredicate',predicates)):
@@ -370,7 +455,7 @@ class QualifiedFactIndex:
             decision = p.iri(P+'qualified-decision:'+_digest([identity,kind]))
             observation = p.one(decision,'qualifiedSelectedObservation')
             reference = p.one(decision,'qualifiedSelectedReference')
-            item = dict(read(reference,kind,observation))
+            item = dict(self._selected_observation(reference,kind,observation))
             if item['id']!=observation or ConflictDetector.qualified_fact_identity(p.project,item,kind)!=identity:
                 raise ProcessingError('Native canonical selected observation identity changed')
             def selected(field):
@@ -425,7 +510,10 @@ class QualifiedFactIndex:
                     if not observation or not supports or observation not in supports:
                         raise ProcessingError('Native canonical decision lacks observation selection')
                     decision=p.iri(P+'qualified-decision:'+_digest([item.id,kind]))
-                    triples=[p.triple(p.head,'qualifiedDecision',decision),
+                    selected_entry=p.iri(P+'qualified-entry:'+_digest([references[kind,item.id],kind,observation]))
+                    partition=p.iri(P+'qualified-partition:'+p.one(selected_entry,'qualifiedPartition'))
+                    triples=[p.triple(partition,'qualifiedDirtyDecision',decision),
+                        p.triple(p.head,'qualifiedDecision',decision),
                         p.triple(decision,'qualifiedSelectedKind',p.scalar(kind)),
                         p.triple(decision,'qualifiedSelectedEntry',p.iri(P+'qualified-entry:'+_digest([references[kind,item.id],kind,observation]))),
                         p.triple(decision,'qualifiedSelectedIdentity',p.scalar(item.id)),

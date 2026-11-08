@@ -81,3 +81,18 @@ def test_only_opposite_polarity_under_identical_conditions_is_explicit_conflict(
     assert set(conflict.evidence_ids) == {"evidence:one", "evidence:two"}
     assert len(conflict.assertion_ids) == len(conflict.relation_ids) == 2
     assert len([item for item in assertions if item.status == "contradicted"]) == 2
+
+
+def test_entity_object_and_typed_literal_do_not_share_identity_or_polarity():
+    from semantica.conflicts.conflict_detector import ConflictDetector
+    base=dict(id='assertion:a',subject_id='entity:s',predicate='p',object='entity:target',
+        qualifiers={'polarity':'positive'},evidence_ids=['evidence:e'])
+    values=[dict(base,object_entity_id='entity:target'),base,
+        dict(base,object=1),dict(base,object=True),dict(base,object='1'),
+        dict(base,object={'value':'1','datatype':'integer'}),
+        dict(base,object={'value':'1','datatype':'string'})]
+    assert len({ConflictDetector.qualified_fact_identity('p',item,'assertion') for item in values})==len(values)
+    positive=KnowledgeAssertion(**values[0])
+    negative=KnowledgeAssertion(**dict(base,id='assertion:b',qualifiers={'polarity':'negative'}))
+    assertions,_,conflicts=ConflictDetector.reconcile_qualified_facts('p',[positive,negative],[])
+    assert len(assertions)==2 and not conflicts

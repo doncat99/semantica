@@ -438,3 +438,81 @@ def test_source_projection_completion_is_durable_and_rejects_corruption(tmp_path
                 list(ExtractionRecords.source_projection(store,'p',key))
     finally:
         store.close()
+
+
+def test_source_projection_point_reads_and_offline_index_preserve_addresses(tmp_path,monkeypatch):
+    from semantica.semantic_artifact_schema import DocumentRepresentation, EvidenceSpan, DocumentLocator
+    key='sha256:'+'b'*64
+    revision='b3-'+'a'*64
+    header=dict(representation=DocumentRepresentation(id='rep',source_id='ss',material_revision_id=revision,
+        input_revision=revision,media_type='text/plain',content_hash=revision,parser='fixture',parser_version='1',
+        recipe_id='fixture',recipe_digest='a'*64,origin='native',artifact_ref_id='artifact').model_dump(),
+        artifact_id='artifact',operations=[])
+    addresses=[header]
+    for number in range(257):
+        span=EvidenceSpan(id='e:'+str(number),representation_id='rep',quote='',
+            locator=DocumentLocator(representation_id='rep',origin='native',quote='',
+                start_char=number,end_char=number+1,quality='precise'))
+        fields=span.model_dump(exclude={'quote','locator'})
+        fields['locator']=span.locator.model_dump(exclude={'quote'})
+        addresses.append(dict(fields=fields,quote_length=1,quote_digest='sha256:'+'a'*64,passage=number%2==0))
+    store=OxigraphStore(tmp_path/'projection')
+    ExtractionRecords.source_projection(store,'p',key,iter(addresses))
+    ox=store._oxigraph
+    native=store.store
+    reads=[]
+    class ObservedStore:
+        def __getattr__(self,name):
+            return getattr(native,name)
+        def quads_for_pattern(self,subject,predicate,obj,graph):
+            if predicate==ox.NamedNode(F+'address'):
+                reads.append(subject)
+            return native.quads_for_pattern(subject,predicate,obj,graph)
+    store.store=ObservedStore()
+    assert list(ExtractionRecords.source_projection(store,'p',key,header_only=True))==[header]
+    assert len(reads)==1
+    selected=list(ExtractionRecords.source_projection(store,'p',key,evidence_ids=['e:256','e:3','absent']))
+    assert [value['fields']['id'] for value in selected]==['e:256','e:3']
+    assert len(reads)==3  # No traversal of the other 255 addresses.
+    original=set(native.quads_for_pattern(None,ox.NamedNode(F+'address'),None,None))
+    for quad in list(native.quads_for_pattern(None,ox.NamedNode(F+'projectionIndexed'),None,None)):
+        native.remove(quad)
+    with pytest.raises(ProcessingError,match='offline address indexing'):
+        list(ExtractionRecords.source_projection(store,'p',key,evidence_ids=['e:3']))
+    ExtractionRecords.index_source_projection(store,'p',key)
+    assert set(native.quads_for_pattern(None,ox.NamedNode(F+'address'),None,None))==original
+    assert [v['fields']['id'] for v in ExtractionRecords.source_projection(store,'p',key,passages_only=True)]==[
+        'e:'+str(i) for i in range(0,257,2)]
+    assert list(ExtractionRecords.source_projection(store,'p',key,evidence_ids=['e:3']))==[addresses[4]]
+    from semantica import semantic_worker_context
+    calls=0
+    def cancel_indexing():
+        nonlocal calls
+        calls+=1
+        if calls==10:
+            raise ProcessingError('canceled')
+    with monkeypatch.context() as patch:
+        patch.setattr(semantic_worker_context,'check_query_cancellation',cancel_indexing)
+        with pytest.raises(ProcessingError,match='canceled'):
+            ExtractionRecords.index_source_projection(store,'p',key)
+    assert set(native.quads_for_pattern(None,ox.NamedNode(F+'address'),None,None))==original
+    status=store.begin_publication('p',expected_generation=None,source_count=0,canonical_count=0)
+    store.store=native
+    del native
+    store.close()
+    store=OxigraphStore(tmp_path/'projection')
+    with pytest.raises(ProcessingError,match='offline address indexing'):
+        list(ExtractionRecords.source_projection(store,'p',key,evidence_ids=['e:3']))
+    store.close()
+    import json,subprocess,sys
+    request=tmp_path/'index.json'
+    request.write_text(json.dumps(dict(semanticStorePath=str(tmp_path/'projection'),
+        publicationReference=status,inputKey=key)))
+    result=subprocess.run([sys.executable,'-m','semantica.native_maintenance','--request-file',str(request),
+        '--index-source-projection'],capture_output=True,text=True,timeout=30)
+    assert result.returncode==0,result.stderr
+    assert json.loads(result.stdout)['indexed'] is True
+    store=OxigraphStore(tmp_path/'projection')
+    assert set(store.store.quads_for_pattern(None,ox.NamedNode(F+'address'),None,None))==original
+    assert list(ExtractionRecords.source_projection(store,'p',key,evidence_ids=['e:3']))==[addresses[4]]
+    store.close()

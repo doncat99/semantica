@@ -1,6 +1,7 @@
 """Offline integrity admission for native stores, including restored installations.
 
-No data conversion or repair is performed. The caller stops the owning process,
+Verification never repairs data. Explicit source address indexing only adds lookup edges.
+The caller stops the owning process,
 verifies its archive byte manifest and supplies the exact publication receipt.
 Opening Oxigraph takes its exclusive writer lock; a live owner is rejected.
 """
@@ -275,15 +276,43 @@ def _verify_vectors(path, semantic, reference, publication, counts, check, sqlit
         raise
 
 
+def index_native_source_projection(request):
+    """Explicit offline migration of one completed projection's lookup edges."""
+    from .triplet_store.oxigraph_store import OxigraphStore
+    from .triplet_store.publication_records import PublicationRecords
+    from .triplet_store.extraction_records import ExtractionRecords
+
+    if (not isinstance(request,dict) or set(request)!={'semanticStorePath','publicationReference','inputKey'}
+            or len(json.dumps(request).encode())>65536):
+        raise ProcessingError('Invalid source projection indexing request')
+    path=request['semanticStorePath']
+    if not isinstance(path,str) or not Path(path).is_absolute() or Path(path).is_symlink() or not Path(path).is_dir():
+        raise ProcessingError('Source indexing requires an absolute existing store path')
+    reference=request['publicationReference']
+    if not isinstance(reference,dict) or not isinstance(reference.get('project'),str):
+        raise ProcessingError('Source indexing requires the exact publication reference')
+    owner=OxigraphStore(path)
+    try:
+        if PublicationRecords(owner,reference['project']).status()!=reference:
+            raise ProcessingError('Native publication reference differs from installed owner')
+        ExtractionRecords.index_source_projection(owner,reference['project'],request['inputKey'])
+        return dict(indexed=True,publicationReference=reference,inputKey=request['inputKey'])
+    finally:
+        owner.close()
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--request-file', required=True)
+    parser.add_argument('--index-source-projection',action='store_true',
+        help='Explicit offline address indexing; never invoked during ordinary verification')
     args = parser.parse_args()
     with open(args.request_file, 'rb') as stream:
         raw = stream.read(65537)
     if len(raw) > 65536:
         raise ProcessingError('Native maintenance request exceeds 64KiB')
-    result = verify_native_installation(json.loads(raw))
+    request=json.loads(raw)
+    result = index_native_source_projection(request) if args.index_source_projection else verify_native_installation(request)
     sys.stdout.write(json.dumps(result, separators=(',', ':'))+'\n')
 
 

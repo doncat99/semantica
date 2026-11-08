@@ -1651,6 +1651,39 @@ def _docling_cell_evidence(built: dict[str, Any]) -> list[EvidenceSpan]:
     return evidence
 
 
+@dataclass(frozen=True)
+class _ProjectionEvidence:
+    """A repeatable native address query, never a materialized source collection."""
+    owner: Any
+    project: str
+    key: str
+    reader: Any
+    passages: bool = False
+
+    def __iter__(self):
+        addresses=ExtractionRecords.source_projection(self.owner,self.project,self.key,
+            passages_only=self.passages)
+        if not self.passages:
+            next(addresses)  # Representation header is not evidence.
+        for address in addresses:
+            yield _EvidenceReference(address['fields'],self.reader,address['quote_length'],address['quote_digest'])
+
+    def select(self,identities):
+        identities=list(dict.fromkeys(identities))
+        for offset in range(0,len(identities),128):
+            for address in ExtractionRecords.source_projection(self.owner,self.project,self.key,
+                    evidence_ids=identities[offset:offset+128]):
+                if not self.passages or address['passage']:
+                    yield _EvidenceReference(address['fields'],self.reader,address['quote_length'],address['quote_digest'])
+
+
+def _selected_evidence(built,identities):
+    evidence=built['evidence']
+    if isinstance(evidence,_ProjectionEvidence):
+        return evidence.select(identities)
+    return (span for span in evidence if span.id in identities)
+
+
 _CLASSIFICATION_INSTRUCTION = (
     "Classify this source against only the supplied vocabulary. Return strict JSON {assignments:[{dimension_id,item_id,confidence,citations:[{evidence_id}]}]}. "
     "Each citation must copy a supplied short evidence reference exactly (e1, e2, etc.); do not combine references or repeat its quote. Select at most one item in single dimensions. "
@@ -1686,15 +1719,20 @@ def _classify_source(built: dict[str, Any], profile: Any, relay: Any) -> tuple[S
     for batch in batches():
         planned.append(([item["id"] for item in batch.get("evidence", [])], stable_digest(batch)))
     del batch
-    by_id = {span.id: span for span in built["passages"]}
+    passages = built["passages"]
+    by_id = None if isinstance(passages, _ProjectionEvidence) else {span.id: span for span in passages}
     grouped: dict[tuple[str, str], list[ClassificationAssignment]] = defaultdict(list)
     receipts = []
     built.setdefault('native_classification_bindings', {})
     operation_start = len(built.get('native_operations', []))
     for identities, context_digest in planned:
+        selected = ({span.id: span for span in passages.select(identities)}
+            if by_id is None else by_id)
+        if any(identity not in selected for identity in identities):
+            raise SemanticArtifactError('classification evidence address missing')
         partial, batch_receipts = _classify_source_batch({**built,
             "classification_context_digest": context_digest,
-            "passages": [by_id[identity] for identity in identities]}, profile, relay)
+            "passages": [selected[identity] for identity in identities]}, profile, relay)
         receipts.extend(batch_receipts)
         if partial is not None:
             for assignment in partial.assignments:
@@ -2943,7 +2981,7 @@ def _publish_native_topics(request, store, generation, source_builds, topics):
     if not topics:
         return
     cited = {ref for topic in topics for ref in topic.evidence_ids}
-    citations = {span.id: (built, span) for built in source_builds for span in built['evidence'] if span.id in cited}
+    citations = {span.id: (built, span) for built in source_builds for span in _selected_evidence(built,cited)}
     for topic in topics:
         references, reference_bytes = set(), 0
         for evidence_id in topic.evidence_ids:
@@ -3134,7 +3172,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                 representation=parsed_refs[source.source_id].representation_revision,
                 mode=request.recipe.id,force_ocr=force_ocr,
                 operations=sorted(set((model_result or {}).get('native_operations',[]))) if request.recipe.id=='model' else []))
-            addresses=ExtractionRecords.source_projection(store,request.project_id,projection_key)
+            addresses=ExtractionRecords.source_projection(store,request.project_id,projection_key,header_only=True)
             if addresses is not None:
                 header=next(addresses)
                 if set(header)!={'representation','artifact_id','operations'}:
@@ -3147,15 +3185,8 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                 if request.recipe.id=='model':
                     built_source['embeddings']=embeddings
                     model_receipts.extend(source_receipts)
-                for address in addresses:
-                    if set(address)!={'fields','quote_length','quote_digest','passage'}:
-                        raise SemanticArtifactError('native source projection evidence differs')
-                    span=_EvidenceReference(address['fields'],parsed.reader,address['quote_length'],address['quote_digest'])
-                    built_source['evidence'].append(span)
-                    if address['passage']:
-                        built_source['passages'].append(span)
-                if not built_source['passages']:
-                    raise SemanticArtifactError('native source projection has no passages')
+                built_source['evidence']=_ProjectionEvidence(store,request.project_id,projection_key,parsed.reader)
+                built_source['passages']=_ProjectionEvidence(store,request.project_id,projection_key,parsed.reader,True)
                 source_builds.append(built_source)
                 source_progress(dict(stage='source_projection',percent=100,detail='source_projection',metadata=dict(reused=True)))
                 del document,parsed
@@ -3438,7 +3469,6 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
             if index.publication.fact_stage_status(generation,input_key):
                 metadata.update(reused=True)
                 return
-            index.publication.reset_fact_stage(generation)
             index.build(rows())
             pending_references={}
             pending_claims=[]
@@ -3514,7 +3544,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
             return _native_canonical_entities(identity_index,hydrate_entity,
                 summarize=summarize_entity,model_recipe=request.recipe.id=='model',**scope)
         def native_facts(kind,**scope):
-            return pages(lambda **query: fact_index.canonical_page(kind,hydrate_fact,**query),**scope)
+            return pages(lambda **query: fact_index.canonical_page(kind,**query),**scope)
         def organize():
             # Exact community detection needs complete topology, not fact bodies.
             publication = identity_index.publication
@@ -3547,7 +3577,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                 ref for item in links for ref in (item.source_entity_id,item.target_entity_id)}
             selected=list(native_entities(ids=endpoints))
             needed={ref for items in (selected,claims,links) for item in items for ref in item.evidence_ids}
-            scoped_evidence=(span for built in source_builds for span in built['evidence'] if span.id in needed)
+            scoped_evidence=(span for built in source_builds for span in _selected_evidence(built,needed))
             reports, receipts = _explanation_reports(request.project_id, source_builds,
                 selected, claims, links, groups, [], scoped_evidence,
                 request.relays['model'], target_ids=[request.project_id],ranking_graph=topology)
@@ -3562,7 +3592,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                 for item in native_facts('assertion',evidence_ids=refs):
                     grounded_claims[item.id]=item
             return groups, _grounded_topics(list(grounded_entities.values()),list(grounded_claims.values()),
-                (span for built in source_builds for span in built['evidence'] if span.id in cited),
+                (span for built in source_builds for span in _selected_evidence(built,cited)),
                 groups, reports), receipts
         with fact_index.publication.build_scope(generation):
             communities, topics, receipts = _project_stage(

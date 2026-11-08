@@ -157,3 +157,27 @@ def test_context_batch_boundaries_match_greedy_with_linear_serialized_work(monke
     actual=list(builder._context_batches(base,iter(records),budget))
     assert actual==expected
     assert serialized<30*sum(original(row) for row in records)
+
+
+def test_classification_native_addresses_are_selected_per_planned_batch(monkeypatch):
+    profile=ClassificationProfile(id='profile',version='1',label='Profile',description='Profile',dimensions=[])
+    passages=[SimpleNamespace(id=str(i),quote='context '*100) for i in range(20)]
+    iterations,selections,seen=[],[],[]
+    class Projected:
+        def __iter__(self):
+            iterations.append(True)
+            return iter(passages)
+        def select(self,identities):
+            selections.append(list(identities))
+            return (span for span in reversed(passages) if span.id in identities)
+    monkeypatch.setattr(builder,'_ProjectionEvidence',Projected)
+    monkeypatch.setattr(builder,'_input_token_budget',lambda _:2500)
+    monkeypatch.setattr(builder,'_generation_payload',lambda _relay,prompt,_schema:prompt)
+    def classify(built,*_):
+        seen.extend(span.id for span in built['passages'])
+        return None,[]
+    monkeypatch.setattr(builder,'_classify_source_batch',classify)
+    builder._classify_source({'source':SimpleNamespace(source_id='source'),'passages':Projected()},profile,object())
+    assert len(iterations)==1
+    assert len(selections)>1
+    assert seen==[span.id for span in passages]

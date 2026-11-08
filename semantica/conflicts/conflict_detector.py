@@ -104,13 +104,21 @@ class ConflictDetector:
     """
 
     @staticmethod
+    def qualified_object(item):
+        """Entity identity and a typed literal are distinct semantic values."""
+        if item.get("object_entity_id") is not None:
+            return item["object_entity_id"]
+        value = item["object"]
+        return ["literal", type(value).__name__, value]
+
+    @staticmethod
     def qualified_fact_identity(project_id, item, prefix):
         """Canonical identity shared by native indexing and qualified reduction."""
         from ..semantic_artifact_schema import stable_digest
         from ..utils.exceptions import ProcessingError
         if prefix not in {"assertion", "relation"}:
             raise ProcessingError("Unknown qualified fact kind")
-        semantic = ([item["subject_id"], item["predicate"], item.get("object_entity_id") or item["object"], item["qualifiers"]]
+        semantic = ([item["subject_id"], item["predicate"], ConflictDetector.qualified_object(item), item["qualifiers"]]
                     if prefix == "assertion" else
                     [item["source_entity_id"], item["type"], item["target_entity_id"], item["qualifiers"]])
         return prefix + ":" + stable_digest([project_id, semantic]).split(":")[1][:32]
@@ -131,14 +139,14 @@ class ConflictDetector:
         assertion_by_id = {item.id: item for item in canonical_assertions}
         facts = [
             {"id": item.id, "subject": item.subject_id, "predicate": item.predicate,
-             "object": item.object_entity_id or item.object, "qualifiers": item.qualifiers}
+             "object": ConflictDetector.qualified_object(item.model_dump()), "qualifiers": item.qualifiers}
             for item in canonical_assertions if item.status != "retracted"]
         polarity_groups = ConflictDetector.qualified_polarity_groups(facts)
         conflicts = []
         for group in polarity_groups:
             members = [assertion_by_id[item["id"]] for item in group]
             sample = members[0]
-            key = stable_digest([sample.subject_id, sample.predicate, sample.object_entity_id or sample.object,
+            key = stable_digest([sample.subject_id, sample.predicate, ConflictDetector.qualified_object(sample.model_dump()),
                                  {key: value for key, value in sample.qualifiers.items() if key != "polarity"}])
             for item in members:
                 item.status = "contradicted"

@@ -162,9 +162,11 @@ class PublicationRecords:
         reusable = (len(self.values(self.head, 'identityStageInput')) == 1
                     and len(self.values(self.head, 'identityStageCount')) == 1
                     and len(self.values(self.head, 'identityIndexSealed')) == 1)
-        selections = [self._identity_selection('?s', '?p')] if reusable else []
-        if reusable and len(self.values(self.head,'factStageInput')) == 1 and len(self.values(self.head,'qualifiedIndexSealed')) == 1:
-            selections.append(self._fact_selection('?s','?p'))
+        # Fact decisions own their input and dirty markers independently. A later
+        # interrupted identity attempt must not erase that completed/partial work.
+        selections = [self._fact_selection('?s','?p')]
+        if reusable:
+            selections.append(self._identity_selection('?s', '?p'))
         discard = 'FILTER(!(' + ' || '.join(selections) + '))' if selections else ''
         self.owner._update_derived_graph(self.graph, delete="?s ?p ?o", insert=" ".join(triples),
             where=f"{guard} OPTIONAL {{ GRAPH {self.graph} {{ ?s ?p ?o }} {discard} }}")
@@ -184,8 +186,20 @@ class PublicationRecords:
             ({subject} = {self.head} && {predicate} IN (<{P}fact>, <{P}factStageInput>)) ||
             EXISTS {{ GRAPH {self.graph} {{ {self.head} <{P}fact> {subject} }} }}'''
 
+    @staticmethod
+    def functional_policy(values):
+        if isinstance(values,(str,bytes,dict)):
+            raise ProcessingError('Invalid functional predicate policy')
+        try:
+            values=tuple(islice(values,4097))
+        except TypeError as exc:
+            raise ProcessingError('Invalid functional predicate policy') from exc
+        if len(values)>4096 or any(not isinstance(value,str) or not value or len(value)>4096 for value in values):
+            raise ProcessingError('Invalid functional predicate policy')
+        return tuple(sorted(set(values)))
+
     @_locked
-    def fact_stage_status(self, generation, input_key):
+    def fact_stage_status(self, generation, input_key, *, functional_predicates=()):
         self.fence(generation,'pending')
         self.scalar(input_key)
         values=self.values(self.head,'factStageInput')
@@ -194,6 +208,9 @@ class PublicationRecords:
         if len(values)!=1:
             raise ProcessingError('Native fact completion marker is duplicated')
         if values[0].value!=input_key:
+            return False
+        policy=self.scalar(json.dumps(self.functional_policy(functional_predicates),separators=(',',':')))
+        if self.values(self.head,'qualifiedFunctionalPredicates') != [policy]:
             return False
         if len(self.values(self.head,'qualifiedIndexSealed'))!=1:
             raise ProcessingError('Native fact completion lacks sealed index')
@@ -258,6 +275,9 @@ class PublicationRecords:
         if int(indexed.value)!=int(planned.value):
             raise ProcessingError('Native fact coverage incomplete')
         self.owner.flush()
+        self.owner.store.update(f'''DELETE {{ GRAPH {self.graph} {{ ?partition ?field ?value }} }}
+            WHERE {{ GRAPH {self.graph} {{ ?partition ?field ?value .
+                VALUES ?field {{ <{P}qualifiedDirty> <{P}qualifiedDirtyDecision> }} }} }}''')
         self.mutate(generation,[self.triple(self.head,'factStageInput',self.scalar(input_key))])
 
     @_locked

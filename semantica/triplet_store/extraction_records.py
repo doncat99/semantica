@@ -61,11 +61,11 @@ def _range(text, start, end):
 
 class ExtractionRecords:
     @classmethod
-    def source_projection(cls,owner,project,input_key,records=None):
+    def source_projection(cls,owner,project,input_key,records=None,*,header_only=False,evidence_ids=None,passages_only=False):
         """Persist derived addresses only; completion follows durable projections."""
         with owner._publication_lock:
             from ..semantic_worker_context import check_query_cancellation
-            if not isinstance(project,str) or not project or not re.fullmatch('sha256:[0-9a-f]{64}',input_key):
+            if not isinstance(project,str) or not project or not isinstance(input_key,str) or not re.fullmatch('sha256:[0-9a-f]{64}',input_key):
                 raise ProcessingError('Invalid native source projection identity')
             ox=owner._oxigraph
             node=ox.NamedNode('urn:semantica:source-projection:'+hashlib.sha256(
@@ -118,7 +118,36 @@ class ExtractionRecords:
                     raise ProcessingError('Native source projection count invalid')
                 def read():
                     total=0
-                    for number in range(count):
+                    if header_only:
+                        positions=[0]
+                    elif evidence_ids is not None or passages_only:
+                        indexed=list(owner.store.quads_for_pattern(node,ox.NamedNode(F+'projectionIndexed'),None,graph))
+                        if len(indexed)!=1 or indexed[0].object!=ox.Literal(count):
+                            raise ProcessingError('Native source projection requires offline address indexing')
+                        if evidence_ids is not None:
+                            if not isinstance(evidence_ids,(list,tuple)) or any(not isinstance(identity,str) or not identity or len(identity)>4096 for identity in evidence_ids):
+                                raise ProcessingError('Native evidence selection identity invalid')
+                            identities=list(dict.fromkeys(evidence_ids))
+                            if len(evidence_ids)>MAX_PAGE_ROWS:
+                                raise ProcessingError('Native evidence selection identity invalid')
+                            if len(identities)>MAX_PAGE_ROWS:
+                                raise ProcessingError('Native evidence selection exceeds row budget')
+                            positions=[]
+                            for identity in identities:
+                                key=ox.NamedNode(node.value+':evidence:'+hashlib.sha256(identity.encode()).hexdigest())
+                                links=list(islice(owner.store.quads_for_pattern(key,ox.NamedNode(F+'addressPosition'),None,graph),2))
+                                if len(links)>1:
+                                    raise ProcessingError('Native evidence selection duplicated')
+                                if links:
+                                    positions.append(int(links[0].object.value))
+                        else:
+                            positions=(int(row['position'].value) for row in owner.store.query(
+                                f'SELECT ?position WHERE {{ GRAPH {graph} {{ {node} <{F}passagePosition> ?position }} }} ORDER BY ?position'))
+                    else:
+                        positions=range(count)
+                    for number in positions:
+                        if not 0<=number<count:
+                            raise ProcessingError('Native evidence address position invalid')
                         check_query_cancellation()
                         field=ox.NamedNode(node.value+':'+str(number))
                         rows=list(islice(owner.store.quads_for_pattern(field,ox.NamedNode(F+'address'),None,graph),2))
@@ -128,7 +157,10 @@ class ExtractionRecords:
                         if total>16*1024*1024:
                             raise ProcessingError('Native source projection byte budget exceeded')
                         try:
-                            yield validate(json.loads(rows[0].object.value),number)
+                            value=validate(json.loads(rows[0].object.value),number)
+                            if evidence_ids is not None and value['fields']['id'] not in identities:
+                                raise ProcessingError('Native evidence selection identity differs')
+                            yield value
                         except ValueError as exc:
                             raise ProcessingError('Native source projection address corrupt') from exc
                 return read()
@@ -153,6 +185,13 @@ class ExtractionRecords:
                     batch_bytes=0
                 batch_bytes+=size
                 batch.append(ox.Quad(ox.NamedNode(node.value+':'+str(count)),ox.NamedNode(F+'address'),ox.Literal(encoded),graph))
+                if count:
+                    key=ox.NamedNode(node.value+':evidence:'+hashlib.sha256(value['fields']['id'].encode()).hexdigest())
+                    if next(owner.store.quads_for_pattern(key,ox.NamedNode(F+'addressPosition'),None,graph),None) or any(q.subject==key for q in batch):
+                        raise ProcessingError('Native source projection evidence duplicated')
+                    batch.append(ox.Quad(key,ox.NamedNode(F+'addressPosition'),ox.Literal(count),graph))
+                    if value['passage']:
+                        batch.append(ox.Quad(node,ox.NamedNode(F+'passagePosition'),ox.Literal(count),graph))
                 count+=1
                 if len(batch)>=MAX_PAGE_ROWS:
                     owner.store.extend(batch)
@@ -163,9 +202,46 @@ class ExtractionRecords:
             owner.store.extend(batch)
             owner.flush()
             check_query_cancellation()
+            owner.store.add(ox.Quad(node,ox.NamedNode(F+'projectionIndexed'),ox.Literal(count),graph))
             owner.store.add(ox.Quad(node,completed,ox.Literal(count),graph))
             owner.flush()
             return None
+
+    @classmethod
+    def index_source_projection(cls,owner,project,input_key):
+        """Explicit offline maintenance: add address edges without copying results."""
+        from ..semantic_worker_context import check_query_cancellation
+        with owner._publication_lock:
+            addresses=cls.source_projection(owner,project,input_key)
+            if addresses is None:
+                raise ProcessingError('Native source projection is not complete')
+            ox=owner._oxigraph
+            node=ox.NamedNode('urn:semantica:source-projection:'+hashlib.sha256(
+                json.dumps([project,input_key],separators=(',',':')).encode()).hexdigest())
+            graph=ox.NamedNode(node.value+':addresses')
+            owner.store.update(f"""DELETE {{ GRAPH {graph} {{ ?s ?p ?o }} }} WHERE {{ GRAPH {graph} {{
+                ?s ?p ?o . VALUES ?p {{ <{F}addressPosition> <{F}passagePosition> <{F}projectionIndexed> }} }} }}""")
+            batch=[]
+            count=0
+            for number,value in enumerate(addresses):
+                check_query_cancellation()
+                count+=1
+                if not number:
+                    continue
+                key=ox.NamedNode(node.value+':evidence:'+hashlib.sha256(value['fields']['id'].encode()).hexdigest())
+                if next(owner.store.quads_for_pattern(key,ox.NamedNode(F+'addressPosition'),None,graph),None) or any(q.subject==key for q in batch):
+                    raise ProcessingError('Native source projection evidence duplicated')
+                batch.append(ox.Quad(key,ox.NamedNode(F+'addressPosition'),ox.Literal(number),graph))
+                if value['passage']:
+                    batch.append(ox.Quad(node,ox.NamedNode(F+'passagePosition'),ox.Literal(number),graph))
+                if len(batch)>=MAX_PAGE_ROWS:
+                    owner.store.extend(batch)
+                    batch=[]
+            owner.store.extend(batch)
+            owner.flush()
+            check_query_cancellation()
+            owner.store.add(ox.Quad(node,ox.NamedNode(F+'projectionIndexed'),ox.Literal(count),graph))
+            owner.flush()
 
     @classmethod
     def window_completion(cls, owner, binding, formula, groundings=None):
@@ -759,7 +835,6 @@ class ExtractionRecords:
         return self._read_fact_projections(identity, ('assertion', 'relation'), index_only=True)
 
     def _read_fact_projections(self, identity, kinds, *, index_only=False):
-        from ..semantic_artifact_schema import KnowledgeAssertion, KnowledgeRelation
         node=self._fact_member(identity)
         graph=self.fact_projection_graph
         facts=[]
@@ -819,14 +894,14 @@ class ExtractionRecords:
             fields=dict(id=one(node,'buildRelationId'),
                 source_entity_id=one(node,'buildSourceId'),target_entity_id=one(node,'buildTargetId'),
                 type=one(node,'buildPredicate'),qualifiers=qualifiers,evidence_ids=evidence)
-            result['relation'] = KnowledgeRelation(**fields, support_ids=evidence, status='candidate').model_dump()
+            result['relation'] = dict(**fields, support_ids=evidence, status='candidate', metadata={})
         if 'assertion' in kinds:
             fields=dict(id=one(node,'buildAssertionId'),subject_id=one(node,'buildSourceId'),
                 object_entity_id=one(node,'buildTargetId'),predicate=one(node,'buildPredicate'),
                 qualifiers=qualifiers,evidence_ids=evidence)
             target=self.ox.NamedNode(self.one(node,'targetEntity'))
             fields['object']=self.one(target,'name').strip()
-            result['assertion']=KnowledgeAssertion(**fields, support_ids=evidence, status='candidate').model_dump()
+            result['assertion']=dict(**fields, support_ids=evidence, status='candidate', metadata={})
         return result
 
     def confidence(self, node, value):

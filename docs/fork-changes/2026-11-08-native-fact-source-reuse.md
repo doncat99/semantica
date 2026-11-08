@@ -44,3 +44,21 @@ Existing owners inspected: EntityMerger.merge_qualified_fact_group, ExtractionRe
 ## Dated follow-ups
 
 2026-11-08: performance evidence applies only to isolated native storage/reduction; packaged and real-data outcomes must be recorded separately.
+
+
+## 2026-11-08 completion ownership and demand reads follow-up
+
+Inspected base: `aabae908` on fork `main`. Repaired the same owners and actual builder consumers; no additional engine, body store or dependency.
+
+- Fact index updates compare native observation identity, canonical conflict partition, representation, evidence and raw status. Only changed/removed old and new partitions lose decisions. Dirty decision references survive interrupted replacement; unrelated decisions remain physically unchanged. Functional-predicate policy has its own bounded identity and dirties only predicates whose policy changed.
+- `begin` preserves fact completion and dirty state independently of identity-stage completion, including an interrupted later identity attempt. Red regression failed with missing fact completion; both completed/interrupted identity variants now pass after reopen.
+- Canonical pagination removed the obsolete reducer callback entirely. Native reopened-store reads consume selected observation fields and saved decisions only.
+- Warm source projection uses a position-zero header seek and lazy address references. Evidence subsets use bounded indexed seeks; passage iteration uses its position index. Missing address indexes fail explicitly and require the existing maintenance CLI `--index-source-projection`. That offline operation writes reference indexes only, never paid facts or bodies; interrupted indexing leaves no completion marker. Ordinary verification remains read-only.
+- Classification assembly consumes only requested evidence IDs after one cold preflight. Completed classification lookup still precedes context/prompt construction. Fact projections return plain field dictionaries rather than constructing and dumping two Pydantic DTOs before use.
+- Entity-backed object identities are unchanged. Literal-only assertion identities now encode literal type and value separately from entity IDs. Historical literal-only derived decisions require explicit recomputation within the fact owner before reuse; no paid extraction or receipt changes. The current native relation builder is entity-backed, so this distinction does not rewrite its existing fact IDs.
+
+Evidence: connected selection 124 passed and one new offline CLI test failed from a test observer retaining the Oxigraph handle; corrected isolated CLI test passed in 0.87s (`/tmp/native-offline-cli.log`). Cancellation/generation and canonical publication selection: 41 passed in 16.64s (`/tmp/fact-generation-green.log`). Typed object identity and classification records: 20 passed in 6.05s (`/tmp/fact-typed-green.log`). Another connected selection: 70 passed, one new typed fixture failed ID validation; only the fixture IDs changed before the 20-test passing run. Skipped tests are not counted as passes.
+
+Latest persistent target-scale fixture: 56,700 observations / 21,620 groups; index 54.392s, reduce/stage 73.341s, seal 26.943s, completed lookup 0.000367s. Measured stages total 154.677s; existing 180s gate passed. Test with fixture lifecycle 174.47s. Process time: real 175.03s, user 263.34s, system 23.02s; max RSS 1,316,077,568 bytes, peak footprint 1,614,205,504 bytes (`/tmp/native-final-scale.log`). These are synthetic lightweight-reader results, not live ESG hydration, activation p95 or whole-App resource acceptance.
+
+Remaining scope: initial grouping reads minimum native index fields, then dirty-group consumption rereads selected native observation fields; the strict single-physical-read requirement is not proved. Existing report reuse still prepares grounding context before its report lookup. Real historical projection indexes have not been migrated; live ESG has not been restarted. The current request schema has no user functional-policy/withdrawal configuration, so no nonexistent input wiring is claimed. Final packaged Case outcome must be recorded separately.
