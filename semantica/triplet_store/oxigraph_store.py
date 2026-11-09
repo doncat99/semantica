@@ -98,9 +98,6 @@ class OxigraphStore:
         from .publication_records import PublicationRecords
         return PublicationRecords(self, project).seal_canonical_count(generation, count)
 
-    def stage_publication_facts(self, project, generation, records):
-        from .publication_records import PublicationRecords
-        return PublicationRecords(self, project).stage_facts(generation, records)
 
     def read_publication_fact_members(self, project, generation, identity, **options):
         from .publication_records import PublicationRecords

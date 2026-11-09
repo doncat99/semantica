@@ -1,762 +1,365 @@
-"""Native reference partitions preserve the complete qualified conflict oracle."""
+"""Native physical inputs, final decisions and exact recovery boundaries."""
+from collections import Counter
 import pytest
-
 from semantica.conflicts.conflict_detector import ConflictDetector
 from semantica.semantic_artifact_schema import KnowledgeAssertion, KnowledgeRelation
+from semantica.triplet_store.extraction_records import ExtractionRecords, F
 from semantica.triplet_store.qualified_fact_index import QualifiedFactIndex
 from semantica.triplet_store.publication_records import P
+from semantica.triplet_store.oxigraph_store import OxigraphStore
 from semantica.utils.exceptions import ProcessingError
 from tests.triplet_store.test_canonical_fact_publication import stage_duplicate_observations
+from tests.triplet_store.test_fact_direct_decisions import projections
 
 
-def rows(refs, count=137):
-    for number in range(count):
-        qualifiers = dict(polarity='negative' if number == count-1 else 'positive', time='2025')
-        assertion = KnowledgeAssertion(id='assertion:'+str(number), subject_id='urn:canonical:0',
-            predicate='owns', object='Engine', object_entity_id='urn:canonical:1',
-            qualifiers=qualifiers, evidence_ids=['urn:evidence:'+str(number)])
-        relation = KnowledgeRelation(id='relation:'+str(number), source_entity_id=assertion.subject_id,
-            target_entity_id=assertion.object_entity_id, type=assertion.predicate,
-            qualifiers=qualifiers, evidence_ids=assertion.evidence_ids)
-        # Several logical observations can be located on one native relation;
-        # the slot is part of the reference identity and never a payload mirror.
-        yield refs[number % len(refs)], 'assertion', assertion.model_dump()
-        yield refs[number % len(refs)], 'relation', relation.model_dump()
+def oracle_views(row):
+    shared=dict(qualifiers=row['qualifiers'],evidence_ids=row['evidence'],
+        support_ids=row['evidence'],status='candidate',metadata={})
+    return (dict(id=row['assertion'],subject_id=row['source'],object_entity_id=row['target'],
+                 predicate=row['predicate'],object=row['object'],**shared),
+            dict(id=row['id'],source_entity_id=row['source'],target_entity_id=row['target'],
+                 type=row['predicate'],**shared))
 
 
-def test_reference_index_crosses_pages_and_preserves_oracle(tmp_path):
-    store, generation, refs, _ = stage_duplicate_observations(tmp_path)
-    source = list(rows(refs))
-    lookup = {(ref, kind, item['id']): item for ref, kind, item in source}
-    index = QualifiedFactIndex(store, 'p', generation)
-    index.build(iter(source))
-    store.close()
-    from semantica.triplet_store.oxigraph_store import OxigraphStore
-    store = OxigraphStore(tmp_path/'facts')
-    index = QualifiedFactIndex(store, 'p', generation)
-    reads = []
-    def read(ref, kind, identity):
-        reads.append((ref,kind,identity))
-        return lookup[ref,kind,identity]
-    output = list(index.iter_reconciled(read,
-        max_group_records=300, max_group_bytes=4*1024*1024))
-    expected = ConflictDetector.reconcile_qualified_facts('p',
-        [KnowledgeAssertion.model_validate(item) for _, kind, item in source if kind == 'assertion'],
-        [KnowledgeRelation.model_validate(item) for _, kind, item in source if kind == 'relation'])
-    assert [group[:3] for group in output] == [expected]
-    assert len(reads) == len(lookup) == len(set(reads))
-    for relation in output[0][1]:
-        members,representative = output[0][3][relation.id]
-        matching = [(ref,item) for ref,kind,item in source if kind == 'relation'
-            and ConflictDetector.qualified_fact_identity('p',item,kind) == relation.id]
-        assert set(members) == {ref for ref,_ in matching}
-        assert any(ref == representative and item['id'] == relation.metadata['representative_observation_id']
-            for ref,item in matching)
-    assert len(output[0][2]) == 1
-    assert len(output[0][0][0].metadata['support_observation_ids']) in {1,136}
-    store.close()
+def prepared(tmp_path, count=1):
+    store,generation,refs,_=stage_duplicate_observations(tmp_path,relations_per_source=count)
+    projections(store,refs)
+    return store,generation,refs,QualifiedFactIndex(store,'p',generation)
 
 
-def test_reconciliation_pages_references_across_many_small_partitions(tmp_path):
-    store, generation, refs, _ = stage_duplicate_observations(tmp_path)
-    source = list(rows(refs, 300))
-    for number, (_, kind, item) in enumerate(source):
-        item['predicate' if kind == 'assertion' else 'type'] += ':' + str(number // 4)
-    lookup = {(ref, kind, item['id']): item for ref, kind, item in source}
-    index = QualifiedFactIndex(store, 'p', generation)
-    index.build(iter(source))
-    native, queries = store.store, []
-    class ObservedStore:
-        def __getattr__(self, name):
-            return getattr(native, name)
-        def query(self, query, *args, **kwargs):
-            if 'SELECT ?partition ?entry ?reference ?kind ?observation ?identity' in query:
-                queries.append(query)
-            return native.query(query, *args, **kwargs)
-    store.store = ObservedStore()
-    reads = []
-    try:
-        output = list(index.iter_reconciled(lambda ref, kind, identity: (
-            reads.append((ref, kind, identity)) or lookup[ref, kind, identity]
-        )))
-        expected = ConflictDetector.reconcile_qualified_facts('p',
-            [KnowledgeAssertion.model_validate(item) for _, kind, item in source if kind == 'assertion'],
-            [KnowledgeRelation.model_validate(item) for _, kind, item in source if kind == 'relation'])
-        assert not queries
-        assert not any('SELECT DISTINCT ?partition' in query for query in queries)
-        assert len(output) == 150
-        assert len(reads) == len(set(reads)) == len(source)
-        assert sorted((item for group in output for item in group[0]), key=lambda item: item.id) == sorted(expected[0], key=lambda item: item.id)
-        assert sorted((item for group in output for item in group[1]), key=lambda item: item.id) == sorted(expected[1], key=lambda item: item.id)
-    finally:
-        store.close()
-
-
-def test_index_rejects_oversized_group_without_emitting_partial_semantics(tmp_path):
-    store, generation, refs, _ = stage_duplicate_observations(tmp_path)
-    source = list(rows(refs, 3))
-    lookup = {(ref, kind, item['id']): item for ref, kind, item in source}
-    index = QualifiedFactIndex(store, 'p', generation)
-    index.build(iter(source))
-    with pytest.raises(ProcessingError, match='record budget'):
-        next(index.iter_reconciled(lambda ref, kind, identity: lookup[ref, kind, identity], max_group_records=5))
-    with pytest.raises(ProcessingError, match='byte budget'):
-        next(index.iter_reconciled(lambda ref, kind, identity: lookup[ref, kind, identity], max_group_bytes=20))
-    with pytest.raises(ProcessingError, match='identity changed'):
-        next(index.iter_reconciled(lambda ref, kind, identity: {**lookup[ref, kind, identity], 'predicate' if kind == 'assertion' else 'type':'changed'}))
-    store.begin_publication('p', expected_generation=generation, source_count=0, canonical_count=0)
-    with pytest.raises(ProcessingError, match='not pending'):
-        next(index.iter_reconciled(lambda ref, kind, identity: lookup[ref, kind, identity]))
-    store.close()
-
-
-def test_partition_reads_seek_before_checking_current_membership(tmp_path):
-    store, generation, refs, _ = stage_duplicate_observations(tmp_path)
-    index = QualifiedFactIndex(store, 'p', generation)
-    source = list(rows(refs, 3))
-    index.build(iter(source))
-    partition = index.partition(source[0][2], source[0][1])
-    p = index.publication
-    orphan = p.iri('urn:orphan:qualified-entry')
-    original = next(index._references(partition))
-    store.store.update('INSERT DATA { GRAPH '+str(p.graph)+' { '+ '\n'.join([
-        p.triple(orphan, 'qualifiedPartition', p.scalar(partition)),
-        *[p.triple(orphan, field, p.scalar(original[key])) for field, key in (
-            ('qualifiedReference', 'reference'), ('qualifiedKind', 'kind'),
-            ('qualifiedObservation', 'observation'), ('qualifiedIdentity', 'identity'))],
-    ])+' } }')
-    native, queries, updates = store.store, [], []
-    class ObservedStore:
-        def __getattr__(self, name):
-            return getattr(native, name)
-        def query(self, query, *args, **kwargs):
-            if 'SELECT ?entry ?reference ?kind ?observation ?identity' in query:
-                queries.append(query)
-            return native.query(query, *args, **kwargs)
-        def update(self, query, *args, **kwargs):
-            if 'qualifiedReconciledStatus' in query:
-                updates.append(query)
-            return native.update(query, *args, **kwargs)
-    store.store = ObservedStore()
-    try:
-        assert len(list(index._references(partition))) == len(source)
-        assert queries
-        assert all(query.index('qualifiedPartition') < query.index('qualifiedEntry')
-            and 'FILTER EXISTS' in query for query in queries)
-        lookup = {(ref, kind, item['id']): item for ref, kind, item in source}
-        for claims, links, _, _, selections in index.iter_reconciled(lambda *key: lookup[key]):
-            index.stage_reconciled(claims, links,references=selections)
-        assert all('WHERE' not in query or 'qualifiedIdentity' not in query.split('WHERE',1)[1] for query in updates)
-        assert not p.values(orphan,'qualifiedReconciledStatus')
-        assert all(p.values(link.object,'qualifiedReconciledStatus') for link in
-            store.store.quads_for_pattern(p.head,p.ox.NamedNode(P+'qualifiedEntry'),None,p.graph))
-    finally:
-        store.close()
-
-
-def test_reconciled_status_writes_use_the_publication_checkpoint(tmp_path, monkeypatch):
-    store, generation, refs, _ = stage_duplicate_observations(tmp_path)
-    source = list(rows(refs, 3))
-    for number, (_, kind, item) in enumerate(source):
-        item['predicate' if kind == 'assertion' else 'type'] += ':' + str(number // 2)
-    lookup = {(ref, kind, item['id']): item for ref, kind, item in source}
-    index = QualifiedFactIndex(store, 'p', generation)
-    index.build(iter(source))
-    flushes = 0
-    original_flush = store.flush
-    def count_flushes():
-        nonlocal flushes
-        flushes += 1
-        return original_flush()
-    monkeypatch.setattr(store, 'flush', count_flushes)
-    with index.publication.build_scope(generation), index.publication.checkpointed(generation):
-        for claims, links, _, _, selections in index.iter_reconciled(lambda ref, kind, identity: lookup[ref, kind, identity]):
-            index.stage_reconciled(claims, links,references=selections)
-        assert flushes == 0
-    assert flushes == 1
-    store.close()
-
-
-def test_complete_partitions_preserve_functional_values_times_and_withdrawal(tmp_path):
-    store, generation, refs, _ = stage_duplicate_observations(tmp_path)
-    source = list(rows(refs, 140))
-    for offset, (_, kind, item) in enumerate(source):
-        number = offset//2
-        item['qualifiers']['time'] = '2026' if number >= 130 else '2025'
-        if number % 2:
-            if kind == 'assertion':
-                item['object'], item['object_entity_id'] = 'Other', 'urn:canonical:other'
-            else:
-                item['target_entity_id'] = 'urn:canonical:other'
-        if number % 11 == 0:
-            item['status'] = 'retracted'
-    lookup = {(ref,kind,item['id']):item for ref,kind,item in source}
-    index = QualifiedFactIndex(store,'p',generation)
-    index.build(iter(source))
-    groups = list(index.iter_reconciled(lambda ref,kind,identity:lookup[ref,kind,identity],
-        functional_predicates=iter(['owns'])))
-    actual = tuple(sorted((item for group in groups for item in group[column]),key=lambda item:item.id)
-        for column in range(3))
-    oracle = ConflictDetector.reconcile_qualified_facts('p',
-        [KnowledgeAssertion.model_validate(item) for _,kind,item in source if kind == 'assertion'],
-        [KnowledgeRelation.model_validate(item) for _,kind,item in source if kind == 'relation'],
-        functional_predicates=['owns'])
-    assert actual == tuple(sorted(values,key=lambda item:item.id) for values in oracle)
-    assert len(groups) == 2
-    assert len(actual[2]) == 3
-    for _,links,_,supports,_ in groups:
-        for relation in links:
-            members,representative = supports[relation.id]
-            matching = [(ref,item) for ref,kind,item in source if kind == 'relation'
-                and ConflictDetector.qualified_fact_identity('p',item,kind) == relation.id]
-            assert set(members) == {ref for ref,_ in matching}
-            assert any(ref == representative and item['id'] == relation.metadata['representative_observation_id']
-                for ref,item in matching)
-    store.close()
-
-
-def test_incomplete_duplicate_and_foreign_reference_index_cannot_be_read(tmp_path):
-    store,generation,refs,_ = stage_duplicate_observations(tmp_path)
-    index = QualifiedFactIndex(store,'p',generation)
-    with pytest.raises(ProcessingError,match='not sealed'):
-        next(index.iter_reconciled(lambda *args:None))
-    first = next(rows(refs,1))
-    with pytest.raises(ProcessingError,match='Duplicate'):
-        index.build(iter([first,first]))
-    with pytest.raises(ProcessingError,match='not sealed'):
-        next(index.iter_reconciled(lambda *args:None))
-    with pytest.raises(ProcessingError,match='current publication'):
-        index.build(iter([('urn:foreign',first[1],first[2])]))
-    store.close()
-
-
-def test_canonical_pages_select_native_partition_and_preserve_oracle(tmp_path,monkeypatch):
-    store,generation,refs,_=stage_duplicate_observations(tmp_path)
-    source=list(rows(refs,3))
-    for ref,kind,item in list(source):
-        other={**item,'id':item['id']+':other','qualifiers':{**item['qualifiers'],'time':'2026'},
-               'evidence_ids':['urn:evidence:other']}
-        source.append((ref,kind,other))
-    lookup={(ref,kind,item['id']):item for ref,kind,item in source}
-    index=QualifiedFactIndex(store,'p',generation)
-    index.build(iter(source))
-    calls=[]
-    def read(ref,kind,observation):
-        calls.append(observation)
-        return lookup[ref,kind,observation]
-    for claims,links,_,_,selections in index.iter_reconciled(read):
-        index.stage_reconciled(claims,links,references=selections)
-    calls.clear()
-    monkeypatch.setattr(index,'_selected_observation',read)
-    first=index.canonical_page('assertion',evidence_ids=['urn:evidence:0'],limit=1)
-    assert len(first['records'])==1
-    assert all(':other' not in call for call in calls)
-    oracle=ConflictDetector.reconcile_qualified_facts('p',
-        [KnowledgeAssertion.model_validate(item) for _,kind,item in source[:6] if kind=='assertion'],
-        [KnowledgeRelation.model_validate(item) for _,kind,item in source[:6] if kind=='relation'])
-    assert first['records'][0] in oracle[0]
-    assert len(first['records'][0].evidence_ids)==2
-    assert first['records'][0].status==oracle[0][0].status
-    calls.clear()
-    assert index.canonical_page('assertion',evidence_ids=['urn:absent'])=={'records':[],'next_cursor':None}
-    assert calls==[]
-    with pytest.raises(ProcessingError,match='page limit'):
-        index.canonical_page('assertion',limit=129)
-    store.close()
-
-
-def test_topology_page_reads_only_staged_native_endpoints(tmp_path):
-    store,generation,refs,plan=stage_duplicate_observations(tmp_path)
-    store.stage_publication_facts('p',generation,[{**plan,'members':refs}])
-    index=QualifiedFactIndex(store,'p',generation)
-    index.build(rows(refs,1))
-    assert index.topology_page(limit=1)['records']==[
-        {'id':plan['id'],'source':plan['source'],'target':plan['target'],'type':'owns'}]
-    assert index.topology_page(after=plan['id'])['records']==[]
-    store.close()
-
-
-def test_canonical_seek_pages_reopen_and_exact_complete_partition_oracle(tmp_path,monkeypatch):
-    from semantica.triplet_store.oxigraph_store import OxigraphStore
-    store,generation,refs,_=stage_duplicate_observations(tmp_path)
-    source=list(rows(refs,4))
-    for number,(_,kind,item) in enumerate(source):
-        item['qualifiers']['time']=str(2024+number//4)
-    lookup={(ref,kind,item['id']):item for ref,kind,item in source}
-    index=QualifiedFactIndex(store,'p',generation)
-    index.build(iter(source))
-    for claims,links,_,_,selections in index.iter_reconciled(lambda *key:lookup[key]):
-        index.stage_reconciled(claims,links,references=selections)
-    store.close()
-    store=OxigraphStore(tmp_path/'facts')
-    index=QualifiedFactIndex(store,'p',generation)
-    monkeypatch.setattr(index,'_selected_observation',lambda *key:lookup[key])
-    for kind,column in (('assertion',0),('relation',1)):
-        actual=[]
-        cursor=None
-        while True:
-            page=index.canonical_page(kind,after=cursor,limit=1)
-            actual.extend(page['records'])
-            cursor=page['next_cursor']
-            if cursor is None:
-                break
-        oracle=ConflictDetector.reconcile_qualified_facts('p',
-            [KnowledgeAssertion.model_validate(item) for _,k,item in source if k=='assertion'],
-            [KnowledgeRelation.model_validate(item) for _,k,item in source if k=='relation'])[column]
-        assert sorted(actual,key=lambda item:item.id)==sorted(oracle,key=lambda item:item.id)
-    with pytest.raises(ProcessingError,match='item exceeds byte budget'):
-        index.canonical_page('assertion',max_bytes=20)
-    store.begin_publication('p',expected_generation=generation,source_count=0,canonical_count=0)
-    with pytest.raises(ProcessingError,match='not pending'):
-        index.canonical_page('assertion')
-    store.close()
-
-
-def test_native_family_metadata_matches_complete_qualified_oracle(tmp_path,monkeypatch):
-    store,generation,refs,_=stage_duplicate_observations(tmp_path)
-    source=list(rows(refs,3))
-    lookup={(ref,kind,item['id']):item for ref,kind,item in source}
-    index=QualifiedFactIndex(store,'p',generation)
-    index.build(iter(source))
-    with pytest.raises(ProcessingError,match='reconciliation incomplete'):
-        index.family_page()
-    for claims,links,_,_,selections in index.iter_reconciled(lambda ref,kind,id:lookup[ref,kind,id]):
-        index.stage_reconciled(claims,links,references=selections)
-    assert index.family_page()['records']==[dict(subject='urn:canonical:0',predicate='owns',
-        representations=['r:s1','r:s2'],required=True)]
-    monkeypatch.setattr(index,'_selected_observation',lambda *key:lookup[key])
-    assert index.canonical_page('assertion',
-        subject_ids=['urn:canonical:0'],predicates=['absent'])['records']==[]
-    assert len(index.canonical_page('relation',
-        subject_ids=['urn:canonical:0'],predicates=['owns'])['records'])==2
-    store.close()
-
-
-def test_native_family_seek_and_budgets_preserve_every_required_family(tmp_path):
-    store,generation,refs,_=stage_duplicate_observations(tmp_path)
-    source=[]
-    for family in ('owns','supplies','uses'):
-        for ref,kind,item in rows(refs,2):
-            item['id']+=':'+family
-            item['predicate' if kind=='assertion' else 'type']=family
-            if family=='supplies':
-                item['status']='retracted'
-            source.append((ref,kind,item))
-    lookup={(ref,kind,item['id']):item for ref,kind,item in source}
-    index=QualifiedFactIndex(store,'p',generation)
-    index.build(iter(source))
-    for claims,links,_,_,selections in index.iter_reconciled(lambda ref,kind,id:lookup[ref,kind,id]):
-        index.stage_reconciled(claims,links,references=selections)
+def page_all(index,kind,**options):
     result=[]
     cursor=None
     while True:
-        page=index.family_page(after=cursor,limit=1)
+        page=index.canonical_page(kind,after=cursor,**options)
         result.extend(page['records'])
         cursor=page['next_cursor']
         if cursor is None:
-            break
-    assert [row['predicate'] for row in result]==['owns','supplies','uses']
-    assert all(row['required'] for row in result)
-    with pytest.raises(ProcessingError,match='source budget'):
-        index.family_page(max_family_sources=1)
-    with pytest.raises(ProcessingError,match='exceeds byte budget'):
-        index.family_page(max_bytes=20)
-    with pytest.raises(ProcessingError,match='cursor'):
-        index.family_page(after='invalid')
-    store.close()
+            return result
 
 
-def test_index_persists_bounded_native_batches_and_cancellation_stays_unsealed(tmp_path, monkeypatch):
-    from threading import Event
-    from semantica.semantic_worker_context import query_cancellation
-    from semantica.triplet_store.publication_records import PublicationRecords, MAX_BYTES, MAX_ROWS
-    from semantica.triplet_store.oxigraph_store import OxigraphStore
-    store,generation,refs,_=stage_duplicate_observations(tmp_path)
-    index=QualifiedFactIndex(store,'p',generation)
-    original=PublicationRecords.mutate
-    batches=[]
-    def observe(owner,generation,triples,**kwargs):
-        batches.append(list(triples))
-        assert len('\n'.join(triples).encode())<=MAX_BYTES
-        assert sum('<urn:semantica:publication:qualifiedEntry>' in triple for triple in triples)<=MAX_ROWS
-        return original(owner,generation,triples,**kwargs)
-    monkeypatch.setattr(PublicationRecords,'mutate',observe)
-    index.build(rows(refs,140))
-    assert len(batches)<20
-    store.close()
-    store=OxigraphStore(tmp_path/'facts')
-    index=QualifiedFactIndex(store,'p',generation)
-    assert list(index.iter_reconciled(lambda ref,kind,identity: dict(next(value for _,kind2,value in rows(refs,140) if kind2==kind and value['id']==identity))))
-    event=Event()
-    def canceled_rows():
-        for position,row in enumerate(rows(refs,140)):
-            if position==150:
-                event.set()
-            yield row
-    token=query_cancellation.set(event)
+def test_cross_page_input_matches_semantic_oracle_and_reads_each_native_once(tmp_path,monkeypatch):
+    store,generation,refs,index=prepared(tmp_path,70)
     try:
-        with pytest.raises(ProcessingError,match='canceled'):
-            with index.publication.build_scope(generation):
-                index.build(canceled_rows())
-        assert store._build_plan_scope is None
-    finally:
-        query_cancellation.reset(token)
-    store.close()
-    store=OxigraphStore(tmp_path/'facts')
-    index=QualifiedFactIndex(store,'p',generation)
-    with pytest.raises(ProcessingError,match='not sealed'):
-        next(index.iter_reconciled(lambda *args:None))
-    # An explicit retry replaces partial rows, then seals only complete input.
-    index.build(rows(refs,2))
-    store.close()
-
-
-def test_index_pending_batch_cannot_cross_generation_change(tmp_path):
-    store,generation,refs,_=stage_duplicate_observations(tmp_path)
-    index=QualifiedFactIndex(store,'p',generation)
-    first=next(rows(refs,1))
-    def replaced_rows():
-        yield first
-        store.begin_publication('p',expected_generation=generation,source_count=0,canonical_count=0)
-        yield refs[0],'relation',next(value for _,kind,value in rows(refs,1) if kind=='relation')
-    with pytest.raises(ProcessingError,match='not pending'):
+        observations=[(kind,item) for _,row in index._physical_rows()
+            for kind,item in zip(('assertion','relation'),oracle_views(row))]
+        expected=ConflictDetector.reconcile_qualified_facts('p',observations=observations)
+        reads=Counter()
+        original=index._physical_rows
+        def read():
+            for reference,row in original():
+                reads[reference]+=1
+                yield reference,row
+        monkeypatch.setattr(index,'_physical_rows',read)
+        monkeypatch.setattr(ExtractionRecords,'read_fact_projection_page',
+            lambda *a,**k:pytest.fail('coordination restored complete fact objects'))
         with index.publication.build_scope(generation):
-            index.build(replaced_rows())
-    assert store._build_plan_scope is None
-    store.close()
-
-
-def test_fact_scope_validates_complete_plan_only_at_stage_boundaries(tmp_path):
-    store,generation,refs,_=stage_duplicate_observations(tmp_path)
-    native=store.store
-    plan_queries=[]
-    class ObservedStore:
-        def __getattr__(self,name):
-            return getattr(native,name)
-        def query(self,query,*args,**kwargs):
-            if 'HAVING(COUNT(?operation)' in query:
-                plan_queries.append(query)
-            return native.query(query,*args,**kwargs)
-    store.store=ObservedStore()
-    source=list(rows(refs,140))
-    lookup={(ref,kind,item['id']):item for ref,kind,item in source}
-    index=QualifiedFactIndex(store,'p',generation)
-    try:
-        with index.publication.build_scope(generation):
-            index.build(iter(source))
-            for claims,links,_,_,selections in index.iter_reconciled(lambda *key:lookup[key]):
-                index.stage_reconciled(claims,links,references=selections)
-            assert len(plan_queries)==1
-        assert len(plan_queries)==2
-        assert store._build_plan_scope is None
+            index.reconcile_and_stage(input_key='input')
+        assert reads==Counter(refs)
+        def summary(items):
+            return sorted((item.id,item.status,tuple(sorted(item.evidence_ids))) for item in items)
+        for kind,oracle in zip(('assertion','relation'),expected[:2]):
+            assert summary(page_all(index,kind,limit=1))==summary(oracle)
+        assert len(index.topology_page()['records'])==1
+        family=index.family_page()['records']
+        assert family==[dict(subject='urn:canonical:0',predicate='owns',
+            representations=['r:s1','r:s2'],required=False)]
     finally:
         store.close()
 
 
-def test_native_family_ordered_subject_scope_crosses_pages_without_global_sort(tmp_path):
-    store,generation,refs,_=stage_duplicate_observations(tmp_path)
-    source=[]
-    for subject in ('urn:canonical:a','urn:canonical:b','urn:canonical:c'):
-        for predicate in ('owns','supplies'):
-            for ref,kind,item in rows(refs,2):
-                item['id']+=':'+subject+':'+predicate
-                item['subject_id' if kind=='assertion' else 'source_entity_id']=subject
-                item['predicate' if kind=='assertion' else 'type']=predicate
-                source.append((ref,kind,item))
-    lookup={(ref,kind,item['id']):item for ref,kind,item in source}
-    index=QualifiedFactIndex(store,'p',generation)
-    index.build(iter(source))
-    for claims,links,_,_,selections in index.iter_reconciled(lambda ref,kind,id:lookup[ref,kind,id]):
-        index.stage_reconciled(claims,links,references=selections)
-    actual=[]
-    cursor=None
-    while True:
-        page=index.family_page(subject_ids=['urn:canonical:c','urn:canonical:a'],after=cursor,limit=1)
-        actual.extend((row['subject'],row['predicate']) for row in page['records'])
-        cursor=page['next_cursor']
-        if cursor is None:
-            break
-    assert actual==[(s,p) for s in ('urn:canonical:c','urn:canonical:a') for p in ('owns','supplies')]
-    assert index.family_page(subject_ids=[])==dict(records=[],next_cursor=None)
-    for subjects in (['x']*129,['x','x'],[None]):
-        with pytest.raises(ProcessingError,match='scope'):
-            index.family_page(subject_ids=subjects)
-    with pytest.raises(ProcessingError,match='cursor'):
-        index.family_page(subject_ids=['urn:canonical:a'],after='["urn:canonical:b","owns"]')
-    store.close()
-
-
-def test_completed_canonical_read_does_not_run_reducer(tmp_path, monkeypatch):
-    store, generation, refs, _ = stage_duplicate_observations(tmp_path)
-    source = list(rows(refs, 3))
-    lookup = {(ref, kind, item['id']): item for ref, kind, item in source}
-    index = QualifiedFactIndex(store, 'p', generation)
-    index.build(iter(source))
-    oracle = list(index.iter_reconciled(lambda *key: lookup[key]))
-    for claims, links, _, _, selections in oracle:
-        index.stage_reconciled(claims, links,references=selections)
-    monkeypatch.setattr(index, '_reconcile_partition', lambda *a, **k: pytest.fail('read ran reducer'))
-    reads = []
-    monkeypatch.setattr(index,'_selected_observation',lambda *key: (reads.append(key) or lookup[key]))
-    actual = index.canonical_page('assertion')
-    assert actual['records'] == oracle[0][0]
-    assert len(reads) == len(actual['records'])
-    store.close()
-
-
-@pytest.mark.parametrize('interrupted_identity',[False,True])
-def test_complete_fact_stage_survives_generation_and_reopen(tmp_path, monkeypatch, interrupted_identity):
-    from semantica.triplet_store.oxigraph_store import OxigraphStore
-    store,generation,refs,_=stage_duplicate_observations(tmp_path)
-    source=list(rows(refs,2))
-    lookup={(ref,kind,item['id']):item for ref,kind,item in source}
-    index=QualifiedFactIndex(store,'p',generation)
-    index.build(iter(source))
-    for claims,links,_,supports,selections in index.iter_reconciled(lambda *key:lookup[key]):
-        index.stage_reconciled(claims,links,references=selections)
-        store.stage_publication_facts('p',generation,[dict(id=link.id,
-            source=link.source_entity_id,target=link.target_entity_id,status=link.status,
-            members=supports[link.id][0],representative=supports[link.id][1],
-            member_count=len(supports[link.id][0])) for link in links])
-    p=index.publication
-    # Identity completion is a dependency of this independent fact result.
-    p.mutate(generation,[p.triple(p.head,field,p.ox.Literal(value)) for field,value in
-        [('identityStageInput','identities'),('identityStageCount',2),('identityIndexSealed',2)]])
-    p.seal_fact_stage(generation,'same-input')
-    from semantica.triplet_store.extraction_records import ExtractionRecords
-    plans=[]
-    for ref in refs:
-        binding=ExtractionRecords.from_fact_reference(store,'p',ref).binding
-        operations=[]
-        for stage in ('entities','relations'):
-            operations.append(ExtractionRecords(store,binding,stage).operation.value)
-        plans.append(dict(source=binding['source'],material=binding['material'],
-            representation=binding['representation'],recipe=binding['recipe'],operation_count=2,operations=operations))
-    if interrupted_identity:
-        # Cancellation of a later identity attempt cannot erase completed facts.
-        store.store.update(f'DELETE WHERE {{ GRAPH {p.graph} {{ {p.head} <{P}identityIndexSealed> ?value }} }}')
-    generation=store.begin_publication('p',expected_generation=generation,source_count=2,canonical_count=2)['generation']
-    store.stage_publication_sources('p',generation,plans)
-    store.close()
-    store=OxigraphStore(tmp_path/'facts')
-    index=QualifiedFactIndex(store,'p',generation)
-    assert index.publication.fact_stage_status(generation,'same-input')
-    assert not index.publication.fact_stage_status(generation,'changed-input')
-    monkeypatch.setattr(index,'_reconcile_partition',lambda *a,**k:pytest.fail('recomputed'))
-    monkeypatch.setattr(index,'_selected_observation',lambda *key:lookup[key])
-    assert len(index.canonical_page('relation')['records'])==2
-    index.publication.reset_fact_stage(generation)
-    assert not index.publication.fact_stage_status(generation,'same-input')
-    store.close()
-
-
-def test_incomplete_fact_stage_cannot_be_reused(tmp_path):
-    store,generation,refs,_=stage_duplicate_observations(tmp_path)
-    index=QualifiedFactIndex(store,'p',generation)
-    index.build(rows(refs,3))
-    with pytest.raises(ProcessingError,match='reconciliation incomplete'):
-        index.publication.seal_fact_stage(generation,'input')
-    assert not index.publication.fact_stage_status(generation,'input')
-    store.close()
-
-
-@pytest.mark.parametrize('defect',['missing-fact','wrong-selection','canceled'])
-def test_fact_completion_rejects_incomplete_or_canceled_commit(tmp_path,monkeypatch,defect):
-    store,generation,refs,_=stage_duplicate_observations(tmp_path)
-    source=list(rows(refs,2))
-    lookup={(ref,kind,item['id']):item for ref,kind,item in source}
-    index=QualifiedFactIndex(store,'p',generation)
-    index.build(iter(source))
-    for claims,links,_,supports,selections in index.iter_reconciled(lambda *key:lookup[key]):
-        index.stage_reconciled(claims,links,references=selections)
-        if defect!='missing-fact':
-            index.publication.stage_facts(generation,[dict(id=link.id,
-                source=link.source_entity_id,target=link.target_entity_id,status=link.status,
-                members=supports[link.id][0],representative=supports[link.id][1],
-                member_count=len(supports[link.id][0])) for link in links])
-    p=index.publication
-    if defect=='wrong-selection':
-        from semantica.triplet_store.publication_records import P
-        predicate=p.ox.NamedNode(P+'qualifiedSelectedReference')
-        quad=next(store.store.quads_for_pattern(None,predicate,None,p.graph))
-        store.store.remove(quad)
-        store.store.add(p.ox.Quad(quad.subject,predicate,p.iri('urn:foreign'),p.graph))
-    if defect=='canceled':
-        def canceled():
-            raise ProcessingError('canceled before completion')
-        monkeypatch.setattr('semantica.triplet_store.publication_records.check_query_cancellation',canceled)
-    with pytest.raises(ProcessingError):
-        p.seal_fact_stage(generation,'input')
-    assert not p.values(p.head,'factStageInput')
-    store.close()
-
-
-def test_endpoint_page_preserves_unique_membership_and_bounds(tmp_path):
-    store,generation,refs,_=stage_duplicate_observations(tmp_path)
-    index=QualifiedFactIndex(store,'p',generation)
-    assert index.canonical_endpoint_page(refs)=={ref:('urn:canonical:0','urn:canonical:1') for ref in refs}
-    with pytest.raises(ProcessingError):
-        index.canonical_endpoint_page(refs*100)
-    with pytest.raises(ProcessingError):
-        index.canonical_endpoint_page(['urn:foreign'])
-    store.close()
-
-
-def test_checkpoint_bounds_writes_without_flushing_each_transport_budget(tmp_path, monkeypatch):
-    store, generation, _, _ = stage_duplicate_observations(tmp_path)
-    p = QualifiedFactIndex(store, 'p', generation).publication
-    flushes = []
-    original = store.flush
-    def flush():
-        flushes.append(True)
-        original()
-    monkeypatch.setattr(store, 'flush', flush)
+def test_completed_read_never_reconciles_or_serializes_support_bodies(tmp_path,monkeypatch):
+    store,generation,refs,index=prepared(tmp_path)
     try:
-        with p.checkpointed(generation):
-            for _ in range(3):
-                p.mutate(generation, [p.triple(p.head, 'checkpointProbe', p.ox.Literal('x' * 100_000))])
-            assert len(flushes) == 0
-            for _ in range(125):
-                p.mutate(generation, [p.triple(p.head, 'checkpointProbe', p.ox.Literal('small'))])
-            assert len(flushes) == 1
-        assert len(flushes) == 2
+        index.reconcile_and_stage(input_key='input')
+        monkeypatch.setattr(ConflictDetector,'reconcile_qualified_facts',lambda *a,**k:pytest.fail('read reran reducer'))
+        for kind in ('assertion','relation'):
+            item=page_all(index,kind)[0]
+            assert len(item.metadata['support_observation_ids'])==2
+            assert 'support_observations' not in item.metadata
+        assert index.topology_page()['records'] and index.family_page()['records']
     finally:
         store.close()
 
 
-def test_changed_partition_keeps_unaffected_decision_and_skips_its_reducer(tmp_path):
-    store,generation,refs,_=stage_duplicate_observations(tmp_path)
-    source=list(rows(refs,2))
-    for _,kind,item in source:
-        item['predicate' if kind=='assertion' else 'type']+=':'+item['id'].split(':')[-1]
-    lookup={(ref,kind,item['id']):item for ref,kind,item in source}
-    index=QualifiedFactIndex(store,'p',generation)
-    index.build(iter(source))
-    for claims,links,_,supports,selections in index.iter_reconciled(lambda *key:lookup[key]):
-        index.stage_reconciled(claims,links,references=selections)
-        index.publication.stage_facts(generation,[dict(id=link.id,
-            source=link.source_entity_id,target=link.target_entity_id,status=link.status,
-            members=supports[link.id][0],representative=supports[link.id][1],
-            member_count=len(supports[link.id][0])) for link in links])
-    index.publication.seal_fact_stage(generation,'before')
-    p=index.publication
-    unchanged=ConflictDetector.qualified_fact_identity('p',source[0][2],'assertion')
-    decision=p.iri(P+'qualified-decision:'+__import__('semantica.triplet_store.qualified_fact_index',fromlist=['_digest'])._digest([unchanged,'assertion']))
-    before=set(store.store.quads_for_pattern(decision,None,None,p.graph))
-    # A new input may move one observation to another partition. Both its old
-    # partition and its new one must be recomputed; the independent one survives.
-    for _,kind,item in source[2:]:
-        item['predicate' if kind=='assertion' else 'type']='changed'
-    index.build(iter(source))
-    reads=[]
-    output=list(index.iter_reconciled(lambda *key:reads.append(key) or lookup[key]))
-    assert {key[2] for key in reads}=={'assertion:1','relation:1'}
-    assert len(output)==1
-    assert set(store.store.quads_for_pattern(decision,None,None,p.graph))==before
-    store.close()
-
-
-def test_canonical_page_reads_real_native_selection_after_reopen_without_reducer(tmp_path,monkeypatch):
-    from semantica.triplet_store.extraction_records import ExtractionRecords
-    from semantica.triplet_store.oxigraph_store import OxigraphStore
-    store,generation,refs,_=stage_duplicate_observations(tmp_path)
-    index=QualifiedFactIndex(store,'p',generation)
-    source=[]
-    for number,ref in enumerate(refs):
-        records=ExtractionRecords.from_fact_reference(store,'p',ref)
-        records.write_fact_projection(ref,assertion_id='a:'+str(number),relation_id='r:'+str(number),
-            source_id='a',target_id='b',predicate='owns',qualifiers={'polarity':'positive'},
-            evidence_ids=['e:'+str(number)])
-        for kind,item in records.read_fact_projections(ref).items():
-            if kind=='assertion':
-                item.update(subject_id='urn:canonical:0',object_entity_id='urn:canonical:1')
-            else:
-                item.update(source_entity_id='urn:canonical:0',target_entity_id='urn:canonical:1')
-            source.append((ref,kind,item))
-    index.build(iter(source))
-    lookup={(ref,kind,item['id']):item for ref,kind,item in source}
-    expected=list(index.iter_reconciled(lambda *key:lookup[key]))
-    for claims,links,_,_,selections in expected:
-        index.stage_reconciled(claims,links,references=selections)
-    store.close()
-    store=OxigraphStore(tmp_path/'facts')
-    index=QualifiedFactIndex(store,'p',generation)
-    monkeypatch.setattr(ConflictDetector,'reconcile_qualified_facts',lambda *a,**k:pytest.fail('read invoked reducer'))
-    assert index.canonical_page('assertion')['records']==expected[0][0]
-    assert index.canonical_page('relation')['records']==expected[0][1]
-    store.close()
-
-
-@pytest.mark.parametrize('change',['remove','move','evidence','status'])
-def test_incremental_invalidation_covers_old_scope_and_survives_reopen(tmp_path,change):
-    from semantica.triplet_store.oxigraph_store import OxigraphStore
-    store,generation,refs,_=stage_duplicate_observations(tmp_path)
-    source=list(rows(refs,2))
-    index=QualifiedFactIndex(store,'p',generation)
-    lookup={(ref,kind,item['id']):item for ref,kind,item in source}
-    def complete():
-        for claims,links,_,supports,selections in index.iter_reconciled(lambda *key:lookup[key]):
-            index.stage_reconciled(claims,links,references=selections)
-            index.publication.stage_facts(generation,[dict(id=link.id,source=link.source_entity_id,
-                target=link.target_entity_id,status=link.status,members=supports[link.id][0],
-                representative=supports[link.id][1],member_count=len(supports[link.id][0])) for link in links])
-    index.build(iter(source))
-    complete()
-    index.publication.seal_fact_stage(generation,'before')
-    if change=='remove':
-        source=source[:2]
-    elif change=='move':
-        for _,kind,item in source[2:]:
-            item['predicate' if kind=='assertion' else 'type']='new'
-    elif change=='evidence':
-        for _,kind,item in source[2:]:
-            item['evidence_ids']=['new-evidence']
-    else:
-        for _,kind,item in source[2:]:
-            item['status']='retracted'
-    index.build(iter(source))
-    # A canceled attempt may already have staged a replacement decision.
-    complete()
-    assert not index.publication.fact_stage_status(generation,'after')
-    store.close()
-    store=OxigraphStore(tmp_path/'facts')
-    index=QualifiedFactIndex(store,'p',generation)
-    # Change again after partial staging: the old partial decision must not leak.
-    for _,kind,item in source:
-        item['qualifiers']={**item['qualifiers'],'time':'2026'}
-    index.build(iter(source))
-    complete()
-    index.publication.seal_fact_stage(generation,'after')
-    assert index.publication.fact_stage_status(generation,'after')
-    store.close()
-
-
-def test_functional_policy_invalidates_only_its_predicates(tmp_path):
-    store,generation,refs,_=stage_duplicate_observations(tmp_path)
-    source=list(rows(refs,2))
-    for _,kind,item in source[2:]:
-        item['predicate' if kind=='assertion' else 'type']='independent'
-    index=QualifiedFactIndex(store,'p',generation)
-    lookup={(ref,kind,item['id']):item for ref,kind,item in source}
-    def complete(policy):
-        reads=[]
-        for claims,links,_,supports,selections in index.iter_reconciled(lambda *key:reads.append(key) or lookup[key],
-                functional_predicates=policy):
-            index.stage_reconciled(claims,links,references=selections)
-            index.publication.stage_facts(generation,[dict(id=link.id,source=link.source_entity_id,
-                target=link.target_entity_id,status=link.status,members=supports[link.id][0],
-                representative=supports[link.id][1],member_count=len(supports[link.id][0])) for link in links])
-        return reads
+def test_small_groups_use_projected_input_and_one_import(tmp_path,monkeypatch):
+    store,generation,refs,_=stage_duplicate_observations(tmp_path,relations_per_source=70)
     try:
-        index.build(iter(source))
-        complete(())
-        index.publication.seal_fact_stage(generation,'input')
-        assert index.publication.fact_stage_status(generation,'input')
-        assert not index.publication.fact_stage_status(generation,'input',functional_predicates=('owns',))
-        assert {key[2] for key in complete(('owns',))}=={'assertion:0','relation:0'}
-        index.publication.seal_fact_stage(generation,'input')
-        assert index.publication.fact_stage_status(generation,'input',functional_predicates=('owns',))
+        for number,reference in enumerate(refs):
+            records=ExtractionRecords.from_fact_reference(store,'p',reference)
+            store.store.add(records.ox.Quad(records.ox.NamedNode(reference),records.ox.NamedNode(F+'time'),
+                records.ox.Literal(str(number)),records.graph))
+            records.write_fact_projection(reference,assertion_id=f'a:{number}',relation_id=f'r:{number}',
+                source_id='urn:canonical:0',target_id='urn:canonical:1',predicate='owns',
+                qualifiers={'polarity':'positive','time':str(number)},evidence_ids=[f'e:{number}'])
+        monkeypatch.setattr(ExtractionRecords,'read_fact_projection_page',
+            lambda *a,**k:pytest.fail('coordination restored complete fact objects'))
+        index=QualifiedFactIndex(store,'p',generation)
+        imports=[]
+        original_import=store.store.bulk_load
+        def bulk_load(**options):
+            imports.append(True)
+            return original_import(**options)
+        monkeypatch.setattr(store.store,'bulk_load',bulk_load)
+        index.reconcile_and_stage(input_key='input')
+        assert imports==[True]
+        assert index.publication.one(index.publication.head,'qualifiedDecisionCount')=='140'
+    finally:
+        store.close()
+
+
+def test_completion_survives_generation_and_reopen_without_native_reads(tmp_path,monkeypatch):
+    store,generation,refs,index=prepared(tmp_path)
+    index.reconcile_and_stage(input_key='input')
+    next_generation=store.begin_publication('p',expected_generation=generation,source_count=2,canonical_count=2)['generation']
+    store.close()
+    store=OxigraphStore(tmp_path/'facts')
+    try:
+        index=QualifiedFactIndex(store,'p',next_generation)
+        monkeypatch.setattr(ExtractionRecords,'read_fact_projection_page',lambda *a,**k:pytest.fail('completion scanned native facts'))
+        assert index.publication.fact_stage_status(next_generation,'input')
+        assert not index.publication.fact_stage_status(next_generation,'changed')
+        assert not index.publication.fact_stage_status(next_generation,'input',functional_predicates=['owns'])
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize('defect',['missing','foreign','duplicate','orphan'])
+def test_writer_rejects_invalid_decision_coverage_before_completion(tmp_path,monkeypatch,defect):
+    store,generation,refs,index=prepared(tmp_path)
+    original=index._reduce_partition
+    def corrupt(*args):
+        result=original(*args)
+        members=result[2]
+        identity=next(iter(members))
+        if defect=='missing':
+            members[identity].pop()
+        elif defect=='foreign':
+            members[identity][-1]='urn:foreign'
+        elif defect=='duplicate':
+            members[identity].append(members[identity][0])
+        else:
+            members['orphan']=[]
+        return result
+    try:
+        monkeypatch.setattr(index,'_reduce_partition',corrupt)
+        with pytest.raises(ProcessingError,match='coverage differs'):
+            index.reconcile_and_stage(input_key='input')
         assert not index.publication.fact_stage_status(generation,'input')
-        assert {key[2] for key in complete(())}=={'assertion:0','relation:0'}
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize('field',['buildPredicate','buildAssertionId','buildRelationId'])
+def test_duplicate_input_projection_rejected_before_completion(tmp_path,field):
+    store,generation,refs,index=prepared(tmp_path)
+    p=index.publication
+    try:
+        records=ExtractionRecords.from_fact_reference(store,'p',refs[0])
+        store.store.add(p.ox.Quad(p.iri(refs[0]),p.ox.NamedNode(F+field),p.scalar('other'),records.fact_projection_graph))
+        with pytest.raises(ProcessingError,match='missing or duplicated'):
+            index.reconcile_and_stage(input_key='input')
+        assert not p.fact_stage_status(generation,'input')
+    finally:
+        store.close()
+
+
+def test_admitted_subset_cannot_claim_complete_native_coverage(tmp_path):
+    store,generation,refs,index=prepared(tmp_path)
+    try:
+        records=ExtractionRecords.from_fact_reference(store,'p',refs[1])
+        store.store.update(f'DELETE WHERE {{ GRAPH {records.fact_projection_graph} {{ <{refs[1]}> ?p ?o }} }}')
+        with pytest.raises(ProcessingError,match='missing or duplicated'):
+            index.reconcile_and_stage(input_key='input')
+        assert not index.publication.fact_stage_status(generation,'input')
+    finally:
+        store.close()
+
+
+def test_input_traversal_omission_never_commits_completion(tmp_path,monkeypatch):
+    store,generation,refs,index=prepared(tmp_path)
+    original=index._physical_rows
+    def incomplete():
+        yield from (item for item in original() if item[0]!=refs[1])
+    try:
+        monkeypatch.setattr(index,'_physical_rows',incomplete)
+        with pytest.raises(ProcessingError,match='admitted coverage incomplete'):
+            index.reconcile_and_stage(input_key='input')
+        assert not index.publication.fact_stage_status(generation,'input')
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize('budget',[dict(max_group_records=1),dict(max_group_bytes=1)])
+def test_group_limits_fail_explicitly_without_sealing(tmp_path,budget):
+    store,generation,refs,index=prepared(tmp_path)
+    try:
+        with pytest.raises(ProcessingError,match='budget'):
+            index.reconcile_and_stage(input_key='input',**budget)
+        assert not index.publication.fact_stage_status(generation,'input')
+    finally:
+        store.close()
+
+
+def test_ambiguous_canonical_membership_rejected(tmp_path):
+    store,generation,refs,index=prepared(tmp_path)
+    try:
+        p=index.publication
+        source=next(store.store.quads_for_pattern(p.iri(refs[0]),p.ox.NamedNode(F+'sourceEntity'),None,p.facts)).object
+        store.store.add(p.ox.Quad(p.iri('urn:canonical:1'),p.ox.NamedNode(P+'member'),source,p.graph))
+        with pytest.raises(ProcessingError,match='unique canonical'):
+            index.reconcile_and_stage(input_key='input')
+        assert not index.publication.fact_stage_status(generation,'input')
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize('prefix',[5,-1])
+def test_partial_import_never_commits_signature_and_retry_recomputes(tmp_path,monkeypatch,prefix):
+    store,generation,refs,index=prepared(tmp_path)
+    p=index.publication
+    original=p.import_batches
+    try:
+        def interrupted(generation,batches):
+            iterator=iter(batches)
+            batch=next(iterator)
+            # Simulate a bulk importer that durably wrote only a prefix.
+            original(generation,iter([batch[:prefix]]))
+            raise ProcessingError('interrupted')
+        monkeypatch.setattr(p,'import_batches',interrupted)
+        with pytest.raises(ProcessingError,match='interrupted'):
+            index.reconcile_and_stage(input_key='input')
+        assert not any(store.store.quads_for_pattern(None,p.ox.NamedNode(P+'qualifiedInput'),None,p.graph))
+        assert not p.fact_stage_status(generation,'input')
+        store.close()
+        store=OxigraphStore(tmp_path/'facts')
+        index=QualifiedFactIndex(store,'p',generation)
+        index.reconcile_and_stage(input_key='input')
+        assert index.publication.fact_stage_status(generation,'input')
+    finally:
+        store.close()
+
+
+def test_unchanged_partitions_keep_decisions_and_skip_reducer(tmp_path,monkeypatch):
+    store,generation,refs,index=prepared(tmp_path)
+    try:
+        index.reconcile_and_stage(input_key='input')
+        p=index.publication
+        before=set(store.store.quads_for_pattern(None,None,None,p.graph))
+        monkeypatch.setattr(index,'_reduce_partition',lambda *a,**k:pytest.fail('unchanged group reduced'))
+        index.reconcile_and_stage(input_key='input')
+        assert set(store.store.quads_for_pattern(None,None,None,p.graph))==before
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize('marker',['old','qualified-reference-records','native-final-decisions'])
+def test_obsolete_layout_requires_offline_reset(tmp_path,marker):
+    store,generation,refs,index=prepared(tmp_path)
+    try:
+        p=index.publication
+        p.mutate(generation,[p.triple(p.head,'qualifiedIndexLayout',p.scalar(marker))])
+        with pytest.raises(ProcessingError,match='offline reset'):
+            index.reconcile_and_stage(input_key='input')
+        p.reset_fact_stage(generation)
+        index.reconcile_and_stage(input_key='input')
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize('field,value',[('status','invalid'),('evidence_ids',[{}]),('qualifiers',{'polarity':'invalid'})])
+def test_reducer_validates_every_input_before_merge(field,value):
+    from pydantic import ValidationError
+    item=dict(id='a',subject_id='s',predicate='owns',object='Engine',
+        qualifiers=dict(polarity='positive'),evidence_ids=['e'])
+    item[field]=value
+    with pytest.raises(ValidationError):
+        ConflictDetector.reconcile_qualified_facts('p',[item],[])
+
+
+@pytest.mark.parametrize('kind',['assertion','relation'])
+def test_endpoint_and_read_bounds(tmp_path,kind):
+    store,generation,refs,index=prepared(tmp_path)
+    try:
+        assert index.canonical_endpoint_page(refs)=={ref:('urn:canonical:0','urn:canonical:1') for ref in refs}
+        with pytest.raises(ProcessingError):
+            index.canonical_endpoint_page([refs[0]]*129)
+        index.reconcile_and_stage(input_key='input')
+        assert not index.canonical_page(kind,subject_ids=[])['records']
+        assert not index.canonical_page(kind,predicates=['other'])['records']
+        with pytest.raises(ProcessingError,match='byte budget'):
+            index.canonical_page(kind,max_bytes=1)
+    finally:
+        store.close()
+
+
+def test_native_groups_preserve_polarity_and_separate_recorded_conditions(tmp_path):
+    store,generation,refs,_=stage_duplicate_observations(tmp_path,source_ids=('s1','s2','s3','s4'))
+    index=QualifiedFactIndex(store,'p',generation)
+    try:
+        for number,ref in enumerate(refs):
+            records=ExtractionRecords.from_fact_reference(store,'p',ref)
+            qualifiers=dict(polarity='negative' if number==1 else 'positive',
+                time='2025' if number<2 else '2026',unit='shares',condition='audited')
+            store.store.update(f'DELETE WHERE {{ GRAPH {records.graph} {{ <{ref}> <{F}polarity> ?v }} }}')
+            for field,value in qualifiers.items():
+                store.store.add(records.ox.Quad(records.ox.NamedNode(ref),records.ox.NamedNode(F+field),
+                    records.ox.NamedNode(F+value) if field=='polarity' else records.ox.Literal(value),records.graph))
+            records.write_fact_projection(ref,assertion_id=f'a:{number}',relation_id=f'r:{number}',
+                source_id='urn:canonical:0',target_id='urn:canonical:1',predicate='owns',
+                qualifiers=qualifiers,evidence_ids=[f'e:{number}'])
+        observations=[(kind,item) for _,row in index._physical_rows()
+            for kind,item in zip(('assertion','relation'),oracle_views(row))]
+        expected=ConflictDetector.reconcile_qualified_facts('p',observations=observations)
+        index.reconcile_and_stage(input_key='input')
+        for kind,oracle in zip(('assertion','relation'),expected[:2]):
+            assert page_all(index,kind)==oracle
+        assertions=page_all(index,'assertion')
+        assert sorted(item.status for item in assertions)==['candidate','contradicted','contradicted']
+        assert len({item.qualifiers['time'] for item in assertions})==2
+    finally:
+        store.close()
+
+
+def test_source_removal_replaces_only_affected_final_memberships(tmp_path,monkeypatch):
+    store,generation,refs,index=prepared(tmp_path)
+    p=index.publication
+    try:
+        index.reconcile_and_stage(input_key='before')
+        # Withdraw one publication source; immutable native extraction stays intact.
+        operation=p.iri(refs[1].rsplit(':relation:',1)[0])
+        source=next(store.store.quads_for_pattern(None,p.ox.NamedNode(P+'operation'),operation,p.graph)).subject
+        store.store.remove(p.ox.Quad(p.head,p.ox.NamedNode(P+'source'),source,p.graph))
+        for quad in list(store.store.quads_for_pattern(p.head,p.ox.NamedNode(P+'sourceCount'),None,p.graph)):
+            store.store.remove(quad)
+        store.store.add(p.ox.Quad(p.head,p.ox.NamedNode(P+'sourceCount'),p.scalar('1'),p.graph))
+        index.reconcile_and_stage(input_key='after')
+        for kind in ('assertion','relation'):
+            records=page_all(index,kind)
+            assert len(records)==1
+            assert records[0].metadata['support_observation_ids']==[('a:' if kind=='assertion' else 'r:')+'0']
+        assert ExtractionRecords.from_fact_reference(store,'p',refs[1]).receipt() is not None
+        store.close()
+        store=OxigraphStore(tmp_path/'facts')
+        index=QualifiedFactIndex(store,'p',generation)
+        monkeypatch.setattr(index,'_reduce_partition',lambda *a,**k:pytest.fail('unchanged remainder reduced'))
+        index.reconcile_and_stage(input_key='after')
+        assert index.publication.fact_stage_status(generation,'after')
+    finally:
+        store.close()
+
+
+def test_generation_change_interrupts_before_final_import(tmp_path,monkeypatch):
+    store,generation,refs,index=prepared(tmp_path)
+    p=index.publication
+    original=p.import_batches
+    try:
+        def changed(generation,batches):
+            store.begin_publication('p',expected_generation=generation,source_count=2,canonical_count=2)
+            original(generation,batches)
+        monkeypatch.setattr(p,'import_batches',changed)
+        with pytest.raises(ProcessingError,match='generation'):
+            index.reconcile_and_stage(input_key='input')
+        assert not p.values(p.head,'factStageInput')
     finally:
         store.close()

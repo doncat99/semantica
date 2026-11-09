@@ -769,9 +769,13 @@ class ExtractionRecords:
         return result
 
     def _fact_member(self, identity):
+        if self.stage!='relations' or self.receipt() is None:
+            raise ProcessingError('Fact projection requires accepted native Relation membership')
+        return self._fact_member_node(identity)
+
+    def _fact_member_node(self, identity):
         node=self.ox.NamedNode(identity)
-        if (self.stage!='relations' or self.receipt() is None
-                or not identity.startswith(self.operation.value+':relation:')
+        if (not identity.startswith(self.operation.value+':relation:')
                 or self.one(node,RDF_TYPE)!=F+'Relation'
                 or not self._owns(node)):
             raise ProcessingError('Fact projection requires accepted native Relation membership')
@@ -787,9 +791,10 @@ class ExtractionRecords:
         from ..semantic_extract.schemas import validate_fact_qualifiers
         validate_fact_qualifiers(qualifiers)
         node=self._fact_member(identity)
+        if qualifiers != self.fact_qualifiers(node):
+            raise ProcessingError('Fact projection qualifiers differ from native observation')
         scalars=dict(buildAssertionId=assertion_id,buildRelationId=relation_id,
-            buildSourceId=source_id,buildTargetId=target_id,buildPredicate=predicate,
-            **{'buildQualifier'+key[0].upper()+key[1:]:value for key,value in qualifiers.items()})
+            buildSourceId=source_id,buildTargetId=target_id,buildPredicate=predicate)
         if (not isinstance(evidence_ids,list) or not 0<len(evidence_ids)<=128
                 or any(not isinstance(value,str) or not value or len(value.encode())>16384
                     for value in [*scalars.values(),*evidence_ids])):
@@ -820,6 +825,53 @@ class ExtractionRecords:
             serialized=' .\n'.join(str(q.subject)+' '+str(q.predicate)+' '+str(q.object) for q in quads)
             self.owner._update_derived_graph(graph, insert=serialized+' .')
 
+    def fact_qualifiers(self,node):
+        """The immutable extraction, not its address projection, owns semantics."""
+        from ..semantic_extract.schemas import validate_fact_qualifiers
+        values=self.read_metadata(node,dict(polarity='polarity',condition='condition',
+            time='time',unit='unit',value='qualifiedValue'))
+        if 'polarity' in values:
+            values['polarity']=values['polarity'].removeprefix(F)
+        return validate_fact_qualifiers(values)
+
+    def migrate_fact_projection(self,identity):
+        """Explicit offline metadata conversion; native facts and IDs stay put."""
+        with self.owner._publication_lock:
+            node=self._fact_member(identity)
+            graph=self.fact_projection_graph
+            payload=list(islice(self.owner.store.quads_for_pattern(node,None,None,graph),33))
+            children=[q.object for q in payload if q.predicate.value==F+'buildEvidence']
+            if len(payload)>32 or not 0<len(children)<=128:
+                raise ProcessingError('Fact projection migration exceeds address budget')
+            for child in children:
+                fields=list(islice(self.owner.store.quads_for_pattern(child,None,None,graph),4))
+                if len(fields)!=2:
+                    raise ProcessingError('Fact projection migration evidence fields invalid')
+                payload.extend(fields)
+            if len(payload)>1024 or sum(len(str(q).encode()) for q in payload)>MAX_PAGE_BYTES:
+                raise ProcessingError('Fact projection migration exceeds byte budget')
+            digests=[q for q in payload if q.predicate.value==F+'factProjectionDigest']
+            body=[q for q in payload if q not in digests]
+            if len(digests)!=1 or _hash(body)!=digests[0].object.value:
+                raise ProcessingError('Native fact projection corrupt')
+            obsolete=[q for q in body if q.predicate.value.startswith(F+'buildQualifier')]
+            if not obsolete:
+                self.read_fact_projections(identity)
+                return False
+            expected={'buildQualifier'+k.title():v for k,v in self.fact_qualifiers(node).items()}
+            actual={q.predicate.value[len(F):]:q.object.value for q in obsolete}
+            if actual!=expected or len(actual)!=len(obsolete):
+                raise ProcessingError('Projection migration qualifiers differ from native facts')
+            current=[q for q in body if q not in obsolete]
+            digest=self.ox.Quad(node,self.ox.NamedNode(F+'factProjectionDigest'),
+                self.ox.Literal(_hash(current)),graph)
+            def triples(quads):
+                return ' '.join(f'{q.subject} {q.predicate} {q.object} .' for q in quads)
+            self.owner._update_derived_graph(graph,delete=triples(obsolete+digests),insert=triples([digest]))
+            self.owner.flush()
+            self.read_fact_projections(identity)
+            return True
+
     def read_fact_projection(self, identity, kind):
         """Hydrate exactly one source observation; canonical remapping is separate."""
         if kind not in {'assertion', 'relation'}:
@@ -827,17 +879,47 @@ class ExtractionRecords:
         return self._read_fact_projections(identity, (kind,))[kind]
 
     def read_fact_projections(self, identity):
-        """Read one immutable projection for both reducer views."""
+        """Project the two public expressions from one immutable observation."""
         return self._read_fact_projections(identity, ('assertion', 'relation'))
 
-    def read_fact_index_projections(self, identity):
-        """Read identity fields for grouping; reducer DTOs are hydrated on consumption."""
-        return self._read_fact_projections(identity, ('assertion', 'relation'), index_only=True)
+    @classmethod
+    def read_fact_projection_page(cls,owner,project,identities):
+        """Share operation admission only within one bounded, locked read page."""
+        if (not isinstance(identities,list) or len(identities)>128
+                or any(not isinstance(value,str) or not re.fullmatch(
+                    r'urn:semantica:extraction:[0-9a-f]{64}:relation:[0-9]+',value)
+                    for value in identities) or len(set(identities))!=len(identities)):
+            raise ProcessingError('Invalid native fact projection page')
+        from ..semantic_worker_context import check_query_cancellation
+        with owner._publication_lock:
+            operations,result={},{}
+            size=0
+            for identity in identities:
+                check_query_cancellation()
+                operation=identity.rsplit(':relation:',1)[0]
+                records=operations.get(operation)
+                if records is None:
+                    records=cls.from_fact_reference(owner,project,identity)
+                    operations[operation]=records
+                    node=records.ox.NamedNode(identity)
+                else:
+                    node=records._fact_member_node(identity)
+                projections,amount=records._read_fact_projection_node(
+                    node,None)
+                size+=amount
+                if size>16*1024*1024:
+                    raise ProcessingError('Fact projection page byte budget exceeded')
+                result[identity]=projections
+            return result
 
-    def _read_fact_projections(self, identity, kinds, *, index_only=False):
+    def _read_fact_projections(self, identity, kinds):
         node=self._fact_member(identity)
+        return self._read_fact_projection_node(node,kinds)[0]
+
+    def _read_fact_projection_node(self,node,kinds):
         graph=self.fact_projection_graph
         facts=[]
+        projection_fields={}
         size=0
         def append(quad):
             nonlocal size
@@ -845,35 +927,16 @@ class ExtractionRecords:
             if len(facts)>=1024 or size>MAX_PAGE_BYTES:
                 raise ProcessingError('Fact projection byte/cardinality budget exceeded')
             facts.append(quad)
+            projection_fields.setdefault((quad.subject,quad.predicate.value),[]).append(quad.object.value)
         for quad in self.owner.store.quads_for_pattern(node,None,None,graph):
             append(quad)
         def one(subject,key,optional=False):
-            values=[q.object.value for q in facts if q.subject==subject and q.predicate.value==F+key]
+            values=projection_fields.get((subject,F+key),[])
             if optional and not values:
                 return None
             if len(values)!=1:
                 raise ProcessingError('Native fact projection field missing or duplicated')
             return values[0]
-        if index_only:
-            children=[q.object for q in facts if q.predicate.value==F+'buildEvidence']
-            if not 0<len(children)<=128:
-                raise ProcessingError('Native fact projection missing evidence')
-            evidence=[]
-            for child in children:
-                values=list(self.owner.store.quads_for_pattern(child,self.ox.NamedNode(F+'referenceId'),None,graph))
-                if len(values)!=1 or not isinstance(values[0].object,self.ox.Literal):
-                    raise ProcessingError('Native fact projection evidence address is invalid')
-                evidence.append(values[0].object.value)
-            qualifiers={key:value for key in ('polarity','condition','time','unit','value')
-                if (value:=one(node,'buildQualifier'+key[0].upper()+key[1:],True)) is not None}
-            return {
-                'relation':dict(id=one(node,'buildRelationId'),
-                    source_entity_id=one(node,'buildSourceId'),target_entity_id=one(node,'buildTargetId'),
-                    type=one(node,'buildPredicate'),qualifiers=qualifiers,evidence_ids=evidence),
-                'assertion':dict(id=one(node,'buildAssertionId'),subject_id=one(node,'buildSourceId'),
-                    object_entity_id=one(node,'buildTargetId'),predicate=one(node,'buildPredicate'),
-                    qualifiers=qualifiers,evidence_ids=evidence),
-            }
         children=[q.object for q in facts if q.predicate.value==F+'buildEvidence']
         if not 0<len(children)<=128:
             raise ProcessingError('Native fact projection missing evidence')
@@ -887,22 +950,28 @@ class ExtractionRecords:
         if [int(one(child,'position')) for child in children]!=list(range(len(children))):
             raise ProcessingError('Native fact projection evidence order corrupt')
         evidence=[one(child,'referenceId') for child in children]
-        qualifiers={key:value for key in ('polarity','condition','time','unit','value')
-            if (value:=one(node,'buildQualifier'+key[0].upper()+key[1:],True)) is not None}
-        result={}
-        if 'relation' in kinds:
-            fields=dict(id=one(node,'buildRelationId'),
-                source_entity_id=one(node,'buildSourceId'),target_entity_id=one(node,'buildTargetId'),
-                type=one(node,'buildPredicate'),qualifiers=qualifiers,evidence_ids=evidence)
-            result['relation'] = dict(**fields, support_ids=evidence, status='candidate', metadata={})
-        if 'assertion' in kinds:
-            fields=dict(id=one(node,'buildAssertionId'),subject_id=one(node,'buildSourceId'),
-                object_entity_id=one(node,'buildTargetId'),predicate=one(node,'buildPredicate'),
-                qualifiers=qualifiers,evidence_ids=evidence)
+        if any(key.startswith(F+'buildQualifier') for _,key in projection_fields):
+            raise ProcessingError('Obsolete fact projection requires offline metadata migration')
+        qualifiers=self.fact_qualifiers(node)
+        physical=dict(id=one(node,'buildRelationId'),assertion=one(node,'buildAssertionId'),
+            source=one(node,'buildSourceId'),target=one(node,'buildTargetId'),
+            predicate=one(node,'buildPredicate'),qualifiers=qualifiers,evidence=evidence)
+        if kinds is None or 'assertion' in kinds:
             target=self.ox.NamedNode(self.one(node,'targetEntity'))
-            fields['object']=self.one(target,'name').strip()
-            result['assertion']=dict(**fields, support_ids=evidence, status='candidate', metadata={})
-        return result
+            physical['object']=self.one(target,'name').strip()
+        if kinds is None:
+            return physical,size
+        result={}
+        shared=dict(qualifiers=qualifiers,evidence_ids=evidence,support_ids=evidence,
+            status='candidate',metadata={})
+        if 'relation' in kinds:
+            result['relation']=dict(id=physical['id'],source_entity_id=physical['source'],
+                target_entity_id=physical['target'],type=physical['predicate'],**shared)
+        if 'assertion' in kinds:
+            result['assertion']=dict(id=physical['assertion'],subject_id=physical['source'],
+                object_entity_id=physical['target'],predicate=physical['predicate'],
+                object=physical['object'],**shared)
+        return result,size
 
     def confidence(self, node, value):
         if type(value) not in (int, float) or not math.isfinite(value) or not 0 <= value <= 1:

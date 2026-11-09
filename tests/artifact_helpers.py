@@ -147,7 +147,15 @@ def build_source_fixture(source, force_ocr, model_result=None, parsed=None):
                     quote = item['name'] if kind == 'entities' else item['evidence']
                     occurrence = item.get('occurrence' if kind == 'entities' else 'evidence_occurrence', 0)
                     item['_start'], item['_end'], _ = pipeline._exact_occurrence(text, quote, occurrence)
-    return pipeline._build_source(source, force_ocr, model_result, admitted)
+    result = pipeline._build_source(source, force_ocr, model_result, admitted)
+    # Test-only public expression oracle; production retains one source fact.
+    from semantica.semantic_artifact_schema import KnowledgeRelation
+    result['assertions'] = result['facts']
+    result['relations'] = [KnowledgeRelation(id='relation:'+item.id.split(':')[1],
+        source_entity_id=item.subject_id,target_entity_id=item.object_entity_id,
+        type=item.predicate,qualifiers=item.qualifiers,evidence_ids=item.evidence_ids,
+        support_ids=item.support_ids,status=item.status) for item in result['facts']]
+    return result
 
 
 def extract_source(text, model, embedding, *, extraction_spec=None, progress=None,

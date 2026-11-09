@@ -2695,8 +2695,7 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
             if not isinstance(local_id, str) or not local_id or local_id in entities_by_ref:
                 raise SemanticArtifactError("entity extraction requires unique occurrence ids")
             entities_by_ref[local_id] = entities[entity_id]
-    assertions: list[KnowledgeAssertion] = []
-    relations: list[KnowledgeRelation] = []
+    facts: list[KnowledgeAssertion] = []
     if model_result is not None:
         for item in model_result["relations"]:
             if not isinstance(item, dict):
@@ -2745,8 +2744,7 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
             for native_ref in item.get("native_refs", []):
                 if native_ref not in native_fact_refs[observation_key]:
                     native_fact_refs[observation_key].append(native_ref)
-            relations.append(KnowledgeRelation(id=relation_id, source_entity_id=subject_entity.id, target_entity_id=object_entity.id, type=predicate, qualifiers=qualifiers, evidence_ids=supporting_ids, support_ids=supporting_ids, status="candidate"))
-            assertions.append(KnowledgeAssertion(id=assertion_id, subject_id=subject_entity.id, predicate=predicate, object=object_entity.canonical_name, object_entity_id=object_entity.id, qualifiers=qualifiers, evidence_ids=supporting_ids, support_ids=supporting_ids, status="candidate"))
+            facts.append(KnowledgeAssertion(id=assertion_id, subject_id=subject_entity.id, predicate=predicate, object=object_entity.canonical_name, object_entity_id=object_entity.id, qualifiers=qualifiers, evidence_ids=supporting_ids, support_ids=supporting_ids, status="candidate"))
     representation = DocumentRepresentation(
         id=representation_id,
         source_id=source.source_id,
@@ -2762,7 +2760,7 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
         artifact_ref_id=representation_artifact_id,
         metadata={"representation_revision": representation_revision, "text_length": len(text), "source_name": source.name, "document_format": document.get("format")},
     )
-    return {"source": source, "text": text, "representation": representation, "evidence": list(evidence.values()), "entities": list(entities.values()), "assertions": assertions, "relations": relations, "artifact_id": representation_artifact_id, "document": document, "source_locations": source_locations,
+    return {"source": source, "text": text, "representation": representation, "evidence": list(evidence.values()), "entities": list(entities.values()), "facts": facts, "artifact_id": representation_artifact_id, "document": document, "source_locations": source_locations,
             "native_entity_refs": dict(native_entity_refs), "native_fact_refs": dict(native_fact_refs), "native_operations": native_operations + list((model_result or {}).get("native_operations", []))}
 
 
@@ -3218,15 +3216,16 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                             context_start=context.start_char,context_end=context.end_char,
                             evidence_ids=entity.evidence_ids,metadata=entity.metadata)
                 del built_source['native_entity_refs']
-                for assertion,relation in zip(built_source.pop('assertions'),built_source.pop('relations'),strict=True):
-                    refs=built_source['native_fact_refs'].get(stable_digest([relation.id,relation.evidence_ids]),[])
+                for fact in built_source.pop('facts'):
+                    relation_id='relation:'+fact.id.split(':')[1]
+                    refs=built_source['native_fact_refs'].get(stable_digest([relation_id,fact.evidence_ids]),[])
                     if not refs:
                         raise SemanticArtifactError('fact has no native membership',code='NATIVE_PUBLICATION_INCOMPLETE')
                     for ref in refs:
                         records=ExtractionRecords.from_fact_reference(store,request.project_id,ref)
-                        records.write_fact_projection(ref,assertion_id=assertion.id,relation_id=relation.id,
-                            source_id=relation.source_entity_id,target_id=relation.target_entity_id,
-                            predicate=relation.type,qualifiers=relation.qualifiers,evidence_ids=relation.evidence_ids)
+                        records.write_fact_projection(ref,assertion_id=fact.id,relation_id=relation_id,
+                            source_id=fact.subject_id,target_id=fact.object_entity_id,
+                            predicate=fact.predicate,qualifiers=fact.qualifiers,evidence_ids=fact.evidence_ids)
                 del built_source['native_fact_refs']
                 # Derived addresses are replayable; paid receipts are already durable.
                 store.flush()
@@ -3428,107 +3427,21 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
             publication.seal_identity_stage(generation, input_key)
         store.seal_publication_canonical_count(request.project_id,generation,canonical_count)
 
-    def hydrate_fact(ref,kind,observation=None,projection=None,endpoints=None):
-        store=_native_build.get()[1]
-        if projection is None:
-            records=ExtractionRecords.from_fact_reference(store,request.project_id,ref)
-            value=records.read_fact_projection(ref,kind)
-        else:
-            value=dict(projection)
-        source,target=endpoints or fact_index.canonical_endpoints(ref)
-        if kind=='assertion':
-            value.update(subject_id=source,object_entity_id=target)
-        else:
-            value.update(source_entity_id=source,target_entity_id=target)
-        return value
-
     def fact_reconciliation(_):
         nonlocal fact_index
         from .triplet_store.qualified_fact_index import QualifiedFactIndex
         store=_native_build.get()[1]
         index=fact_index=QualifiedFactIndex(store,request.project_id,generation)
-        def rows():
-            cursor=None
-            while True:
-                page=store.read_build_records(request.project_id,generation,kind='Relation',fields=['urn:semantica:field:predicateName'],after=cursor,limit=128)
-                endpoints_by_ref=index.canonical_endpoint_page([record['id'] for record in page['records']])
-                for record in page['records']:
-                    records=ExtractionRecords.from_fact_reference(store,request.project_id,record['id'])
-                    projections=records.read_fact_index_projections(record['id'])
-                    endpoints=endpoints_by_ref[record['id']]
-                    for kind in ('assertion','relation'):
-                        yield record['id'],kind,hydrate_fact(record['id'],kind,
-                            projection=projections[kind],endpoints=endpoints)
-                        metadata['indexedObservations'] += 1
-                cursor=page['next_cursor']
-                if cursor is None:
-                    break
         with _project_progress(progress,'fact_reconciliation',90) as metadata, index.publication.build_scope(generation), index.publication.checkpointed(generation):
             metadata.update(indexedObservations=0,completedPartitions=0,canonicalRelations=0)
             input_key=stable_digest(dict(identity=index.publication.one(index.publication.head,'identityStageInput')))
             if index.publication.fact_stage_status(generation,input_key):
                 metadata.update(reused=True)
                 return
-            index.build(rows())
-            pending_references={}
-            pending_claims=[]
-            pending_links=[]
-            pending_facts=[]
-            pending_members=0
-            pending_bytes=0
-            def flush_statuses():
-                nonlocal pending_claims,pending_links,pending_references
-                if pending_claims or pending_links:
-                    index.stage_reconciled(pending_claims,pending_links,references=pending_references)
-                    pending_references={}
-                    pending_claims=[]
-                    pending_links=[]
-            def flush_facts():
-                nonlocal pending_facts,pending_members,pending_bytes
-                if pending_facts:
-                    index.publication.stage_facts(generation,pending_facts)
-                    pending_facts=[]
-                    pending_members=0
-                    pending_bytes=0
-            current_ref=None
-            current_views=None
-            def read_observation(ref,kind,observation):
-                nonlocal current_ref,current_views
-                if current_ref!=ref:
-                    records=ExtractionRecords.from_fact_reference(store,request.project_id,ref)
-                    projections=records.read_fact_projections(ref)
-                    endpoints=index.canonical_endpoints(ref)
-                    current_views={view:hydrate_fact(ref,view,projection=projection,endpoints=endpoints)
-                        for view,projection in projections.items()}
-                    current_ref=ref
-                return current_views[kind]
-            for claims,links,issues,supports,selections in index.iter_reconciled(read_observation):
-                pending_references.update(selections)
-                pending_claims.extend(claims)
-                pending_links.extend(links)
-                if len(pending_claims)+len(pending_links)>=128:
-                    flush_statuses()
-                for relation in links:
-                    members,representative=supports[relation.id]
-                    for offset in range(0,len(members),128):
-                        record=dict(id=relation.id,
-                            source=relation.source_entity_id,target=relation.target_entity_id,
-                            representative=representative,members=members[offset:offset+128],
-                            member_count=len(members),status=relation.status)
-                        estimate=4*len(json.dumps(record,ensure_ascii=False,separators=(',',':')).encode())+512
-                        refs=len(record['members'])
-                        if pending_facts and (len(pending_facts)>=128 or pending_members+refs>128 or pending_bytes+estimate>262144):
-                            flush_facts()
-                        if estimate>262144:
-                            raise ProcessingError('Canonical fact publication batch exceeds byte budget')
-                        pending_facts.append(record)
-                        pending_members+=refs
-                        pending_bytes+=estimate
+            def completed_partition(relations):
                 metadata['completedPartitions'] += 1
-                metadata['canonicalRelations'] += len(links)
-            flush_statuses()
-            flush_facts()
-            index.publication.seal_fact_stage(generation,input_key)
+                metadata['canonicalRelations'] += relations
+            index.reconcile_and_stage(input_key=input_key,on_partition=completed_partition)
 
     def semantic_organization(_):
         nonlocal communities, topics

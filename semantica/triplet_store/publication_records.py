@@ -3,12 +3,13 @@
 Paid typed observations remain in their extraction owner. This codec stores
 only the current publication's input identities and references to those facts.
 """
+import io
 import hashlib
 import json
 import uuid
 from contextlib import contextmanager
 from functools import wraps
-from itertools import islice
+from itertools import chain, islice
 
 from ..utils.exceptions import ProcessingError
 from ..semantic_worker_context import check_query_cancellation
@@ -18,6 +19,30 @@ from .extraction_records import BINDING, ExtractionRecords, F, RDF_TYPE, operati
 MAX_ROWS = 128
 MAX_BYTES = 262144
 P = "urn:semantica:publication:"
+
+
+class _TripleStream(io.RawIOBase):
+    def __init__(self, batches):
+        self.batches=iter(batches)
+        self.pending=memoryview(b'')
+
+    def readable(self):
+        return True
+
+    def readinto(self, target):
+        while not self.pending:
+            check_query_cancellation()
+            batch=next(self.batches,None)
+            if batch is None:
+                return 0
+            body=('\n'.join(batch)+'\n').encode()
+            if len(body)>MAX_BYTES+1:
+                raise ProcessingError('Publication import window exceeds byte budget')
+            self.pending=memoryview(body)
+        count=min(len(target),len(self.pending))
+        target[:count]=self.pending[:count]
+        self.pending=self.pending[count:]
+        return count
 
 
 def _locked(method):
@@ -59,6 +84,48 @@ class PublicationRecords:
                 raise ProcessingError("Publication field exceeds 128 references")
         return result
 
+    def fields(self, node, fields, *, graph=None, prefix=P):
+        """Point-read selected fields without traversing support membership."""
+        return self.field_page([node], fields, graph=graph, prefix=prefix)[node]
+
+    def field_page(self,nodes,fields,*,graph=None,prefix=P):
+        """Project a bounded address page inside the native engine."""
+        if len(nodes)>MAX_ROWS or len(set(nodes))!=len(nodes):
+            raise ProcessingError('Publication field page exceeds row budget')
+        result={node:{field:[] for field in fields} for node in nodes}
+        if not nodes or not fields:
+            return result
+        names={field if field==RDF_TYPE else prefix+field:field for field in fields}
+        size=0
+        predicates=[(self.ox.NamedNode(name),field) for name,field in names.items()]
+        # Bind both indexes explicitly; a VALUES cross-product can select a
+        # whole-graph join plan even though the returned page is small.
+        for node in nodes:
+            check_query_cancellation()
+            for predicate,field in predicates:
+                for quad in self.owner.store.quads_for_pattern(node,predicate,None,graph or self.graph):
+                    values=result[node][field]
+                    size+=len(str(quad.object).encode())
+                    if len(values)>=MAX_ROWS or size>MAX_BYTES:
+                        raise ProcessingError('Publication field page exceeds byte or row budget')
+                    values.append(quad.object)
+        return result
+
+    def qualified_members(self, *, decision):
+        """Final native support adjacency; no intermediate view entries exist."""
+        self.decision_identity(decision)
+        yield from self.owner.store.quads_for_pattern(decision,self.ox.NamedNode(P+'member'),None,self.graph)
+
+    def decision_identity(self, node):
+        """The address contains the semantic identity, never a second scalar copy."""
+        if not isinstance(node,self.ox.NamedNode):
+            raise ProcessingError('Native fact reconciliation incomplete')
+        identity=node.value
+        kind,_,digest=identity.partition(':')
+        if kind!='relation' or len(digest)!=32 or any(c not in '0123456789abcdef' for c in digest):
+            raise ProcessingError('Native fact reconciliation incomplete')
+        return kind,identity
+
     def one(self, node, field):
         values = self.values(node, field)
         if len(values) != 1:
@@ -88,12 +155,52 @@ class PublicationRecords:
             raise ProcessingError("Publication generation stale or not " + state)
         return status
 
+    def _check_generation(self, generation, state):
+        if self.one(self.head,'generation')!=generation or self.one(self.head,'state')!=state:
+            raise ProcessingError('Publication generation stale or not '+state)
+
     def triple(self, node, field, value):
         return f"{node} <{P + field}> {value} ."
 
+    @_locked
+    def mutate(self, generation, triples, *, state="pending"):
+        body = "\n".join(triples)
+        if len(body.encode()) > MAX_BYTES:
+            raise ProcessingError("Publication atomic write exceeds byte budget")
+        check_query_cancellation()
+        self.fence(generation, state)
+        checkpoint = getattr(self, '_checkpoint', None)
+        if checkpoint is not None:
+            if checkpoint['generation'] != generation or state != 'pending':
+                raise ProcessingError('Publication checkpoint generation changed')
+        self.owner._update_derived_graph(self.graph, insert=body, where=f"GRAPH {self.graph} {{ {self.head} <{P}generation> {self.scalar(generation)} ; <{P}state> {self.scalar(state)} . }}")
+        if checkpoint is None:
+            self.owner.flush()
+        else:
+            checkpoint['writes'] += 1
+            if checkpoint['writes'] >= MAX_ROWS:
+                self.owner.flush()
+                checkpoint.update(writes=0)
+        self.fence(generation, state)
+
+    @_locked
+    def import_batches(self, generation, batches):
+        """Stream bounded pending windows into the existing native graph."""
+        self._build_fence(generation)
+        # One stage-wide import; _TripleStream bounds Python's current window.
+        # The caller commits completion metadata only after this stream succeeds.
+        with io.BufferedReader(_TripleStream(batches)) as stream:
+            self.owner.store.bulk_load(input=stream,format=self.ox.RdfFormat.N_TRIPLES,to_graph=self.graph)
+        self._build_fence(generation)
+
     def require_kind(self, node, kind):
-        for other in {'canonical', 'community', 'topic', 'fact'} - {kind}:
-            if next(self.owner.store.quads_for_pattern(self.head, self.ox.NamedNode(P+other), node, self.graph), None):
+        other_kinds={self.ox.NamedNode(P+other) for other in
+            {'canonical', 'community', 'topic', 'fact'} - {kind}}
+        # Seek roles pointing to this address once, rather than probing each role.
+        for count,link in enumerate(self.owner.store.quads_for_pattern(self.head,None,node,self.graph),1):
+            if count>MAX_ROWS:
+                raise ProcessingError('Publication identity role fanout exceeds row budget')
+            if link.predicate in other_kinds:
                 raise ProcessingError('Publication identity already has another kind')
 
     @contextmanager
@@ -118,27 +225,6 @@ class PublicationRecords:
                 self.owner.flush()
             finally:
                 self._checkpoint = None
-
-    @_locked
-    def mutate(self, generation, triples, *, state="pending"):
-        body = "\n".join(triples)
-        if len(body.encode()) > MAX_BYTES:
-            raise ProcessingError("Publication atomic write exceeds byte budget")
-        check_query_cancellation()
-        self.fence(generation, state)
-        checkpoint = getattr(self, '_checkpoint', None)
-        if checkpoint is not None:
-            if checkpoint['generation'] != generation or state != 'pending':
-                raise ProcessingError('Publication checkpoint generation changed')
-        self.owner._update_derived_graph(self.graph, insert=body, where=f"GRAPH {self.graph} {{ {self.head} <{P}generation> {self.scalar(generation)} ; <{P}state> {self.scalar(state)} . }}")
-        if checkpoint is None:
-            self.owner.flush()
-        else:
-            checkpoint['writes'] += 1
-            if checkpoint['writes'] >= MAX_ROWS:
-                self.owner.flush()
-                checkpoint.update(writes=0)
-        self.fence(generation, state)
 
     @_locked
     def begin(self, *, expected_generation, source_count, canonical_count):
@@ -198,10 +284,20 @@ class PublicationRecords:
             raise ProcessingError('Invalid functional predicate policy')
         return tuple(sorted(set(values)))
 
+    def require_qualified_layout(self):
+        """Reject incompatible derived indices; reads never migrate or rebuild."""
+        layout=self.values(self.head,'qualifiedIndexLayout')
+        if layout==[self.ox.Literal('native-single-fact-decisions')]:
+            return
+        if layout or any(self.values(self.head,field) for field in
+                ('qualifiedIndexSealed','factStageInput','qualifiedEntry','qualifiedPartitionNode')):
+            raise ProcessingError('Obsolete qualified index requires explicit offline reset')
+
     @_locked
     def fact_stage_status(self, generation, input_key, *, functional_predicates=()):
         self.fence(generation,'pending')
         self.scalar(input_key)
+        self.require_qualified_layout()
         values=self.values(self.head,'factStageInput')
         if not values:
             return False
@@ -212,7 +308,7 @@ class PublicationRecords:
         policy=self.scalar(json.dumps(self.functional_policy(functional_predicates),separators=(',',':')))
         if self.values(self.head,'qualifiedFunctionalPredicates') != [policy]:
             return False
-        if len(self.values(self.head,'qualifiedIndexSealed'))!=1:
+        if len(self.values(self.head,'qualifiedDecisionCount'))!=1:
             raise ProcessingError('Native fact completion lacks sealed index')
         return True
 
@@ -222,63 +318,6 @@ class PublicationRecords:
         self.owner._update_derived_graph(self.graph,delete='?s ?p ?o',
             where=f'GRAPH {self.graph} {{ ?s ?p ?o }} FILTER({self._fact_selection("?s","?p")})')
         self.owner.flush()
-
-    @_locked
-    def seal_fact_stage(self,generation,input_key):
-        self.fence(generation,'pending')
-        self.scalar(input_key)
-        if self.values(self.head,'factStageInput') or len(self.values(self.head,'qualifiedIndexSealed'))!=1:
-            raise ProcessingError('Native fact stage is not sealable')
-        # Follow committed addresses once; correlated NOT EXISTS materialized cross-products.
-        count=0
-        for link in self.owner.store.quads_for_pattern(self.head,
-                self.ox.NamedNode(P+'qualifiedEntry'),None,self.graph):
-            check_query_cancellation()
-            entry=link.object
-            if not self.values(entry,'qualifiedReconciledStatus') or not self.values(entry,'qualifiedDecision'):
-                raise ProcessingError('Native fact reconciliation incomplete')
-            status=self.one(entry,'qualifiedReconciledStatus')
-            address=self.one(entry,'qualifiedDecision')
-            decision=self.iri(address)
-            if not next(self.owner.store.quads_for_pattern(self.head,
-                    self.ox.NamedNode(P+'qualifiedDecision'),decision,self.graph),None):
-                raise ProcessingError('Native fact reconciliation incomplete')
-            identity=self.one(entry,'qualifiedIdentity')
-            kind=self.one(entry,'qualifiedKind')
-            selected=self.iri(self.one(decision,'qualifiedSelectedEntry'))
-            if (self.one(decision,'qualifiedSelectedIdentity')!=identity
-                    or self.one(decision,'qualifiedSelectedKind')!=kind
-                    or self.one(decision,'qualifiedSelectedStatus')!=status
-                    or not next(self.owner.store.quads_for_pattern(self.head,
-                        self.ox.NamedNode(P+'qualifiedEntry'),selected,self.graph),None)
-                    or self.one(selected,'qualifiedIdentity')!=identity
-                    or self.one(selected,'qualifiedKind')!=kind
-                    or self.one(selected,'qualifiedObservation')!=self.one(decision,'qualifiedSelectedObservation')
-                    or self.one(selected,'qualifiedReference')!=self.one(decision,'qualifiedSelectedReference')):
-                raise ProcessingError('Native fact reconciliation incomplete')
-            count+=1
-        if count!=int(self.one(self.head,'qualifiedIndexSealed')):
-            raise ProcessingError('Native fact reconciliation incomplete')
-        incomplete=self.owner.store.query(f'''SELECT ?fact WHERE {{ GRAPH {self.graph} {{
-            {self.head} <{P}fact> ?fact . ?fact <{P}memberCount> ?expected .
-            OPTIONAL {{ ?fact <{P}member> ?ref }} }} }} GROUP BY ?fact ?expected
-            HAVING(COUNT(?ref) != xsd:integer(?expected)) LIMIT 1''',
-            prefixes={'xsd':'http://www.w3.org/2001/XMLSchema#'})
-        if next(iter(incomplete),None) is not None:
-            raise ProcessingError('Native fact membership incomplete')
-        indexed=next(iter(self.owner.store.query(f'''SELECT (COUNT(DISTINCT ?ref) AS ?count) WHERE {{
-            GRAPH {self.graph} {{ {self.head} <{P}qualifiedEntry> ?entry .
-                ?entry <{P}qualifiedKind> "relation" ; <{P}qualifiedReference> ?ref }} }}''')))['count']
-        planned=next(iter(self.owner.store.query(f'''SELECT (COALESCE(SUM(xsd:integer(?expected)),0) AS ?count) WHERE {{
-            GRAPH {self.graph} {{ {self.head} <{P}fact> ?fact . ?fact <{P}memberCount> ?expected }} }}''',
-            prefixes={'xsd':'http://www.w3.org/2001/XMLSchema#'})))['count']
-        if int(indexed.value)!=int(planned.value):
-            raise ProcessingError('Native fact coverage incomplete')
-        self.owner.flush()
-        self.owner.store.update(f'''DELETE {{ GRAPH {self.graph} {{ ?partition ?field ?value }} }}
-            WHERE {{ GRAPH {self.graph} {{ ?partition ?field ?value .
-                VALUES ?field {{ <{P}qualifiedDirty> <{P}qualifiedDirtyDecision> }} }} }}''')
-        self.mutate(generation,[self.triple(self.head,'factStageInput',self.scalar(input_key))])
 
     @_locked
     def identity_stage_status(self, generation, input_key):
@@ -420,6 +459,11 @@ class PublicationRecords:
         self.mutate(generation, triples)
 
     def member(self, record, source_ids=None):
+        self.members([record], source_ids)
+
+    def members(self, records, source_ids=None):
+        """Validate each record, sharing operation admission only within this page."""
+        self.batch(records)
         selected = None
         if source_ids is not None:
             self.batch(source_ids)
@@ -428,16 +472,29 @@ class PublicationRecords:
             for source in source_ids:
                 self.scalar(source)
             selected = {self.ox.NamedNode(self.graph.value + ":source:" + hashlib.sha256(source.encode()).hexdigest()) for source in source_ids}
-        # Start at the requested record, so each point read avoids a project join.
-        for owned in self.owner.store.quads_for_pattern(None, self.ox.NamedNode(F + 'ownedRecord'), record, self.facts):
-            check_query_cancellation()
-            for binding in self.owner.store.quads_for_pattern(None, self.ox.NamedNode(P + 'operation'), owned.subject, self.graph):
+        admitted = set()
+        owned_record = self.ox.NamedNode(F+'ownedRecord')
+        operation = self.ox.NamedNode(P+'operation')
+        source = self.ox.NamedNode(P+'source')
+        for record in records:
+            found = False
+            for owned in self.owner.store.quads_for_pattern(None, owned_record, record, self.facts):
                 check_query_cancellation()
-                if selected is not None and binding.subject not in selected:
-                    continue
-                if next(self.owner.store.quads_for_pattern(self.head, self.ox.NamedNode(P + 'source'), binding.subject, self.graph), None) is not None:
-                    return
-        raise ProcessingError("Record outside current publication")
+                if owned.subject in admitted:
+                    found = True
+                    break
+                for binding in self.owner.store.quads_for_pattern(None, operation, owned.subject, self.graph):
+                    check_query_cancellation()
+                    if selected is not None and binding.subject not in selected:
+                        continue
+                    if next(self.owner.store.quads_for_pattern(self.head, source, binding.subject, self.graph), None) is not None:
+                        admitted.add(owned.subject)
+                        found = True
+                        break
+                if found:
+                    break
+            if not found:
+                raise ProcessingError("Record outside current publication")
 
     @_locked
     def attribute_reference(self, generation, entity, name):
@@ -605,122 +662,6 @@ class PublicationRecords:
                     triples.append(self.triple(node, field, ref))
         self.mutate(generation, triples)
 
-    @_locked
-    def stage_facts(self, generation, records):
-        """Append bounded native observation references to canonical facts.
-
-        Repeated calls append members with an unchanged plan. No extraction
-        payload is persisted in this graph; canonical fields dereference the
-        representative observation. Activation seals exact member coverage.
-        """
-        self.fence(generation, "pending")
-        self.batch(records)
-        triples, plans, assigned = [], {}, {}
-        required = {"id", "source", "target", "representative", "members", "member_count", "status"}
-        member_count = 0
-        expected_members = {}
-        for record in records:
-            if not isinstance(record, dict) or set(record) != required:
-                raise ProcessingError("Canonical fact requires exact reference membership")
-            self.batch(record["members"])
-            member_count += len(record["members"])
-            if member_count > MAX_ROWS:
-                raise ProcessingError("Canonical fact staging exceeds the member page limit")
-            if (type(record["member_count"]) is not int
-                    or not len(record["members"]) <= record["member_count"] <= 1000000
-                    or len(set(record["members"])) != len(record["members"])
-                    or record["status"] not in {"candidate", "accepted", "contradicted", "retracted"}):
-                raise ProcessingError("Invalid canonical fact membership plan")
-            node = self.iri(record["id"])
-            self.require_kind(node, "fact")
-            fields = {key: record[key] for key in ("source", "target", "representative", "status")}
-            fields["memberCount"] = str(record["member_count"])
-            if record["id"] in plans and plans[record["id"]] != fields:
-                raise ProcessingError("Canonical fact plan changed")
-            plans[record["id"]] = fields
-            self.scalar(record["source"])
-            self.scalar(record["target"])
-            self.scalar(record["representative"])
-            self.iri(record["source"])
-            self.iri(record["target"])
-            self.iri(record["representative"])
-            self.scalar(record["id"])
-            self.scalar(record["status"])
-            for identity in record["members"]:
-                member = self.iri(identity)
-                if identity in assigned:
-                    raise ProcessingError("Native Relation already belongs to another canonical fact")
-                assigned[identity] = record["id"]
-                expected_members[identity] = dict(source=record["source"], target=record["target"],
-                    fact=record["id"], representative=record["representative"])
-                triples.append(self.triple(node, "member", member))
-            triples.append(self.triple(self.head, "fact", node))
-            for field, value in fields.items():
-                term = self.iri(value) if field in {"source", "target", "representative"} else self.scalar(value)
-                triples.append(self.triple(node, field, term))
-
-        existing_plans = {identity:{P+field:{term.value for term in self.values(self.iri(identity),field)}
-            for field in fields} for identity,fields in plans.items()}
-        for fact, fields in plans.items():
-            current = existing_plans.get(fact, {})
-            if any(len(current.get(P+field, set())) > 1 or
-                    (current.get(P+field) and next(iter(current[P+field])) != value)
-                    for field, value in fields.items()):
-                raise ProcessingError("Canonical fact plan changed")
-
-        identity_fields = ("predicateName", "polarity", "condition", "time", "unit", "qualifiedValue")
-        expected_owned = set(expected_members) | {value['representative'] for value in expected_members.values()}
-        fields_by_record={}
-        projected_bytes=0
-        for identity in expected_owned:
-            check_query_cancellation()
-            node=self.iri(identity)
-            self.member(node)
-            fields={}
-            for field in (*identity_fields,RDF_TYPE):
-                predicate=field if field==RDF_TYPE else F+field
-                values=set()
-                for quad in self.owner.store.quads_for_pattern(node,self.ox.NamedNode(predicate),None,self.facts):
-                    projected_bytes+=len(str(quad.object).encode())
-                    if len(values)>=MAX_ROWS or projected_bytes>MAX_BYTES:
-                        raise ProcessingError('Canonical fact validation projection exceeds byte or row budget')
-                    values.add(quad.object)
-                fields[field]=values
-            if fields[RDF_TYPE]!={self.ox.NamedNode(F+'Relation')}:
-                raise ProcessingError('Canonical fact member is not a current native Relation')
-            fields_by_record[identity]=fields
-        observed={identity:dict(fields=fields_by_record[identity],
-            representative_fields=fields_by_record[value['representative']])
-            for identity,value in expected_members.items()}
-        for identity,expected in expected_members.items():
-            node=self.iri(identity)
-            for field,canonical in (('sourceEntity',expected['source']),('targetEntity',expected['target'])):
-                endpoints=list(islice(self.owner.store.quads_for_pattern(node,
-                    self.ox.NamedNode(F+field),None,self.facts),2))
-                if len(endpoints)!=1 or not next(self.owner.store.quads_for_pattern(
-                        self.iri(canonical),self.ox.NamedNode(P+'member'),endpoints[0].object,self.graph),None):
-                    raise ProcessingError('Canonical fact member endpoint differs')
-            for link in self.owner.store.quads_for_pattern(None,self.ox.NamedNode(P+'member'),node,self.graph):
-                check_query_cancellation()
-                if next(self.owner.store.quads_for_pattern(self.head,
-                        self.ox.NamedNode(P+'fact'),link.subject,self.graph),None):
-                    if link.subject.value!=expected['fact']:
-                        raise ProcessingError('Native Relation already belongs to another canonical fact')
-        for identity, value in observed.items():
-            expected = expected_members[identity]
-            if len(value['fields']['predicateName']) != 1 or not isinstance(
-                    next(iter(value['fields']['predicateName'])), self.ox.Literal):
-                raise ProcessingError("Native fact predicate missing or duplicated")
-            if len(value['representative_fields']['predicateName']) != 1:
-                raise ProcessingError("Native fact predicate missing or duplicated")
-            if not isinstance(next(iter(value['representative_fields']['predicateName'])), self.ox.Literal):
-                raise ProcessingError("Native fact predicate missing or duplicated")
-            def normalize(fields):
-                return {field: (frozenset(normalize_fact_predicate(item.value) for item in values)
-                    if field == 'predicateName' else frozenset(values)) for field, values in fields.items()}
-            if normalize(value['fields']) != normalize(value['representative_fields']):
-                raise ProcessingError("Canonical fact member qualifier or predicate differs")
-        self.mutate(generation, triples)
 
     @_locked
     def fact_members(self, generation, identity, *, after=None, limit=MAX_ROWS, max_bytes=MAX_BYTES):
@@ -844,7 +785,7 @@ class PublicationRecords:
             ?membership <{P}operation> ?operation }} GRAPH {self.facts} {{
             ?operation <{F}ownedRecord> ?relation . ?relation <{RDF_TYPE}> <{F}Relation> }}"""
         owned_count = next(iter(self.owner.store.query(f"SELECT (COUNT(DISTINCT ?relation) AS ?count) WHERE {{ {relation_scope} }}")))["count"]
-        # stage_facts admits only owned relations and forbids cross-fact assignment;
+        # The production fact owner admits owned relations with unique assignment;
         # the check above verifies each fact's actual membership count. Their sum
         # therefore proves exact coverage without joining every relation again.
         planned_count = next(iter(self.owner.store.query(f"""SELECT (COALESCE(SUM(xsd:integer(?expected)), 0) AS ?count) WHERE {{
@@ -887,9 +828,10 @@ class PublicationRecords:
 
     def _build_fence(self, generation):
         """A complete immutable input plan is required before any build traversal."""
-        status = self.fence(generation, "pending")
         if getattr(self.owner, '_build_plan_scope', None) == (self.graph.value, generation):
+            self._check_generation(generation,'pending')
             return
+        status = self.fence(generation, "pending")
         sources = next(iter(self.owner.store.query(f"SELECT (COUNT(?source) AS ?count) WHERE {{ GRAPH {self.graph} {{ {self.head} <{P}source> ?source }} }}")))
         if int(sources['count'].value) != status['source_count']:
             raise ProcessingError("Native build source plan is incomplete")

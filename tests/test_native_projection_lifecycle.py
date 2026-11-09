@@ -4,6 +4,7 @@ import weakref
 
 from semantica import semantic_publication_builder as builder
 from semantica.triplet_store.oxigraph_store import OxigraphStore
+from semantica.triplet_store.qualified_fact_index import QualifiedFactIndex
 from tests.test_native_extraction_handoff import build_child
 
 
@@ -29,13 +30,10 @@ def test_model_build_releases_raw_source_entities_and_facts_after_native_reducti
     # test owner even though the existing helper assigns that global directly.
     monkeypatch.setattr(urllib.request, 'urlopen', urllib.request.urlopen)
     monkeypatch.setenv('OPENAI_API_KEY', 'fixture-only')
-    baseline = build_child(tmp_path, stop_before_publication=False)
-    expected = publication_semantics(baseline)
-    paid_calls = (tmp_path / 'build-calls.jsonl').read_bytes()
-    references = dict(entities=[], assertions=[], relations=[])
+    references = dict(entities=[], facts=[])
     boundaries = []
     build_source = builder._build_source
-    remap_facts = builder._remap_identity_facts
+    reconcile_facts = QualifiedFactIndex.reconcile_and_stage
     organize = builder._semantic_organization
 
     def source(*args, **kwargs):
@@ -51,21 +49,31 @@ def test_model_build_releases_raw_source_entities_and_facts_after_native_reducti
             assert all(ref() is None for ref in references[kind]), (
                 f'raw source {kind} still retained after canonical replacement')
 
-    def remap(*args, **kwargs):
+    def reconcile(*args, **kwargs):
         assert_released('entities')
         boundaries.append('entity-resolution')
-        return remap_facts(*args, **kwargs)
+        return reconcile_facts(*args, **kwargs)
 
     def organization(*args, **kwargs):
-        assert_released('entities', 'assertions', 'relations')
+        assert_released('entities', 'facts')
         boundaries.append('fact-reconciliation')
         return organize(*args, **kwargs)
 
     monkeypatch.setattr(builder, '_build_source', source)
-    monkeypatch.setattr(builder, '_remap_identity_facts', remap)
+    monkeypatch.setattr(QualifiedFactIndex, 'reconcile_and_stage', reconcile)
     monkeypatch.setattr(builder, '_semantic_organization', organization)
-    result = build_child(tmp_path, stop_before_publication=False)
+    baseline = build_child(tmp_path, stop_before_publication=False)
     assert boundaries == ['entity-resolution', 'fact-reconciliation']
+    expected = publication_semantics(baseline)
+    paid_calls = (tmp_path / 'build-calls.jsonl').read_bytes()
+
+    def forbidden_source(*args, **kwargs):
+        raise AssertionError('completed source projection must be reused')
+
+    monkeypatch.setattr(builder, '_build_source', forbidden_source)
+    monkeypatch.setattr(QualifiedFactIndex, 'reconcile_and_stage', reconcile_facts)
+    monkeypatch.setattr(builder, '_semantic_organization', organize)
+    result = build_child(tmp_path, stop_before_publication=False)
     assert result['publication']['state'] == 'ready'
     assert result['publication']['canonical_count'] == 2
     assert result['publication']['generation'] != baseline['publication']['generation']

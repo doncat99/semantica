@@ -39,3 +39,19 @@ def test_reference_reduction_is_order_independent_and_idempotent():
     result=EntityMerger.merge_qualified_fact_group('canonical',source)
     assert result==EntityMerger.merge_qualified_fact_group('canonical',reversed(source))
     assert result==EntityMerger.merge_qualified_fact_group('canonical',[result])
+
+
+def test_group_reduction_does_not_retain_observation_bodies():
+    import weakref
+    alive=weakref.WeakSet()
+    class Body(dict):
+        __hash__=object.__hash__
+    def observations():
+        for number in range(2000):
+            body=Body(id=f'input:{number:06d}',status='accepted',evidence_ids=[f'e:{number}'],metadata={})
+            alive.add(body)
+            assert len(alive)<=3, 'support bodies must be consumed, not accumulated'
+            yield body
+    result=EntityMerger.merge_qualified_fact_group('canonical',observations())
+    assert len(result['metadata']['support_observation_ids'])==2000
+    assert len(result['evidence_ids'])==2000

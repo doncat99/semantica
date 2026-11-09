@@ -53,6 +53,51 @@ from .duplicate_detector import DuplicateDetector, DuplicateGroup
 from .merge_strategy import MergeResult, MergeStrategy, MergeStrategyManager
 
 
+class _QualifiedFactGroup:
+    """Streaming state of the existing qualified-fact merge, not a body collection."""
+    def __init__(self):
+        self.key = self.target = None
+        self.statuses, self.evidence, self.withdrawn_evidence, self.observations = set(), set(), set(), set()
+
+    def add(self, member, *, identifier=None, admit=None):
+        import json
+        key = json.dumps(member, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+        if admit is not None:
+            admit(member, identifier, len(key.encode()))
+        if self.key is None or key < self.key:
+            self.key, self.target = key, member
+        status = member.get("status", "candidate")
+        if status != "retracted":
+            self.statuses.add(status)
+            self.evidence.update(member.get("evidence_ids", ()))
+        else:
+            self.withdrawn_evidence.update(member.get("evidence_ids", ()))
+        self.observations.update(member.get("metadata", {}).get("support_observation_ids", [member["id"]]))
+
+    def finish(self, identifier):
+        from copy import deepcopy
+        if self.target is None:
+            raise ProcessingError("Qualified fact group has no members")
+        target = deepcopy(self.target)
+        representative = target.get("metadata", {}).get("representative_observation_id", target["id"])
+        target["id"] = identifier
+        statuses = self.statuses
+        if not statuses:
+            target["status"] = "retracted"
+        elif "contradicted" in statuses:
+            target["status"] = "contradicted"
+        elif "rejected" in statuses:
+            target["status"] = "rejected" if statuses == {"rejected"} else "candidate"
+        else:
+            target["status"] = "accepted" if "accepted" in statuses else "candidate"
+        target["evidence_ids"] = sorted(self.evidence if statuses else self.withdrawn_evidence)
+        target["support_ids"] = list(target["evidence_ids"])
+        target["metadata"] = {**target.get("metadata", {}),
+            "support_observation_ids": sorted(self.observations),
+            "representative_observation_id": representative}
+        return target
+
+
 @dataclass
 class MergeOperation:
     """Entity merge operation representation."""
@@ -86,53 +131,24 @@ class EntityMerger:
     """
 
     @staticmethod
-    def merge_qualified_facts(facts, *, identity):
-        """Yield equal qualified facts in canonical order with every independent support."""
+    def merge_qualified_facts(facts, *, identity, admit=None):
+        """Accumulate references and one representative per distinct proposition."""
         grouped = {}
         for fact in facts:
             identifier = identity(fact)
-            grouped.setdefault(identifier, []).append(fact)
+            if identifier not in grouped:
+                grouped[identifier] = _QualifiedFactGroup()
+            grouped[identifier].add(fact, identifier=identifier, admit=admit)
         for identifier in sorted(grouped):
-            yield EntityMerger.merge_qualified_fact_group(identifier, grouped.pop(identifier))
+            yield grouped.pop(identifier).finish(identifier)
 
     @staticmethod
     def merge_qualified_fact_group(identifier, members):
-        """Reduce one native identity cursor without retaining its input rows."""
-        from copy import deepcopy
-        import json
-
-        encoded = lambda item: json.dumps(item, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-        representative_key = None
-        target = None
-        observations = []
+        """Consume support bodies once; retain only the selected body and references."""
+        group = _QualifiedFactGroup()
         for member in members:
-            key = encoded(member)
-            if representative_key is None or key < representative_key:
-                representative_key = key
-                target = member
-            observations.append(member)
-        if target is None:
-            raise ProcessingError("Qualified fact group has no members")
-        target = deepcopy(target)
-        representative_id = target.get("metadata", {}).get("representative_observation_id", target["id"])
-        target["id"] = identifier
-        originals = observations
-        active = [item for item in originals if item.get("status", "candidate") != "retracted"]
-        statuses = {item.get("status", "candidate") for item in active}
-        if not active:
-            target["status"] = "retracted"
-        elif "contradicted" in statuses:
-            target["status"] = "contradicted"
-        elif "rejected" in statuses:
-            target["status"] = "rejected" if statuses == {"rejected"} else "candidate"
-        else:
-            target["status"] = "accepted" if "accepted" in statuses else "candidate"
-        # A withdrawn observation remains auditable, but cannot support a live fact.
-        target["evidence_ids"] = sorted({ref for item in active or originals for ref in item.get("evidence_ids", [])})
-        target["support_ids"] = list(target["evidence_ids"])
-        target["metadata"] = {**target.get("metadata", {}), "support_observation_ids": sorted({ref for item in originals for ref in item.get("metadata", {}).get("support_observation_ids", [item["id"]])}),
-            "representative_observation_id": representative_id}
-        return target
+            group.add(member)
+        return group.finish(identifier)
 
     def __init__(
         self,

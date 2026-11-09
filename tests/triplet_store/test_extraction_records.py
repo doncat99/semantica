@@ -100,8 +100,8 @@ def test_native_entity_attributes_profile_and_qualified_relation_roundtrip(tmp_p
     store.stage_publication_canonical('p', generation, [dict(id='urn:canonical:'+str(index),
         representative=identity, members=[identity], selectors=[], member_count=len([identity]), selector_count=len([])) for index, identity in enumerate(ids)])
     relation_id = ExtractionRecords(store, bound, 'relations').node('relation:0').value
-    store.stage_publication_facts('p', generation, [dict(id='urn:fact:owns', source='urn:canonical:0',
-        target='urn:canonical:1', representative=relation_id, members=[relation_id], member_count=1, status='accepted')])
+    from tests.triplet_store.test_canonical_fact_publication import prepare_native_fact_decisions
+    prepare_native_fact_decisions(store, generation, [relation_id])
     indexes = dict(keyword=dict(kind='native-keyword', store_id='kw', recipe_digest='recipe'),
         semantic=dict(kind='native-vector', store_id='vectors', recipe_digest='recipe', space_id='space'))
     store.activate_publication('p', generation, indexes=indexes)
@@ -311,8 +311,8 @@ def test_rebind_relations_and_publication_keep_physical_references(tmp_path):
         representative=identity, members=[identity], selectors=[], member_count=1, selector_count=0)
         for i, identity in enumerate(ids)])
     relation_id = ExtractionRecords(store, previous, 'relations').node('relation:0').value
-    store.stage_publication_facts('p', generation, [dict(id='urn:fact:owns', source='urn:canonical:0',
-        target='urn:canonical:1', representative=relation_id, members=[relation_id], member_count=1, status='accepted')])
+    from tests.triplet_store.test_canonical_fact_publication import prepare_native_fact_decisions
+    prepare_native_fact_decisions(store, generation, [relation_id])
     indexes = dict(keyword=dict(kind='native-keyword', store_id='kw', recipe_digest='recipe'),
         semantic=dict(kind='native-vector', store_id='vectors', recipe_digest='recipe', space_id='space'))
     store.activate_publication('p', generation, indexes=indexes)

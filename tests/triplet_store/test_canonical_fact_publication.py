@@ -7,7 +7,7 @@ from semantica.triplet_store.oxigraph_store import OxigraphStore
 from semantica.triplet_store.extraction_records import ExtractionRecords, F
 from tests.triplet_store.test_publication_records import indexes
 
-def stage_duplicate_observations(tmp_path, source_ids=('s1', 's2')):
+def stage_duplicate_observations(tmp_path, source_ids=('s1', 's2'), relations_per_source=1):
     store = OxigraphStore(tmp_path / 'facts')
     text = 'Acme owns Engine'
     ids_by_endpoint = [[], []]
@@ -25,9 +25,10 @@ def stage_duplicate_observations(tmp_path, source_ids=('s1', 's2')):
         relation = Relation(acme, 'owns', engine, .8, text, dict(subject_id='a', object_id='b',
             evidence_start=0, evidence_end=len(text), evidence_occurrence=0,
             qualifiers=dict(polarity='positive')))
-        relations = store.adopt_extraction(bound, 'relations', [relation], text=text,
+        relations = store.adopt_extraction(bound, 'relations', [relation]*relations_per_source, text=text,
             native_ranges=ranges, accepted_digest='relations:'+source)
-        native_relations.append(ExtractionRecords(store,bound,'relations').node('relation:0').value)
+        native_relations.extend(ExtractionRecords(store,bound,'relations').node('relation:'+str(i)).value
+            for i in range(relations_per_source))
         for endpoint, entity in enumerate((acme, engine)):
             records = ExtractionRecords(store, bound, 'entities')
             identity = records.entity_node(entity).value
@@ -47,13 +48,45 @@ def stage_duplicate_observations(tmp_path, source_ids=('s1', 's2')):
     return store, generation, native_relations, plan
 
 
+def prepare_native_fact_decisions(store, generation, refs):
+    """Exercise production projection, reduction and sealing, not a fixture writer."""
+    from semantica.semantic_extract.types import normalize_fact_predicate
+    from semantica.triplet_store.publication_records import P, PublicationRecords
+    from semantica.triplet_store.qualified_fact_index import QualifiedFactIndex
+    p = PublicationRecords(store, 'p')
+    for ref in refs:
+        records = ExtractionRecords.from_fact_reference(store, 'p', ref)
+        node = p.iri(ref)
+        canonical = []
+        for field in ('sourceEntity', 'targetEntity'):
+            mention = p.iri(records.one(node, field))
+            identities = ExtractionRecords.from_identity_reference(store, 'p', mention.value)
+            if not any(store.store.quads_for_pattern(mention, p.iri(F+'identityProjectionDigest'),
+                    None, identities.identity_projection_graph)):
+                binding = identities.binding
+                identities.write_identity_projection(mention.value, mention_id=mention.value,
+                    representation_id=binding['representation'], context_start=binding['window_start'],
+                    context_end=binding['window_end'], evidence_ids=['e:'+mention.value],
+                    metadata=dict(source_ids=[binding['source']], identity_scope=binding['representation']))
+            canonical.append(next(q.subject.value for q in store.store.quads_for_pattern(
+                None, p.iri(P+'member'), mention, p.graph)
+                if any(store.store.quads_for_pattern(p.head, p.iri(P+'canonical'), q.subject, p.graph))))
+        qualifiers = records.read_metadata(node, dict(polarity='polarity', condition='condition',
+            time='time', unit='unit', value='qualifiedValue'))
+        qualifiers['polarity'] = qualifiers['polarity'].removeprefix(F)
+        records.write_fact_projection(ref, assertion_id='a:'+ref, relation_id='r:'+ref,
+            source_id=canonical[0], target_id=canonical[1],
+            predicate=normalize_fact_predicate(records.one(node, 'predicateName')),
+            qualifiers=qualifiers, evidence_ids=['e:'+ref])
+    index = QualifiedFactIndex(store, 'p', generation)
+    index.reconcile_and_stage(input_key='fixture-input')
+    return index
+
+
 def test_duplicate_native_observations_publish_one_canonical_fact_with_all_support(tmp_path):
     store, generation, native_relations, plan = stage_duplicate_observations(tmp_path)
-    # Append separate cursor pages without retaining the full group in staging.
-    store.stage_publication_facts('p', generation, [{**plan, 'members':[native_relations[0]]}])
-    with pytest.raises(ProcessingError, match='membership plan is incomplete'):
-        store.activate_publication('p', generation, indexes=indexes())
-    store.stage_publication_facts('p', generation, [{**plan, 'members':[native_relations[1]]}])
+    index = prepare_native_fact_decisions(store, generation, native_relations)
+    plan['id'] = index.canonical_page('relation')['records'][0].id
     store.activate_publication('p', generation, indexes=indexes())
     store.close()
     store = OxigraphStore(tmp_path / 'facts')
@@ -83,35 +116,23 @@ def test_unstaged_native_relation_is_not_silently_published(tmp_path):
     store.close()
 
 
-def test_fact_membership_rejects_changed_plan_wrong_endpoint_and_duplicate_owner(tmp_path):
-    store, generation, native_relations, plan = stage_duplicate_observations(tmp_path)
-    row = {**plan, 'members':native_relations}
-    with pytest.raises(ProcessingError, match='endpoint differs'):
-        store.stage_publication_facts('p', generation, [{**row, 'target':plan['source']}])
-    store.stage_publication_facts('p', generation, [row])
-    with pytest.raises(ProcessingError, match='plan changed'):
-        store.stage_publication_facts('p', generation, [{**row, 'status':'retracted'}])
-    with pytest.raises(ProcessingError, match='another canonical fact'):
-        store.stage_publication_facts('p', generation, [{**row, 'id':'urn:other:fact'}])
-    store.close()
-
-
-def test_fact_staging_rejects_relation_outside_publication_before_sealing_coverage(tmp_path):
+def test_withdrawn_operation_is_excluded_before_coordination(tmp_path):
     from semantica.triplet_store.publication_records import P, PublicationRecords
-    store, generation, relations, plan = stage_duplicate_observations(tmp_path)
-    publication = PublicationRecords(store, 'p')
-    source = store._oxigraph.NamedNode(publication.graph.value + ':source:' + hashlib.sha256(b's2').hexdigest())
-    relation = store._oxigraph.NamedNode(relations[1])
-    operation = next(iter(store.store.query(f'''SELECT ?operation WHERE {{ GRAPH {publication.facts} {{
-        ?operation <{F}ownedRecord> {relation} }} }}''')))['operation']
-    store.store.update(f'''DELETE DATA {{ GRAPH {publication.graph} {{
-        {source} <{P}operation> {operation} ; <{P}operationCount> "2" . }} }}''')
-    store.store.update(f'''INSERT DATA {{ GRAPH {publication.graph} {{
-        {source} <{P}operationCount> "1" . }} }}''')
-
-    with pytest.raises(ProcessingError, match='outside (the )?current publication'):
-        store.stage_publication_facts('p', generation, [{**plan, 'members':relations}])
-    store.close()
+    store,generation,relations,_=stage_duplicate_observations(tmp_path)
+    publication=PublicationRecords(store,'p')
+    relation=publication.iri(relations[1])
+    operation=next(q.subject for q in store.store.quads_for_pattern(None,publication.iri(F+'ownedRecord'),relation,publication.facts))
+    source=next(q.subject for q in store.store.quads_for_pattern(None,publication.iri(P+'operation'),operation,publication.graph))
+    store.store.remove(store._oxigraph.Quad(source,publication.iri(P+'operation'),operation,publication.graph))
+    store.store.update(f'DELETE WHERE {{ GRAPH {publication.graph} {{ {source} <{P}operationCount> ?count }} }}')
+    store.store.add(store._oxigraph.Quad(source,publication.iri(P+'operationCount'),
+        store._oxigraph.Literal(1),publication.graph))
+    try:
+        index=prepare_native_fact_decisions(store,generation,relations)
+        decision=index.canonical_page('relation')['records'][0]
+        assert decision.metadata['support_observation_ids']==['r:'+relations[0]]
+    finally:
+        store.close()
 
 
 @pytest.mark.parametrize('complete', [False, True])
@@ -119,7 +140,7 @@ def test_fact_coverage_uses_relation_index_not_all_fact_pairs(tmp_path, monkeypa
     store, generation, relations, plan = stage_duplicate_observations(tmp_path)
     from semantica.triplet_store.publication_records import P
     if complete:
-        store.stage_publication_facts('p', generation, [{**plan, 'members':relations}])
+        prepare_native_fact_decisions(store, generation, relations)
     native = store.store
     coverage_queries = []
     class IndexedCoverage:
@@ -147,10 +168,12 @@ def test_fact_coverage_uses_relation_index_not_all_fact_pairs(tmp_path, monkeypa
 def test_activation_rejects_equal_count_foreign_member_replacement(tmp_path):
     from semantica.triplet_store.publication_records import P, PublicationRecords
     store, generation, relations, plan = stage_duplicate_observations(tmp_path)
-    store.stage_publication_facts('p', generation, [{**plan, 'members':relations}])
+    index = prepare_native_fact_decisions(store, generation, relations)
+    plan['id'] = index.canonical_page('relation')['records'][0].id
     publication = PublicationRecords(store, 'p')
     fact = store._oxigraph.NamedNode(plan['id'])
-    replaced = store._oxigraph.NamedNode(relations[1])
+    representative = publication.one(fact, 'representative')
+    replaced = store._oxigraph.NamedNode(next(ref for ref in relations if ref != representative))
     foreign = store._oxigraph.NamedNode('urn:test:foreign-relation')
     store.store.update(f'''DELETE DATA {{ GRAPH {publication.graph} {{
         {fact} <{P}member> {replaced} . }} }}''')
@@ -213,27 +236,42 @@ def test_publication_activation_at_esg_observation_scale(tmp_path):
     store.close()
 
 
-def test_fact_staging_validates_a_full_member_page_with_bounded_store_reads(tmp_path, monkeypatch):
-    store, generation, relations, plan = stage_duplicate_observations(
-        tmp_path, source_ids=tuple(f'source-{number}' for number in range(128)))
+def test_member_page_checks_shared_operation_once_and_does_not_retain_admission(tmp_path, monkeypatch):
+    from semantica.triplet_store.publication_records import P, PublicationRecords
+    store, generation, relations, _ = stage_duplicate_observations(tmp_path, source_ids=('s1',))
+    p = PublicationRecords(store, 'p')
     native = store.store
-    calls = {'patterns': 0, 'queries': 0, 'rows':0}
-    class CountedStore:
+    endpoints = [q.object for field in ('sourceEntity', 'targetEntity')
+        for q in native.quads_for_pattern(p.iri(relations[0]), p.ox.NamedNode(F+field), None, p.facts)]
+    seeks = []
+    class ObservedStore:
         def __getattr__(self, name):
             return getattr(native, name)
-        def query(self, query, **kwargs):
-            calls['queries'] += 1
-            return native.query(query, **kwargs)
-        def quads_for_pattern(self, *args, **kwargs):
-            calls['patterns'] += 1
-            for row in native.quads_for_pattern(*args, **kwargs):
-                calls['rows']+=1
-                yield row
-    monkeypatch.setattr(store, 'store', CountedStore())
+        def quads_for_pattern(self, subject, predicate, obj, graph):
+            if predicate == p.ox.NamedNode(P+'operation'):
+                seeks.append(obj)
+            return native.quads_for_pattern(subject, predicate, obj, graph)
+    monkeypatch.setattr(store, 'store', ObservedStore())
     try:
-        store.stage_publication_facts('p', generation, [{**plan, 'member_count':len(relations), 'members':relations}])
-        assert calls['queries'] == 0
-        assert calls['patterns'] <= 16*len(relations)+64
-        assert calls['rows'] <= 25*len(relations)+64
+        p.members(endpoints)
+        assert len(seeks) == 1
+        operation = seeks[0]
+        with pytest.raises(ProcessingError, match='outside current publication'):
+            p.members([endpoints[0], p.iri('urn:foreign:record')])
+        with pytest.raises(ProcessingError, match='outside current publication'):
+            p.members(endpoints, source_ids=['s2'])
+        for link in list(native.quads_for_pattern(None, p.ox.NamedNode(P+'operation'), operation, p.graph)):
+            native.remove(link)
+        with pytest.raises(ProcessingError, match='outside current publication'):
+            p.members(endpoints)
+        with pytest.raises(ProcessingError, match='outside current publication'):
+            p.members([endpoints[0], p.iri('urn:foreign:record')])
     finally:
         store.close()
+
+
+def test_only_production_fact_decision_writer_is_exposed():
+    from semantica.triplet_store.publication_records import PublicationRecords
+    assert not hasattr(OxigraphStore, 'stage_publication_facts')
+    assert not hasattr(PublicationRecords, 'stage_facts')
+    assert not hasattr(PublicationRecords, '_fact_triples')

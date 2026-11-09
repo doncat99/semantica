@@ -124,14 +124,42 @@ class ConflictDetector:
         return prefix + ":" + stable_digest([project_id, semantic]).split(":")[1][:32]
 
     @staticmethod
-    def reconcile_qualified_facts(project_id, assertions, relations, *, functional_predicates=()):
-        """One qualified fact identity; each located evidence span is an independent support."""
+    def reconcile_qualified_facts(project_id, assertions=(), relations=(), *,
+                                  functional_predicates=(), observations=None, admit=None):
+        """Reduce supports once; a native stream need not retain two DTO lists.
+
+        ``admit(item, identity, encoded_bytes)`` checks the validated observation
+        before accumulation, reusing its canonical identity and selection encoding.
+        """
+        from itertools import chain
         from ..deduplication.entity_merger import EntityMerger
         from ..semantic_artifact_schema import KnowledgeAssertion, KnowledgeRelation, KnowledgeConflict, stable_digest
-        canonical_assertions = [KnowledgeAssertion.model_validate(item) for item in EntityMerger.merge_qualified_facts(
-            (item.model_dump() for item in assertions), identity=lambda item: ConflictDetector.qualified_fact_identity(project_id, item, "assertion"))]
-        canonical_relations = [KnowledgeRelation.model_validate(item) for item in EntityMerger.merge_qualified_facts(
-            (item.model_dump() for item in relations), identity=lambda item: ConflictDetector.qualified_fact_identity(project_id, item, "relation"))]
+        from ..utils.exceptions import ProcessingError
+        if observations is not None and (assertions or relations):
+            raise ProcessingError('Qualified observation stream cannot mix input views')
+        inputs = observations if observations is not None else chain(
+            (('assertion', item) for item in assertions),
+            (('relation', item) for item in relations))
+        def validated():
+            for kind,item in inputs:
+                if kind not in {'assertion','relation'}:
+                    raise ProcessingError('Unknown qualified fact kind')
+                model = KnowledgeAssertion if kind=='assertion' else KnowledgeRelation
+                # Native projections already arrive as plain dictionaries.  Keep
+                # the schema/qualifier validation, but pass the validated model's
+                # field mapping through directly; model_dump() here created a
+                # second deep serialization for every logical view before the
+                # reducer consumed it.
+                yield model.model_validate(item).__dict__
+        merged = EntityMerger.merge_qualified_facts(validated(), identity=lambda item:
+            ConflictDetector.qualified_fact_identity(project_id,item,
+                'assertion' if 'subject_id' in item else 'relation'), admit=admit)
+        canonical_assertions, canonical_relations = [], []
+        for item in merged:
+            if 'subject_id' in item:
+                canonical_assertions.append(KnowledgeAssertion.model_validate(item))
+            else:
+                canonical_relations.append(KnowledgeRelation.model_validate(item))
         relations_by_endpoint = {}
         for item in canonical_relations:
             endpoint = (item.source_entity_id, item.target_entity_id, item.type)
@@ -139,14 +167,14 @@ class ConflictDetector:
         assertion_by_id = {item.id: item for item in canonical_assertions}
         facts = [
             {"id": item.id, "subject": item.subject_id, "predicate": item.predicate,
-             "object": ConflictDetector.qualified_object(item.model_dump()), "qualifiers": item.qualifiers}
+             "object": ConflictDetector.qualified_object(item.__dict__), "qualifiers": item.qualifiers}
             for item in canonical_assertions if item.status != "retracted"]
         polarity_groups = ConflictDetector.qualified_polarity_groups(facts)
         conflicts = []
         for group in polarity_groups:
             members = [assertion_by_id[item["id"]] for item in group]
             sample = members[0]
-            key = stable_digest([sample.subject_id, sample.predicate, ConflictDetector.qualified_object(sample.model_dump()),
+            key = stable_digest([sample.subject_id, sample.predicate, ConflictDetector.qualified_object(sample.__dict__),
                                  {key: value for key, value in sample.qualifiers.items() if key != "polarity"}])
             for item in members:
                 item.status = "contradicted"

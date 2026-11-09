@@ -22,6 +22,40 @@ def indexes():
     return dict(keyword=dict(kind="native-keyword", store_id="kw", recipe_digest="recipe"), semantic=dict(kind="native-vector", store_id="vectors", recipe_digest="recipe", space_id="space"))
 
 
+@pytest.mark.parametrize('reader', ['page', 'record'])
+def test_field_page_does_not_materialize_unrequested_fields(tmp_path, monkeypatch, reader):
+    from semantica.triplet_store.publication_records import P, PublicationRecords
+    store, _, _, identity = fixture(tmp_path)
+    p = PublicationRecords(store, 'p')
+    native = store.store
+    node = p.iri(identity)
+    native.extend(p.ox.Quad(node, p.iri(P+'unused:'+str(i)), p.scalar('unused'), p.graph)
+        for i in range(2000))
+    native.add(p.ox.Quad(node, p.iri(P+'status'), p.scalar('accepted'), p.graph))
+    reads = []
+    class ObservedStore:
+        def __getattr__(self, name):
+            return getattr(native, name)
+        def quads_for_pattern(self, *args):
+            for row in native.quads_for_pattern(*args):
+                reads.append(row)
+                yield row
+        def query(self, *args, **kwargs):
+            for row in native.query(*args, **kwargs):
+                reads.append(row)
+                yield row
+    monkeypatch.setattr(store, 'store', ObservedStore())
+    try:
+        expected = {'status': [p.scalar('accepted')], 'absent': []}
+        if reader == 'page':
+            assert p.field_page([node], ['status', 'absent']) == {node: expected}
+        else:
+            assert p.fields(node, ['status', 'absent']) == expected
+        assert len(reads) == 1
+    finally:
+        store.close()
+
+
 def test_grounded_topics_validate_native_refs_and_survive_restart(tmp_path):
     store, _, receipt, identity = fixture(tmp_path)
     generation = stage(store, receipt, identity)
@@ -528,8 +562,8 @@ def test_visible_native_scene_links_preserve_relation_qualifiers(tmp_path, monke
     store.stage_publication_canonical('p', generation, [dict(id='urn:canonical:'+str(index),representative=identity,members=[identity],selectors=[], member_count=len([identity]), selector_count=len([]))
         for index,identity in enumerate(ids)])
     relation_id = ExtractionRecords(store,bound,'relations').node('relation:0').value
-    store.stage_publication_facts('p', generation, [dict(id='urn:fact:owns', source='urn:canonical:0',
-        target='urn:canonical:1', representative=relation_id, members=[relation_id], member_count=1, status='accepted')])
+    from tests.triplet_store.test_canonical_fact_publication import prepare_native_fact_decisions
+    prepare_native_fact_decisions(store, generation, [relation_id])
     store.activate_publication('p', generation, indexes=indexes())
     page = store.read_publication_scene('p', generation,dict(kind='links',visibleIds=['urn:canonical:0','urn:canonical:1']))
     link = page['links'][0]
@@ -824,18 +858,18 @@ def test_canonical_fact_predicate_normalization_preserves_qualifier_identity(tmp
         operation_count=2, operations=[entities['operation_id'], receipt['operation_id']])])
     store.stage_publication_canonical('p', generation, [dict(id='urn:canonical:'+str(i), representative=ref, members=[ref], selectors=[], member_count=len([ref]), selector_count=len([]))
         for i, ref in enumerate(ids)])
-    record = dict(id='urn:fact:owns', source='urn:canonical:0', target='urn:canonical:1', representative=refs[0],
-        members=refs, member_count=2, status='accepted')
-    if changed:
-        with pytest.raises(ProcessingError, match='qualifier or predicate differs'):
-            store.stage_publication_facts('p', generation, [record])
-        assert store.publication_status('p')['state'] == 'pending'
-    else:
-        store.stage_publication_facts('p', generation, [record])
-        store.activate_publication('p', generation, indexes=indexes())
-        link = store.read_publication_scene('p', generation, dict(kind='links', visibleIds=['urn:canonical:0', 'urn:canonical:1']))['links'][0]
-        assert link['predicate'] == 'owns'
-        assert store.read_publication_fact_members('p', generation, 'urn:fact:owns')['members'] == sorted(refs)
+    from tests.triplet_store.test_canonical_fact_publication import prepare_native_fact_decisions
+    index = prepare_native_fact_decisions(store, generation, refs)
+    decisions = index.canonical_page('relation')['records']
+    assert len(decisions) == (2 if changed else 1)
+    store.activate_publication('p', generation, indexes=indexes())
+    links = store.read_publication_scene('p', generation,
+        dict(kind='links', visibleIds=['urn:canonical:0', 'urn:canonical:1']))['links']
+    assert len(links) == len(decisions)
+    assert all(link['predicate'] == 'owns' for link in links)
+    members = [set(store.read_publication_fact_members('p', generation, link['id'])['members']) for link in links]
+    assert set.union(*members) == set(refs)
+    assert [len(group) for group in members] == ([1, 1] if changed else [2])
     store.close()
 
 
@@ -1042,3 +1076,91 @@ def test_organization_member_projection_survives_full_reference_budget_failure(t
             store.read_publication_scene('p',generation,dict(selection,fields=['id']))
     finally: query_cancellation.reset(token)
     store.close()
+
+
+def test_native_publication_mutation_is_atomic_fixed_graph_and_fenced(tmp_path):
+    from semantica.triplet_store.publication_records import PublicationRecords
+    store,_,receipt,identity=fixture(tmp_path)
+    generation=stage(store,receipt,identity)
+    p=PublicationRecords(store,'p')
+    node=p.iri('urn:atomic:probe')
+    valid=p.triple(node,'probe',p.scalar('value'))
+    try:
+        for invalid in ('invalid RDF', '<urn:s> <urn:p> <urn:o> <urn:foreign> .'):
+            with pytest.raises(SyntaxError):
+                p.mutate(generation,[valid,invalid])
+            assert not list(store.store.quads_for_pattern(node,None,None,None))
+        with pytest.raises(ProcessingError,match='byte budget'):
+            p.mutate(generation,[valid,' '*262145])
+        with pytest.raises(ProcessingError,match='stale'):
+            p.mutate('not-the-current-generation',[valid])
+        assert not list(store.store.quads_for_pattern(node,None,None,None))
+        p.mutate(generation,[valid])
+        assert [q.graph_name for q in store.store.quads_for_pattern(node,None,None,None)]==[p.graph]
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize('role', [None, 'canonical', 'community', 'topic'])
+def test_kind_admission_uses_one_index_seek_and_rejects_other_roles(tmp_path, role):
+    from semantica.triplet_store.publication_records import P, PublicationRecords
+    store, _, _, _ = fixture(tmp_path)
+    p = PublicationRecords(store, 'p')
+    native = store.store
+    node = p.iri('urn:test:fact')
+    if role:
+        native.add(p.ox.Quad(p.head, p.iri(P+role), node, p.graph))
+    reads = []
+    class Counted:
+        def quads_for_pattern(self, *args):
+            reads.append(args)
+            return native.quads_for_pattern(*args)
+    store.store = Counted()
+    try:
+        if role:
+            with pytest.raises(ProcessingError, match='another kind'):
+                p.require_kind(node, 'fact')
+        else:
+            p.require_kind(node, 'fact')
+        assert len(reads) == 1
+        assert reads[0] == (p.head, None, node, p.graph)
+    finally:
+        store.store = native
+        store.close()
+
+
+def test_final_reference_import_uses_one_streaming_bulk_load(tmp_path, monkeypatch):
+    from semantica.triplet_store.publication_records import PublicationRecords, MAX_BYTES
+    store, _, receipt, identity = fixture(tmp_path)
+    generation = stage(store, receipt, identity)
+    p = PublicationRecords(store, 'p')
+    original = store.store.bulk_load
+    calls = []
+    def bulk_load(*, input, **options):
+        assert hasattr(input, 'readinto')
+        calls.append(True)
+        return original(input=input, **options)
+    monkeypatch.setattr(store.store, 'bulk_load', bulk_load)
+    try:
+        p.import_batches(generation, [[p.triple(p.head, 'test', p.scalar(str(i)))] for i in range(300)])
+        assert len(calls) == 1
+        with pytest.raises(ProcessingError, match='byte budget'):
+            p.import_batches(generation, [['x' * (MAX_BYTES + 1)]])
+    finally:
+        store.close()
+
+
+def test_final_reference_stream_checks_cancellation_between_windows():
+    from threading import Event
+    from semantica.semantic_worker_context import query_cancellation
+    from semantica.triplet_store.publication_records import _TripleStream
+    event=Event()
+    token=query_cancellation.set(event)
+    try:
+        with _TripleStream([['first'], ['second']]) as stream:
+            assert stream.readinto(bytearray(6))==6
+            event.set()
+            with pytest.raises(ProcessingError,match='canceled'):
+                stream.readinto(bytearray(7))
+    finally:
+        query_cancellation.reset(token)
