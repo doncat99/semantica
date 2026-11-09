@@ -1120,3 +1120,9 @@ ordinary completed-result reuse. No real-user data migration, model call, App
 package/pin change, journey-library or change-verification run was performed.
 Case journey-library: keep existing criteria; these are supporting owner tests,
 not user acceptance. No baseline or performance pass criterion was relaxed.
+
+### 2026-11-09 worker Pillow constraint alignment
+
+Native owner: pyproject.toml and .github/requirements/semantic-worker-*.lock, consumed by semantic_worker_release.py. Upstream core already requires Pillow>=13.0.0; six worker constraints still pinned 12.3.0 and made make dev unsatisfiable. Align all CPU/CUDA/DirectML worker constraints to 13.0.0; preserve the core security floor. Verify the macOS arm64 dependency resolution and relocated bundle through make dev; other platforms are not executed locally.
+
+Resolution also requires docling-core 2.104.0 (first selected Pillow 13 compatible core) and its doclang 0.8.1 dependency, updated in all six constraints. Public pinned docling-slim 2.141.0 still caps Pillow<13; make dev explicitly uses the canonical local Docling wheel, whose current contract allows Pillow<14. Public release resolution remains blocked until that Docling artifact is published and pinned. No dependency bypass is added.

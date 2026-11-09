@@ -79,7 +79,7 @@ dill==0.4.1
     # via
     #   -c .github/requirements/semantic-worker-linux-x64.lock
     #   multiprocess
-doclang==0.7.3
+doclang==0.8.1
     # via
     #   -c .github/requirements/semantic-worker-linux-x64.lock
     #   docling-core
@@ -87,7 +87,7 @@ docling==2.141.0
     # via
     #   -c .github/requirements/semantic-worker-linux-x64.lock
     #   semantica (pyproject.toml)
-docling-core==2.103.1
+docling-core==2.104.0
     # via
     #   -c .github/requirements/semantic-worker-linux-x64.lock
     #   docling-parse
@@ -325,7 +325,7 @@ pandas==3.0.6
     #   -c .github/requirements/semantic-worker-linux-x64.lock
     #   semantica (pyproject.toml)
     #   docling-core
-pillow==12.3.0
+pillow==13.0.0
     # via
     #   -c .github/requirements/semantic-worker-linux-x64.lock
     #   semantica (pyproject.toml)
