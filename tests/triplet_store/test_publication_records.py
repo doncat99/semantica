@@ -22,6 +22,68 @@ def indexes():
     return dict(keyword=dict(kind="native-keyword", store_id="kw", recipe_digest="recipe"), semantic=dict(kind="native-vector", store_id="vectors", recipe_digest="recipe", space_id="space"))
 
 
+@pytest.mark.parametrize('value', ['not-a-number', '1.5', '-1'])
+def test_activation_rejects_invalid_decision_count(tmp_path, value):
+    from semantica.triplet_store.publication_records import P, PublicationRecords
+    store, _, receipt, identity = fixture(tmp_path)
+    try:
+        generation = stage(store, receipt, identity)
+        owner = PublicationRecords(store, 'p')
+        node = owner.iri('urn:canonical:acme')
+        graph = owner.record_graph(node)
+        predicate = owner.iri(P+'memberCount')
+        for quad in list(store.store.quads_for_pattern(node, predicate, None, graph)):
+            store.store.remove(quad)
+        store.store.add(owner.ox.Quad(node, predicate, owner.scalar(value), graph))
+        with pytest.raises(ProcessingError, match='membership plan is incomplete'):
+            owner.activate(generation, indexes=indexes())
+        assert owner.status()['state'] == 'pending'
+    finally:
+        store.close()
+
+
+def test_completion_is_atomic_with_activation_and_rejects_corrupt_binding(tmp_path):
+    from semantica.triplet_store.publication_records import P, PublicationRecords
+    store, _, receipt, identity = fixture(tmp_path)
+    generation = stage(store, receipt, identity)
+    owner = PublicationRecords(store, 'p')
+    addresses = {kind: dict(receipt=value, path='/installed/'+kind) for kind, value in indexes().items()}
+    assert owner.completed_publication('inputs') is None
+    with pytest.raises(ProcessingError, match='input and index addresses'):
+        owner.activate(generation, indexes=indexes(), completed_input='inputs')
+    assert owner.status()['state'] == 'pending'
+    owner.activate(generation, indexes=indexes(), completed_input='inputs', index_addresses=addresses)
+    store.close()
+    store = OxigraphStore(tmp_path / 'facts')
+    try:
+        owner = PublicationRecords(store, 'p')
+        assert owner.completed_publication('inputs') == addresses
+        assert owner.completed_publication('different inputs') is None
+        store.store.add(owner.ox.Quad(owner.head, owner.iri(P+'completedInput'), owner.scalar('duplicate'), owner.graph))
+        with pytest.raises(ProcessingError, match='duplicated'):
+            owner.completed_publication('inputs')
+    finally:
+        store.close()
+
+
+def test_completion_checksum_damage_does_not_recompute(tmp_path):
+    from semantica.triplet_store.publication_records import P, PublicationRecords
+    store, _, receipt, identity = fixture(tmp_path)
+    try:
+        generation = stage(store, receipt, identity)
+        owner = PublicationRecords(store, 'p')
+        addresses = {kind: dict(receipt=value) for kind, value in indexes().items()}
+        owner.activate(generation, indexes=indexes(), completed_input='inputs', index_addresses=addresses)
+        predicate = owner.iri(P+'completedIndexesDigest')
+        for quad in list(store.store.quads_for_pattern(owner.head, predicate, None, owner.graph)):
+            store.store.remove(quad)
+        store.store.add(owner.ox.Quad(owner.head, predicate, owner.scalar('corrupt'), owner.graph))
+        with pytest.raises(ProcessingError, match='corrupt'):
+            owner.completed_publication('inputs')
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize('reader', ['page', 'record'])
 def test_field_page_does_not_materialize_unrequested_fields(tmp_path, monkeypatch, reader):
     from semantica.triplet_store.publication_records import P, PublicationRecords
@@ -291,12 +353,14 @@ def test_canonical_member_admission_uses_reverse_point_reads(tmp_path, unrelated
     store.store = PointMembership()
     try:
         store.stage_publication_canonical('p', generation, [record])
-        assert len(reverse_rows) == len(membership_reads) == 2
+        assert len(reverse_rows) == 2
+        # One additional point read checks the decision's graph pointer contract.
+        assert len(membership_reads) == 3
         with pytest.raises(ProcessingError, match='already belongs'):
             store.stage_publication_canonical('p', generation,
                 [{**record, 'id':'urn:canonical:duplicate'}])
         assert 3 <= len(reverse_rows) <= 5
-        assert len(reverse_rows) == len(membership_reads)
+        assert len(membership_reads) == len(reverse_rows) + 2
         assert next(underlying.quads_for_pattern(publication.head, canonical,
             ox.NamedNode('urn:canonical:duplicate'), publication.graph), None) is None
     finally:
@@ -376,7 +440,7 @@ def test_cross_project_source_incomplete_and_stale_cas_rejected(tmp_path):
         store.read_native_records("other", generation, [identity])
 
 
-def test_bounded_reads_and_no_canonical_body_copies(tmp_path):
+def test_bounded_reads_and_pending_attempt_preserves_active_publication(tmp_path):
     store, _, receipt, identity = fixture(tmp_path)
     generation = stage(store, receipt, identity)
     store.activate_publication("p", generation, indexes=indexes())
@@ -390,9 +454,16 @@ def test_bounded_reads_and_no_canonical_body_copies(tmp_path):
     assert not any(q.object.value == "Acme" for q in publication)
     old = generation
     generation = store.begin_publication("p", expected_generation=old, source_count=0, canonical_count=0)["generation"]
-    assert not any(q.object.value == identity for q in store.store if q.graph_name.value.startswith("urn:semantica:publication:"))
-    with pytest.raises(ProcessingError, match="stale"):
-        store.read_native_records("p", old, [identity])
+    assert store.read_native_records("p", old, [identity])[0]['id'] == identity
+    assert store.read_canonical_membership('p', old)['records'][0]['members'] == [identity]
+    # A failed activation and a process restart must leave the completed result usable.
+    with pytest.raises(ProcessingError, match='both'):
+        store.activate_publication('p', generation, indexes={})
+    store.close()
+    del store
+    gc.collect()
+    store = OxigraphStore(tmp_path / 'facts')
+    assert store.read_native_records('p', old, [identity])[0]['id'] == identity
     store.activate_publication("p", generation, indexes=indexes())
     with pytest.raises(ProcessingError, match="outside"):
         store.read_native_records("p", generation, [identity])
@@ -535,7 +606,9 @@ def test_native_scene_is_bounded_reference_projection_and_generation_fenced(tmp_
         store.read_publication_scene('p', generation, dict(kind='nodes', maxBytes=32))
     with pytest.raises(ProcessingError, match='128'):
         store.read_publication_scene('p', generation, dict(kind='links', visibleIds=['urn:n']*129))
-    store.begin_publication('p', expected_generation=generation, source_count=0, canonical_count=0)
+    pending = store.begin_publication('p', expected_generation=generation, source_count=0, canonical_count=0)
+    assert store.read_publication_scene('p', generation, dict(kind='nodes'))['nodes']
+    store.activate_publication('p', pending['generation'], indexes=indexes())
     with pytest.raises(ProcessingError, match='stale'):
         store.read_publication_scene('p', generation, dict(kind='nodes'))
 

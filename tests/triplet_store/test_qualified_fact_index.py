@@ -118,8 +118,33 @@ def test_completion_survives_generation_and_reopen_without_native_reads(tmp_path
         index=QualifiedFactIndex(store,'p',next_generation)
         monkeypatch.setattr(ExtractionRecords,'read_fact_projection_page',lambda *a,**k:pytest.fail('completion scanned native facts'))
         assert index.publication.fact_stage_status(next_generation,'input')
-        assert not index.publication.fact_stage_status(next_generation,'changed')
-        assert not index.publication.fact_stage_status(next_generation,'input',functional_predicates=['owns'])
+        with pytest.raises(ProcessingError, match='input changed'):
+            index.publication.fact_stage_status(next_generation,'changed')
+        with pytest.raises(ProcessingError, match='input changed'):
+            index.publication.fact_stage_status(next_generation,'input',functional_predicates=['owns'])
+    finally:
+        store.close()
+
+
+def test_changed_input_rejects_corrupt_previous_policy(tmp_path):
+    store,generation,refs,index=prepared(tmp_path)
+    try:
+        index.reconcile_and_stage(input_key='input')
+        p=index.publication
+        graph,head=p.graph,p.head
+        store.store.update(f'DELETE WHERE {{ GRAPH {graph} {{ {head} <{P}qualifiedFunctionalPredicates> ?v }} }}')
+        store.store.update(f'INSERT DATA {{ GRAPH {graph} {{ {p.triple(head,"qualifiedFunctionalPredicates",p.scalar("not-json"))} }} }}')
+        next_generation=store.begin_publication('p',expected_generation=generation,source_count=2,canonical_count=2)['generation']
+        sources=[]
+        for source in ('s1','s2'):
+            operations=sorted({reference.rsplit(':relation:',1)[0] for reference in refs
+                if ExtractionRecords.from_fact_reference(store,'p',reference).binding['source']==source})
+            entities=ExtractionRecords(store,ExtractionRecords.from_fact_reference(store,'p',operations[0]+':relation:0').binding,'entities').operation.value
+            sources.append(dict(source=source,material='m',representation='r:'+source,recipe='recipe',
+                operation_count=2,operations=[entities,*operations]))
+        store.stage_publication_sources('p',next_generation,sources)
+        with pytest.raises(ProcessingError,match='Completed fact policy is corrupt'):
+            QualifiedFactIndex(store,'p',next_generation).reconcile_and_stage(input_key='changed')
     finally:
         store.close()
 
@@ -253,6 +278,62 @@ def test_unchanged_partitions_keep_decisions_and_skip_reducer(tmp_path,monkeypat
         store.close()
 
 
+@pytest.mark.parametrize('completed',[True,False])
+def test_new_generation_references_unchanged_fact_partition_without_copying_members(tmp_path,monkeypatch,completed):
+    from tests.triplet_store.test_publication_records import indexes
+    store,generation,refs,index=prepared(tmp_path)
+    try:
+        index.reconcile_and_stage(input_key='before')
+        prior=index.publication
+        old_graph=prior.graph
+        if not completed:
+            key=prior._completion_key('fact','before')
+            store.store.remove(prior.ox.Quad(key,prior.iri(P+'completedGraph'),old_graph,prior.registry))
+        sources=[]
+        endpoints=[[],[]]
+        for reference in refs:
+            records=ExtractionRecords.from_fact_reference(store,'p',reference)
+            binding=records.binding
+            entity=ExtractionRecords(store,binding,'entities')
+            sources.append(dict(source=binding['source'],material=binding['material'],
+                representation=binding['representation'],recipe=binding['recipe'],
+                operation_count=2,operations=[entity.operation.value,records.operation.value]))
+            for i,field in enumerate(('sourceEntity','targetEntity')):
+                endpoints[i].append(records.one(prior.iri(reference),field))
+        generation=store.begin_publication('p',expected_generation=generation,
+            source_count=2,canonical_count=2)['generation']
+        store.stage_publication_sources('p',generation,sources)
+        store.stage_publication_canonical('p',generation,[dict(id='urn:canonical:'+str(i),
+            representative=members[0],members=members,member_count=2,selectors=[],selector_count=0)
+            for i,members in enumerate(endpoints)])
+        index=QualifiedFactIndex(store,'p',generation)
+        reductions=[]
+        reduce=index._reduce_partition
+        def checked_reduce(*args):
+            if completed:
+                pytest.fail('unchanged completed partition reduced')
+            reductions.append(1)
+            return reduce(*args)
+        monkeypatch.setattr(index,'_reduce_partition',checked_reduce)
+        index.reconcile_and_stage(input_key='after')
+        p=index.publication
+        assert p.graph!=old_graph
+        assert bool(list(store.store.quads_for_pattern(None,p.iri(P+'member'),None,p.graph))) is not completed
+        assert bool(reductions) is not completed
+        for kind in ('assertion','relation'):
+            assert len(page_all(index,kind))==1
+        assert len(index.topology_page()['records'])==1
+        assert len(index.family_page()['records'])==1
+        fact=page_all(index,'relation')[0]
+        store.activate_publication('p',generation,indexes=indexes())
+        assert set(store.read_publication_fact_members('p',generation,fact.id)['members'])==set(refs)
+        scene=store.read_publication_scene('p',generation,dict(kind='links',
+            visibleIds=['urn:canonical:0','urn:canonical:1']))
+        assert len(scene['links'])==1
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize('marker',['old','qualified-reference-records','native-final-decisions'])
 def test_obsolete_layout_requires_offline_reset(tmp_path,marker):
     store,generation,refs,index=prepared(tmp_path)
@@ -326,14 +407,24 @@ def test_source_removal_replaces_only_affected_final_memberships(tmp_path,monkey
     p=index.publication
     try:
         index.reconcile_and_stage(input_key='before')
-        # Withdraw one publication source; immutable native extraction stays intact.
-        operation=p.iri(refs[1].rsplit(':relation:',1)[0])
-        source=next(store.store.quads_for_pattern(None,p.ox.NamedNode(P+'operation'),operation,p.graph)).subject
-        store.store.remove(p.ox.Quad(p.head,p.ox.NamedNode(P+'source'),source,p.graph))
-        for quad in list(store.store.quads_for_pattern(p.head,p.ox.NamedNode(P+'sourceCount'),None,p.graph)):
-            store.store.remove(quad)
-        store.store.add(p.ox.Quad(p.head,p.ox.NamedNode(P+'sourceCount'),p.scalar('1'),p.graph))
+        old_graph=p.graph
+        # Withdrawal creates another publication; completed decisions stay immutable.
+        source=ExtractionRecords.from_fact_reference(store,'p',refs[0])
+        binding=source.binding
+        entity=ExtractionRecords(store,binding,'entities')
+        generation=store.begin_publication('p',expected_generation=generation,
+            source_count=1,canonical_count=2)['generation']
+        store.stage_publication_sources('p',generation,[dict(source=binding['source'],
+            material=binding['material'],representation=binding['representation'],
+            recipe=binding['recipe'],operation_count=2,
+            operations=[entity.operation.value,source.operation.value])])
+        endpoints=[source.one(p.iri(refs[0]),field) for field in ('sourceEntity','targetEntity')]
+        store.stage_publication_canonical('p',generation,[dict(id='urn:canonical:'+str(i),
+            representative=mention,members=[mention],selectors=[],member_count=1,selector_count=0)
+            for i,mention in enumerate(endpoints)])
+        index=QualifiedFactIndex(store,'p',generation)
         index.reconcile_and_stage(input_key='after')
+        assert next(store.store.quads_for_pattern(None,p.iri(P+'member'),p.iri(refs[1]),old_graph),None)
         for kind in ('assertion','relation'):
             records=page_all(index,kind)
             assert len(records)==1

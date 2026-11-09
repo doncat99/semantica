@@ -148,8 +148,28 @@ def build_source_fixture(source, force_ocr, model_result=None, parsed=None):
                     occurrence = item.get('occurrence' if kind == 'entities' else 'evidence_occurrence', 0)
                     item['_start'], item['_end'], _ = pipeline._exact_occurrence(text, quote, occurrence)
     result = pipeline._build_source(source, force_ocr, model_result, admitted)
-    # Test-only public expression oracle; production retains one source fact.
-    from semantica.semantic_artifact_schema import KnowledgeRelation
+    # Public DTOs exist only at this fixture/consumer boundary.
+    from semantica.semantic_artifact_schema import KnowledgeEntity, KnowledgeAssertion, KnowledgeRelation
+    spans = {span.id: span for span in result['evidence']}
+    entities = []
+    for address in result['entities']:
+        mention = spans[address.evidence_ids[0]]
+        context = spans[address.metadata['identity_context_evidence_id']].quote
+        raw = next((item for item in (model_result or {}).get('entities', [])
+                    if item['_start'] == mention.locator.start_char and item['_end'] == mention.locator.end_char), {})
+        profile = address.metadata.get('identity_profile')
+        description = (profile or {}).get('description') or raw.get('attributes', {}).get('description', '')
+        if not profile and description.casefold() not in context.casefold():
+            description = ''
+        entities.append(KnowledgeEntity(id=address.id, canonical_name=mention.quote,
+            type=raw.get('type', 'MENTION'), context=context, description=description,
+            attributes=raw.get('attributes', {}), aliases=[], evidence_ids=address.evidence_ids,
+            status='candidate', metadata=address.metadata))
+    result['entities'] = entities
+    names = {item.id: item.canonical_name for item in entities}
+    result['facts'] = [KnowledgeAssertion(id=item.id, subject_id=item.subject_id, predicate=item.predicate,
+        object=names[item.object_entity_id], object_entity_id=item.object_entity_id, qualifiers=item.qualifiers,
+        evidence_ids=item.evidence_ids, support_ids=item.evidence_ids, status='candidate') for item in result['facts']]
     result['assertions'] = result['facts']
     result['relations'] = [KnowledgeRelation(id='relation:'+item.id.split(':')[1],
         source_entity_id=item.subject_id,target_entity_id=item.object_entity_id,

@@ -30,10 +30,10 @@ def test_homonymous_occurrences_and_typed_endpoints_are_distinct(tmp_path):
     assert {item.id for item in built["entities"]} == {item.id for item in reordered["entities"]}
     assert {item.id for item in built["relations"]} == {item.id for item in reordered["relations"]}
     shifted = build(tmp_path, "Unrelated preface. " + text, extraction)
-    assert {item.id for item in built["entities"]} == {item.id for item in shifted["entities"]}
+    assert {item.id for item in built["entities"]}.isdisjoint(item.id for item in shifted["entities"])
 
 
-def test_sentence_edit_preserves_mention_assertion_and_relation_ids(tmp_path):
+def test_new_immutable_parse_has_new_observation_addresses(tmp_path):
     extraction = {"entities": [
         {"id": "alex", "name": "Alex", "type": "PERSON", "occurrence": 0},
         {"id": "alpha", "name": "Alpha", "type": "ORG", "occurrence": 0}],
@@ -46,9 +46,8 @@ def test_sentence_edit_preserves_mention_assertion_and_relation_ids(tmp_path):
     }]}
     edited = build(tmp_path, "Alex clearly leads Alpha.", edited_extraction)
 
-    assert {item.id for item in edited["entities"]} == {item.id for item in original["entities"]}
-    assert {item.id for item in edited["assertions"]} == {item.id for item in original["assertions"]}
-    assert {item.id for item in edited["relations"]} == {item.id for item in original["relations"]}
+    for kind in ('entities', 'assertions', 'relations'):
+        assert {item.id for item in edited[kind]}.isdisjoint(item.id for item in original[kind])
 
 
 def facts(source, negated=False, year="2025"):

@@ -60,6 +60,91 @@ def _range(text, start, end):
 
 
 class ExtractionRecords:
+    @staticmethod
+    def source_projection_identity(*, project, source, material, mime_type, representation,
+                                   mode, force_ocr, extraction, formula_semantics):
+        from ..semantic_artifact_schema import stable_digest
+        return stable_digest(dict(project=project, source=source, material=material,
+            mime_type=mime_type, representation=representation, mode=mode,
+            force_ocr=force_ocr, extraction=extraction, formula_semantics=formula_semantics))
+
+    @classmethod
+    def rebind_source_projection(cls, owner, project, previous, *, extraction, formula_semantics, execute=False):
+        """Offline-only rekey of reviewed historical transport-bound addresses."""
+        from itertools import zip_longest
+        from ..semantic_artifact_schema import SourceBuildInput, stable_digest
+        from ..semantic_worker_context import check_query_cancellation
+        if (not isinstance(previous, dict) or set(previous) !=
+                {'source', 'representation', 'mode', 'force_ocr', 'operations'} or
+                previous['mode'] not in {'model', 'deterministic'} or
+                type(previous['force_ocr']) is not bool or type(formula_semantics) is not bool or
+                type(execute) is not bool or not isinstance(extraction, str) or
+                not extraction or len(extraction.encode()) > 4096 or
+                not isinstance(previous['representation'], str) or
+                not re.fullmatch('sha256:[0-9a-f]{64}', previous['representation']) or
+                not isinstance(previous['operations'], list) or len(previous['operations']) > 100000 or
+                any(not isinstance(value, str) or not value.startswith('urn:semantica:extraction:') or
+                    len(value.encode()) > 4096 for value in previous['operations']) or
+                previous['operations'] != sorted(set(previous['operations']))):
+            raise ProcessingError('Invalid source projection migration identity')
+        source = SourceBuildInput.model_validate(previous['source'])
+        old_key = stable_digest(previous)
+        new_key = cls.source_projection_identity(project=project, source=source.source_id,
+            material=source.material_revision, mime_type=source.mime_type,
+            representation=previous['representation'], mode=previous['mode'],
+            force_ocr=previous['force_ocr'], extraction=extraction, formula_semantics=formula_semantics)
+        with owner._publication_lock:
+            old = cls.source_projection(owner, project, old_key)
+            current = cls.source_projection(owner, project, new_key)
+            if old is None:
+                if current is None:
+                    raise ProcessingError('Source projection migration has no completed input')
+                old = cls.source_projection(owner, project, new_key)
+            header = next(old)
+            representation = header['representation']
+            if (representation['source_id'] != source.source_id or
+                    representation['material_revision_id'] != source.material_revision or
+                    representation['metadata'].get('representation_revision') != previous['representation'] or
+                    sorted(set(header['operations'])) != previous['operations']):
+                raise ProcessingError('Source projection migration binding differs')
+            if previous['mode'] == 'deterministic' and (extraction != 'deterministic-pattern' or header['operations']):
+                raise ProcessingError('Deterministic projection migration binding differs')
+            from .publication_records import PublicationRecords
+            publication = PublicationRecords(owner, project)
+            for operation in header['operations']:
+                check_query_cancellation()
+                records = publication.verify_operation(operation, dict(source=source.source_id,
+                    material=source.material_revision, representation=previous['representation']))
+                if records.binding['recipe'] != extraction:
+                    raise ProcessingError('Source projection migration operation binding differs')
+                records.audit()
+            # Validate every address before any mutation; comparison is streaming.
+            if current is not None:
+                if next(current) != header or any(a != b for a, b in zip_longest(old, current)):
+                    raise ProcessingError('Source projection migration target differs')
+            else:
+                for _ in old:
+                    check_query_cancellation()
+            def node(key):
+                return 'urn:semantica:source-projection:' + hashlib.sha256(
+                    json.dumps([project,key],separators=(',',':')).encode()).hexdigest()
+            original, target = node(old_key), node(new_key)
+            old_graph, new_graph = owner._oxigraph.NamedNode(original+':addresses'), owner._oxigraph.NamedNode(target+':addresses')
+            if execute and next(owner.store.quads_for_pattern(None,None,None,old_graph),None) is not None:
+                if current is not None:
+                    owner.store.update('CLEAR GRAPH '+str(old_graph))
+                else:
+                    # Only internal lookup subjects change; published IDs inside
+                    # address values and all accepted observations remain intact.
+                    if any(not q.subject.value.startswith(original) for q in owner.store.quads_for_pattern(None,None,None,old_graph)):
+                        raise ProcessingError('Source projection migration contains foreign addresses')
+                    owner.store.update(f'''DELETE {{ GRAPH {old_graph} {{ ?s ?p ?o }} }}
+                        INSERT {{ GRAPH {new_graph} {{ ?target ?p ?o }} }}
+                        WHERE {{ GRAPH {old_graph} {{ ?s ?p ?o }}
+                            BIND(IRI(CONCAT({json.dumps(target)}, SUBSTR(STR(?s), {len(original)+1}))) AS ?target) }}''')
+                owner.flush()
+            return dict(previousKey=old_key, inputKey=new_key, executed=execute)
+
     @classmethod
     def source_projection(cls,owner,project,input_key,records=None,*,header_only=False,evidence_ids=None,passages_only=False):
         """Persist derived addresses only; completion follows durable projections."""
@@ -643,6 +728,23 @@ class ExtractionRecords:
                 raise ProcessingError('Identity projection evidence order corrupt')
             return [one(ref,'referenceId') for ref in refs]
         return facts,one,addresses
+
+    def identity_projection_exists(self, identity):
+        """Absence is distinct from an incomplete or corrupt address record."""
+        node = self._identity_member(identity)
+        if next(self.owner.store.quads_for_pattern(node, None, None,
+                self.identity_projection_graph), None) is None:
+            return False
+        self._read_identity_projection_fields(node)
+        return True
+
+    def fact_projection_exists(self, identity):
+        node = self._fact_member(identity)
+        if next(self.owner.store.quads_for_pattern(node, None, None,
+                self.fact_projection_graph), None) is None:
+            return False
+        self._read_fact_projection_node(node, None)
+        return True
 
     def read_identity_summary(self, identity, *, max_bytes=MAX_PAGE_BYTES):
         """Read only identity addresses and provenance, never original text.

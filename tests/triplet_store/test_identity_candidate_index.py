@@ -3,6 +3,7 @@ import pytest
 
 from semantica.kg.entity_resolver import EntityResolver
 from semantica.triplet_store.identity_candidate_index import IdentityCandidateIndex
+from semantica.triplet_store.publication_records import P
 from semantica.utils.exceptions import ProcessingError
 from tests.triplet_store.test_build_record_cursor import staged
 
@@ -424,10 +425,10 @@ def test_component_pages_and_hydration_do_not_rescan_members(tmp_path, monkeypat
         index.build(lambda: iter(zip(ids, rows)))
         visited = []
         original = index.publication.values
-        def counted(node, predicate):
+        def counted(node, predicate, **kwargs):
             if predicate == 'identityNextMember':
                 visited.append(node)
-            return original(node, predicate)
+            return original(node, predicate, **kwargs)
         monkeypatch.setattr(index.publication, 'values', counted)
         cursor, actual = None, []
         while True:
@@ -541,6 +542,7 @@ def test_unfinished_identity_never_survives_generation(tmp_path):
                     resolve_candidates=False)
         generation = store.begin_publication('p', expected_generation=generation,
             source_count=1, canonical_count=None)['generation']
+        index.publication.fence(generation, 'pending')
         assert not index.publication.values(index.publication.head, 'identityIndexSealed')
         assert store.identity_stage_status('p', generation, 'exact-input') is None
     finally:
@@ -583,12 +585,13 @@ def test_component_reuse_tracks_absent_context_and_preserves_untouched_selectors
         before = set(store.store.quads_for_pattern(untouched, None, None, p.graph))
         selector = p.values(untouched, 'selector')[0]
         before_selector = set(store.store.quads_for_pattern(selector, None, None, p.graph))
+        old_graph = p.graph
         # A newly available definition invalidates a prior ABSENT read even
         # though neither the mention nor its candidate membership changed.
         from semantica.semantic_extract.types import Entity
         from semantica.triplet_store.extraction_records import ExtractionRecords
-        source_node = p.values(p.head, 'source')[0]
-        old_operation = p.one(source_node, 'operation')
+        source_node = p.values(p.publication_head, 'source', graph=p.publication_graph)[0]
+        old_operation = p.values(source_node, 'operation', graph=p.publication_graph)[0].value
         binding = dict(project='p', source='new', material='new-material', representation='new-repr',
             recipe='recipe', model='model', specification='spec', parser='parser', grounding='grounding',
             window_start=0, window_end=3)
@@ -609,17 +612,21 @@ def test_component_reuse_tracks_absent_context_and_preserves_untouched_selectors
         new_row = resolver.duplicate_detector.disambiguator.identity_projection(new_row)
         new_row['_identity_features']['grounded_definitions'] = [('xyz', 'x y z')]
         result = index.build(lambda: iter([*zip(ids, rows), (new_ref, new_row)]), policy_key='identity-rules')
+        p = index.publication
         assert result == dict(retained_canonical_count=2, retained_components=2)
         assert index.roots(affected_only=True)['records'] == [ids[0], new_ref]
         assert set(p.values(p.head, 'canonical')) == {untouched, p.ox.NamedNode('urn:decision:2')}
-        assert set(store.store.quads_for_pattern(untouched, None, None, p.graph)) == before
-        assert set(store.store.quads_for_pattern(selector, None, None, p.graph)) == before_selector
+        assert p.record_graph(untouched) == old_graph
+        assert set(store.store.quads_for_pattern(untouched, None, None, old_graph)) == before
+        assert set(store.store.quads_for_pattern(selector, None, None, old_graph)) == before_selector
+        assert p.values(untouched, 'representative') == [p.iri(ids[1])]
+        assert not list(store.store.quads_for_pattern(untouched, p.iri(P+'member'), None, p.graph))
         assert p.status()['state'] == 'pending'
     finally:
         store.close()
 
 
-def test_rebuild_invalidates_old_completion_before_resealing_index(tmp_path, monkeypatch):
+def test_rebuild_cannot_mutate_a_completed_identity_stage(tmp_path, monkeypatch):
     store, generation, ids = staged(tmp_path, 2)
     resolver = EntityResolver(strategy='contextual')
     index = IdentityCandidateIndex(store, 'p', generation, resolver.duplicate_detector)
@@ -636,10 +643,11 @@ def test_rebuild_invalidates_old_completion_before_resealing_index(tmp_path, mon
             raise ProcessingError('canceled before decision reconciliation')
 
         monkeypatch.setattr(index, '_reconcile_decisions', interrupt)
-        with pytest.raises(ProcessingError, match='canceled'):
+        with pytest.raises(ProcessingError, match='immutable'):
             index.build(lambda: iter(zip(ids, rows)), policy_key='identity-rules')
-        assert publication.identity_stage_status(generation, 'old-input') is None
-        assert not publication.values(publication.head, 'identityStageCount')
+        assert publication.identity_stage_status(generation, 'old-input') == dict(
+            input_key='old-input', canonical_count=0)
+        assert publication.values(publication.head, 'identityStageCount') == [publication.ox.Literal(0)]
     finally:
         store.close()
 
@@ -677,7 +685,7 @@ def test_component_dependencies_stream_beyond_single_write_budget(tmp_path):
         store.close()
 
 
-def test_identity_seal_checks_coverage_with_member_point_reads(tmp_path, monkeypatch):
+def test_identity_seal_checks_exact_coverage_without_per_mention_queries(tmp_path, monkeypatch):
     from semantica.triplet_store.publication_records import P
     store, generation, ids = staged(tmp_path, 3, canonical_count=None)
     resolver = EntityResolver(strategy='contextual')
@@ -693,17 +701,16 @@ def test_identity_seal_checks_coverage_with_member_point_reads(tmp_path, monkeyp
                 selectors=[], selector_count=0)])
         member = ox.NamedNode(P+'member')
         canonical = ox.NamedNode(P+'canonical')
-        reads = []
+        queries = []
         class IndexedCoverage:
             def __getattr__(self, key):
                 return getattr(native, key)
-            def query(self, query):
-                assert 'FILTER NOT EXISTS' not in query, 'coverage must not join every canonical per mention'
-                return native.query(query)
+            def query(self, query, **options):
+                queries.append(query)
+                return native.query(query, **options)
             def quads_for_pattern(self, s, pred, o, graph):
                 if pred == member:
-                    assert s is None and o is not None
-                    reads.append(o)
+                    pytest.fail('seal must not issue one membership point read per mention')
                 yield from native.quads_for_pattern(s, pred, o, graph)
         monkeypatch.setattr(store, 'store', IndexedCoverage())
         # A reference from an unregistered canonical must not satisfy coverage.
@@ -714,8 +721,9 @@ def test_identity_seal_checks_coverage_with_member_point_reads(tmp_path, monkeyp
             p.seal_identity_stage(generation, 'input')
         assert not p.values(p.head, 'identityStageInput')
         native.add(quad)
-        reads.clear()
+        queries.clear()
         assert p.seal_identity_stage(generation, 'input') == 3
-        assert len(reads) == 3
+        # Seven bounded checks include missing member/selector count rejection.
+        assert len(queries) <= 7
     finally:
         store.close()

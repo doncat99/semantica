@@ -157,7 +157,11 @@ class SQLiteVecStore:
 
         # Ensure table exists (if not read-only)
         if not self.read_only:
-            self._ensure_table_exists()
+            try:
+                self._ensure_table_exists()
+            except BaseException:
+                self.close()
+                raise
 
         self.logger.info(
             f"Initialized SQLiteVecStore: db_path={db_path}, table={table_name}, "
@@ -254,6 +258,12 @@ class SQLiteVecStore:
         with self._lock, self._get_connection() as conn:
             try:
                 conn.execute('BEGIN IMMEDIATE')
+                existing_bindings = conn.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name=?",
+                    (self.table_name + '_embedding_bindings',)).fetchone()
+                existing_scope = conn.execute("SELECT 1 FROM sqlite_master WHERE type='index' AND name=?",
+                    (self.table_name + '_embedding_scope',)).fetchone()
+                if existing_bindings and not existing_scope:
+                    raise ProcessingError('Embedding scope index requires explicit offline migration')
                 conn.execute(create_table_sql)
                 conn.execute(f'''CREATE TABLE IF NOT EXISTS {self.table_name}_embedding_operations (
                     id TEXT PRIMARY KEY, count INTEGER NOT NULL, digest TEXT NOT NULL,
@@ -262,25 +272,66 @@ class SQLiteVecStore:
                 conn.execute(f'''CREATE TABLE IF NOT EXISTS {self.table_name}_embedding_bindings (
                     logical_id TEXT PRIMARY KEY, physical_id TEXT NOT NULL UNIQUE,
                     binding_json TEXT NOT NULL) WITHOUT ROWID''')
+                conn.execute(f'''CREATE INDEX IF NOT EXISTS {self.table_name}_embedding_scope
+                    ON {self.table_name}_embedding_bindings(
+                        json_extract(binding_json,'$.project'),json_extract(binding_json,'$.source'),
+                        json_extract(binding_json,'$.material'),json_extract(binding_json,'$.representation'),
+                        json_extract(binding_json,'$.parser'),json_extract(binding_json,'$.recipe'),
+                        json_extract(binding_json,'$.model'),json_extract(binding_json,'$.space'),
+                        json_extract(binding_json,'$.ranges'))''')
                 if self.config.get('embedding_space_identity') is not None:
                     conn.execute('CREATE TABLE IF NOT EXISTS embedding_space(id INTEGER PRIMARY KEY CHECK(id=1),identity TEXT NOT NULL,dimension INTEGER NOT NULL)')
                     conn.execute('INSERT OR IGNORE INTO embedding_space VALUES(1,?,?)',
                         (json.dumps(self.config['embedding_space_identity'], sort_keys=True, separators=(',', ':')), self.dimension))
                 conn.commit()
                 self.logger.debug(f"Virtual table {self.table_name} ensured")
+            except ProcessingError:
+                conn.rollback()
+                raise
             except Exception as e:
                 conn.rollback()
                 raise ProcessingError("Failed to create vec0 virtual table") from e
 
+    @staticmethod
+    def migrate_embedding_scope_index(db_path, *, execute=False):
+        """Explicit offline index upgrade; never touches vectors or paid receipts."""
+        from pathlib import Path
+        with sqlite3.connect(Path(db_path).resolve().as_uri() + '?mode=rw', uri=True, timeout=0) as conn:
+            conn.execute('BEGIN EXCLUSIVE')
+            if conn.execute("SELECT 1 FROM sqlite_master WHERE name='embeddings_embedding_bindings'").fetchone() is None:
+                raise ProcessingError('Embedding binding owner is missing')
+            exists = conn.execute("SELECT 1 FROM sqlite_master WHERE name='embeddings_embedding_scope'").fetchone() is not None
+            if execute and not exists:
+                conn.execute('''CREATE INDEX embeddings_embedding_scope ON embeddings_embedding_bindings(
+                    json_extract(binding_json,'$.project'),json_extract(binding_json,'$.source'),
+                    json_extract(binding_json,'$.material'),json_extract(binding_json,'$.representation'),
+                    json_extract(binding_json,'$.parser'),json_extract(binding_json,'$.recipe'),
+                    json_extract(binding_json,'$.model'),json_extract(binding_json,'$.space'),
+                    json_extract(binding_json,'$.ranges'))''')
+            return dict(indexed=exists or execute, changed=execute and not exists, vectors_copied=0)
+
+    def require_native_publication(self, project, generation, receipt):
+        """Point-check a completed index receipt without reading vector bodies."""
+        space = self.embedding_space_identity
+        if (not isinstance(receipt, dict) or set(receipt) != {'kind','store_id','recipe_digest','space_id'}
+                or receipt['kind'] != 'native-sqlite-vec' or receipt['space_id'] != space['binding']):
+            raise ProcessingError('Native vector publication receipt differs')
+        with self._lock, self._get_connection() as conn:
+            self._assert_embedding_space(conn)
+            row = conn.execute(f'SELECT generation,digest,recipe FROM {self.table_name}_native_publications WHERE project=?',
+                (project,)).fetchone()
+            if row != (generation, receipt['store_id'], receipt['recipe_digest']):
+                raise ProcessingError('Native vector publication is missing or stale')
+
     @classmethod
-    def open_embedding_space(cls, db_path, space, dimension=None):
+    def open_embedding_space(cls, db_path, space, dimension=None, *, read_only=False):
         # Multiple bounded build workers can encounter a new space together.
         # Hold only schema admission, never model execution or vector queries.
         with cls._embedding_space_lock:
-            return cls._open_embedding_space(db_path, space, dimension)
+            return cls._open_embedding_space(db_path, space, dimension, read_only=read_only)
 
     @classmethod
-    def _open_embedding_space(cls, db_path, space, dimension=None):
+    def _open_embedding_space(cls, db_path, space, dimension=None, *, read_only=False):
         """Open a bound native space without a model call to rediscover dimension.
 
         A new space has no carrier until the first accepted model response gives
@@ -297,11 +348,12 @@ class SQLiteVecStore:
             if row is None or len(row[0]) > 16384 or row[0] != encoded or (dimension is not None and row[1] != dimension):
                 raise ProcessingError('Embedding space identity or dimension differs')
             dimension = row[1]
-        elif dimension is None:
+        elif read_only or dimension is None:
             return None
         if type(dimension) is not int or not 1 <= dimension <= 8192:
             raise ValidationError('Embedding dimension exceeds native space budget')
-        owner = cls(str(db_path), 'embeddings', dimension, 'cosine', embedding_space_identity=space)
+        owner = cls(str(db_path), 'embeddings', dimension, 'cosine',
+            embedding_space_identity=space, read_only=read_only)
         owner.embedding_space_identity = space
         return owner
 
@@ -353,6 +405,27 @@ class SQLiteVecStore:
         with self._lock, self._get_connection() as conn:
             physical = self._embedding_physical_id(conn, identity)
             return self._read_embedding(conn, physical, include_vectors=include_vectors) if physical else None
+
+    def read_embedding_range_binding(self, scope):
+        """Find the accepted input digest by immutable source/range, without text hydration."""
+        fields = ('project','source','material','representation','parser','recipe','model','space','ranges')
+        if not isinstance(scope, dict) or set(scope) != set(fields):
+            raise ValidationError('Embedding range lookup requires the exact immutable scope')
+        self.embedding_operation_id(dict(scope, input_digest='lookup'))
+        parameters = [json.dumps(scope[key], separators=(',', ':')) if key == 'ranges' else scope[key]
+                      for key in fields]
+        where = ' AND '.join("json_extract(binding_json,'$." + key + "')=?" for key in fields)
+        with self._lock, self._get_connection() as conn:
+            self._assert_embedding_space(conn)
+            rows = conn.execute(f'SELECT logical_id,binding_json FROM {self.table_name}_embedding_bindings WHERE {where} LIMIT 2', parameters).fetchall()
+            if not rows:
+                return None
+            if len(rows) != 1 or len(rows[0][1].encode()) > 65536:
+                raise ProcessingError('Embedding source range has ambiguous or oversized acceptance')
+            binding = json.loads(rows[0][1])
+            if self.embedding_operation_id(binding) != rows[0][0]:
+                raise ProcessingError('Embedding source range identity is corrupt')
+            return binding
 
     def _embedding_physical_id(self, conn, logical_id):
         self._assert_embedding_space(conn)

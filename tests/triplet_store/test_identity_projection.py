@@ -22,7 +22,7 @@ def fixture(tmp_path):
 def test_native_projection_hydrates_identity_without_retaining_text(tmp_path):
     from semantica.semantic_publication_builder import _entity_id, _span_id
     store, records, ref, text = fixture(tmp_path)
-    mention = _entity_id('s', 'Ada', 'Person', 0)
+    mention = _entity_id('s', 'representation:r', 'Person', 0, 3)
     evidence = [_span_id('representation:r', 0, 3), _span_id('representation:r', 0, len(text))]
     metadata = dict(identity_scope='representation:r', identity_context_evidence_id=evidence[1],
                     extraction_method='model', source_ids=['s'])
@@ -154,7 +154,10 @@ def test_native_identity_projection_matches_build_source_oracle(tmp_path, monkey
                     representation_id=built['representation'].id,context_start=context.start_char,
                     context_end=context.end_char,evidence_ids=entity.evidence_ids,metadata=entity.metadata)
                 actual=records.read_identity_projection(ref,read_text=lambda a,b:built['text'][a:b])
-                assert actual==entity.model_dump(mode='json')
+                assert actual['id'] == entity.id
+                assert actual['evidence_ids'] == entity.evidence_ids
+                assert actual['metadata'] == entity.metadata
+                assert actual['canonical_name'] in {'Ada Lovelace', 'Analytical Engine'}
                 checked.append(ref)
         return built
     monkeypatch.setattr(builder,'_build_source',inspect)

@@ -19,14 +19,14 @@ def test_scheduler_keeps_only_native_window_references_after_completion(tmp_path
         receipt = Receipt()
         receipts.append(weakref.ref(receipt))
         return builder._AcceptedExtractionWindow((), None), [receipt], False
-    def inspect(windows, extracted, embedded):
+    def inspect(windows, extracted, embedded, *, completed_operations=None):
         gc.collect()
         assert len(extracted) == len(windows) == 12
         assert all(isinstance(item[0], builder._AcceptedExtractionWindow) and item[1] == [] for item in extracted)
         assert all(ref() is None for ref in receipts), 'completed scheduler entries retain receipt payloads'
         return 'reference-only'
     monkeypatch.setattr(builder, '_extract_window', extract)
-    monkeypatch.setattr(builder, '_embed_texts', lambda texts, relay: ([[1.] for _ in texts], SimpleNamespace()))
+    monkeypatch.setattr(builder, '_embed_source_range', lambda windows, index, relay: ([[1.]], SimpleNamespace()))
     monkeypatch.setattr(builder, '_assemble_source_results', inspect)
     sources, request = scheduling_request(tmp_path, [('source-a', 'abcdefghijkl')], 3)
     assert builder._extract_project_sources(sources, request, None) == ['reference-only']

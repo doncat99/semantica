@@ -28,7 +28,7 @@ class QualifiedFactIndex:
 
     def __init__(self, owner, project, generation):
         self.owner, self.generation = owner, generation
-        self.publication = PublicationRecords(owner, project)
+        self.publication = PublicationRecords(owner, project, stage='fact')
 
     @staticmethod
     def partition(item, kind):
@@ -51,21 +51,22 @@ class QualifiedFactIndex:
         """Read only coordination columns; never restore or audit complete DTOs."""
         p=self.publication
         from ..semantic_extract.schemas import validate_fact_qualifiers
-        for canonical in self.owner.store.quads_for_pattern(p.head,p.iri(P+'canonical'),None,p.graph):
+        graph,head=p.stage_graph('identity'),p.stage_head('identity')
+        for canonical in self.owner.store.quads_for_pattern(head,p.iri(P+'canonical'),None,graph):
             check_query_cancellation()
             # Bound sorting to one canonical subject, as required by the conflict
             # rules. Missing columns stay visible and fail instead of losing rows.
             query=f'''SELECT ?reference ?target ?predicate ?assertion ?id ?object ?representation
                     ?polarity ?condition ?time ?unit ?value ?evidence ?position ?ambiguous WHERE {{
-                GRAPH {p.graph} {{ {canonical.object} <{P}member> ?rawSource }}
+                {p.canonical_pattern(canonical.object, f'{canonical.object} <{P}member> ?rawSource', variable='?sourceDecisionGraph')}
                 GRAPH {p.facts} {{ ?reference <{F}sourceEntity> ?rawSource ; <{RDF_TYPE}> <{F}Relation> }}
                 BIND(IRI(REPLACE(STR(?reference), ":relation:[0-9]+$", "")) AS ?operation)
-                GRAPH {p.graph} {{ {p.head} <{P}source> ?source . ?source <{P}operation> ?operation }}
+                GRAPH {p.publication_graph} {{ {p.publication_head} <{P}source> ?source . ?source <{P}operation> ?operation }}
                 BIND(IRI(CONCAT(STR(?operation), ":fact-projection")) AS ?projection)
                 BIND(IRI(CONCAT(REPLACE(STR(?rawSource), ":entity:[^:]+$", ""), ":identity-projection")) AS ?identity)
                 OPTIONAL {{ GRAPH {p.facts} {{ ?operation <{F}ownedRecord> ?reference .
                     ?reference <{F}targetEntity> ?rawTarget . ?rawTarget <{F}name> ?object }} }}
-                OPTIONAL {{ GRAPH {p.graph} {{ {p.head} <{P}canonical> ?target . ?target <{P}member> ?rawTarget }} }}
+                OPTIONAL {{ {p.canonical_pattern('?target', f'?target <{P}member> ?rawTarget', variable='?targetDecisionGraph')} }}
                 OPTIONAL {{ GRAPH ?identity {{ ?rawSource <{F}buildRepresentationId> ?representation }} }}
                 OPTIONAL {{ GRAPH ?projection {{ ?reference <{F}buildPredicate> ?predicate }} }}
                 OPTIONAL {{ GRAPH ?projection {{ ?reference <{F}buildAssertionId> ?assertion }} }}
@@ -77,8 +78,7 @@ class QualifiedFactIndex:
                 OPTIONAL {{ GRAPH {p.facts} {{ ?reference <{F}time> ?time }} }}
                 OPTIONAL {{ GRAPH {p.facts} {{ ?reference <{F}unit> ?unit }} }}
                 OPTIONAL {{ GRAPH {p.facts} {{ ?reference <{F}qualifiedValue> ?value }} }}
-                BIND(EXISTS {{ GRAPH {p.graph} {{ {p.head} <{P}canonical> ?other .
-                    ?other <{P}member> ?rawSource . FILTER(?other != {canonical.object}) }} }} AS ?ambiguous)
+                BIND(EXISTS {{ {p.canonical_pattern('?other', f'?other <{P}member> ?rawSource . FILTER(?other != {canonical.object})', variable='?otherDecisionGraph')} }} AS ?ambiguous)
             }} ORDER BY ?reference ?position'''
             rows=[]
             size=0
@@ -187,6 +187,7 @@ class QualifiedFactIndex:
             yield p.triple(partition,'qualifiedDecision',decision)
             yield p.triple(p.head,'qualifiedDecision',decision)
             yield p.triple(p.head,'fact',decision)
+            yield p.triple(decision,'factDecisionGraph',p.graph)
             for field,value in (
                 ('qualifiedAssertionId',p.scalar(item.id)),
                 ('qualifiedSubject',p.scalar(item.subject_id)),
@@ -218,11 +219,31 @@ class QualifiedFactIndex:
         with self.owner._publication_lock:
             if p.fact_stage_status(self.generation,input_key,functional_predicates=policy):
                 return
+            # Bind the new immutable stage before any mutation; an unbound
+            # stage would route writes into the publication graph.
+            p._bind_stage('fact', input_key, functional_predicates=policy)
+            p._writable_stage()
             self._fence(False)
+            previous=p._pointer(p.publication_head,'previousFactGraph',p.publication_graph)
+            if previous is not None:
+                previous_head=p.iri(previous.value+':head')
+                inputs=p.values(previous_head,'factStageInput',graph=previous)
+                policies=p.values(previous_head,'qualifiedFunctionalPredicates',graph=previous)
+                if len(inputs)!=1 or len(policies)!=1:
+                    previous=None
+                else:
+                    try:
+                        previous_policy=json.loads(policies[0].value)
+                    except (ValueError, TypeError) as error:
+                        raise ProcessingError('Completed fact policy is corrupt') from error
+                    completion=p._completion_key('fact',inputs[0].value,
+                        functional_predicates=previous_policy)
+                    if p._pointer(completion,'completedGraph',p.registry)!=previous:
+                        previous=None
             # Input cardinality closes the projection's omission boundary; member
             # coverage is proved in each complete group before emitting decisions.
             expected=int(next(iter(self.owner.store.query(f'''SELECT (COUNT(DISTINCT ?reference) AS ?count) WHERE {{
-                GRAPH {p.graph} {{ {p.head} <{P}source> ?source . ?source <{P}operation> ?operation }}
+                GRAPH {p.publication_graph} {{ {p.publication_head} <{P}source> ?source . ?source <{P}operation> ?operation }}
                 GRAPH {p.facts} {{ ?operation <{F}ownedRecord> ?reference .
                     ?reference <{RDF_TYPE}> <{F}Relation> }} }}''')))['count'].value)
             for field in ('factStageInput','qualifiedDecisionCount','qualifiedPhysicalCount','qualifiedFunctionalPredicates'):
@@ -264,6 +285,21 @@ class QualifiedFactIndex:
                     if p.values(partition,'qualifiedInput')==[digest]:
                         decision_count+=sum(1 for _ in self.owner.store.quads_for_pattern(partition,
                             p.ox.NamedNode(P+'qualifiedDecision'),None,p.graph))
+                    elif previous is not None and p.values(partition,'qualifiedInput',graph=previous)==[digest]:
+                        prior_graph=p._pointer(partition,'qualifiedDecisionGraph',previous)
+                        if prior_graph is None:
+                            raise ProcessingError('Completed fact partition lacks its decision graph')
+                        yield p.triple(p.head,'qualifiedPartitionNode',partition)
+                        yield p.triple(partition,'qualifiedInput',digest)
+                        yield p.triple(partition,'qualifiedDecisionGraph',prior_graph)
+                        for link in self.owner.store.quads_for_pattern(partition,
+                                p.iri(P+'qualifiedDecision'),None,prior_graph):
+                            decision=link.object
+                            yield p.triple(p.head,'qualifiedDecision',decision)
+                            yield p.triple(p.head,'fact',decision)
+                            yield p.triple(partition,'qualifiedDecision',decision)
+                            yield p.triple(decision,'factDecisionGraph',prior_graph)
+                            decision_count+=1
                     else:
                         if next(self.owner.store.quads_for_pattern(partition,None,None,p.graph),None):
                             self._remove_partition(partition)
@@ -278,6 +314,7 @@ class QualifiedFactIndex:
                             raise ProcessingError('Native fact decision coverage differs from input')
                         decision_count+=len(result[0])
                         yield from self._final_triples(partition,result)
+                        yield p.triple(partition,'qualifiedDecisionGraph',p.graph)
                         # Pending commit metadata is not a reusable completion.
                         yield p.triple(partition,'qualifiedPendingInput',digest)
                         if on_partition is not None:
@@ -324,7 +361,7 @@ class QualifiedFactIndex:
                 p.triple(p.head,'qualifiedPhysicalCount',p.scalar(str(count))),
                 p.triple(p.head,'qualifiedFunctionalPredicates',p.scalar(json.dumps(policy,separators=(',',':')))),
                 p.triple(p.head,'factStageInput',p.scalar(input_key))])
-            self.owner.flush()
+            p._complete_stage('fact',input_key,functional_predicates=policy)
 
     def canonical_endpoints(self, reference):
         return self.canonical_endpoint_page([reference])[reference]
@@ -349,13 +386,10 @@ class QualifiedFactIndex:
                     if len(mentions)!=1:
                         raise ProcessingError('Native fact requires unique canonical endpoint membership')
                     selected=None
-                    for link in self.owner.store.quads_for_pattern(None,p.ox.NamedNode(P+'member'),mentions[0].object,p.graph):
-                        check_query_cancellation()
-                        if next(self.owner.store.quads_for_pattern(p.head,
-                                p.ox.NamedNode(P+'canonical'),link.subject,p.graph),None):
-                            if selected is not None:
-                                raise ProcessingError('Native fact requires unique canonical endpoint membership')
-                            selected=link.subject.value
+                    for link in self.owner.store.query(f'SELECT ?canonical WHERE {{ {p.canonical_pattern("?canonical", f"?canonical <{P}member> {mentions[0].object}")} }} LIMIT 2'):
+                        if selected is not None:
+                            raise ProcessingError('Native fact requires unique canonical endpoint membership')
+                        selected=link['canonical'].value
                     if selected is None:
                         raise ProcessingError('Native fact requires unique canonical endpoint membership')
                     endpoints.append(selected)
@@ -377,9 +411,7 @@ class QualifiedFactIndex:
             self._fence()
             cursor=f'FILTER(STR(?id) > {p.scalar(after)})' if after is not None else ''
             rows=list(self.owner.store.query(f'''SELECT ?id ?source ?target ?predicate WHERE {{
-                GRAPH {p.graph} {{ {p.head} <{P}fact> ?id .
-                    ?id <{P}source> ?source ; <{P}target> ?target ;
-                    <{P}representative> ?representative . {cursor} }}
+                {p.fact_pattern('?id', f'?id <{P}source> ?source ; <{P}target> ?target ; <{P}representative> ?representative . {cursor}')}
                 GRAPH {p.facts} {{ ?representative <{F}predicateName> ?predicate }}
                 }} ORDER BY ?id LIMIT {limit+1}'''))
         values=[]
@@ -423,12 +455,11 @@ class QualifiedFactIndex:
         cursor=f'FILTER(STR(?identity) > {p.scalar(after)})' if after is not None else ''
         with self.owner._publication_lock:
             self._fence()
-            identity_binding=(f'?decision <{P}qualifiedAssertionId> ?identity .' if kind=='assertion'
-            else 'BIND(STR(?decision) AS ?identity)')
+            identity_binding=f'?decision <{P}qualifiedAssertionId> ?identity .' if kind=='assertion' else ''
+            identity_projection='BIND(STR(?decision) AS ?identity)' if kind=='relation' else ''
             rows=list(self.owner.store.query(f'''SELECT DISTINCT ?decision ?identity WHERE {{
-                GRAPH {p.graph} {{ {p.head} <{P}qualifiedDecision> ?decision .
-                    {identity_binding}
-                    {' '.join(filters)} {cursor} }}
+                {p.fact_pattern('?decision', f"{identity_binding} {' '.join(filters)}")}
+                {identity_projection} {cursor}
                 }} ORDER BY ?identity LIMIT {limit+1}'''))
         values=[]
         for row in rows[:limit]:
@@ -442,7 +473,7 @@ class QualifiedFactIndex:
                 raise ProcessingError('Native canonical selected observation identity changed')
             def selected(field):
                 result, size = [], 0
-                for q in self.owner.store.quads_for_pattern(decision,p.ox.NamedNode(P+field),None,p.graph):
+                for q in self.owner.store.quads_for_pattern(decision,p.ox.NamedNode(P+field),None,p.record_graph(decision)):
                     if not isinstance(q.object,p.ox.Literal):
                         raise ProcessingError('Native canonical selection value invalid')
                     size+=len(q.object.value.encode())
@@ -537,27 +568,25 @@ class QualifiedFactIndex:
                         (STR(?subject) = {p.scalar(subject)} && STR(?predicate) > {p.scalar(predicate)}))'''
             rows=list(self.owner.store.query(f'''SELECT DISTINCT ?subject ?predicate WHERE {{
                 {selection}
-                GRAPH {p.graph} {{ {p.head} <{P}qualifiedDecision> ?decision .
-                    ?decision <{P}qualifiedSubject> ?subject ; <{P}qualifiedPredicate> ?predicate .
-                    }} {cursor} }} ORDER BY {order} LIMIT {limit+1}'''))
+                {p.fact_pattern('?decision', f'?decision <{P}qualifiedSubject> ?subject ; <{P}qualifiedPredicate> ?predicate .')}
+                {cursor} }} ORDER BY {order} LIMIT {limit+1}'''))
             values=[]
             for row in rows[:limit]:
                 subject,predicate=row['subject'].value,row['predicate'].value
-                pattern=f'''{p.head} <{P}qualifiedDecision> ?decision .
-                    ?decision <{P}qualifiedSubject> {p.scalar(subject)} ;
+                pattern=f'''?decision <{P}qualifiedSubject> {p.scalar(subject)} ;
                     <{P}qualifiedPredicate> {p.scalar(predicate)} .'''
                 sources=set()
-                decisions=self.owner.store.query(f"""SELECT ?decision WHERE {{ GRAPH {p.graph} {{ {pattern} }} }}""")
+                decisions=self.owner.store.query(f'SELECT ?decision WHERE {{ {p.fact_pattern("?decision",pattern)} }}')
                 for row in decisions:
-                    for q in self.owner.store.quads_for_pattern(row['decision'],p.ox.NamedNode(P+'qualifiedRepresentation'),None,p.graph):
+                    for q in self.owner.store.quads_for_pattern(row['decision'],p.ox.NamedNode(P+'qualifiedRepresentation'),None,p.record_graph(row['decision'])):
                         sources.add(q.object.value)
                         if len(sources)>max_family_sources:
                             raise ProcessingError('Native qualified family source budget exceeded')
                 if len(sources)>max_family_sources:
                     raise ProcessingError('Native qualified family source budget exceeded')
-                required=bool(self.owner.store.query(f'''ASK {{ GRAPH {p.graph} {{
-                    {pattern} ?decision (<{P}qualifiedSelectedStatus>|<{P}qualifiedAssertionStatus>) ?status .
-                    VALUES ?status {{ "contradicted" "retracted" "rejected" }} }} }}'''))
+                status_pattern=f'''{pattern} ?decision (<{P}qualifiedSelectedStatus>|<{P}qualifiedAssertionStatus>) ?status .
+                    VALUES ?status {{ "contradicted" "retracted" "rejected" }}'''
+                required=bool(self.owner.store.query(f'ASK {{ {p.fact_pattern("?decision",status_pattern)} }}'))
                 value=dict(subject=subject,predicate=predicate,
                     representations=sorted(sources),required=required)
                 if len(json.dumps(values+[value],ensure_ascii=False).encode())>max_bytes:

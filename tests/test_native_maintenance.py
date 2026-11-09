@@ -14,6 +14,70 @@ from semantica.utils.exceptions import ProcessingError
 from tests.test_native_extraction_handoff import build_child
 
 
+@pytest.mark.parametrize('target_exists', [False, True])
+def test_source_projection_semantic_rebind_is_offline_exact_and_idempotent(tmp_path, target_exists):
+    from semantica.triplet_store.extraction_records import ExtractionRecords, F
+    from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest, stable_digest
+    from semantica.semantic_extraction_recipe import extraction_recipe
+    from tests.test_semantic_artifact import _request
+    result = build_child(tmp_path, stop_before_publication=False)
+    request = SemanticArtifactBuildRequest.model_validate(_request(tmp_path/'source.txt', tmp_path/'published', recipe='model')['params'])
+    source = request.sources[0]
+    recipe = extraction_recipe(request)
+    revision = request.parsed_sources[0].representation_revision
+    identity = ExtractionRecords.source_projection_identity(project=request.project_id, source=source.source_id,
+        material=source.material_revision, mime_type=source.mime_type, representation=revision,
+        mode='model', force_ocr=False, extraction=recipe, formula_semantics=False)
+    owner = OxigraphStore(result['semantic_store']['path'])
+    try:
+        addresses = list(ExtractionRecords.source_projection(owner, request.project_id, identity))
+        previous = dict(source=source.model_dump(mode='json',by_alias=True), representation=revision,
+            mode='model', force_ocr=False, operations=sorted(set(addresses[0]['operations'])))
+        old_key = stable_digest(previous)
+        ExtractionRecords.source_projection(owner, request.project_id, old_key, iter(addresses))
+        before = sorted(str(q) for q in owner.store if q.graph_name.value.startswith('urn:semantica:project:'))
+        def migrate(**options):
+            return ExtractionRecords.rebind_source_projection(owner, request.project_id, previous,
+                extraction=recipe, formula_semantics=False, **options)
+        assert migrate()['executed'] is False
+        assert list(ExtractionRecords.source_projection(owner,request.project_id,old_key)) == addresses
+        # Same count and a valid address schema do not prove target equality.
+        ox=owner._oxigraph
+        import hashlib
+        address = 'urn:semantica:source-projection:' + hashlib.sha256(
+            json.dumps([request.project_id,identity],separators=(',',':')).encode()).hexdigest()
+        graph = ox.NamedNode(address+':addresses')
+        address_quad=next(q for q in owner.store.quads_for_pattern(None,ox.NamedNode(F+'address'),None,graph)
+            if ':1' == q.subject.value[len(address):])
+        changed=json.loads(address_quad.object.value)
+        changed['quote_digest']='sha256:'+'0'*64
+        replacement=ox.Quad(address_quad.subject,address_quad.predicate,
+            ox.Literal(json.dumps(changed,ensure_ascii=False,separators=(',',':'))),graph)
+        owner.store.remove(address_quad)
+        owner.store.add(replacement)
+        with pytest.raises(ProcessingError,match='target differs'):
+            migrate(execute=True)
+        assert list(ExtractionRecords.source_projection(owner,request.project_id,old_key)) == addresses
+        owner.store.remove(replacement)
+        owner.store.add(address_quad)
+        quad=next(q for q in owner.store if q.predicate==ox.NamedNode(F+'address') and
+            q.graph_name.value.startswith('urn:semantica:source-projection:') and
+            q.object.value==json.dumps(addresses[0],ensure_ascii=False,separators=(',',':')))
+        owner.store.remove(quad)
+        with pytest.raises(ProcessingError,match='missing'):
+            migrate(execute=True)
+        owner.store.add(quad)
+        if not target_exists:
+            owner.store.clear_graph(ox.NamedNode(address+':addresses'))
+        assert migrate(execute=True)['inputKey'] == identity
+        assert migrate(execute=True)['inputKey'] == identity
+        assert ExtractionRecords.source_projection(owner,request.project_id,old_key) is None
+        assert list(ExtractionRecords.source_projection(owner,request.project_id,identity)) == addresses
+        assert sorted(str(q) for q in owner.store if q.graph_name.value.startswith('urn:semantica:project:')) == before
+    finally:
+        owner.close()
+
+
 @pytest.fixture
 def ready(tmp_path):
     result = build_child(tmp_path, stop_before_publication=False)

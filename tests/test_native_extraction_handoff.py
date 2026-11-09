@@ -291,8 +291,9 @@ def test_actual_build_restarts_without_rebuy_or_checkpoint_before_publication(tm
     paid = [json.loads(line) for line in (tmp_path/'build-calls.jsonl').read_text().splitlines()]
     assert sorted(paid) == sorted(['entities','relations','embedding','classification','organization'])
     stages = json.loads((tmp_path/'stages.json').read_text())
-    assert {'document_parsing','extracting','source_projection','source_classification',
+    assert {'document_parsing','source_projection','source_classification',
         'entity_resolution','fact_reconciliation','semantic_organization','artifact_writing'} <= set(stages)
+    assert 'extracting' not in stages, 'accepted extraction must be reused on restart'
     assert (tmp_path/'host-product.json').is_file()
     assert not list(tmp_path.rglob('*checkpoint*'))
     assert not list((tmp_path/'published').glob('*.json'))

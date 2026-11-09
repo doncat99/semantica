@@ -452,14 +452,16 @@ class NativeParsedSource:
     page_count: int | None
 
 
-def _load_parsed_source(source: Any, ref: ParsedSourceRef, force_ocr: bool, profile: dict) -> NativeParsedSource:
+def _load_parsed_source(source: Any, ref: ParsedSourceRef, force_ocr: bool, profile: dict, *, completed=False) -> NativeParsedSource:
     profile = normalized_processing_profile(profile)
     path = Path(ref.artifact_path).resolve()
-    if not path.is_file() or _digest_file(path) != ref.artifact_digest:
+    if not path.is_file() or (not completed and _digest_file(path) != ref.artifact_digest):
         raise SemanticArtifactError(f"parsed source artifact digest is invalid: {source.source_id}")
-    if source_content_revision(Path(source.file_path).resolve()) != source.material_revision:
+    if not completed and source_content_revision(Path(source.file_path).resolve()) != source.material_revision:
         raise SemanticArtifactError(f"source material revision does not match immutable bytes: {source.source_id}")
     from .semantic_document_reader import read_source_header
+    # Completed results admit the installed immutable reader; selected ranges
+    # retain their digest checks without rehashing either complete file.
     reader = _source_reader_request(source, ref)
     try:
         payload = read_source_header(reader)['header']

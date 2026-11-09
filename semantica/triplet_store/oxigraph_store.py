@@ -294,7 +294,7 @@ class OxigraphStore:
         Public raw Store.update remains conservatively invalidating.
         """
         value = graph.value
-        if not (re.fullmatch(r'urn:semantica:publication:[0-9a-f]{64}', value)
+        if not (re.fullmatch(r'urn:semantica:publication:[0-9a-f]{64}(?::generation:[0-9a-f]{64}(?::(?:identity|fact))?)?', value)
                 or re.fullmatch(r'urn:semantica:extraction:[0-9a-f]{64}:(?:identity|fact)-projection', value)):
             raise ProcessingError('Derived mutation cannot target accepted extraction facts')
         statement = ''

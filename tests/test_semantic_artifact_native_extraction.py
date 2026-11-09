@@ -14,42 +14,6 @@ from semantica.semantic_extract.types import Entity, Relation
 from semantica.utils.exceptions import ProcessingError
 
 
-def test_entity_occurrence_index_preserves_identity_and_scans_each_name_once(monkeypatch):
-    text = "Roof roof rooftop ROOF Roof"
-    original = re.finditer
-    calls = []
-    def scan(*args, **kwargs):
-        calls.append(args)
-        return original(*args, **kwargs)
-    monkeypatch.setattr(semantic_publication_builder.re, "finditer", scan)
-    positions = [match.start() for match in original('Roof', text, re.IGNORECASE)]
-    cache = semantic_publication_builder._source_occurrence_ordinals(
-        lambda start, end: text[start:end], len(text), [('Roof', start) for start in positions])
-    for match in original("Roof", text, re.IGNORECASE):
-        occurrence = sum(1 for prior in original("Roof", text[:match.end()], re.IGNORECASE) if prior.start() < match.start())
-        expected = "mention:" + semantic_publication_builder.stable_digest(["source", "object", "roof", occurrence]).split(":")[1][:32]
-        assert semantic_publication_builder._entity_id("source", "Roof", "object", cache['Roof', match.start()]) == expected
-    assert calls == []
-
-
-def test_occurrence_index_uses_literal_search_without_changing_unicode_matching(monkeypatch):
-    text = "I İ ı i S ſ s K K k Σ σ ς ß ẞ é É aaaa"
-    names = ["I", "i", "S", "K", "Σ", "ß", "é", "aa"]
-    original = re.finditer
-    from bisect import bisect_left
-    positions = {name: [m.start() for m in original(re.escape(name), text, re.IGNORECASE)] for name in names}
-    targets = [(name, start) for name in names for start in range(len(text)+1)]
-    expected = {(name, start): bisect_left(positions[name], start) for name, start in targets}
-    scans = []
-    def scan(pattern, source, flags=0):
-        scans.append(flags)
-        return original(pattern, source, flags)
-    monkeypatch.setattr(semantic_publication_builder.re, "finditer", scan)
-    assert semantic_publication_builder._source_occurrence_ordinals(
-        lambda start, end: text[start:end], len(text), targets) == expected
-    assert scans == []
-
-
 def test_worker_internal_failure_retains_code_location_without_source_content():
     from semantica.semantic_worker import _response
     try:
@@ -166,7 +130,7 @@ def test_semantic_artifact_extraction_uses_canonical_semantica_extractors(monkey
     monkeypatch.setattr(
         semantic_publication_builder,
         "_embed_texts",
-        lambda texts, _relay: ([[0.1, 0.2] for _ in texts], ModelReceipt(
+        lambda texts, _relay, *, read_texts=None: ([[0.1, 0.2] for _ in (texts if texts is not None else read_texts())], ModelReceipt(
             id="receipt:embedding",
             operation="embedding",
             provider="test",
@@ -473,19 +437,6 @@ def test_source_assembly_preserves_relations_when_distinct_refs_share_identity(t
     assert len(built['relations']) == len(built['assertions']) == 2
     assert built['relations'][0].source_entity_id == built['relations'][0].target_entity_id
     assert not built['representation'].metadata.get('rejected_candidates')
-
-
-def test_whitespace_variants_share_occurrence_numbers_before_identity_resolution():
-    text = 'Paris Agreement and Paris  Agreement and Paris\nAgreement'
-    names = ['Paris Agreement', 'Paris  Agreement', 'Paris\nAgreement']
-    positions = [0, 20, 41]
-    index = semantic_publication_builder._source_occurrence_ordinals(
-        lambda start, end: text[start:end], len(text), [(name, start) for name in names for start in positions])
-    assert all([index[name, start] for start in positions] == [0, 1, 2] for name in names)
-    ids = [semantic_publication_builder._entity_id('source', name, 'EVENT', index[name, start])
-           for name, start in zip(names, positions)]
-    assert len(set(ids)) == 3
-    assert semantic_publication_builder._entity_id('source', names[0], 'EVENT', index[names[0], positions[1]]) == ids[1]
 
 
 def test_identity_remap_preserves_collapsed_facts_through_native_graph(monkeypatch):

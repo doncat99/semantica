@@ -85,7 +85,7 @@ def test_global_queue_interleaves_sources_preserves_order_and_budget(tmp_path, m
             active -= 1
         return ({'entities': [], 'relations': []}, [], False)
     monkeypatch.setattr(builder, '_extract_window', extract)
-    monkeypatch.setattr(builder, '_embed_texts', lambda texts, relay: ([[1.] for _ in texts], SimpleNamespace()))
+    monkeypatch.setattr(builder, '_embed_source_range', lambda windows, index, relay: ([[1.]], SimpleNamespace()))
     sources, request = scheduling_request(tmp_path, [('source-a', 'abc'), ('source-b', 'xy')], 2)
     events = []
     result = builder._extract_project_sources(sources, request, events.append)
@@ -113,7 +113,7 @@ def test_restore_coalesces_warnings_without_blocking_worker_lock(tmp_path, monke
         calls.append(args)
         return ({'entities': [], 'relations': []}, [receipt], True)
     monkeypatch.setattr(builder, '_extract_window', extract)
-    monkeypatch.setattr(builder, '_embed_texts', lambda texts, relay: ([[1.] for _ in texts], SimpleNamespace()))
+    monkeypatch.setattr(builder, '_embed_source_range', lambda windows, index, relay: ([[1.]], SimpleNamespace()))
     def progress(event):
         if event['stage'] == 'extracting' and any(r['inFlightChunks'] for r in event['metadata']['sourceProgress']):
             # A slow stdout consumer cannot hold the source-state lock.

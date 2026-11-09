@@ -19,7 +19,6 @@ import urllib.request
 from collections import OrderedDict, defaultdict
 from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, replace
-from bisect import bisect_left
 from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
 from hashlib import sha256
@@ -821,7 +820,7 @@ def _source_windows(parsed):
     return _NativeSourceWindows(parsed.text, addresses)
 
 
-def _extract_project_sources(parsed_sources, request, progress):
+def _extract_project_sources(parsed_sources, request, progress, *, completed_operations=None):
     windows = [_source_windows(parsed)
                for source, force_ocr, parsed in parsed_sources]
     locations = [parsed.locations for _, _, parsed in parsed_sources]
@@ -979,7 +978,8 @@ def _extract_project_sources(parsed_sources, request, progress):
             for index in range(max(map(len, windows), default=0))
             for source_index, items in enumerate(windows) if index < len(items)]
     try:
-        phase("extracting", jobs,
+        if completed_operations is None:
+            phase("extracting", jobs,
               lambda job: _extract_window(parsed_sources[job[0]][2].text, request.relays["model"],
                                           request.recipe.extraction_spec, locations[job[0]], windows[job[0]].ranges[job[1]],
                                           parsed_sources[job[0]][0].source_id in getattr(request.recipe, "formula_semantics_source_ids", ())),
@@ -994,11 +994,12 @@ def _extract_project_sources(parsed_sources, request, progress):
             for source_index, items in enumerate(batches) if index < len(items)]
     try:
         phase("embedding", jobs,
-              lambda job: _embed_windows([windows[job[0]][job[1]]], request.relays["embedding"]),
+              lambda job: _embed_source_range(windows[job[0]], job[1], request.relays["embedding"]),
               embedded, 60, 30)
     except ProcessingError as exc:
         raise _typed_extraction_error(exc) from exc
-    return [_assemble_source_results(windows[index], extracted[index], embedded[index])
+    return [_assemble_source_results(windows[index], extracted[index], embedded[index],
+                completed_operations=completed_operations)
             for index, (_, _, parsed) in enumerate(parsed_sources)]
 
 
@@ -1109,17 +1110,20 @@ def _assemble_grounded_windows(windows, extracted_windows):
     return result, receipts
 
 
-def _assemble_source_results(windows, extracted_windows, embedded_batches):
-    result, receipts = _assemble_grounded_windows(windows, extracted_windows)
+def _assemble_source_results(windows, extracted_windows, embedded_batches, *, completed_operations=None):
+    if completed_operations is None:
+        result, receipts = _assemble_grounded_windows(windows, extracted_windows)
+    else:
+        result, receipts = {"native_operations": list(completed_operations)}, []
     embeddings = []
-    batches = ([window] for window in windows)
+    batches = ([windows.ranges[index]] for index in range(len(windows)))
     for batch, (vectors, receipt) in zip(batches, embedded_batches, strict=True):
         receipts.append(receipt)
         ids = getattr(receipt, '_native_vector_ids', [None] * len(vectors))
         embeddings.extend({"start_char": start, "end_char": end, "vector": vector,
                            **({"vector_id": identity, "vector_store_path": receipt._native_vector_path}
                               if identity is not None else {})}
-                          for (start, end, _), vector, identity in zip(batch, vectors, ids, strict=True))
+                          for (start, end), vector, identity in zip(batch, vectors, ids, strict=True))
         for item in embeddings[-len(vectors):]:
             if item.get('vector_id') is not None:
                 item['native_binding'] = receipt._native_vector_binding
@@ -1381,13 +1385,24 @@ def _embed_windows(windows, relay):
         _native_embedding_ranges.reset(token)
 
 
+def _embed_source_range(windows, index, relay):
+    start, end = windows.ranges[index]
+    token = _native_embedding_ranges.set([[start, end]])
+    vectors_token = _native_embedding_vectors_required.set(False)
+    try:
+        return _embed_texts(None, relay, read_texts=lambda: [windows.text[start:end]])
+    finally:
+        _native_embedding_vectors_required.reset(vectors_token)
+        _native_embedding_ranges.reset(token)
+
+
 def _embedding_owner_binding(texts, relay):
     from .semantic_embedding_recipe import embedding_recipe
     from .vector_store.sqlite_vec_store import SQLiteVecStore
     native, source, ranges = _native_build.get(), _native_source_binding.get(), _native_embedding_ranges.get()
-    if native is None or source is None or ranges is None or len(texts) != 1 or len(ranges) != 1:
+    if native is None or source is None or ranges is None or (texts is not None and len(texts) != 1) or len(ranges) != 1:
         raise SemanticArtifactError('Embedding requires one admitted native source range')
-    if len(texts[0]) != ranges[0][1] - ranges[0][0]:
+    if texts is not None and len(texts[0]) != ranges[0][1] - ranges[0][0]:
         raise SemanticArtifactError('Embedding source range differs from its admitted text')
     recipe = embedding_recipe(relay)
     space_id = stable_digest({'binding': relay.binding_id, 'model': relay.model_id,
@@ -1395,18 +1410,28 @@ def _embedding_owner_binding(texts, relay):
     space = {'binding': space_id, 'model': relay.model_id, 'recipe': recipe}
     binding = {key: source[key] for key in ('project', 'source', 'material', 'representation', 'parser')}
     binding['recipe'] = recipe
-    binding.update(model=relay.model_id, space=space_id, ranges=ranges,
-                   input_digest=stable_digest(texts))
+    binding.update(model=relay.model_id, space=space_id, ranges=ranges)
+    if texts is not None:
+        binding['input_digest'] = stable_digest(texts)
     path = Path(native[0].native_store_dir).parent / ('embedding-' + space_id.removeprefix('sha256:') + '.sqlite')
     return SQLiteVecStore, native[2], binding, space, str(path)
 
 
-def _embed_texts(texts: list[str], relay: Any) -> tuple[list[list[float] | None], ModelReceipt]:
+def _embed_texts(texts: list[str] | None, relay: Any, *, read_texts=None) -> tuple[list[list[float] | None], ModelReceipt]:
     include_vectors = _native_embedding_vectors_required.get()
     from .utils.exceptions import ValidationError
     owner_type, cache, binding, space, path = _embedding_owner_binding(texts, relay)
     owner = owner_type.open_embedding_space(path, space)
     try:
+        if texts is None:
+            existing = owner.read_embedding_range_binding(binding) if owner is not None else None
+            if existing is not None:
+                binding = existing
+            else:
+                texts = read_texts()
+                if len(texts) != 1 or len(texts[0]) != binding['ranges'][0][1] - binding['ranges'][0][0]:
+                    raise SemanticArtifactError('Embedding source range differs from its admitted text')
+                binding['input_digest'] = stable_digest(texts)
         key = ((owner.embedding_physical_operation_id(binding) if owner is not None else None)
                or owner_type.embedding_operation_id(binding))
         accepted = cache.accepted_digest('embedding', key)
@@ -2447,65 +2472,29 @@ def _span_id(representation_id: str, start: int, end: int) -> str:
     return readable if len(readable) <= 128 else _evidence_id(["span", representation_id, start, end])
 
 
-def _source_occurrence_ordinals(read, length, targets, *, chunk_size=TEXT_WINDOW_CHARS):
-    """Count preceding matches without retaining a source or its match positions.
-
-    Whitespace compression makes even arbitrarily long ``\\s+`` matches bounded.
-    Original positions preserve occurrence numbering and non-overlap semantics.
-    """
-    groups = {}
-    for name, start in targets:
-        parts = name.split()
-        key = ('words', _normalized_text(name)) if len(parts) > 1 else (
-            ('ascii', name.lower()) if name.isascii() else ('unicode', name))
-        if key not in groups:
-            pattern = ' '.join(parts) if len(parts) > 1 else name
-            if len(pattern) > TEXT_WINDOW_CHARS:
-                raise SemanticArtifactError('entity name exceeds native source traversal budget',
-                                            code='NATIVE_SOURCE_BUDGET_EXCEEDED')
-            groups[key] = dict(pattern=re.compile(re.escape(pattern), re.IGNORECASE),
-                width=len(pattern), targets=[], cursor=0, count=0, next_start=0, carry='', positions=[])
-        groups[key]['targets'].append((start, name))
-    for group in groups.values():
-        group['targets'] = sorted(set(group['targets']))
-    result = {}
-    previous_space = False
-    for offset in range(0, length, chunk_size):
-        compressed, positions = [], []
-        for index, char in enumerate(read(offset, min(length, offset+chunk_size)), offset):
-            is_space = char.isspace()
-            if not is_space or not previous_space:
-                compressed.append(' ' if is_space else char)
-                positions.append(index)
-            previous_space = is_space
-        body = ''.join(compressed)
-        for group in groups.values():
-            value = group['carry'] + body
-            addresses = group['positions'] + positions
-            search_from = bisect_left(addresses, group['next_start'])
-            while (match := group['pattern'].search(value, search_from)) is not None:
-                start = addresses[match.start()]
-                while (group['cursor'] < len(group['targets'])
-                       and group['targets'][group['cursor']][0] <= start):
-                    target_start, name = group['targets'][group['cursor']]
-                    result[name, target_start] = group['count']
-                    group['cursor'] += 1
-                group['count'] += 1
-                group['next_start'] = addresses[match.end()-1] + 1
-                search_from = match.end()
-            keep = group['width'] - 1
-            group['carry'] = value[-keep:] if keep else ''
-            group['positions'] = addresses[-keep:] if keep else []
-    for group in groups.values():
-        for start, name in group['targets'][group['cursor']:]:
-            result[name, start] = group['count']
-    return result
-
-
-def _entity_id(source_id: str, name: str, entity_type: str, occurrence: int) -> str:
-    """Anchor an occurrence without making ordinary sentence edits change its ID."""
-    key = [source_id, entity_type.casefold(), _normalized_text(name), occurrence]
+def _entity_id(source_id: str, representation_id: str, entity_type: str, start: int, end: int) -> str:
+    """New addresses bind the accepted mention, never a whole-source match count."""
+    key = [source_id, representation_id, entity_type.casefold(), start, end]
     return "mention:" + stable_digest(key).split(":")[1][:32]
+
+
+@dataclass
+class _IdentityAddress:
+    id: str
+    evidence_ids: list[str]
+    metadata: dict
+    context_start: int
+    context_end: int
+
+
+@dataclass
+class _FactAddress:
+    id: str
+    subject_id: str
+    predicate: str
+    object_entity_id: str
+    qualifiers: dict
+    evidence_ids: list[str]
 
 
 def _normalized_text(value: str) -> str:
@@ -2516,8 +2505,8 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
     if parsed is None:
         raise SemanticArtifactError('source projection requires native parsed-source admission')
     text, document = parsed.text, parsed.document
-    # Projection validates many overlapping spans (occurrence ordinals, quotes,
-    # context and evidence). Keep a small bounded native-window cache so those
+    # Projection validates overlapping quotes, context and evidence.
+    # Keep a small bounded native-window cache so those
     # validations do not reopen the same reader range for every field.
     projection_windows: OrderedDict[int, str] = OrderedDict()
     projection_window_chars = min(TEXT_WINDOW_CHARS, 4096)
@@ -2550,8 +2539,8 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
     representation_id = f"representation:{_safe_id(source.source_id)}:{representation_revision[7:]}"
     representation_artifact_id = f"artifact:{representation_id}"
     source_locations = parsed.locations
-    entities: dict[str, KnowledgeEntity] = {}
-    entities_by_ref: dict[str, KnowledgeEntity] = {}
+    entities: dict[str, _IdentityAddress] = {}
+    entities_by_ref: dict[str, _IdentityAddress] = {}
     evidence: dict[str, EvidenceSpan] = {}
     native_entity_refs = defaultdict(list)
     native_fact_refs = defaultdict(list)
@@ -2597,8 +2586,6 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
         if type(start) is not int or type(end) is not int or not 0 <= start < end <= len(text):
             raise SemanticArtifactError('entity extraction requires native source coordinates')
         located_entities.append((item, name, entity_type, start, end))
-    occurrences = _source_occurrence_ordinals(lambda start, end: read(start, end), len(text),
-        [(name, start) for _, name, _, start, _ in located_entities])
     for item, name, entity_type, start, end in located_entities:
         if read(start, end).casefold() != name.casefold():
             raise SemanticArtifactError(f"entity is not present in source text: {name}")
@@ -2620,7 +2607,16 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
             confidence=item.get("confidence"),
             metadata=source_metadata,
         )
-        entity_id = _entity_id(source.source_id, name, entity_type, occurrences[name, start])
+        entity_id = _entity_id(source.source_id, representation_id, entity_type, start, end)
+        native = _native_build.get()
+        if native is not None and item.get('native_ref'):
+            records = ExtractionRecords.from_identity_reference(native[1], native[0].project_id, item['native_ref'])
+            if records.identity_projection_exists(item['native_ref']):
+                summary = records.read_identity_summary(item['native_ref'])
+                if (summary['canonical_name'].strip() != name or summary['type'].strip() != entity_type
+                        or summary['metadata'].get('identity_scope') != representation_id):
+                    raise SemanticArtifactError('native identity address differs from accepted mention')
+                entity_id = summary['id']
         if item.get("native_ref") and item["native_ref"] not in native_entity_refs[entity_id]:
             native_entity_refs[entity_id].append(item["native_ref"])
         current = entities.get(entity_id)
@@ -2645,21 +2641,11 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
                     quote=mention_context, start_char=context_start, end_char=context_end,
                     quality="precise", **context_fields), metadata=context_metadata,
             )
-            description = str(item.get("attributes", {}).get("description", "")).strip()
-            if not description or description.casefold() not in mention_context.casefold():
-                description = ""
-            description_metadata = {}
-            description_ids = []
-            entities[entity_id] = KnowledgeEntity(
+            entities[entity_id] = _IdentityAddress(
                 id=entity_id,
-                canonical_name=name,
-                type=entity_type,
-                description=description, context=mention_context,
-                attributes=dict(item.get("attributes", {})),
-                aliases=[],
-                evidence_ids=list(dict.fromkeys([evidence_id, context_id, *description_ids])),
-                status="candidate",
-                metadata={"identity_scope": representation_id, "identity_context_evidence_id": context_id, "extraction_method": "model" if model_result is not None else "pattern", "source_ids": [source.source_id], **description_metadata, **({"detected_label": item["detected_label"]} if item.get("detected_label") else {})},
+                evidence_ids=list(dict.fromkeys([evidence_id, context_id])),
+                context_start=context_start, context_end=context_end,
+                metadata={"identity_scope": representation_id, "identity_context_evidence_id": context_id, "extraction_method": "model" if model_result is not None else "pattern", "source_ids": [source.source_id], **({"detected_label": item["detected_label"]} if item.get("detected_label") else {})},
             )
         elif evidence_id not in current.evidence_ids:
             current.evidence_ids.append(evidence_id)
@@ -2687,7 +2673,6 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
             if description_id not in current.evidence_ids:
                 current.evidence_ids.append(description_id)
             if not current.metadata.get('identity_profile'):
-                current.description = (profile.get('description') or '').strip()
                 current.metadata.update(description_mention_id=entity_id,
                     description_evidence_ids=[description_id], identity_profile=profile)
         if model_result is not None:
@@ -2695,7 +2680,7 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
             if not isinstance(local_id, str) or not local_id or local_id in entities_by_ref:
                 raise SemanticArtifactError("entity extraction requires unique occurrence ids")
             entities_by_ref[local_id] = entities[entity_id]
-    facts: list[KnowledgeAssertion] = []
+    facts: list[_FactAddress] = []
     if model_result is not None:
         for item in model_result["relations"]:
             if not isinstance(item, dict):
@@ -2740,11 +2725,30 @@ def _build_source(source: Any, force_ocr: bool, model_result: dict[str, Any] | N
             predicate = normalize_fact_predicate(predicate)
             key = stable_digest([source.source_id, subject_entity.id, predicate, object_entity.id, qualifiers]).split(":")[1][:32]
             relation_id, assertion_id = "relation:" + key, "assertion:" + key
+            native = _native_build.get()
+            existing = []
+            if native is not None:
+                for ref in item.get('native_refs', []):
+                    records = ExtractionRecords.from_fact_reference(native[1], native[0].project_id, ref)
+                    if records.fact_projection_exists(ref):
+                        projection = records.read_fact_projection(ref, 'assertion')
+                        if (projection['subject_id'] != subject_entity.id
+                                or projection['object_entity_id'] != object_entity.id
+                                or projection['predicate'] != predicate or projection['qualifiers'] != qualifiers
+                                or projection['evidence_ids'] != supporting_ids):
+                            raise SemanticArtifactError('native fact address differs from accepted observation')
+                        existing.append(projection['id'])
+                if len(set(existing)) > 1:
+                    raise SemanticArtifactError('native fact members have inconsistent addresses')
+                if existing:
+                    assertion_id = existing[0]
+                    relation_id = 'relation:' + assertion_id.split(':', 1)[1]
             observation_key = stable_digest([relation_id, supporting_ids])
             for native_ref in item.get("native_refs", []):
                 if native_ref not in native_fact_refs[observation_key]:
                     native_fact_refs[observation_key].append(native_ref)
-            facts.append(KnowledgeAssertion(id=assertion_id, subject_id=subject_entity.id, predicate=predicate, object=object_entity.canonical_name, object_entity_id=object_entity.id, qualifiers=qualifiers, evidence_ids=supporting_ids, support_ids=supporting_ids, status="candidate"))
+            facts.append(_FactAddress(id=assertion_id, subject_id=subject_entity.id, predicate=predicate,
+                object_entity_id=object_entity.id, qualifiers=qualifiers, evidence_ids=supporting_ids))
     representation = DocumentRepresentation(
         id=representation_id,
         source_id=source.source_id,
@@ -3110,6 +3114,51 @@ def build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=Non
 def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=None) -> dict[str, Any]:
     """Assemble product contracts; native pipeline owns stage execution."""
     from .pipeline import PipelineBuilder, ExecutionEngine
+    from .triplet_store.publication_records import PublicationRecords
+
+    publication = PublicationRecords(_native_build.get()[1], request.project_id)
+    completion_key = stable_digest(dict(project=request.project_id, mode=request.recipe.id,
+        sources=sorted((dict(source=item.source_id, material=item.material_revision, mime=item.mime_type)
+            for item in request.sources), key=lambda item: item['source']),
+        parses=sorted((dict(source=item.source_id, revision=item.representation_revision)
+            for item in request.parsed_sources), key=lambda item: item['source']),
+        extraction=_extraction_recipe(request) if request.recipe.id == 'model' else 'deterministic-pattern',
+        classification=request.recipe.classification_profile.model_dump(mode='json') if request.recipe.classification_profile else None,
+        force_ocr=sorted(request.recipe.force_ocr_source_ids),
+        formulas=sorted(request.recipe.formula_semantics_source_ids),
+        identity_properties=request.identity_property_schema,
+        models={kind: dict(model=relay.model_id, binding=relay.binding_id,
+            context=relay.context_window_tokens, output=relay.max_output_tokens)
+            for kind, relay in request.relays.items()},
+        organization=request.organization_reports.recipe_digest))
+    completed_indexes = publication.completed_publication(completion_key)
+    if completed_indexes is not None:
+        from .explorer.search_index import GraphSearchIndex
+        from .vector_store.sqlite_vec_store import SQLiteVecStore
+        status = publication.status()
+        keyword = completed_indexes['keyword']
+        lexical = GraphSearchIndex.open_native_positions(keyword['path'], project=request.project_id,
+            generation=status['generation'], receipt=keyword['receipt'],
+            installation_identity=tuple(map(int, keyword['installation']['identity'].split(':'))))
+        lexical.close_native_positions()
+        semantic = completed_indexes['semantic']
+        space = semantic['space']
+        vectors = SQLiteVecStore.open_embedding_space(semantic['path'],
+            dict(binding=space['space_id'], model=space['modelId'], recipe=space['recipe']),
+            space['dimensions'], read_only=True)
+        if vectors is None:
+            raise SemanticArtifactError('Completed native vector owner is missing')
+        try:
+            vectors.require_native_publication(request.project_id, status['generation'], semantic['receipt'])
+        finally:
+            vectors.close()
+        if progress:
+            progress(dict(stage='artifact_writing', percent=100, detail='Completed publication reused',
+                metadata=dict(reused=True)))
+        return dict(publication=status, semantic_store=dict(
+            path=str(Path(request.native_store_dir).resolve()), projectId=request.project_id,
+            generationId=status['generation']), native_indexes=completed_indexes,
+            model_receipts=[])
 
     source_builds = []
     model_receipts: list[ModelReceipt] = []
@@ -3151,8 +3200,17 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                         "metadata": {**event.get("metadata", {}),
                             "sourceOrdinal": source_index, "sourceCount": len(request.sources)}})
             force_ocr = source.source_id in request.recipe.force_ocr_source_ids
+            store = _native_build.get()[1]
+            projection_key=ExtractionRecords.source_projection_identity(project=request.project_id, source=source.source_id,
+                material=source.material_revision, mime_type=source.mime_type,
+                representation=parsed_refs[source.source_id].representation_revision,
+                mode=request.recipe.id,force_ocr=force_ocr,
+                extraction=_extraction_recipe(request) if request.recipe.id=='model' else 'deterministic-pattern',
+                formula_semantics=source.source_id in request.recipe.formula_semantics_source_ids)
+            addresses=ExtractionRecords.source_projection(store,request.project_id,projection_key,header_only=True)
+            header = next(addresses) if addresses is not None else None
             parsed = _load_parsed_source(source, parsed_refs[source.source_id], force_ocr,
-                request.document_processing.model_dump(mode="json", by_alias=True))
+                request.document_processing.model_dump(mode="json", by_alias=True), completed=header is not None)
             document = parsed.document
             total_pages = parsed.page_count
             if progress:
@@ -3164,15 +3222,9 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                 })
             if request.recipe.id == "model":
                 model_result, embeddings, source_receipts = _extract_project_sources(
-                    [(source, force_ocr, parsed)], request, source_progress if progress else None)[0]
-            store = _native_build.get()[1]
-            projection_key=stable_digest(dict(source=source.model_dump(mode='json',by_alias=True),
-                representation=parsed_refs[source.source_id].representation_revision,
-                mode=request.recipe.id,force_ocr=force_ocr,
-                operations=sorted(set((model_result or {}).get('native_operations',[]))) if request.recipe.id=='model' else []))
-            addresses=ExtractionRecords.source_projection(store,request.project_id,projection_key,header_only=True)
+                    [(source, force_ocr, parsed)], request, source_progress if progress else None,
+                    completed_operations=header['operations'] if header is not None else None)[0]
             if addresses is not None:
-                header=next(addresses)
                 if set(header)!={'representation','artifact_id','operations'}:
                     raise SemanticArtifactError('native source projection header differs')
                 built_source=dict(source=source,
@@ -3203,17 +3255,20 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                     *built_source["evidence"], *built_source["passages"], *_docling_cell_evidence(built_source),
                 ]}.values())
                 store = _native_build.get()[1]
-                spans = {span.id: span for span in built_source['evidence']}
                 for entity in built_source.pop('entities'):
-                    context = spans[entity.metadata['identity_context_evidence_id']].locator
                     refs = built_source['native_entity_refs'].get(entity.id)
                     if not refs:
                         raise SemanticArtifactError('identity has no native membership', code='NATIVE_PUBLICATION_INCOMPLETE')
                     for ref in refs:
                         records = ExtractionRecords.from_identity_reference(store,request.project_id,ref)
+                        if records.identity_projection_exists(ref):
+                            summary = records.read_identity_summary(ref)
+                            if summary['id'] != entity.id or summary['evidence_ids'] != entity.evidence_ids:
+                                raise SemanticArtifactError('existing native identity addresses differ')
+                            continue
                         records.write_identity_projection(ref, mention_id=entity.id,
                             representation_id=built_source['representation'].id,
-                            context_start=context.start_char,context_end=context.end_char,
+                            context_start=entity.context_start,context_end=entity.context_end,
                             evidence_ids=entity.evidence_ids,metadata=entity.metadata)
                 del built_source['native_entity_refs']
                 for fact in built_source.pop('facts'):
@@ -3223,6 +3278,8 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                         raise SemanticArtifactError('fact has no native membership',code='NATIVE_PUBLICATION_INCOMPLETE')
                     for ref in refs:
                         records=ExtractionRecords.from_fact_reference(store,request.project_id,ref)
+                        if records.fact_projection_exists(ref):
+                            continue
                         records.write_fact_projection(ref,assertion_id=fact.id,relation_id=relation_id,
                             source_id=fact.subject_id,target_id=fact.object_entity_id,
                             predicate=fact.predicate,qualifiers=fact.qualifiers,evidence_ids=fact.evidence_ids)
@@ -3434,7 +3491,8 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
         index=fact_index=QualifiedFactIndex(store,request.project_id,generation)
         with _project_progress(progress,'fact_reconciliation',90) as metadata, index.publication.build_scope(generation), index.publication.checkpointed(generation):
             metadata.update(indexedObservations=0,completedPartitions=0,canonicalRelations=0)
-            input_key=stable_digest(dict(identity=index.publication.one(index.publication.head,'identityStageInput')))
+            identity_publication = identity_index.publication
+            input_key=stable_digest(dict(identity=identity_publication.one(identity_publication.head,'identityStageInput')))
             if index.publication.fact_stage_status(generation,input_key):
                 metadata.update(reused=True)
                 return
@@ -3528,7 +3586,8 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
             native_indexes = _publish_native_indexes(request, generation, source_builds)
             if native_indexes.get('semantic') is not None:
                 store.activate_publication(request.project_id, generation,
-                    indexes={name: descriptor['receipt'] for name, descriptor in native_indexes.items()})
+                    indexes={name: descriptor['receipt'] for name, descriptor in native_indexes.items()},
+                    completed_input=completion_key, index_addresses=native_indexes)
             return {"publication": store.publication_status(request.project_id),
                     "semantic_store": {"path": str(Path(request.native_store_dir).resolve()),
                                        "projectId": request.project_id, "generationId": generation},

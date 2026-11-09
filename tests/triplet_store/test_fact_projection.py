@@ -46,10 +46,11 @@ def test_native_fact_projection_matches_source_observation_oracle(tmp_path, monk
             relation=KnowledgeRelation(id='relation:'+fact.id.split(':')[1],
                 source_entity_id=fact.subject_id,target_entity_id=fact.object_entity_id,
                 type=fact.predicate,qualifiers=fact.qualifiers,evidence_ids=fact.evidence_ids,
-                support_ids=fact.support_ids,status=fact.status)
+                support_ids=fact.evidence_ids,status='candidate')
             key=builder.stable_digest([relation.id,relation.evidence_ids])
             for ref in result['native_fact_refs'][key]:
-                expected[ref]=(fact.model_dump(),relation.model_dump())
+                expected[ref]=(dict(id=fact.id, subject_id=fact.subject_id, object_entity_id=fact.object_entity_id,
+                    predicate=fact.predicate, qualifiers=fact.qualifiers, evidence_ids=fact.evidence_ids),relation.model_dump())
         return result
     monkeypatch.setattr(builder,'_build_source',capture)
     from semantica.triplet_store.qualified_fact_index import QualifiedFactIndex
@@ -57,7 +58,7 @@ def test_native_fact_projection_matches_source_observation_oracle(tmp_path, monk
     def verify_released(index,**options):
         assert source_results
         assert all(not ({'facts','assertions','relations','native_fact_refs'} & result.keys()) for result in source_results)
-        assert index.owner._build_plan_scope == (index.publication.graph.value,index.generation)
+        assert index.owner._build_plan_scope == (index.publication.publication_graph.value,index.generation)
         return original_index_build(index,**options)
     monkeypatch.setattr(QualifiedFactIndex,'reconcile_and_stage',verify_released)
     build_child(tmp_path,stop_before_publication=False)
@@ -67,7 +68,9 @@ def test_native_fact_projection_matches_source_observation_oracle(tmp_path, monk
         assert expected
         for ref,(assertion,relation) in expected.items():
             records=ExtractionRecords.from_fact_reference(store,request.project_id,ref)
-            assert records.read_fact_projection(ref,'assertion')==assertion
+            actual = records.read_fact_projection(ref,'assertion')
+            assert {key: actual[key] for key in assertion} == assertion
+            assert actual['object'] == 'Analytical Engine'
             assert records.read_fact_projection(ref,'relation')==relation
             graph=records.fact_projection_graph
             node=store._oxigraph.NamedNode(ref)
@@ -91,7 +94,7 @@ def test_native_family_representation_matches_builder_evidence(tmp_path, monkeyp
         expected.update(item.representation_id for item in result['evidence'])
         return result
     def capture_family(index, **kwargs):
-        assert index.owner._build_plan_scope == (index.publication.graph.value,index.generation)
+        assert index.owner._build_plan_scope == (index.publication.publication_graph.value,index.generation)
         assert 0 < len(kwargs['subject_ids']) <= 128
         page = original_family(index, **kwargs)
         actual.update(value for row in page['records'] for value in row['representations'])

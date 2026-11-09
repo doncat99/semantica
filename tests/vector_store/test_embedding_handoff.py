@@ -24,6 +24,69 @@ RECEIPT = dict(id='receipt-1', operation='embedding', provider='fixture', model=
     metadata={'usage': {'input_tokens': 7}}, parameters={})
 
 
+def test_completed_space_opens_read_only_without_schema_writes(tmp_path, monkeypatch):
+    path = str(tmp_path/'vectors.db')
+    assert SQLiteVecStore.open_embedding_space(path, SPACE, 3, read_only=True) is None
+    assert not (tmp_path/'vectors.db').exists()
+    owner = SQLiteVecStore.open_embedding_space(path, SPACE, 3)
+    original = owner.adopt_embedding(BINDING, [[1.,0.,0.],[0.,1.,0.]], RECEIPT, accepted_digest='paid')
+    owner.close()
+    def reject_schema(*args, **kwargs):
+        raise AssertionError('Completed read attempted schema creation')
+    monkeypatch.setattr(SQLiteVecStore, '_ensure_table_exists', reject_schema)
+    owner = SQLiteVecStore.open_embedding_space(path, SPACE, read_only=True)
+    try:
+        assert owner.read_embedding(BINDING) == original
+        with pytest.raises(sqlite3.OperationalError, match='readonly'):
+            owner._conn.execute('DELETE FROM embeddings_embedding_operations')
+    finally:
+        owner.close()
+
+
+def test_missing_scope_index_requires_offline_upgrade_without_copying_vectors(tmp_path):
+    path = str(tmp_path/'vectors.db')
+    owner = SQLiteVecStore.open_embedding_space(path, SPACE, 3)
+    original = owner.adopt_embedding(BINDING, [[1.,0.,0.],[0.,1.,0.]], RECEIPT, accepted_digest='paid')
+    rowids = owner._conn.execute('SELECT * FROM embeddings_rowids ORDER BY rowid').fetchall()
+    owner._conn.execute('DROP INDEX embeddings_embedding_scope')
+    owner._conn.commit()
+    owner.close()
+    with pytest.raises(ProcessingError, match='explicit offline migration'):
+        SQLiteVecStore.open_embedding_space(path, SPACE)
+    assert SQLiteVecStore.migrate_embedding_scope_index(path) == dict(indexed=False, changed=False, vectors_copied=0)
+    assert SQLiteVecStore.migrate_embedding_scope_index(path, execute=True)['changed']
+    assert not SQLiteVecStore.migrate_embedding_scope_index(path, execute=True)['changed']
+    owner = SQLiteVecStore.open_embedding_space(path, SPACE)
+    try:
+        assert owner.read_embedding(BINDING) == original
+        assert owner._conn.execute('SELECT * FROM embeddings_rowids ORDER BY rowid').fetchall() == rowids
+    finally:
+        owner.close()
+
+
+def test_range_lookup_is_indexed_survives_restart_and_checks_scope(tmp_path):
+    path = str(tmp_path/'vectors.db')
+    owner = SQLiteVecStore.open_embedding_space(path, SPACE, 3)
+    owner.adopt_embedding(BINDING, [[1.,0.,0.],[0.,1.,0.]], RECEIPT, accepted_digest='paid')
+    owner.close()
+    owner = SQLiteVecStore.open_embedding_space(path, SPACE)
+    try:
+        scope = {key: value for key, value in BINDING.items() if key != 'input_digest'}
+        queries = []
+        owner._conn.set_trace_callback(queries.append)
+        assert owner.read_embedding_range_binding(scope) == BINDING
+        owner._conn.set_trace_callback(None)
+        query = next(query for query in queries if query.startswith('SELECT logical_id,binding_json'))
+        plan = owner._conn.execute('EXPLAIN QUERY PLAN '+query).fetchall()
+        assert any('USING INDEX embeddings_embedding_scope' in row[-1] for row in plan), plan
+        assert owner.read_embedding_range_binding({**scope, 'source': 'other'}) is None
+        assert owner.read_embedding_range_binding({**scope, 'ranges': [[0, 7], [9, 16]]}) is None
+        with pytest.raises(ValidationError, match='exact immutable scope'):
+            owner.read_embedding_range_binding({**scope, 'filePath': '/irrelevant'})
+    finally:
+        owner.close()
+
+
 def test_offline_identity_migration_keeps_physical_vectors_receipts_and_rowids(tmp_path):
     owner = SQLiteVecStore.open_embedding_space(str(tmp_path/'vectors.db'), SPACE, 3)
     before = owner.adopt_embedding(BINDING, [[1.,0.,0.],[0.,1.,0.]], RECEIPT, accepted_digest='paid')

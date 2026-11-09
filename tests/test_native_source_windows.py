@@ -192,7 +192,7 @@ def test_source_range_hydrates_exact_arbitrary_unicode_span(tmp_path, format):
 def test_projection_reads_fragmented_source_by_native_windows(tmp_path, monkeypatch):
     from semantica import semantic_document_reader as reader
     from semantica.semantic_publication_builder import _read_source_projection_text
-    from semantica.semantic_publication_builder import _source_passage_ranges, _source_occurrence_ordinals
+    from semantica.semantic_publication_builder import _source_passage_ranges
 
     native = DoclingDocument(name='fragmented')
     for section in range(12):
@@ -232,9 +232,6 @@ def test_projection_reads_fragmented_source_by_native_windows(tmp_path, monkeypa
     actual = list(_source_passage_ranges(lambda start, end: text[start:end], len(text)))
     oracle = list(_source_passage_ranges(lambda start, end: expected[start:end], len(expected)))
     assert actual == oracle
-    targets = [('Alpha Beta', len(expected)), ('Beta 😀', len(expected)//2)]
-    assert _source_occurrence_ordinals(lambda start, end: text[start:end], len(text), targets) == (
-        _source_occurrence_ordinals(lambda start, end: expected[start:end], len(expected), targets))
     from semantica.semantic_publication_builder import _EvidenceReference
     from semantica.semantic_artifact_schema import EvidenceSpan, DocumentLocator
     start, end = 13, 9000

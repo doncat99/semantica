@@ -175,9 +175,10 @@ def test_activation_rejects_equal_count_foreign_member_replacement(tmp_path):
     representative = publication.one(fact, 'representative')
     replaced = store._oxigraph.NamedNode(next(ref for ref in relations if ref != representative))
     foreign = store._oxigraph.NamedNode('urn:test:foreign-relation')
-    store.store.update(f'''DELETE DATA {{ GRAPH {publication.graph} {{
+    decision_graph = publication.record_graph(fact)
+    store.store.update(f'''DELETE DATA {{ GRAPH {decision_graph} {{
         {fact} <{P}member> {replaced} . }} }}''')
-    store.store.update(f'''INSERT DATA {{ GRAPH {publication.graph} {{
+    store.store.update(f'''INSERT DATA {{ GRAPH {decision_graph} {{
         {fact} <{P}member> {foreign} . }} }}''')
 
     with pytest.raises(ProcessingError, match='outside (the )?current publication'):
@@ -217,6 +218,7 @@ def test_publication_activation_at_esg_observation_scale(tmp_path):
         members = relation_ids[offset:offset + size]
         quads.extend((
             ox.Quad(publication.head, ox.NamedNode(P+'fact'), fact, publication.graph),
+            ox.Quad(fact, ox.NamedNode(P+'factDecisionGraph'), publication.graph, publication.graph),
             ox.Quad(fact, ox.NamedNode(P+'memberCount'), ox.Literal(size), publication.graph),
             ox.Quad(fact, ox.NamedNode(P+'representative'), members[0], publication.graph),
             *(ox.Quad(fact, ox.NamedNode(P+'member'), member, publication.graph) for member in members),

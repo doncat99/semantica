@@ -276,13 +276,15 @@ def _verify_vectors(path, semantic, reference, publication, counts, check, sqlit
         raise
 
 
-def index_native_source_projection(request):
+def index_native_source_projection(request, *, rebind=False, execute=False):
     """Explicit offline migration of one completed projection's lookup edges."""
     from .triplet_store.oxigraph_store import OxigraphStore
     from .triplet_store.publication_records import PublicationRecords
     from .triplet_store.extraction_records import ExtractionRecords
 
-    if (not isinstance(request,dict) or set(request)!={'semanticStorePath','publicationReference','inputKey'}
+    fields = ({'semanticStorePath','publicationReference','previous','extraction','formulaSemantics'}
+        if rebind else {'semanticStorePath','publicationReference','inputKey'})
+    if (not isinstance(request,dict) or set(request)!=fields
             or len(json.dumps(request).encode())>65536):
         raise ProcessingError('Invalid source projection indexing request')
     path=request['semanticStorePath']
@@ -295,6 +297,9 @@ def index_native_source_projection(request):
     try:
         if PublicationRecords(owner,reference['project']).status()!=reference:
             raise ProcessingError('Native publication reference differs from installed owner')
+        if rebind:
+            return ExtractionRecords.rebind_source_projection(owner, reference['project'], request['previous'],
+                extraction=request['extraction'], formula_semantics=request['formulaSemantics'], execute=execute)
         ExtractionRecords.index_source_projection(owner,reference['project'],request['inputKey'])
         return dict(indexed=True,publicationReference=reference,inputKey=request['inputKey'])
     finally:
@@ -306,13 +311,32 @@ def main():
     parser.add_argument('--request-file', required=True)
     parser.add_argument('--index-source-projection',action='store_true',
         help='Explicit offline address indexing; never invoked during ordinary verification')
+    parser.add_argument('--rebind-source-projection', action='store_true',
+        help='Offline semantic rebind of a reviewed historical projection; dry-run unless --execute')
+    parser.add_argument('--index-embedding-scope', action='store_true',
+        help='Explicit offline upgrade of the accepted embedding range lookup index')
+    parser.add_argument('--execute', action='store_true')
     args = parser.parse_args()
+    if sum((args.index_source_projection, args.rebind_source_projection, args.index_embedding_scope)) > 1:
+        parser.error('Choose exactly one maintenance operation')
     with open(args.request_file, 'rb') as stream:
         raw = stream.read(65537)
     if len(raw) > 65536:
         raise ProcessingError('Native maintenance request exceeds 64KiB')
     request=json.loads(raw)
-    result = index_native_source_projection(request) if args.index_source_projection else verify_native_installation(request)
+    if args.index_embedding_scope:
+        from .vector_store.sqlite_vec_store import SQLiteVecStore
+        from .triplet_store.oxigraph_store import OxigraphStore
+        if set(request) != {'semanticStorePath', 'vectorStorePath'}:
+            raise ProcessingError('Embedding index migration requires exact native store paths')
+        owner = OxigraphStore(request['semanticStorePath'])
+        try:
+            result = SQLiteVecStore.migrate_embedding_scope_index(request['vectorStorePath'], execute=args.execute)
+        finally:
+            owner.close()
+    else:
+        result = (index_native_source_projection(request, rebind=args.rebind_source_projection, execute=args.execute)
+            if args.index_source_projection or args.rebind_source_projection else verify_native_installation(request))
     sys.stdout.write(json.dumps(result, separators=(',', ':'))+'\n')
 
 

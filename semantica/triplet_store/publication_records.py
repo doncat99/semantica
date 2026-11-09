@@ -53,15 +53,92 @@ def _locked(method):
     return call
 
 
+def _stage(kind):
+    def decorate(method):
+        @wraps(method)
+        def call(self, *args, **kwargs):
+            previous = self.stage
+            self.stage = kind
+            try:
+                return method(self, *args, **kwargs)
+            finally:
+                self.stage = previous
+        return call
+    return decorate
+
+
 class PublicationRecords:
-    def __init__(self, owner, project):
+    def __init__(self, owner, project, *, stage=None):
         if not isinstance(project, str) or not project or len(project.encode()) > 4096:
             raise ProcessingError("Invalid publication project")
         self.owner, self.ox, self.project = owner, owner._oxigraph, project
         digest = hashlib.sha256(project.encode()).hexdigest()
-        self.graph = self.ox.NamedNode(P + digest)
+        self.registry = self.ox.NamedNode(P + digest)
+        self.registry_head = self.ox.NamedNode(self.registry.value + ':head')
         self.facts = self.ox.NamedNode("urn:semantica:project:" + digest)
-        self.head = self.ox.NamedNode(self.graph.value + ":head")
+        self.stage = stage
+        self.generation = self._pointer(self.registry_head, 'latest', self.registry)
+
+    def _pointer(self, node, field, graph):
+        values = list(islice(self.owner.store.quads_for_pattern(
+            node, self.ox.NamedNode(P + field), None, graph), 2))
+        if len(values) > 1:
+            raise ProcessingError('Publication pointer is duplicated: ' + field)
+        return values[0].object if values else None
+
+    @property
+    def publication_graph(self):
+        generation = self.generation
+        return self.ox.NamedNode(self.registry.value + ':generation:' + generation.value) if generation else self.registry
+
+    @property
+    def publication_head(self):
+        return self.ox.NamedNode(self.publication_graph.value + ':head')
+
+    def stage_graph(self, kind):
+        if self.generation is None:
+            return self.publication_graph
+        return self._pointer(self.publication_head, kind + 'Graph', self.publication_graph) or self.publication_graph
+
+    def stage_head(self, kind):
+        return self.ox.NamedNode(self.stage_graph(kind).value + ':head')
+
+    @property
+    def graph(self):
+        return self.stage_graph(self.stage) if self.stage else self.publication_graph
+
+    @property
+    def head(self):
+        return self.ox.NamedNode(self.graph.value + ':head')
+
+    def _completion_key(self, kind, input_key, *, functional_predicates=()):
+        identity = [input_key, self.functional_policy(functional_predicates)] if kind == 'fact' else input_key
+        return self.ox.NamedNode(self.registry.value + ':' + kind + ':' + hashlib.sha256(
+            json.dumps(identity, separators=(',', ':')).encode()).hexdigest())
+
+    def _bind_stage(self, kind, input_key, *, functional_predicates=()):
+        """A publication references a completed stage; it never copies its rows."""
+        key = self._completion_key(kind, input_key, functional_predicates=functional_predicates)
+        completed = self._pointer(key, 'completedGraph', self.registry)
+        graph = completed or self.ox.NamedNode(self.publication_graph.value + ':' + kind)
+        previous = self._pointer(self.publication_head, kind + 'Graph', self.publication_graph)
+        if previous is not None and previous != graph:
+            raise ProcessingError('Publication stage input changed within an attempt')
+        self.owner.store.add(self.ox.Quad(self.publication_head,
+            self.ox.NamedNode(P + kind + 'Graph'), graph, self.publication_graph))
+        return key, graph
+
+    def _complete_stage(self, kind, input_key, *, functional_predicates=()):
+        key, graph = self._bind_stage(kind, input_key, functional_predicates=functional_predicates)
+        self.owner.flush()
+        self.owner.store.add(self.ox.Quad(key, self.ox.NamedNode(P + 'completedGraph'), graph, self.registry))
+        self.owner.flush()
+
+    def _writable_stage(self):
+        if self.stage is not None and self.graph != self.publication_graph:
+            completion = 'identityStageInput' if self.stage == 'identity' else 'factStageInput'
+            if self.values(self.head, completion):
+                raise ProcessingError('Completed publication stage is immutable')
 
     def iri(self, value):
         if not isinstance(value, str) or not value or len(value.encode()) > 8192:
@@ -77,12 +154,73 @@ class PublicationRecords:
         return self.ox.Literal(value)
 
     def values(self, node, field, graph=None):
+        if graph is None and self.stage in {'identity', 'fact'} and node != self.head:
+            graph = self.record_graph(node)
+        if graph is None and self.stage is None:
+            if node == self.publication_head and (field.startswith('identity') or field == 'canonical'):
+                node, graph = self.stage_head('identity'), self.stage_graph('identity')
+            elif node == self.publication_head and (field.startswith('qualified') or field in {'fact', 'factStageInput'}):
+                node, graph = self.stage_head('fact'), self.stage_graph('fact')
+            elif node != self.publication_head:
+                graph = self.record_graph(node)
         result = []
         for quad in self.owner.store.quads_for_pattern(node, self.ox.NamedNode(P + field), None, graph or self.graph):
             result.append(quad.object)
             if len(result) > MAX_ROWS:
                 raise ProcessingError("Publication field exceeds 128 references")
         return result
+
+    def record_graph(self, node):
+        canonical = self.ox.NamedNode(node.value.split(':selector:')[0])
+        location = self._pointer(canonical, 'canonicalGraph', self.stage_graph('identity'))
+        if location is not None:
+            return location
+        location = self._pointer(node, 'factDecisionGraph', self.stage_graph('fact'))
+        if location is not None:
+            return location
+        for kind, role in (('identity', 'canonical'), ('fact', 'fact')):
+            graph, head = self.stage_graph(kind), self.stage_head(kind)
+            if next(self.owner.store.quads_for_pattern(head, self.ox.NamedNode(P + role), node, graph), None):
+                raise ProcessingError('Completed '+kind+' decision graph missing')
+        return self.graph
+
+    def canonical_pattern(self, node, pattern, *, variable='?canonicalRecordGraph'):
+        """Join current membership to its immutable decision, without copying it."""
+        return f'''GRAPH {self.stage_graph('identity')} {{
+            {self.stage_head('identity')} <{P}canonical> {node} .
+            {node} <{P}canonicalGraph> {variable} }} GRAPH {variable} {{ {pattern} }}'''
+
+    def fact_pattern(self, node, pattern, *, variable='?factRecordGraph'):
+        return f'''GRAPH {self.stage_graph('fact')} {{
+            {self.stage_head('fact')} <{P}fact> {node} .
+            {node} <{P}factDecisionGraph> {variable} }} GRAPH {variable} {{ {pattern} }}'''
+
+    def _check_decision_plans(self, kind):
+        role, pointer = ('canonical', 'canonicalGraph') if kind == 'identity' else ('fact', 'factDecisionGraph')
+        graph, head = self.stage_graph(kind), self.stage_head(kind)
+        invalid=self.owner.store.query(f'''SELECT ?node WHERE {{ GRAPH {graph} {{
+            {head} <{P+role}> ?node . OPTIONAL {{ ?node <{P+pointer}> ?location }} }} }}
+            GROUP BY ?node HAVING(COUNT(?location) != 1) LIMIT 1''')
+        if next(iter(invalid),None) is not None:
+            raise ProcessingError('Completed '+kind+' decision graph missing or duplicated')
+        pattern = self.canonical_pattern if kind == 'identity' else self.fact_pattern
+        for field,count in [('member','memberCount')]+([('selector','selectorCount')] if kind=='identity' else []):
+            missing = self.owner.store.query(f'''ASK {{ GRAPH {graph} {{
+                {head} <{P+role}> ?node . ?node <{P+pointer}> ?location }}
+                FILTER NOT EXISTS {{ GRAPH ?location {{ ?node <{P+count}> ?expected }} }} }}''')
+            body=f'''?node <{P+count}> ?expected .
+                BIND(IF(datatype(?expected) IN (xsd:integer, xsd:string),
+                    xsd:integer(?expected), 1/0) AS ?integer)
+                OPTIONAL {{ ?node <{P+field}> ?ref }}'''
+            invalid=self.owner.store.query(f'''SELECT ?node WHERE {{ {pattern('?node',body)} }}
+                GROUP BY ?node HAVING(COUNT(DISTINCT ?expected) != 1 ||
+                    COUNT(?integer) != COUNT(?expected) || MIN(?integer) < 0 ||
+                    COUNT(?ref) != MIN(?integer)) LIMIT 1''',
+                prefixes={'xsd':'http://www.w3.org/2001/XMLSchema#'})
+            if bool(missing) or next(iter(invalid),None) is not None:
+                label = 'Canonical' if kind == 'identity' else 'Canonical fact'
+                label += ' membership' if field == 'member' else ' selector'
+                raise ProcessingError(label+' plan is incomplete')
 
     def fields(self, node, fields, *, graph=None, prefix=P):
         """Point-read selected fields without traversing support membership."""
@@ -103,7 +241,7 @@ class PublicationRecords:
         for node in nodes:
             check_query_cancellation()
             for predicate,field in predicates:
-                for quad in self.owner.store.quads_for_pattern(node,predicate,None,graph or self.graph):
+                for quad in self.owner.store.quads_for_pattern(node,predicate,None,graph or self.record_graph(node)):
                     values=result[node][field]
                     size+=len(str(quad.object).encode())
                     if len(values)>=MAX_ROWS or size>MAX_BYTES:
@@ -114,7 +252,7 @@ class PublicationRecords:
     def qualified_members(self, *, decision):
         """Final native support adjacency; no intermediate view entries exist."""
         self.decision_identity(decision)
-        yield from self.owner.store.quads_for_pattern(decision,self.ox.NamedNode(P+'member'),None,self.graph)
+        yield from self.owner.store.quads_for_pattern(decision,self.ox.NamedNode(P+'member'),None,self.record_graph(decision))
 
     def decision_identity(self, node):
         """The address contains the semantic identity, never a second scalar copy."""
@@ -134,30 +272,73 @@ class PublicationRecords:
 
     @_locked
     def status(self):
-        if not self.values(self.head, "generation"):
+        head, graph = self.publication_head, self.publication_graph
+        if not self.values(head, "generation", graph=graph):
             return None
-        result = dict(project=self.project, generation=self.one(self.head, "generation"),
-                      state=self.one(self.head, "state"), source_count=int(self.one(self.head, "sourceCount")),
-                      canonical_count=(int(self.one(self.head, "canonicalCount"))
-                          if self.values(self.head, "canonicalCount") else None), indexes={})
+        def one(node, field):
+            values = self.values(node, field, graph=graph)
+            if len(values) != 1:
+                raise ProcessingError('Publication field missing or duplicated: ' + field)
+            return values[0].value
+        result = dict(project=self.project, generation=one(head, "generation"),
+                      state=one(head, "state"), source_count=int(one(head, "sourceCount")),
+                      canonical_count=(int(one(head, "canonicalCount"))
+                          if self.values(head, "canonicalCount", graph=graph) else None), indexes={})
         if result["state"] == "ready":
             for kind in ("keyword", "semantic"):
-                node = self.iri(self.one(self.head, kind))
-                identity = {key: self.one(node, key) for key in ("kind", "store_id", "recipe_digest")}
-                if self.values(node, "space_id"):
-                    identity["space_id"] = self.one(node, "space_id")
+                node = self.iri(one(head, kind))
+                identity = {key: one(node, key) for key in ("kind", "store_id", "recipe_digest")}
+                if self.values(node, "space_id", graph=graph):
+                    identity["space_id"] = one(node, "space_id")
                 result["indexes"][kind] = identity
         return result
 
     def fence(self, generation, state="ready"):
+        self.scalar(generation)
+        self.generation = self.scalar(generation)
         status = self.status()
         if status is None or status["generation"] != generation or status["state"] != state:
             raise ProcessingError("Publication generation stale or not " + state)
+        pointer = self._pointer(self.registry_head, 'active' if state == 'ready' else 'latest', self.registry)
+        if pointer != self.scalar(generation):
+            raise ProcessingError('Publication generation stale or not ' + state)
         return status
 
+    @_locked
+    def completed_publication(self, input_key):
+        """Read an atomically activated input binding; never reconstruct results."""
+        self.generation = self._pointer(self.registry_head, 'active', self.registry)
+        if self.generation is None:
+            return None
+        status = self.status()
+        if status is None or status['state'] != 'ready':
+            return None
+        keys = self.values(self.head, 'completedInput')
+        if len(keys) > 1:
+            raise ProcessingError('Completed publication input is duplicated')
+        if not keys or keys != [self.scalar(input_key)]:
+            return None
+        encoded = self.one(self.head, 'completedIndexes')
+        if len(encoded.encode()) > MAX_BYTES:
+            raise ProcessingError('Completed publication addresses exceed budget')
+        if hashlib.sha256(encoded.encode()).hexdigest() != self.one(self.head, 'completedIndexesDigest'):
+            raise ProcessingError('Completed publication addresses are corrupt')
+        try:
+            indexes = json.loads(encoded)
+        except ValueError as exc:
+            raise ProcessingError('Completed publication addresses are corrupt') from exc
+        self._check_index_addresses(indexes, status['indexes'])
+        return indexes
+
+    def _check_index_addresses(self, addresses, receipts):
+        if not isinstance(addresses, dict) or set(addresses) != {'keyword', 'semantic'}:
+            raise ProcessingError('Completed publication indexes are incomplete')
+        for kind, descriptor in addresses.items():
+            if not isinstance(descriptor, dict) or descriptor.get('receipt') != receipts[kind]:
+                raise ProcessingError('Completed publication index receipt differs')
+
     def _check_generation(self, generation, state):
-        if self.one(self.head,'generation')!=generation or self.one(self.head,'state')!=state:
-            raise ProcessingError('Publication generation stale or not '+state)
+        self.fence(generation, state)
 
     def triple(self, node, field, value):
         return f"{node} <{P + field}> {value} ."
@@ -169,11 +350,12 @@ class PublicationRecords:
             raise ProcessingError("Publication atomic write exceeds byte budget")
         check_query_cancellation()
         self.fence(generation, state)
+        self._writable_stage()
         checkpoint = getattr(self, '_checkpoint', None)
         if checkpoint is not None:
             if checkpoint['generation'] != generation or state != 'pending':
                 raise ProcessingError('Publication checkpoint generation changed')
-        self.owner._update_derived_graph(self.graph, insert=body, where=f"GRAPH {self.graph} {{ {self.head} <{P}generation> {self.scalar(generation)} ; <{P}state> {self.scalar(state)} . }}")
+        self.owner._update_derived_graph(self.graph, insert=body, where=f"GRAPH {self.publication_graph} {{ {self.publication_head} <{P}generation> {self.scalar(generation)} ; <{P}state> {self.scalar(state)} . }}")
         if checkpoint is None:
             self.owner.flush()
         else:
@@ -187,6 +369,7 @@ class PublicationRecords:
     def import_batches(self, generation, batches):
         """Stream bounded pending windows into the existing native graph."""
         self._build_fence(generation)
+        self._writable_stage()
         # One stage-wide import; _TripleStream bounds Python's current window.
         # The caller commits completion metadata only after this stream succeeds.
         with io.BufferedReader(_TripleStream(batches)) as stream:
@@ -197,11 +380,14 @@ class PublicationRecords:
         other_kinds={self.ox.NamedNode(P+other) for other in
             {'canonical', 'community', 'topic', 'fact'} - {kind}}
         # Seek roles pointing to this address once, rather than probing each role.
-        for count,link in enumerate(self.owner.store.quads_for_pattern(self.head,None,node,self.graph),1):
-            if count>MAX_ROWS:
-                raise ProcessingError('Publication identity role fanout exceeds row budget')
-            if link.predicate in other_kinds:
-                raise ProcessingError('Publication identity already has another kind')
+        graphs = {self.publication_graph, self.stage_graph('identity'), self.stage_graph('fact')}
+        for graph in graphs:
+            head = self.ox.NamedNode(graph.value + ':head')
+            for count,link in enumerate(self.owner.store.quads_for_pattern(head,None,node,graph),1):
+                if count>MAX_ROWS:
+                    raise ProcessingError('Publication identity role fanout exceeds row budget')
+                if link.predicate in other_kinds:
+                    raise ProcessingError('Publication identity already has another kind')
 
     @contextmanager
     def checkpointed(self, generation):
@@ -236,26 +422,25 @@ class PublicationRecords:
         if (current or {}).get("generation") != expected_generation:
             raise ProcessingError("Publication CAS conflict")
         generation = hashlib.sha256(uuid.uuid4().bytes).hexdigest()
+        previous_identity = self.stage_graph('identity') if current else None
+        previous_fact = self.stage_graph('fact') if current else None
+        self.generation = self.scalar(generation)
         triples = [self.triple(self.head, k, self.ox.Literal(v)) for k, v in dict(
             generation=generation, state="pending", sourceCount=source_count).items()]
         if canonical_count is not None:
             triples.append(self.triple(self.head, "canonicalCount", self.ox.Literal(canonical_count)))
-        guard = (f"GRAPH {self.graph} {{ {self.head} <{P}generation> {self.scalar(expected_generation)} }}" if expected_generation is not None
-                 else f"FILTER NOT EXISTS {{ GRAPH {self.graph} {{ {self.head} <{P}generation> ?generation }} }}")
-        # Completed identity decisions are immutable references independent of
-        # publication generation. Keep them in place while replacing all other
-        # derived output; incomplete stages are discarded atomically.
-        reusable = (len(self.values(self.head, 'identityStageInput')) == 1
-                    and len(self.values(self.head, 'identityStageCount')) == 1
-                    and len(self.values(self.head, 'identityIndexSealed')) == 1)
-        # Fact decisions own their input and dirty markers independently. A later
-        # interrupted identity attempt must not erase that completed/partial work.
-        selections = [self._fact_selection('?s','?p')]
-        if reusable:
-            selections.append(self._identity_selection('?s', '?p'))
-        discard = 'FILTER(!(' + ' || '.join(selections) + '))' if selections else ''
-        self.owner._update_derived_graph(self.graph, delete="?s ?p ?o", insert=" ".join(triples),
-            where=f"{guard} OPTIONAL {{ GRAPH {self.graph} {{ ?s ?p ?o }} {discard} }}")
+        if previous_identity is not None:
+            triples.append(self.triple(self.head, 'previousIdentityGraph', previous_identity))
+        if previous_fact is not None:
+            triples.append(self.triple(self.head, 'previousFactGraph', previous_fact))
+        guard = (f"GRAPH {self.registry} {{ {self.registry_head} <{P}latest> {self.scalar(expected_generation)} }}" if expected_generation is not None
+                 else f"FILTER NOT EXISTS {{ GRAPH {self.registry} {{ {self.registry_head} <{P}latest> ?generation }} }}")
+        # Pending output has its own address. The active pointer and immutable
+        # completed stages are untouched until a validated atomic activation.
+        old = f'{self.registry_head} <{P}latest> {self.scalar(expected_generation)}' if expected_generation is not None else ''
+        self.owner.store.update(f'''DELETE {{ GRAPH {self.registry} {{ {old} }} }}
+            INSERT {{ GRAPH {self.registry} {{ {self.registry_head} <{P}latest> {self.scalar(generation)} }}
+                GRAPH {self.graph} {{ {' '.join(triples)} }} }} WHERE {{ {guard} }}''')
         self.owner.flush()
         return self.fence(generation, "pending")
 
@@ -286,18 +471,37 @@ class PublicationRecords:
 
     def require_qualified_layout(self):
         """Reject incompatible derived indices; reads never migrate or rebuild."""
-        layout=self.values(self.head,'qualifiedIndexLayout')
+        # Old all-in-one publications stored the marker on the publication
+        # graph.  Check that graph before a pending attempt binds a private
+        # fact stage, otherwise the obsolete layout is hidden by the new scope.
+        graph = self.graph
+        head = self.head
+        layout=self.values(head,'qualifiedIndexLayout')
+        if graph != self.publication_graph:
+            legacy_head = self.publication_head
+            legacy = list(self.owner.store.quads_for_pattern(
+                legacy_head, self.ox.NamedNode(P+'qualifiedIndexLayout'), None,
+                self.publication_graph))
+            if legacy:
+                layout = [quad.object for quad in legacy]
+                head, graph = legacy_head, self.publication_graph
         if layout==[self.ox.Literal('native-single-fact-decisions')]:
             return
-        if layout or any(self.values(self.head,field) for field in
+        if layout or any(self.values(head,field,graph=graph) for field in
                 ('qualifiedIndexSealed','factStageInput','qualifiedEntry','qualifiedPartitionNode')):
             raise ProcessingError('Obsolete qualified index requires explicit offline reset')
 
     @_locked
+    @_stage('fact')
     def fact_stage_status(self, generation, input_key, *, functional_predicates=()):
         self.fence(generation,'pending')
         self.scalar(input_key)
         self.require_qualified_layout()
+        stage_key = self._completion_key('fact', input_key, functional_predicates=functional_predicates)
+        if (self._pointer(stage_key, 'completedGraph', self.registry) is None and
+                self._pointer(self.publication_head, 'factGraph', self.publication_graph) is None):
+            return False
+        self._bind_stage('fact', input_key, functional_predicates=functional_predicates)
         values=self.values(self.head,'factStageInput')
         if not values:
             return False
@@ -313,17 +517,34 @@ class PublicationRecords:
         return True
 
     @_locked
+    @_stage('fact')
     def reset_fact_stage(self,generation):
         self.fence(generation,'pending')
+        self._writable_stage()
         self.owner._update_derived_graph(self.graph,delete='?s ?p ?o',
             where=f'GRAPH {self.graph} {{ ?s ?p ?o }} FILTER({self._fact_selection("?s","?p")})')
+        # Explicit offline reset also removes the pre-stage qualified index
+        # marker left on the old publication graph. Normal reads never do this.
+        if self.graph != self.publication_graph:
+            self.owner.store.update(f'''DELETE {{ GRAPH {self.publication_graph} {{
+                {self.publication_head} ?predicate ?value }} }}
+                WHERE {{ GRAPH {self.publication_graph} {{
+                {self.publication_head} ?predicate ?value .
+                FILTER(?predicate IN (<{P}qualifiedIndexLayout>, <{P}qualifiedIndexSealed>,
+                    <{P}factStageInput>, <{P}qualifiedEntry>, <{P}qualifiedPartitionNode>)) }} }}''')
         self.owner.flush()
 
     @_locked
+    @_stage('identity')
     def identity_stage_status(self, generation, input_key):
         """Point-read a complete decision stage; never restore or audit entities."""
         self.fence(generation, 'pending')
         self.scalar(input_key)
+        stage_key = self._completion_key('identity', input_key)
+        if (self._pointer(stage_key, 'completedGraph', self.registry) is None and
+                self._pointer(self.publication_head, 'identityGraph', self.publication_graph) is None):
+            return None
+        self._bind_stage('identity', input_key)
         values = self.values(self.head, 'identityStageInput')
         if not values:
             return None
@@ -337,9 +558,22 @@ class PublicationRecords:
                     canonical_count=int(self.one(self.head, 'identityStageCount')))
 
     @_locked
+    @_stage('identity')
     def reset_identity_stage(self, generation):
         """Invalidate only identity output after an explicit dependency mismatch."""
         self.fence(generation, 'pending')
+        local = self.ox.NamedNode(self.publication_graph.value + ':identity')
+        if self.graph not in (self.publication_graph, local):
+            # Detach this attempt; never delete a shared completed decision.
+            input_key = self.one(self.head, 'identityStageInput')
+            key = self._completion_key('identity', input_key)
+            self.owner.store.remove(self.ox.Quad(key,
+                self.ox.NamedNode(P+'completedGraph'), self.graph, self.registry))
+            self.owner.store.remove(self.ox.Quad(self.publication_head,
+                self.ox.NamedNode(P+'identityGraph'), self.graph, self.publication_graph))
+            self.owner.store.add(self.ox.Quad(self.publication_head,
+                self.ox.NamedNode(P+'identityGraph'), local, self.publication_graph))
+        self._writable_stage()
         self.owner._update_derived_graph(self.graph, delete='?s ?predicate ?o',
             where=f"""GRAPH {self.graph} {{ ?s ?predicate ?o }}
                 FILTER({self._identity_selection('?s', '?predicate')} ||
@@ -348,6 +582,7 @@ class PublicationRecords:
         self.fence(generation, 'pending')
 
     @_locked
+    @_stage('identity')
     def seal_identity_stage(self, generation, input_key):
         """Commit completion only after every decision reference is durable."""
         self.fence(generation, 'pending')
@@ -356,30 +591,21 @@ class PublicationRecords:
             raise ProcessingError('Native identity stage already sealed')
         if not self.values(self.head, 'identityIndexSealed'):
             raise ProcessingError('Native identity candidate index is not sealed')
-        for field, count in [('member', 'memberCount'), ('selector', 'selectorCount')]:
-            incomplete = self.owner.store.query(f"""SELECT ?canonical WHERE {{ GRAPH {self.graph} {{
-                {self.head} <{P}canonical> ?canonical . ?canonical <{P+count}> ?expected .
-                OPTIONAL {{ ?canonical <{P+field}> ?ref }} }} }} GROUP BY ?canonical ?expected
-                HAVING(COUNT(?ref) != ?expected) LIMIT 1""")
-            if next(iter(incomplete), None) is not None:
-                raise ProcessingError('Canonical identity '+field+' plan is incomplete')
-        member, canonical = self.ox.NamedNode(P+'member'), self.ox.NamedNode(P+'canonical')
-        for mention in self.owner.store.quads_for_pattern(
-                self.head, self.ox.NamedNode(P+'identityMember'), None, self.graph):
-            check_query_cancellation()
-            # Reverse member lookup avoids joining every canonical for each mention.
-            if not any(next(self.owner.store.quads_for_pattern(
-                    self.head, canonical, reference.subject, self.graph), None) is not None
-                    for reference in self.owner.store.quads_for_pattern(
-                        None, member, mention.object, self.graph)):
-                raise ProcessingError('Canonical identity membership coverage is incomplete')
+        self._check_decision_plans('identity')
+        uncovered=self.owner.store.query(f'''ASK {{ GRAPH {self.graph} {{
+            {self.head} <{P}identityMember> ?mention }} FILTER NOT EXISTS {{
+            {self.canonical_pattern('?canonical', f'?canonical <{P}member> ?mention')} }} }}''')
+        if bool(uncovered):
+            raise ProcessingError('Canonical identity membership coverage is incomplete')
         count = int(next(iter(self.owner.store.query(f"""SELECT (COUNT(?canonical) AS ?count)
             WHERE {{ GRAPH {self.graph} {{ {self.head} <{P}canonical> ?canonical }} }}""")))['count'].value)
         self.mutate(generation, [self.triple(self.head, 'identityStageInput', self.scalar(input_key)),
             self.triple(self.head, 'identityStageCount', self.ox.Literal(count))])
+        self._complete_stage('identity', input_key)
         return count
 
     @_locked
+    @_stage(None)
     def seal_canonical_count(self, generation, count):
         """Seal the output count after streaming computation, before activation."""
         self.fence(generation, "pending")
@@ -387,7 +613,7 @@ class PublicationRecords:
             raise ProcessingError("Invalid canonical publication count")
         if self.values(self.head, "canonicalCount"):
             raise ProcessingError("Canonical publication count already sealed")
-        actual = next(iter(self.owner.store.query(f"SELECT (COUNT(?record) AS ?count) WHERE {{ GRAPH {self.graph} {{ {self.head} <{P}canonical> ?record }} }}")))["count"]
+        actual = next(iter(self.owner.store.query(f"SELECT (COUNT(?record) AS ?count) WHERE {{ GRAPH {self.stage_graph('identity')} {{ {self.stage_head('identity')} <{P}canonical> ?record }} }}")))["count"]
         if int(actual.value) != count:
             raise ProcessingError("Canonical publication count does not match staged records")
         self.mutate(generation, [self.triple(self.head, "canonicalCount", self.ox.Literal(count))])
@@ -427,6 +653,7 @@ class PublicationRecords:
         return records
 
     @_locked
+    @_stage(None)
     def stage_sources(self, generation, sources):
         self.fence(generation, "pending")
         self.batch(sources)
@@ -456,7 +683,16 @@ class PublicationRecords:
                 # contribution must never become a current publication.
                 self.verify_operation(identity, source)
                 triples.append(self.triple(source_node, "operation", operation))
-        self.mutate(generation, triples)
+        window, size = [], 0
+        for triple in triples:
+            width = len(triple.encode()) + 1
+            if window and size + width > MAX_BYTES:
+                self.mutate(generation, window)
+                window, size = [], 0
+            window.append(triple)
+            size += width
+        if window:
+            self.mutate(generation, window)
 
     def member(self, record, source_ids=None):
         self.members([record], source_ids)
@@ -471,7 +707,7 @@ class PublicationRecords:
                 raise ProcessingError("Duplicate native source selection")
             for source in source_ids:
                 self.scalar(source)
-            selected = {self.ox.NamedNode(self.graph.value + ":source:" + hashlib.sha256(source.encode()).hexdigest()) for source in source_ids}
+            selected = {self.ox.NamedNode(self.publication_graph.value + ":source:" + hashlib.sha256(source.encode()).hexdigest()) for source in source_ids}
         admitted = set()
         owned_record = self.ox.NamedNode(F+'ownedRecord')
         operation = self.ox.NamedNode(P+'operation')
@@ -483,11 +719,11 @@ class PublicationRecords:
                 if owned.subject in admitted:
                     found = True
                     break
-                for binding in self.owner.store.quads_for_pattern(None, operation, owned.subject, self.graph):
+                for binding in self.owner.store.quads_for_pattern(None, operation, owned.subject, self.publication_graph):
                     check_query_cancellation()
                     if selected is not None and binding.subject not in selected:
                         continue
-                    if next(self.owner.store.quads_for_pattern(self.head, source, binding.subject, self.graph), None) is not None:
+                    if next(self.owner.store.quads_for_pattern(self.publication_head, source, binding.subject, self.publication_graph), None) is not None:
                         admitted.add(owned.subject)
                         found = True
                         break
@@ -514,6 +750,7 @@ class PublicationRecords:
         return matches[0]
 
     @_locked
+    @_stage('identity')
     def stage_canonical(self, generation, records):
         """Append bounded reference pages against one exact membership plan."""
         self.fence(generation, "pending")
@@ -546,6 +783,7 @@ class PublicationRecords:
                 if record['representative'] not in record['members']:
                     raise ProcessingError('Canonical representative must be a member')
                 triples.append(self.triple(self.head, "canonical", node))
+                triples.append(self.triple(node, 'canonicalGraph', self.graph))
                 triples.extend(self.triple(node,field,value) for field,value in fields.items())
             counts = {}
             for field in ('member','selector'):
@@ -589,6 +827,7 @@ class PublicationRecords:
         self.mutate(generation, triples)
 
     @_locked
+    @_stage(None)
     def stage_communities(self, generation, records):
         """Persist native detector membership references, never a graph copy."""
         self.fence(generation, 'pending')
@@ -611,12 +850,13 @@ class PublicationRecords:
                 self.triple(node, 'titleState', self.scalar('unavailable_title'))])
             for identity in record['members']:
                 member = self.iri(identity)
-                if not list(islice(self.owner.store.quads_for_pattern(self.head, self.ox.NamedNode(P+'canonical'), member, self.graph), 1)):
+                if not list(islice(self.owner.store.quads_for_pattern(self.stage_head('identity'), self.ox.NamedNode(P+'canonical'), member, self.stage_graph('identity')), 1)):
                     raise ProcessingError('Community member is not a current canonical entity')
                 triples.append(self.triple(node, 'member', member))
         self.mutate(generation, triples)
 
     @_locked
+    @_stage(None)
     def stage_topics(self, generation, records):
         """Retain the existing grounded organizer's result and native references."""
         self.fence(generation, 'pending')
@@ -652,7 +892,7 @@ class PublicationRecords:
                 for identity in values:
                     ref = self.iri(identity)
                     if field == 'member':
-                        if not list(islice(self.owner.store.quads_for_pattern(self.head, self.ox.NamedNode(P+'canonical'), ref, self.graph), 1)):
+                        if not list(islice(self.owner.store.quads_for_pattern(self.stage_head('identity'), self.ox.NamedNode(P+'canonical'), ref, self.stage_graph('identity')), 1)):
                             raise ProcessingError('Topic member is not a current canonical entity')
                     else:
                         self.member(ref)
@@ -664,6 +904,7 @@ class PublicationRecords:
 
 
     @_locked
+    @_stage('fact')
     def fact_members(self, generation, identity, *, after=None, limit=MAX_ROWS, max_bytes=MAX_BYTES):
         """Seek support observations without loading a canonical fact group."""
         self.fence(generation)
@@ -676,7 +917,7 @@ class PublicationRecords:
         cursor = f'FILTER(STR(?member) > {self.scalar(after)})' if after is not None else ''
         if after is not None:
             self.iri(after)
-        rows = list(self.owner.store.query(f'SELECT ?member WHERE {{ GRAPH {self.graph} {{ {node} <{P}member> ?member }} {cursor} }} ORDER BY ?member LIMIT {limit+1}'))
+        rows = list(self.owner.store.query(f'SELECT ?member WHERE {{ {self.fact_pattern(node, f"{node} <{P}member> ?member")} {cursor} }} ORDER BY ?member LIMIT {limit+1}'))
         response = dict(id=identity, members=[], member_count=int(self.one(node, "memberCount")), next_cursor=None)
         for row in rows[:limit]:
             member = row["member"].value
@@ -693,6 +934,7 @@ class PublicationRecords:
         self.fence(generation)
         return response
 
+    @_stage('fact')
     def _fact_scene_link(self, generation, row):
         identity = row["id"].value
         node = self.iri(identity)
@@ -701,8 +943,8 @@ class PublicationRecords:
         # Provenance is a bounded display projection. Large fact support is
         # retained in RDF and must be requested through a bounded member page.
         query = f"""SELECT DISTINCT ?source ?evidence WHERE {{
-            GRAPH {self.graph} {{ {node} <{P}member> ?record .
-                {self.head} <{P}source> ?membership .
+            {self.fact_pattern(node, f'{node} <{P}member> ?record')}
+            GRAPH {self.publication_graph} {{ {self.publication_head} <{P}source> ?membership .
                 ?membership <{P}source> ?source ; <{P}operation> ?operation }}
             GRAPH {self.facts} {{ ?operation <{F}ownedRecord> ?record .
                 OPTIONAL {{ ?record <{F}evidence> ?evidence }} }}
@@ -721,13 +963,25 @@ class PublicationRecords:
             evidenceIds=sorted({r["evidence"].value for r in rows if r["evidence"] is not None}))
 
     @_locked
-    def activate(self, generation, *, indexes):
+    @_stage(None)
+    def activate(self, generation, *, indexes, completed_input=None, index_addresses=None):
         status = self.fence(generation, "pending")
         if status["canonical_count"] is None:
             raise ProcessingError("Canonical publication count is not sealed")
         if not isinstance(indexes, dict) or set(indexes) != {"keyword", "semantic"}:
             raise ProcessingError("Publication requires both native indexes")
         triples = []
+        if (completed_input is None) != (index_addresses is None):
+            raise ProcessingError('Publication completion requires input and index addresses')
+        if completed_input is not None:
+            self.scalar(completed_input)
+            self._check_index_addresses(index_addresses, indexes)
+            encoded = json.dumps(index_addresses, ensure_ascii=False, separators=(',', ':'))
+            if len(encoded.encode()) > MAX_BYTES:
+                raise ProcessingError('Completed publication addresses exceed budget')
+            triples.extend(self.triple(self.head, key, self.ox.Literal(value)) for key, value in dict(
+                completedInput=completed_input, completedIndexes=encoded,
+                completedIndexesDigest=hashlib.sha256(encoded.encode()).hexdigest()).items())
         for kind, identity in indexes.items():
             required = {"kind", "store_id", "recipe_digest"} | ({"space_id"} if kind == "semantic" else set())
             if not isinstance(identity, dict) or set(identity) != required:
@@ -735,17 +989,19 @@ class PublicationRecords:
             node = self.ox.NamedNode(self.graph.value + ":index:" + kind)
             triples.append(self.triple(self.head, kind, node))
             triples.extend(self.triple(node, field, self.scalar(value)) for field, value in identity.items())
-        for field, expected in (("source", status["source_count"]), ("canonical", status["canonical_count"])):
-            count = next(iter(self.owner.store.query(f"SELECT (COUNT(?record) AS ?count) WHERE {{ GRAPH {self.graph} {{ {self.head} <{P + field}> ?record }} }}")))["count"]
+        identity_graph, identity_head = self.stage_graph('identity'), self.stage_head('identity')
+        fact_graph, fact_head = self.stage_graph('fact'), self.stage_head('fact')
+        for field, expected, graph, head in (
+                ("source", status["source_count"], self.publication_graph, self.publication_head),
+                ("canonical", status["canonical_count"], identity_graph, identity_head)):
+            count = next(iter(self.owner.store.query(f"SELECT (COUNT(?record) AS ?count) WHERE {{ GRAPH {graph} {{ {head} <{P + field}> ?record }} }}")))["count"]
             if int(count.value) != expected:
                 raise ProcessingError("Publication staged record count is incomplete")
         incomplete = self.owner.store.query(f"SELECT ?source WHERE {{ GRAPH {self.graph} {{ {self.head} <{P}source> ?source . ?source <{P}operationCount> ?expected . OPTIONAL {{ ?source <{P}operation> ?operation }} }} }} GROUP BY ?source ?expected HAVING(COUNT(?operation) != ?expected) LIMIT 1")
         if next(iter(incomplete), None) is not None:
             raise ProcessingError("Publication source operation plan is incomplete")
-        for field,count,label in (('member','memberCount','membership'),('selector','selectorCount','selector')):
-            incomplete=self.owner.store.query(f'SELECT ?canonical WHERE {{ GRAPH {self.graph} {{ {self.head} <{P}canonical> ?canonical . ?canonical <{P+count}> ?expected . OPTIONAL {{ ?canonical <{P+field}> ?ref }} }} }} GROUP BY ?canonical ?expected HAVING(COUNT(?ref) != ?expected) LIMIT 1')
-            if next(iter(incomplete),None) is not None:
-                raise ProcessingError('Canonical '+label+' plan is incomplete')
+        self._check_decision_plans('identity')
+        self._check_decision_plans('fact')
         incomplete = self.owner.store.query(f'SELECT ?community WHERE {{ GRAPH {self.graph} {{ {self.head} <{P}community> ?community . ?community <{P}memberCount> ?expected . OPTIONAL {{ ?community <{P}member> ?member }} }} }} GROUP BY ?community ?expected HAVING(COUNT(?member) != ?expected) LIMIT 1')
         if next(iter(incomplete), None) is not None:
             raise ProcessingError('Community membership plan is incomplete')
@@ -756,32 +1012,26 @@ class PublicationRecords:
                 GROUP BY ?topic ?expected HAVING(COUNT(?ref) != ?expected) LIMIT 1''')
             if next(iter(incomplete), None) is not None:
                 raise ProcessingError('Topic membership plan is incomplete')
-        incomplete = self.owner.store.query(f"""SELECT ?fact WHERE {{ GRAPH {self.graph} {{
-            {self.head} <{P}fact> ?fact . ?fact <{P}memberCount> ?expected .
-            OPTIONAL {{ ?fact <{P}member> ?member }} }} }}
-            GROUP BY ?fact ?expected HAVING(COUNT(?member) != xsd:integer(?expected)) LIMIT 1""",
-            prefixes={"xsd": "http://www.w3.org/2001/XMLSchema#"})
-        if next(iter(incomplete), None) is not None:
-            raise ProcessingError("Canonical fact membership plan is incomplete")
-        invalid = self.owner.store.query(f"""ASK {{ GRAPH {self.graph} {{
-            {self.head} <{P}fact> ?fact . ?fact <{P}representative> ?representative .
-            FILTER NOT EXISTS {{ ?fact <{P}member> ?representative }} }} }}""")
+        invalid = self.owner.store.query(f'''ASK {{ GRAPH {fact_graph} {{
+            {fact_head} <{P}fact> ?fact . ?fact <{P}factDecisionGraph> ?decision }}
+            FILTER NOT EXISTS {{ GRAPH ?decision {{ ?fact <{P}representative> ?representative ;
+                <{P}member> ?representative }} }} }}''')
         if bool(invalid):
             raise ProcessingError("Canonical fact representative is not a member")
-        invalid_member = self.owner.store.query(f"""ASK {{ GRAPH {self.graph} {{
-            {self.head} <{P}fact> ?fact . ?fact <{P}member> ?relation }}
+        invalid_member = self.owner.store.query(f"""ASK {{ {self.fact_pattern('?fact', f'?fact <{P}member> ?relation')}
             FILTER NOT EXISTS {{ GRAPH {self.facts} {{
                 ?operation <{F}ownedRecord> ?relation . ?relation <{RDF_TYPE}> <{F}Relation> }}
-                GRAPH {self.graph} {{ {self.head} <{P}source> ?sourceOwner .
+                GRAPH {self.publication_graph} {{ {self.publication_head} <{P}source> ?sourceOwner .
                     ?sourceOwner <{P}operation> ?operation }} }} }}""")
         if bool(invalid_member):
             raise ProcessingError("Canonical fact member is outside the current publication")
-        duplicate_member = self.owner.store.query(f"""ASK {{ GRAPH {self.graph} {{
-            {self.head} <{P}fact> ?left, ?right . ?left <{P}member> ?relation .
-            ?right <{P}member> ?relation . FILTER(?left != ?right) }} }}""")
+        duplicate_member = self.owner.store.query(f"""ASK {{
+            {self.fact_pattern('?left', f'?left <{P}member> ?relation',variable='?leftFactGraph')}
+            {self.fact_pattern('?right', f'?right <{P}member> ?relation',variable='?rightFactGraph')}
+            FILTER(?left != ?right) }}""")
         if bool(duplicate_member):
             raise ProcessingError("Native Relation belongs to multiple canonical facts")
-        relation_scope = f"""GRAPH {self.graph} {{ {self.head} <{P}source> ?membership .
+        relation_scope = f"""GRAPH {self.publication_graph} {{ {self.publication_head} <{P}source> ?membership .
             ?membership <{P}operation> ?operation }} GRAPH {self.facts} {{
             ?operation <{F}ownedRecord> ?relation . ?relation <{RDF_TYPE}> <{F}Relation> }}"""
         owned_count = next(iter(self.owner.store.query(f"SELECT (COUNT(DISTINCT ?relation) AS ?count) WHERE {{ {relation_scope} }}")))["count"]
@@ -789,17 +1039,23 @@ class PublicationRecords:
         # the check above verifies each fact's actual membership count. Their sum
         # therefore proves exact coverage without joining every relation again.
         planned_count = next(iter(self.owner.store.query(f"""SELECT (COALESCE(SUM(xsd:integer(?expected)), 0) AS ?count) WHERE {{
-            GRAPH {self.graph} {{ {self.head} <{P}fact> ?fact .
-                ?fact <{P}memberCount> ?expected }} }}""", prefixes={"xsd": "http://www.w3.org/2001/XMLSchema#"})))["count"]
+            {self.fact_pattern('?fact', f'?fact <{P}memberCount> ?expected')} }}""", prefixes={"xsd": "http://www.w3.org/2001/XMLSchema#"})))["count"]
         check_query_cancellation()
         if int(owned_count.value) != int(planned_count.value):
             raise ProcessingError("Canonical fact coverage is incomplete")
         body = " ".join(triples)
-        self.owner._update_derived_graph(self.graph, delete=f"{self.head} <{P}state> 'pending'", insert=f"{self.head} <{P}state> 'ready' . {body}", where=f"GRAPH {self.graph} {{ {self.head} <{P}generation> {self.scalar(generation)} ; <{P}state> 'pending' }}")
+        self.owner.store.update(f'''DELETE {{
+                GRAPH {self.graph} {{ {self.head} <{P}state> 'pending' }}
+                GRAPH {self.registry} {{ {self.registry_head} <{P}active> ?old }} }}
+            INSERT {{ GRAPH {self.graph} {{ {self.head} <{P}state> 'ready' . {body} }}
+                GRAPH {self.registry} {{ {self.registry_head} <{P}active> {self.scalar(generation)} }} }}
+            WHERE {{ GRAPH {self.graph} {{ {self.head} <{P}generation> {self.scalar(generation)} ; <{P}state> 'pending' }}
+                OPTIONAL {{ GRAPH {self.registry} {{ {self.registry_head} <{P}active> ?old }} }} }}''')
         self.owner.flush()
         return self.fence(generation)
 
     @_locked
+    @_stage(None)
     def withdraw(self, *, expected_generation):
         self.fence(expected_generation)
         self.owner._update_derived_graph(self.graph, delete=f"{self.head} <{P}state> 'ready'", insert=f"{self.head} <{P}state> 'withdrawn'", where=f"GRAPH {self.graph} {{ {self.head} <{P}generation> {self.scalar(expected_generation)} ; <{P}state> 'ready' }}")
@@ -819,13 +1075,14 @@ class PublicationRecords:
             if getattr(self.owner, '_build_plan_scope', None) is not None:
                 raise ProcessingError('Nested native build plan scope')
             self._build_fence(generation)
-            self.owner._build_plan_scope = (self.graph.value, generation)
+            self.owner._build_plan_scope = (self.publication_graph.value, generation)
             try:
                 yield
             finally:
                 self.owner._build_plan_scope = None
             self._build_fence(generation)
 
+    @_stage(None)
     def _build_fence(self, generation):
         """A complete immutable input plan is required before any build traversal."""
         if getattr(self.owner, '_build_plan_scope', None) == (self.graph.value, generation):
@@ -851,6 +1108,7 @@ class PublicationRecords:
         return result
 
     @_locked
+    @_stage(None)
     def build_page(self, generation, *, kind, source=None, after=None, limit=MAX_ROWS,
                    fields=None, max_bytes=MAX_BYTES):
         """Seek projected accepted records directly in native pending membership."""
@@ -953,6 +1211,7 @@ class PublicationRecords:
             raise ProcessingError("Native read exceeds byte budget")
         return result
 
+    @_stage(None)
     def source_binding(self, generation, source):
         self.fence(generation)
         node = self.ox.NamedNode(self.graph.value + ':source:' + hashlib.sha256(source.encode()).hexdigest())
@@ -960,6 +1219,7 @@ class PublicationRecords:
             raise ProcessingError('Source is not a current publication member')
         return {key:self.one(node,key) for key in ('source','material','representation')}
 
+    @_stage(None)
     def grounded_candidates(self, generation, positions, *, limit=MAX_ROWS, max_bytes=MAX_BYTES):
         """Exact source/scalar addresses join to native typed observations.
 
@@ -1007,6 +1267,7 @@ class PublicationRecords:
         self.fence(generation)
         return records
 
+    @_stage(None)
     def grounded_reference_page(self, generation, position, *, after=None, limit=MAX_ROWS):
         """Maintenance-only, keyset pages of native record/evidence addresses."""
         from ..semantic_worker_context import check_query_cancellation
@@ -1046,6 +1307,7 @@ class PublicationRecords:
         self.fence(generation,'pending')
         return dict(items=values,next_cursor=None)
 
+    @_stage(None)
     def section_records(self, generation, selection):
         """Page exact native facts intersecting consumer-selected reader ranges."""
         from ..semantic_worker_context import check_query_cancellation
@@ -1107,6 +1369,7 @@ class PublicationRecords:
         self.fence(generation)
         return response
 
+    @_stage(None)
     def record_binding(self, generation, identity):
         """Resolve one current fact's exact source binding through native membership."""
         self.fence(generation)
@@ -1121,6 +1384,7 @@ class PublicationRecords:
         self.fence(generation)
         return {key: rows[0][key].value for key in ('source', 'material', 'representation')}
 
+    @_stage('identity')
     def _canonical_references(self, node, max_bytes=MAX_BYTES):
         """Collect this complete canonical item under its response byte budget.
 
@@ -1129,13 +1393,14 @@ class PublicationRecords:
         """
         from ..semantic_worker_context import check_query_cancellation
         size, members, selectors = 0, [], []
-        for quad in self.owner.store.quads_for_pattern(node, self.ox.NamedNode(P+'member'), None, self.graph):
+        graph = self.record_graph(node)
+        for quad in self.owner.store.quads_for_pattern(node, self.ox.NamedNode(P+'member'), None, graph):
             check_query_cancellation()
             size += len(json.dumps(quad.object.value).encode()) + 2
             if size > max_bytes:
                 raise ProcessingError('Canonical read exceeds byte budget')
             members.append(quad.object.value)
-        for quad in self.owner.store.quads_for_pattern(node, self.ox.NamedNode(P+'selector'), None, self.graph):
+        for quad in self.owner.store.quads_for_pattern(node, self.ox.NamedNode(P+'selector'), None, graph):
             check_query_cancellation()
             item = dict(field=self.one(quad.object,'field'), record=self.one(quad.object,'record'))
             size += len(json.dumps(item).encode()) + 2
@@ -1232,7 +1497,7 @@ class PublicationRecords:
             scope = ('VALUES ?source { ' + ' '.join(str(self.scalar(s)) for s in source_ids) + ' }') if source_ids else ''
             query = f"""SELECT DISTINCT ?source ?evidence WHERE {{
                 VALUES ?record {{ {values} }} {scope}
-                GRAPH {self.graph} {{ {self.head} <{P}source> ?membership .
+                GRAPH {self.publication_graph} {{ {self.publication_head} <{P}source> ?membership .
                     ?membership <{P}source> ?source ; <{P}operation> ?operation . }}
                 GRAPH {self.facts} {{ ?operation <{F}ownedRecord> ?record .
                     OPTIONAL {{ {{ ?record <{F}mention> ?evidence }} UNION {{ ?record <{F}evidence> ?evidence }} }} }}
@@ -1247,6 +1512,7 @@ class PublicationRecords:
         return sorted(sources), sorted(evidence)
 
     @_locked
+    @_stage(None)
     def source_scene(self, generation, selection):
         """Bounded source membership addresses; no synthetic similarity edges."""
         from ..semantic_worker_context import check_query_cancellation
@@ -1283,6 +1549,7 @@ class PublicationRecords:
         return result
 
     @_locked
+    @_stage(None)
     def classification_dimension(self, generation, source, dimension_id=None, **page):
         """Resolve the one current source reduction and one requested dimension."""
         from .classification_records import ClassificationRecords, BINDING as fields
@@ -1316,6 +1583,7 @@ class PublicationRecords:
         self.fence(generation)
         return result
 
+    @_stage(None)
     def organization_scene(self, generation, selection):
         from ..semantic_worker_context import check_query_cancellation
         self.fence(generation)
@@ -1367,12 +1635,13 @@ class PublicationRecords:
             raise ProcessingError('Invalid native scene field projection')
         return fields
 
+    @_stage('identity')
     def _scene_name(self, node, source_ids):
         # Read only name selectors, not descriptions, attributes or complete membership.
         scope = ''
         if source_ids is not None:
             sources = ' '.join(str(self.scalar(source)) for source in source_ids)
-            scope = f"""GRAPH {self.graph} {{ {self.head} <{P}source> ?membership .
+            scope = f"""GRAPH {self.publication_graph} {{ {self.publication_head} <{P}source> ?membership .
                 ?membership <{P}source> ?source ; <{P}operation> ?operation . }}
                 VALUES ?source {{ {sources} }} GRAPH {self.facts} {{ ?operation <{F}ownedRecord> ?record }}"""
         query = f"""SELECT DISTINCT ?record WHERE {{ GRAPH {self.graph} {{
@@ -1416,10 +1685,12 @@ class PublicationRecords:
             accept(representative)
         return chosen['value']
 
+    @_stage('identity')
     def _scene_sources(self, node, source_ids):
         scope = ('VALUES ?source { ' + ' '.join(str(self.scalar(s)) for s in source_ids) + ' }') if source_ids else ''
         query = f"""SELECT DISTINCT ?source WHERE {{ GRAPH {self.graph} {{
-            {node} <{P}member> ?record . {self.head} <{P}source> ?membership .
+            {node} <{P}member> ?record }}
+            GRAPH {self.publication_graph} {{ {self.publication_head} <{P}source> ?membership .
             ?membership <{P}source> ?source ; <{P}operation> ?operation . }}
             {scope} GRAPH {self.facts} {{ ?operation <{F}ownedRecord> ?record }} }} ORDER BY ?source"""
         sources, size = [], 0
@@ -1433,6 +1704,7 @@ class PublicationRecords:
         return sources
 
     @_locked
+    @_stage(None)
     def scene(self, generation, selection):
         """Page the current native canonical references, never assemble a graph.
 
@@ -1442,6 +1714,8 @@ class PublicationRecords:
         """
         from ..semantic_worker_context import check_query_cancellation
         self.fence(generation)
+        identity_graph, identity_head = self.stage_graph('identity'), self.stage_head('identity')
+        fact_graph, fact_head = self.stage_graph('fact'), self.stage_head('fact')
         if not isinstance(selection, dict):
             raise ProcessingError('Invalid native scene selection')
         kind = selection.get('kind')
@@ -1477,18 +1751,18 @@ class PublicationRecords:
             community_filter = ''
             if selection.get('communityId') is not None:
                 community = self.iri(selection['communityId'])
-                community_filter = f'GRAPH {self.graph} {{ {self.head} <{P}community> {community} . {community} <{P}member> ?id }}'
+                community_filter = f'GRAPH {self.publication_graph} {{ {self.publication_head} <{P}community> {community} . {community} <{P}member> ?id }}'
             if selection.get('topicId') is not None:
                 topic = self.iri(selection['topicId'])
-                community_filter += f'GRAPH {self.graph} {{ {self.head} <{P}topic> {topic} . {topic} <{P}member> ?id }}'
+                community_filter += f'GRAPH {self.publication_graph} {{ {self.publication_head} <{P}topic> {topic} . {topic} <{P}member> ?id }}'
             if source_ids is not None:
                 self.batch(source_ids)
                 if len(set(source_ids)) != len(source_ids):
                     raise ProcessingError('Duplicate scene source identities')
-                source_filter = f'''GRAPH {self.graph} {{ {self.head} <{P}source> ?membership .
+                source_filter = f'''GRAPH {self.publication_graph} {{ {self.publication_head} <{P}source> ?membership .
                     VALUES ?source {{ {' '.join(str(self.scalar(s)) for s in source_ids)} }}
-                    ?membership <{P}source> ?source ; <{P}operation> ?operation .
-                    ?id <{P}member> ?member . }}
+                    ?membership <{P}source> ?source ; <{P}operation> ?operation . }}
+                    {self.canonical_pattern('?id', f'?id <{P}member> ?member')}
                     GRAPH {self.facts} {{ ?operation <{F}ownedRecord> ?member }}'''
             exact_filter = ('VALUES ?id { ' + ' '.join(str(self.iri(n)) for n in exact) + ' }') if exact else ''
             records_filter = ''
@@ -1498,12 +1772,11 @@ class PublicationRecords:
                 if len(set(records)) != len(records) or exact is not None:
                     raise ProcessingError('Invalid native member selection')
                 records_filter = f'''VALUES ?selectedRecord {{ {' '.join(str(self.iri(r)) for r in records)} }}
-                    {{ GRAPH {self.graph} {{ {self.head} <{P}fact> ?selectedRecord .
-                        ?selectedRecord (<{P}source>|<{P}target>) ?id }} }} UNION {{
-                    GRAPH {self.graph} {{ ?id <{P}member> ?selectedEntity }}
+                    {{ {self.fact_pattern('?selectedRecord', f'?selectedRecord (<{P}source>|<{P}target>) ?id')} }} UNION {{
+                    {self.canonical_pattern('?id', f'?id <{P}member> ?selectedEntity')}
                     GRAPH {self.facts} {{ ?selectedRecord (<{F}sourceEntity>|<{F}targetEntity>)? ?selectedEntity }} }}'''
-            query = f'''SELECT DISTINCT ?id WHERE {{ GRAPH {self.graph} {{
-                {self.head} <{P}canonical> ?id }} {exact_filter} {records_filter} {source_filter} {community_filter} {cursor}
+            query = f'''SELECT DISTINCT ?id WHERE {{ GRAPH {identity_graph} {{
+                {identity_head} <{P}canonical> ?id }} {exact_filter} {records_filter} {source_filter} {community_filter} {cursor}
                 }} ORDER BY ?id LIMIT {limit + 1}'''
         else:
             visible = selection.get('visibleIds')
@@ -1512,14 +1785,13 @@ class PublicationRecords:
                 raise ProcessingError('Duplicate visible scene identities')
             nodes = ' '.join(str(self.iri(n)) for n in visible)
             admitted = list(self.owner.store.query(f'''SELECT ?id WHERE {{
-                VALUES ?id {{ {nodes} }} GRAPH {self.graph} {{ {self.head} <{P}canonical> ?id }}
+                VALUES ?id {{ {nodes} }} GRAPH {identity_graph} {{ {identity_head} <{P}canonical> ?id }}
             }} LIMIT {MAX_ROWS + 1}'''))
             if len(admitted) != len(visible):
                 raise ProcessingError('Visible scene identities are outside the current publication')
             query = f'''SELECT DISTINCT ?id ?source ?target WHERE {{
                 VALUES ?source {{ {nodes} }} VALUES ?target {{ {nodes} }}
-                GRAPH {self.graph} {{ {self.head} <{P}fact> ?id .
-                    ?id <{P}source> ?source ; <{P}target> ?target . }}
+                {self.fact_pattern('?id', f'?id <{P}source> ?source ; <{P}target> ?target .')}
                 {cursor} }} ORDER BY ?id LIMIT {limit + 1}'''
         rows = list(self.owner.store.query(query))
         if kind == 'nodes' and exact is not None and len(rows) != len(exact):
@@ -1591,13 +1863,12 @@ class PublicationRecords:
         after = selection.get('after')
         if after is not None:
             self.iri(after)
-        admitted = self.owner.store.query(f'ASK {{ GRAPH {self.graph} {{ {self.head} <{P}canonical> {focus} }} }}')
+        admitted = self.owner.store.query(f'ASK {{ GRAPH {self.stage_graph("identity")} {{ {self.stage_head("identity")} <{P}canonical> {focus} }} }}')
         if not bool(admitted):
             raise ProcessingError('Incident focus is outside current publication')
         cursor = f'FILTER(STR(?id) > {self.scalar(after)})' if after is not None else ''
         query = f'''SELECT DISTINCT ?id ?source ?target WHERE {{
-            GRAPH {self.graph} {{ {self.head} <{P}fact> ?id .
-                ?id <{P}source> ?source ; <{P}target> ?target . }}
+            {self.fact_pattern('?id', f'?id <{P}source> ?source ; <{P}target> ?target .')}
             FILTER(?source = {focus} || ?target = {focus})
             {cursor} }} ORDER BY ?id LIMIT {limit + 1}'''
         rows = list(self.owner.store.query(query))
@@ -1646,6 +1917,7 @@ class PublicationRecords:
         self.fence(generation)
         return response
 
+    @_stage(None)
     def page(self, generation, *, source=None, after=None, limit=MAX_ROWS, max_bytes=MAX_BYTES, canonical=False):
         self.fence(generation)
         if type(max_bytes) is not int or not 1 <= max_bytes <= MAX_BYTES:
@@ -1653,14 +1925,14 @@ class PublicationRecords:
         if type(limit) is not int or not 1 <= limit <= MAX_ROWS:
             raise ProcessingError("Native page limit must be 1..128")
         if canonical:
-            pattern = f"{self.head} <{P}canonical> ?record"
+            pattern = f"{self.stage_head('identity')} <{P}canonical> ?record"
         else:
             pattern = f"{self.head} <{P}source> ?source . ?source <{P}operation> ?operation ."
             if source is not None:
                 pattern += f"?source <{P}source> {self.scalar(source)} ."
             pattern = f"GRAPH {self.graph} {{ {pattern} }} GRAPH {self.facts} {{ ?operation <{F}ownedRecord> ?record }}"
         if canonical:
-            pattern = f"GRAPH {self.graph} {{ {pattern} }}"
+            pattern = f"GRAPH {self.stage_graph('identity')} {{ {pattern} }}"
         cursor = f"FILTER(STR(?record) > {self.scalar(after)})" if after else ""
         ids = [row["record"].value for row in self.owner.store.query(f"SELECT DISTINCT ?record WHERE {{ {pattern} {cursor} }} ORDER BY ?record LIMIT {limit + 1}")]
         selected = ids[:limit]

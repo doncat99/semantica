@@ -200,7 +200,7 @@ class NativeIdentityContext:
 
     def __init__(self, owner, project, generation):
         self.owner, self.generation = owner, generation
-        self.publication = PublicationRecords(owner, project)
+        self.publication = PublicationRecords(owner, project, stage='identity')
         self._resolution_depth = 0
         self._fence_reads = 0
         self._last_fence = 0.

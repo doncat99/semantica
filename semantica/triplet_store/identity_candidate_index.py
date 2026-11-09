@@ -18,16 +18,27 @@ class IdentityCandidateIndex:
         if not detector.contextual_identity:
             raise ProcessingError('Native candidate index requires contextual identity')
         self.owner, self.generation, self.detector = owner, generation, detector
-        self.publication = PublicationRecords(owner, project)
+        self.publication = PublicationRecords(owner, project, stage='identity')
 
     def build(self, rows, *, resolve_candidates=True, policy_key=None):
         """Read native rows once; replay only bounded compact identity features."""
         p = self.publication
         with self.owner._publication_lock, p.build_scope(self.generation), TemporaryFile(mode='w+b') as features:
             p._build_fence(self.generation)
+            # Reserve the generation-local stage before writing any index rows.
+            # Completion later binds this same graph to the semantic input key.
+            if p._pointer(p.publication_head, 'identityGraph', p.publication_graph) is None:
+                graph = p.ox.NamedNode(p.publication_graph.value + ':identity')
+                self.owner.store.add(p.ox.Quad(p.publication_head,
+                    p.ox.NamedNode(P+'identityGraph'), graph, p.publication_graph))
+                self.owner.flush()
+            p._writable_stage()
             self._policy_key = policy_key
-            reusable = bool(p.values(p.head, 'identityStageInput')) and policy_key is not None
-            previous_policy = p.values(p.head, 'identityDecisionPolicy')
+            self._previous_graph = p._pointer(p.publication_head, 'previousIdentityGraph', p.publication_graph)
+            prior_graph = self._previous_graph or p.graph
+            prior_head = p.ox.NamedNode(prior_graph.value + ':head')
+            reusable = bool(p.values(prior_head, 'identityStageInput', graph=prior_graph)) and policy_key is not None
+            previous_policy = p.values(prior_head, 'identityDecisionPolicy', graph=prior_graph)
             reuse_features = reusable and len(previous_policy) == 1 and previous_policy[0].value == policy_key
             reusable = reuse_features
             self._context = None
@@ -53,7 +64,7 @@ class IdentityCandidateIndex:
                 for identity, row in rows():
                     check_query_cancellation()
                     p._build_fence(self.generation)
-                    prior = p.values(p.iri(identity), 'identityFeatures') if reuse_features else []
+                    prior = p.values(p.iri(identity), 'identityFeatures', graph=prior_graph) if reuse_features else []
                     if prior:
                         if len(prior) != 1:
                             raise ProcessingError('Native identity features are duplicated')
@@ -105,7 +116,7 @@ class IdentityCandidateIndex:
                 check_query_cancellation()
                 p._build_fence(self.generation)
                 self.owner._update_derived_graph(p.graph, insert=body,
-                    where=f'GRAPH {p.graph} {{ {p.head} <{P}generation> {p.scalar(self.generation)} ; <{P}state> "pending" }}')
+                    where=f'GRAPH {p.publication_graph} {{ {p.publication_head} <{P}generation> {p.scalar(self.generation)} ; <{P}state> "pending" }}')
                 p._build_fence(self.generation)
                 pending_bytes += size
 
@@ -239,7 +250,7 @@ class IdentityCandidateIndex:
                 if pending_rows >= MAX_ROWS:
                     checkpoint()
             expected = next(iter(self.owner.store.query(f'''SELECT (COUNT(DISTINCT ?record) AS ?count)
-                WHERE {{ GRAPH {p.graph} {{ {p.head} <{P}source> ?source .
+                WHERE {{ GRAPH {p.publication_graph} {{ {p.publication_head} <{P}source> ?source .
                     ?source <{P}operation> ?operation }} GRAPH {p.facts} {{
                     ?operation <{F}ownedRecord> ?record . ?record <{RDF_TYPE}> <{F}Entity> }} }}''')))['count']
             if int(expected.value) != count:
@@ -274,26 +285,40 @@ class IdentityCandidateIndex:
 
     def _reconcile_decisions(self, reusable):
         p = self.publication
+        previous = self._previous_graph or p.graph
+        previous_head = p.ox.NamedNode(previous.value + ':head')
         retained, components = 0, 0
         for quad in self.owner.store.quads_for_pattern(None,
                 p.ox.NamedNode(P+'identityComponent'), None, p.graph):
             if quad.subject != quad.object:
                 continue
             root, group = quad.subject, self._group(quad.subject.value)
-            linked = next(self.owner.store.quads_for_pattern(p.head,
-                p.ox.NamedNode(P+'identityDecisionGroup'), group, p.graph), None)
+            linked = next(self.owner.store.quads_for_pattern(previous_head,
+                p.ox.NamedNode(P+'identityDecisionGroup'), group, previous), None)
             valid = reusable and linked is not None
+            decision_graph = p._pointer(group, 'identityDecisionGraph', previous)
             if valid:
+                if decision_graph is None:
+                    raise ProcessingError('Completed identity group lacks its decision graph')
                 dependencies = (json.loads(quad.object.value) for quad in
                     self.owner.store.quads_for_pattern(group,
-                        p.ox.NamedNode(P+'identityDecisionDependencies'), None, p.graph))
+                        p.ox.NamedNode(P+'identityDecisionDependencies'), None, decision_graph))
                 valid = all(self._context is not None and
                     self._context.dependency_digest(field, key) == digest
                     for field, key, digest in dependencies)
             if valid:
                 p.mutate(self.generation, [p.triple(root, 'identityRetained', group)])
-                retained += sum(1 for _ in self.owner.store.quads_for_pattern(group,
-                    p.ox.NamedNode(P+'identityDecisionCanonical'), None, p.graph))
+                p.mutate(self.generation, [p.triple(p.head, 'identityDecisionGroup', group),
+                    p.triple(group, 'identityDecisionGraph', decision_graph)])
+                for item in self.owner.store.quads_for_pattern(group,
+                        p.ox.NamedNode(P+'identityDecisionCanonical'), None, decision_graph):
+                    canonical = item.object
+                    location = p._pointer(canonical, 'canonicalGraph', previous)
+                    if location is None:
+                        raise ProcessingError('Completed canonical lacks its decision graph')
+                    p.mutate(self.generation, [p.triple(p.head, 'canonical', canonical),
+                        p.triple(canonical, 'canonicalGraph', location)])
+                    retained += 1
                 components += 1
         # Point-scoped deletes keep the publication fence outside the deletion
         # domain. Never use uncorrelated UNION branches with head variables.
@@ -318,9 +343,10 @@ class IdentityCandidateIndex:
                 where=f'GRAPH {p.graph} {{ {group} ?predicate ?o }}')
         # Explicitly rebuild plans without current component dependency metadata.
         for row in self.owner.store.query(f"""SELECT ?canonical WHERE {{ GRAPH {p.graph} {{
-                {p.head} <{P}canonical> ?canonical .
-                FILTER NOT EXISTS {{ ?group <{P}identityDecisionCanonical> ?canonical .
-                    ?root <{P}identityRetained> ?group }} }} }}"""):
+                {p.head} <{P}canonical> ?canonical }}
+                FILTER NOT EXISTS {{ GRAPH {p.graph} {{ ?root <{P}identityRetained> ?group .
+                    ?group <{P}identityDecisionGraph> ?decisionGraph }}
+                    GRAPH ?decisionGraph {{ ?group <{P}identityDecisionCanonical> ?canonical }} }} }}"""):
             remove_canonical(row['canonical'])
         self.owner._update_derived_graph(p.graph, delete=f'{p.head} ?predicate ?o',
             where=f'''GRAPH {p.graph} {{ {p.head} ?predicate ?o . VALUES ?predicate {{
@@ -376,7 +402,8 @@ class IdentityCandidateIndex:
                     raise ProcessingError('Identity decision references an unstaged canonical')
                 triples.append(p.triple(group, 'identityDecisionCanonical', canonical))
             p.mutate(self.generation, triples)
-        p.mutate(self.generation, [p.triple(p.head, 'identityDecisionGroup', group)])
+        p.mutate(self.generation, [p.triple(p.head, 'identityDecisionGroup', group),
+            p.triple(group, 'identityDecisionGraph', p.graph)])
 
     def _fence(self):
         check_query_cancellation()
@@ -586,12 +613,12 @@ class IdentityCandidateIndex:
             if evidence_ids is not None:
                 values = ' '.join(str(p.scalar(value)) for value in evidence_ids)
                 evidence_clause = f"""VALUES ?evidence {{ {values} }}
-                    ?id <{P}member> ?native . ?native <{P}identityEvidence> ?evidence ."""
+                    {p.canonical_pattern('?id', f'?id <{P}member> ?native')}
+                    GRAPH {p.graph} {{ ?native <{P}identityEvidence> ?evidence }}"""
             cursor_clause = '' if position is None else f'FILTER(STR(?id) > {p.scalar(position)})'
             rows = list(self.owner.store.query(f"""SELECT DISTINCT ?id ?representative WHERE {{
-                GRAPH {p.graph} {{ {p.head} <{P}canonical> ?id .
-                ?id <{P}representative> ?representative . {evidence_clause}
-                {cursor_clause} }} }} ORDER BY STR(?id) LIMIT {limit+1}"""))
+                {p.canonical_pattern('?id', f'?id <{P}representative> ?representative')}
+                {evidence_clause} {cursor_clause} }} ORDER BY STR(?id) LIMIT {limit+1}"""))
             selected = rows[:limit]
             response = dict(records=[dict(id=row['id'].value,
                 representative=row['representative'].value) for row in selected],
