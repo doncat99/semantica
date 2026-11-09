@@ -40,6 +40,12 @@ from ..utils.exceptions import ProcessingError, ValidationError
 from ..utils.helpers import ensure_directory, hash_data
 from ..utils.logging import get_logger
 from ..utils.progress_tracker import get_progress_tracker
+from .endpoint_names import (
+    SOURCE_ENDPOINT_NAMES,
+    TARGET_ENDPOINT_NAMES,
+    first_set_id,
+    is_unset_id,
+)
 
 
 SEMANTICA_NS = "https://semantica.dev/ns#"
@@ -849,7 +855,7 @@ class RDFSerializer:
         entities = rdf_data.get("entities", [])
         for entity in entities:
             entity_id = entity.get("id")
-            if not entity_id:
+            if is_unset_id(entity_id):
                 entity_text = entity.get("text", "")
                 entity_id = mint_entity_iri(entity_text)
 
@@ -888,8 +894,8 @@ class RDFSerializer:
         # Convert relationships to RDF triplets
         relationships = rdf_data.get("relationships", [])
         for idx, rel in enumerate(relationships):
-            source_id = rel.get("source_id") or rel.get("source")
-            target_id = rel.get("target_id") or rel.get("target")
+            source_id = first_set_id(rel, SOURCE_ENDPOINT_NAMES)
+            target_id = first_set_id(rel, TARGET_ENDPOINT_NAMES)
             rel_type = rel.get("type", DEFAULT_RELATION_TYPE)
 
             lines.append(
@@ -961,7 +967,11 @@ class RDFSerializer:
         """
         rel_id = self._as_turtle_iri(
             rel.get("id")
-            or mint_relationship_iri(idx, source_id or "", target_id or ""),
+            or mint_relationship_iri(
+                idx,
+                "" if is_unset_id(source_id) else source_id,
+                "" if is_unset_id(target_id) else target_id,
+            ),
             namespaces,
         )
 
@@ -978,11 +988,11 @@ class RDFSerializer:
         )
 
         predicates = ["a semantica:Relationship"]
-        if source_id:
+        if not is_unset_id(source_id):
             predicates.append(
                 f"semantica:source <{self._as_turtle_iri(source_id, namespaces)}>"
             )
-        if target_id:
+        if not is_unset_id(target_id):
             predicates.append(
                 f"semantica:target <{self._as_turtle_iri(target_id, namespaces)}>"
             )
@@ -1025,8 +1035,10 @@ class RDFSerializer:
         # alone hashes empty strings for every relationship that uses source,
         # so unrelated relationships at the same index would collide on a
         # deterministic IRI.
-        source_id = rel.get("source_id") or rel.get("source") or ""
-        target_id = rel.get("target_id") or rel.get("target") or ""
+        source_id = first_set_id(rel, SOURCE_ENDPOINT_NAMES)
+        source_id = "" if source_id is None else source_id
+        target_id = first_set_id(rel, TARGET_ENDPOINT_NAMES)
+        target_id = "" if target_id is None else target_id
         rel_base_id = self._as_turtle_iri(
             rel.get("id") or mint_relationship_iri(idx, source_id, target_id),
             namespaces,
@@ -1105,7 +1117,7 @@ class RDFSerializer:
         for entity in entities:
             # Generate entity ID if not provided
             entity_id = entity.get("id")
-            if not entity_id:
+            if is_unset_id(entity_id):
                 entity_text = entity.get("text", "")
                 entity_id = mint_entity_iri(entity_text)
 
@@ -1154,8 +1166,8 @@ class RDFSerializer:
         # Convert relationships to RDF/XML
         relationships = rdf_data.get("relationships", [])
         for rel in relationships:
-            source_id = rel.get("source_id") or rel.get("source")
-            target_id = rel.get("target_id") or rel.get("target")
+            source_id = first_set_id(rel, SOURCE_ENDPOINT_NAMES)
+            target_id = first_set_id(rel, TARGET_ENDPOINT_NAMES)
             # RDF/XML predicates are emitted as QNames, unlike resource
             # attributes which use the shared absolute-IRI normalizer.
             rel_type = rel.get("type") or "semantica:related_to"
@@ -1252,7 +1264,9 @@ class RDFSerializer:
             # f"semantica:entity/{text}" interpolated the raw text into an IRI:
             # any entity whose text contained a space produced an invalid IRI
             # and was dropped in full by a JSON-LD parser, silently.
-            entity_id = entity.get("id") or mint_entity_iri(entity.get("text", ""))
+            entity_id = entity.get("id")
+            if is_unset_id(entity_id):
+                entity_id = mint_entity_iri(entity.get("text", ""))
 
             # The caller's type label is data, not a class we define: minting
             # it into @type expanded it through @vocab into ns#ORG and
@@ -1298,8 +1312,10 @@ class RDFSerializer:
             # source_id/target_id used to hash into f"semantica:rel/_", so every
             # such relationship in an export collapsed onto one node and their
             # types and endpoints merged.
-            source = rel.get("source_id") or rel.get("source", "")
-            target = rel.get("target_id") or rel.get("target", "")
+            source = first_set_id(rel, SOURCE_ENDPOINT_NAMES)
+            source = "" if source is None else source
+            target = first_set_id(rel, TARGET_ENDPOINT_NAMES)
+            target = "" if target is None else target
             rel_id = rel.get("id") or mint_relationship_iri(index, source, target)
 
             jsonld["@graph"].append(
@@ -1348,7 +1364,7 @@ class RDFSerializer:
         namespaces = self.namespace_manager.extract_namespaces(rdf_data)
 
         def expand_uri(uri: str) -> str:
-            if not uri:
+            if is_unset_id(uri):
                 return ""
             return f"<{self._as_turtle_iri(uri, namespaces)}>"
 
@@ -1357,7 +1373,7 @@ class RDFSerializer:
         for entity in entities:
             # Generate entity ID if not provided
             entity_id = entity.get("id")
-            if not entity_id:
+            if is_unset_id(entity_id):
                 entity_text = entity.get("text", "")
                 entity_id = mint_entity_iri(entity_text)
 
@@ -1405,11 +1421,11 @@ class RDFSerializer:
         # Convert relationships
         relationships = rdf_data.get("relationships", [])
         for rel in relationships:
-            source_id = rel.get("source_id") or rel.get("source")
-            target_id = rel.get("target_id") or rel.get("target")
+            source_id = first_set_id(rel, SOURCE_ENDPOINT_NAMES)
+            target_id = first_set_id(rel, TARGET_ENDPOINT_NAMES)
             rel_type = rel.get("type") or DEFAULT_RELATION_TYPE
 
-            if source_id and target_id:
+            if not is_unset_id(source_id) and not is_unset_id(target_id):
                 lines.append(
                     f"{expand_uri(source_id)} {expand_uri(rel_type)} {expand_uri(target_id)} ."
                 )
@@ -1527,9 +1543,9 @@ class RDFValidator:
                 continue
 
             # Check for required fields
-            if "source_id" not in rel and "source" not in rel:
+            if first_set_id(rel, SOURCE_ENDPOINT_NAMES) is None:
                 errors.append(f"Relationship {i} missing 'source_id' or 'source' field")
-            if "target_id" not in rel and "target" not in rel:
+            if first_set_id(rel, TARGET_ENDPOINT_NAMES) is None:
                 errors.append(f"Relationship {i} missing 'target_id' or 'target' field")
 
         is_valid = len(errors) == 0
@@ -1617,22 +1633,22 @@ class RDFValidator:
 
         # Build set of entity IDs for reference checking
         entities = rdf_data.get("entities", [])
-        entity_ids = {e.get("id") for e in entities if e.get("id")}
+        entity_ids = {e.get("id") for e in entities if not is_unset_id(e.get("id"))}
 
         # Check relationship references
         relationships = rdf_data.get("relationships", [])
         for i, rel in enumerate(relationships):
-            source_id = rel.get("source_id") or rel.get("source")
-            target_id = rel.get("target_id") or rel.get("target")
+            source_id = first_set_id(rel, SOURCE_ENDPOINT_NAMES)
+            target_id = first_set_id(rel, TARGET_ENDPOINT_NAMES)
 
             # Check if source entity exists
-            if source_id and source_id not in entity_ids:
+            if not is_unset_id(source_id) and source_id not in entity_ids:
                 issues.append(
                     f"Relationship {i} references non-existent source entity: {source_id}"
                 )
 
             # Check if target entity exists
-            if target_id and target_id not in entity_ids:
+            if not is_unset_id(target_id) and target_id not in entity_ids:
                 issues.append(
                     f"Relationship {i} references non-existent target entity: {target_id}"
                 )

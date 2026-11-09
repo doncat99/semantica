@@ -33,3 +33,10 @@
 - Upstream assessment: no incoming merge. The existing committed native owner
   already supplies the required implementation; remove the obsolete local
   replacement instead of adding compatibility code.
+
+
+## 2026-11-09 upstream merge assessment
+
+Retain PyMuPDF. Incoming upstream PDF page-default tests are adapted to the current reader; all five cases pass. No pdfplumber production code or dependency is restored.
+See [sync evidence](2026-11-09-upstream-sync.md) for inspected revisions,
+resolutions and scoped verification.

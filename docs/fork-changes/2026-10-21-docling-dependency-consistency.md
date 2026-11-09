@@ -46,3 +46,10 @@ Repair main's dependency resolution; preserve unrelated draft checkouts.
 - Incoming upstream revision: not reviewed in this repair.
 - On future merges, reconcile declarations and lockfiles together, then run the
   existing locked-resolution and native artifact acceptance checks.
+
+
+## 2026-11-09 upstream merge assessment
+
+Retain the exact fork Docling wheel URLs and hashes while regenerating uv.lock for upstream 0.8.0/Python 3.11–3.13/Pillow 13. Locked validation passes. No worker artifact or consumer pin is published by this source sync.
+See [sync evidence](2026-11-09-upstream-sync.md) for inspected revisions,
+resolutions and scoped verification.

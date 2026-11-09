@@ -189,3 +189,10 @@ contract regressions and exact immutable artifact acceptance after merges.
   Scope SHA-256/deletion manifest: `/tmp/g4-tms-source-freeze.json` (includes
   current shared ContextRetriever/reasoning exports, not whole-fork digest).
   No claim of packaged/ESG acceptance from this source-only evidence.
+
+
+## 2026-11-09 upstream merge assessment
+
+Retain the removal. Incoming upstream #1731 (`cd1c5d40`) requires full truth-snapshot assembly; its incompatible new owners/exports/tests/docs are excluded rather than restoring removed APIs. Existing native version-fenced filtering is unchanged.
+See [sync evidence](2026-11-09-upstream-sync.md) for inspected revisions,
+resolutions and scoped verification.

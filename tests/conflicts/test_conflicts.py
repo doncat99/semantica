@@ -269,6 +269,27 @@ class TestConflictsModule(unittest.TestCase):
         self.assertEqual(result.resolution_strategy, "credibility_weighted")
         self.assertGreater(result.confidence, 0.0)
 
+    def test_conflict_resolver_credibility_weighted_stays_unresolved_without_data(self):
+        """Missing credibility cannot silently select another resolution strategy."""
+        resolver = ConflictResolver()
+        # No set_source_credibility calls — all sources use the default 0.5
+        from semantica.conflicts.conflict_detector import ConflictType
+        conflict = Conflict(
+            conflict_id="c_no_cred",
+            conflict_type=ConflictType.VALUE_CONFLICT,
+            conflicting_values=["A", "B"],
+            sources=[
+                {"document": "doc1", "confidence": 0.9},
+                {"document": "doc2", "confidence": 0.8},
+            ],
+        )
+        result = resolver.resolve_conflict(conflict, strategy="credibility_weighted")
+        self.assertFalse(result.resolved)
+        self.assertIsNone(result.resolved_value)
+        self.assertIn("No source credibility data", result.resolution_notes)
+        self.assertEqual(result.resolution_strategy, "credibility_weighted")
+
+
     def test_conflict_resolver_first_seen(self):
         """Test first-seen resolution strategy (#865)."""
         resolver = ConflictResolver()

@@ -951,10 +951,21 @@ class VectorStore:
         return True
 
     @_serialized_operation
-    def delete_vectors(self, vector_ids: List[str], **options) -> bool:
-        """Delete vectors from store."""
+    def delete_vectors(
+        self, vector_ids: List[str], namespace: Optional[str] = None, **options
+    ) -> bool:
+        """Delete vectors from store.
+
+        Args:
+            vector_ids: Vector IDs to delete.
+            namespace: Native backend namespace, when supported by the
+                configured backend.
+            **options: Additional backend-specific options.
+        """
         # Delegate to backend store if available
         if self._backend_store:
+            if namespace is not None and self.backend == "pinecone":
+                options["namespace"] = namespace
             success = False
             if hasattr(self._backend_store, 'delete'):
                 success = self._backend_store.delete(ids=vector_ids, **options)
@@ -1040,7 +1051,7 @@ class VectorStore:
                 "backend store adapter to enable enumeration for this backend."
             )
 
-    def iter_vectors(self, batch_size: int = 500):
+    def iter_vectors(self, batch_size: int = 500, namespace: Optional[str] = None):
         """
         Iterate over every stored vector, one page at a time.
 
@@ -1050,6 +1061,8 @@ class VectorStore:
 
         Args:
             batch_size: Number of vectors to fetch per underlying call
+            namespace: Native backend namespace, when supported by the
+                configured backend
 
         Yields:
             Result dicts with 'id', 'metadata', and 'vector', in scan order
@@ -1057,6 +1070,9 @@ class VectorStore:
         if self.backend != "inmemory" and self._backend_store is not None:
             iter_all = getattr(self._backend_store, "iter_all", None)
             if callable(iter_all):
+                if namespace is not None and self.backend == "pinecone":
+                    yield from iter_all(batch_size=batch_size, namespace=namespace)
+                    return
                 yield from iter_all(batch_size=batch_size)
                 return
 
