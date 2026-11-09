@@ -77,6 +77,19 @@ its particular field-level cause is not established by this change.
 
 ## Dated follow-ups
 
+- Packaged ESG run `2d60dabb-c0a1-4944-8c4f-e797589a4237` exposed an omitted
+  migration: the interrupted publication was stored in the flat registry graph,
+  with no generation/latest pointer. New-generation CAS therefore matched no row.
+  `PublicationRecords.migrate_pending_registry()` now validates completed identity
+  membership/count/coverage before admitting the existing identity graph by
+  reference and creating a pending publication header. No graph is copied or
+  moved. Incomplete facts receive no completion binding. This explicit offline
+  operation is idempotent; normal begin rejects unmigrated data and does not
+  dispatch to an old reader. Ready flat publications require separate audited
+  admission and are explicitly rejected by this pending-only migration.
+  The first real migration used the superseded `MOVE GRAPH` implementation and
+  took 672.0 seconds; that timing is not evidence for reference-only admission.
+
 - 2026-11-10: New native bundle acceptance passed. Host App packaging and isolated
   change-verification are running; delivery is not yet certified.
 - Final focused owner run: 133 passed in 101.21 seconds (projection lifecycle,

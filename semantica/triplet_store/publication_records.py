@@ -413,12 +413,81 @@ class PublicationRecords:
                 self._checkpoint = None
 
     @_locked
+    def migrate_pending_registry(self):
+        """Offline admission of a flat interrupted publication by reference."""
+        if self._pointer(self.registry_head, 'latest', self.registry) is not None:
+            return False
+        self.generation = None
+        current = self.status()
+        if current is None:
+            return False
+        if current['state'] != 'pending':
+            raise ProcessingError('Offline publication migration requires an interrupted pending publication')
+        old_head, old_graph = self.head, self.graph
+        identity_input = self.values(old_head, 'identityStageInput', graph=old_graph)
+        if identity_input:
+            if len(identity_input) != 1 or not self.values(old_head, 'identityIndexSealed', graph=old_graph):
+                raise ProcessingError('Offline publication migration identity completion is incomplete')
+            # Index seeks avoid a Cartesian plan over unrelated support edges.
+            canonical = self.iri(P+'canonical')
+            canonical_count = 0
+            for link in self.owner.store.quads_for_pattern(old_head, canonical, None, old_graph):
+                check_query_cancellation()
+                canonical_count += 1
+                for field, count in [('member', 'memberCount'), ('selector', 'selectorCount')]:
+                    values = self.values(link.object, count, graph=old_graph)
+                    try:
+                        if len(values) != 1 or values[0].datatype.value not in {
+                            'http://www.w3.org/2001/XMLSchema#integer',
+                            'http://www.w3.org/2001/XMLSchema#string',
+                        }:
+                            raise ValueError
+                        expected = int(values[0].value)
+                    except (AttributeError, ValueError):
+                        raise ProcessingError('Offline publication migration identity plan is incomplete')
+                    actual = sum(1 for _ in self.owner.store.quads_for_pattern(
+                        link.object, self.iri(P+field), None, old_graph))
+                    if expected < 0 or actual != expected:
+                        raise ProcessingError('Offline publication migration identity plan is incomplete')
+            if canonical_count != int(self.one(old_head, 'identityStageCount')):
+                raise ProcessingError('Offline publication migration identity count differs')
+            for link in self.owner.store.quads_for_pattern(old_head, self.iri(P+'identityMember'), None, old_graph):
+                check_query_cancellation()
+                if not any(next(self.owner.store.quads_for_pattern(
+                    old_head, canonical, member.subject, old_graph), None) is not None
+                    for member in self.owner.store.quads_for_pattern(None, self.iri(P+'member'), link.object, old_graph)):
+                    raise ProcessingError('Offline publication migration identity coverage is incomplete')
+        self.generation = self.scalar(current['generation'])
+        graph, head = self.publication_graph, self.publication_head
+        if self.owner.store.contains_named_graph(graph):
+            raise ProcessingError('Offline publication migration destination already exists')
+        completion = (self.triple(self._completion_key('identity', identity_input[0].value),
+            'completedGraph', old_graph) if identity_input else '')
+        header = ' '.join(self.triple(head, key, self.ox.Literal(value)) for key, value in {
+            'generation': current['generation'], 'state': 'pending',
+            'sourceCount': current['source_count'],
+        }.items())
+        identity = self.triple(head, 'identityGraph', old_graph) if identity_input else ''
+        # Admit the existing immutable stage without copying its rows. The new
+        # pending publication has no reference to any unfinished fact stage.
+        self.owner.store.update(f'''
+            INSERT DATA {{ GRAPH {self.registry} {{
+                {self.registry_head} <{P}latest> {self.generation} . {completion} }}
+                GRAPH {graph} {{ {header} {identity} }} }};
+            INSERT {{ GRAPH {old_graph} {{ ?node <{P}canonicalGraph> {old_graph} }} }}
+            WHERE {{ GRAPH {old_graph} {{ {old_head} <{P}canonical> ?node }} }}''')
+        self.owner.flush()
+        return True
+
+    @_locked
     def begin(self, *, expected_generation, source_count, canonical_count):
         if self.owner.path is None:
             raise ProcessingError("Publication requires persistent Oxigraph")
         if any(type(n) is not int or n < 0 or n > 1000000 for n in (source_count, *([canonical_count] if canonical_count is not None else []))):
             raise ProcessingError("Invalid publication counts")
         current = self.status()
+        if current is not None and self._pointer(self.registry_head, 'latest', self.registry) is None:
+            raise ProcessingError('Native store requires offline publication migration')
         if (current or {}).get("generation") != expected_generation:
             raise ProcessingError("Publication CAS conflict")
         generation = hashlib.sha256(uuid.uuid4().bytes).hexdigest()

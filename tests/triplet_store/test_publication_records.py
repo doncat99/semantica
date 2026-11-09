@@ -22,6 +22,52 @@ def indexes():
     return dict(keyword=dict(kind="native-keyword", store_id="kw", recipe_digest="recipe"), semantic=dict(kind="native-vector", store_id="vectors", recipe_digest="recipe", space_id="space"))
 
 
+def test_flat_pending_publication_requires_explicit_idempotent_migration(tmp_path):
+    from semantica.triplet_store.publication_records import P, PublicationRecords
+    store, _, _, _ = fixture(tmp_path)
+    try:
+        owner = PublicationRecords(store, 'p')
+        old_head, old_graph = owner.head, owner.graph
+        store.store.update(f'''INSERT DATA {{ GRAPH {old_graph} {{
+            {old_head} <{P}generation> "old" ; <{P}state> "pending" ; <{P}sourceCount> 1 .
+            {old_head} <{P}identityStageInput> "identity-input" ; <{P}identityStageCount> 1 ;
+                <{P}identityIndexSealed> 1 ; <{P}canonical> <urn:canonical:a> .
+            <urn:canonical:a> <{P}member> <urn:member:a> ; <{P}memberCount> 1 ; <{P}selectorCount> 0 .
+        }} }}''')
+        with pytest.raises(ProcessingError, match='offline publication migration'):
+            owner.begin(expected_generation='old', source_count=1, canonical_count=None)
+        assert owner.migrate_pending_registry() is True
+        assert owner.migrate_pending_registry() is False
+        assert owner.status()['generation'] == 'old'
+        assert owner.stage_graph('identity') == old_graph
+        assert owner.identity_stage_status('old', 'identity-input')['canonical_count'] == 1
+        following = owner.begin(expected_generation='old', source_count=1, canonical_count=None)
+        assert following['state'] == 'pending'
+        assert owner.identity_stage_status(following['generation'], 'identity-input')['canonical_count'] == 1
+        assert [value.value for value in owner.values(old_head, 'generation', graph=old_graph)] == ['old']
+    finally:
+        store.close()
+
+
+def test_flat_migration_rejects_incomplete_identity_before_mutating(tmp_path):
+    from semantica.triplet_store.publication_records import P, PublicationRecords
+    store, _, _, _ = fixture(tmp_path)
+    try:
+        owner = PublicationRecords(store, 'p')
+        store.store.update(f'''INSERT DATA {{ GRAPH {owner.graph} {{
+            {owner.head} <{P}generation> "old" ; <{P}state> "pending" ; <{P}sourceCount> 1 ;
+                <{P}identityStageInput> "identity-input" ; <{P}identityStageCount> 1 ;
+                <{P}identityIndexSealed> 1 ; <{P}canonical> <urn:canonical:a> .
+            <urn:canonical:a> <{P}memberCount> 1 ; <{P}selectorCount> 0 .
+        }} }}''')
+        with pytest.raises(ProcessingError, match='identity plan is incomplete'):
+            owner.migrate_pending_registry()
+        assert owner._pointer(owner.registry_head, 'latest', owner.registry) is None
+        assert owner.status()['generation'] == 'old'
+    finally:
+        store.close()
+
+
 @pytest.mark.parametrize('value', ['not-a-number', '1.5', '-1'])
 def test_activation_rejects_invalid_decision_count(tmp_path, value):
     from semantica.triplet_store.publication_records import P, PublicationRecords
