@@ -77,6 +77,19 @@ assert spec.loader is not None
 spec.loader.exec_module(module)
 
 
+def test_acceptance_checks_selected_package_versions():
+    import ast
+    tree = ast.parse(SCRIPT.with_name("semantic_worker_acceptance.py").read_text())
+    start = next(index for index, node in enumerate(tree.body)
+                 if isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and target.id == "selected_packages" for target in node.targets))
+    check = compile(ast.Module(body=tree.body[start:start + 2], type_ignores=[]), str(SCRIPT), "exec")
+    selected = {"docling": "2.141.0", "docling-slim": "2.149.0+ontoscience.1", "docling-ibm-models": "4.0.4+ontoscience.3"}
+    scope = {"release": {"packages": list(selected.items())}, "version": selected.__getitem__}
+    exec(check, scope)
+    with pytest.raises(AssertionError, match="docling-slim"):
+        exec(check, {**scope, "version": lambda name: "wrong" if name == "docling-slim" else selected[name]})
+
+
 def test_release_tag_is_derived_from_full_revision():
     assert module.revision_tag("a" * 40) == "ontoscience-semantic-worker-aaaaaaaaaaaa"
 
