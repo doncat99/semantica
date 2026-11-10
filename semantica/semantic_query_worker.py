@@ -23,6 +23,7 @@ from .semantic_query_schema import (
     NativeEvidenceRequest,
     NativeSceneRequest,
     NativeClassificationRequest,
+    NativeClassificationBatchRequest,
 )
 from .semantic_worker_context import query_cancellation
 from .utils.exceptions import ProcessingError
@@ -109,6 +110,21 @@ def handle_request(raw: Dict[str, Any]) -> Dict[str, Any]:
         _native_store.borrow(selected.semantic_store, selected.project_id)
         return _response(request.id, True, result=dict(project=selected.project_id,
             generation=selected.semantic_store.generation, bindings=bindings))
+    if request.method == 'classification_batch':
+        from .semantic_worker_context import check_query_cancellation
+        selected = NativeClassificationBatchRequest.model_validate(request.params)
+        owner = _native_store.borrow(selected.semantic_store, selected.project_id)
+        pages = []
+        for selection in selected.selections:
+            check_query_cancellation()
+            pages.append(owner.read_native_classification_dimension(selected.project_id,
+                selected.semantic_store.generation, selection.source_id, selection.dimension_id,
+                after=selection.after, limit=selection.limit, max_bytes=selection.max_bytes))
+            if len(json.dumps(pages, ensure_ascii=False).encode()) > selected.max_bytes:
+                raise ProcessingError('Classification batch exceeds byte budget')
+        _native_store.borrow(selected.semantic_store, selected.project_id)
+        return _response(request.id, True, result=dict(project=selected.project_id,
+            generation=selected.semantic_store.generation, pages=pages))
     if request.method == 'classification':
         selected = NativeClassificationRequest.model_validate(request.params)
         owner = _native_store.borrow(selected.semantic_store, selected.project_id)

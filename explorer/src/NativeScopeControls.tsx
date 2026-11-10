@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from 'react';
 import { useQueryClient } from '@tanstack/react-query';
 
-type CatalogKind = 'sources' | 'communities';
-type CatalogPage = { nodes: Array<{ id: string; memberCount?: number }>; next_cursor: string | null };
-type Selection = { sourceId?: string; communityId?: string; nodeIds?: string[]; after?: string };
+type CatalogKind = 'sources' | 'communities' | 'topics';
+type CatalogPage = { nodes: Array<{ id: string; title?: string; memberCount?: number }>; next_cursor: string | null };
+type Selection = { sourceId?: string; communityId?: string; topicId?: string; nodeIds?: string[]; after?: string };
 type Active = { selection: Selection; next_cursor: string | null; nodeCount: number; linkCount: number };
 
 async function read<T>(url: string, signal: AbortSignal, selection?: Selection): Promise<T> {
@@ -68,13 +68,13 @@ export function NativeScopeControls({ onChange }: { onChange: () => void }) {
     color: 'var(--ws-text)', background: 'var(--ws-bg)', fontSize: 12, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
     <label>Browse <select aria-label="Scope kind" value={kind} disabled={busy}
       onChange={event => void browse(event.target.value as CatalogKind)}>
-      <option value="sources">Sources</option><option value="communities">Communities</option>
+      <option value="sources">Sources</option><option value="topics">Themes</option><option value="communities">Topology communities</option>
     </select></label>
     <select aria-label="Select native scope" value={chosen} onChange={event => setChosen(event.target.value)} disabled={busy} style={{ maxWidth: 280 }}>
       <option value="">Choose a scope</option>
-      {catalog.nodes.map(node => <option key={node.id} value={node.id}>{node.id}{node.memberCount !== undefined ? ` (${node.memberCount} members)` : ''}</option>)}
+      {catalog.nodes.map(node => <option key={node.id} value={node.id}>{node.title ?? node.id}{node.memberCount !== undefined ? ` (${node.memberCount} members)` : ''}</option>)}
     </select>
-    <button disabled={busy || !chosen} onClick={() => void select(kind === 'sources' ? { sourceId: chosen } : { communityId: chosen })}>Open first node page</button>
+    <button disabled={busy || !chosen} onClick={() => void select(kind === 'sources' ? { sourceId: chosen } : kind === 'topics' ? { topicId: chosen } : { communityId: chosen })}>Open first node page</button>
     <button disabled={busy || !catalog.next_cursor} onClick={() => void browse(kind,catalog.next_cursor!)}>More scopes</button>
     <button disabled={busy} onClick={() => void browse(kind)}>First scopes</button>
     <label>Node IDs <input aria-label="Explicit native node identities" value={ids} onChange={event => setIds(event.target.value)} placeholder="Comma-separated IDs" /></label>
@@ -89,6 +89,12 @@ export function NativeScopeControls({ onChange }: { onChange: () => void }) {
       // for an installed scene, and do not allow another selection meanwhile.
       void fetch('/api/native-scope/cancel', { method: 'POST' });
     }}>Cancel selection</button>}
+    <details>
+      <summary>Knowledge object types</summary>
+      <p>Concept/Object nodes retain their business type. Relations appear as directed edges with the existing fact status; the same fact is not duplicated as another node.</p>
+      <p>Themes use completed semantic topics. Topology communities are not themes.</p>
+      <p>Evidence is inspected on demand. A relationship appears once, with its recorded fact status.</p>
+    </details>
     {error && <span role="alert">{error}</span>}
   </section>;
 }

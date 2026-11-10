@@ -60,6 +60,8 @@ def _range(text, start, end):
 
 
 class ExtractionRecords:
+    binding_fields = BINDING
+
     @staticmethod
     def source_projection_identity(*, project, source, material, mime_type, representation,
                                    mode, force_ocr, extraction, formula_semantics):
@@ -393,6 +395,64 @@ class ExtractionRecords:
         self.operation = links[0].object if links else self.logical
         self.quads = []
 
+    @classmethod
+    def from_operation(cls, owner, identity, project):
+        return cls.from_operations(owner, [identity], project)[0]
+
+    @classmethod
+    def from_operations(cls, owner, identities, project):
+        """Admit one bounded address page without reopening each receipt field."""
+        if (not isinstance(identities, list) or not 1 <= len(identities) <= MAX_PAGE_ROWS
+                or len(set(identities)) != len(identities)):
+            raise ProcessingError('Native operation admission requires 1..128 unique addresses')
+        ox = owner._oxigraph
+        graph = ox.NamedNode('urn:semantica:project:' + hashlib.sha256(project.encode()).hexdigest())
+        names = {'operationIdentity', 'extractionStage', 'operationDigest', 'factsDigest',
+            'resultCount', 'ownedCount', 'quadCount', 'acceptedDigest'} | {
+            'binding'+key[0].upper()+key[1:] for key in cls.binding_fields}
+        if cls is not ExtractionRecords:
+            names.remove('extractionStage')
+        columns = [(RDF_TYPE, 'type'), *((F+name, name) for name in sorted(names))]
+        metadata, size = {}, 0
+        query = ('SELECT ?operation ' + ' '.join('?'+name for _,name in columns)
+            + ' WHERE { VALUES ?operation { '
+            + ' '.join(str(ox.NamedNode(value)) for value in identities)
+            + ' } GRAPH '+str(graph)+' { '
+            + ' . '.join('?operation '+str(ox.NamedNode(predicate))+' ?'+name
+                for predicate,name in columns) + ' } } LIMIT '+str(len(identities)+1))
+        for row in owner.store.query(query):
+            identity = row['operation'].value
+            if identity in metadata:
+                raise ProcessingError('Native operation completion projection is duplicated')
+            fields = {predicate if predicate == RDF_TYPE else name: [row[name]]
+                for predicate,name in columns}
+            size += sum(len(str(values[0]).encode()) for values in fields.values())
+            if size > MAX_PAGE_BYTES:
+                raise ProcessingError('Native operation completion projection exceeds budget')
+            metadata[identity] = fields
+        if set(metadata) != set(identities):
+            raise ProcessingError('Native operation completion field missing')
+        admitted = []
+        for identity in identities:
+            fields = metadata[identity]
+            def text(key):
+                values = fields.get(key, [])
+                if len(values) != 1:
+                    raise ProcessingError('Native operation completion field missing: '+key)
+                return values[0].value
+            try:
+                binding = {key: (int(text('binding'+key[0].upper()+key[1:]))
+                    if key in {'window_start', 'window_end'} else text('binding'+key[0].upper()+key[1:]))
+                    for key in cls.binding_fields}
+            except ValueError as exc:
+                raise ProcessingError('Native operation completion binding is invalid') from exc
+            records = (cls(owner, binding, text('extractionStage')) if cls is ExtractionRecords
+                else cls(owner, binding))
+            if records.operation.value != identity or not records.indexed or records._completion_receipt(fields) is None:
+                raise ProcessingError('Publication operation has no valid native receipt')
+            admitted.append(records)
+        return admitted
+
     def node(self, suffix):
         return self.ox.NamedNode(self.operation.value + ":" + suffix)
 
@@ -421,7 +481,9 @@ class ExtractionRecords:
             return None
         if len(result) != 1:
             raise ProcessingError("Native extraction field missing or duplicated: " + predicate)
-        value = result[0]
+        return self._scalar_value(result[0])
+
+    def _scalar_value(self, value):
         if isinstance(value, self.ox.NamedNode):
             return value.value
         datatype = value.datatype.value
@@ -1169,33 +1231,41 @@ class ExtractionRecords:
                 return None
             return self._verify_receipt()
 
-    def _completion_receipt(self):
-        present = self.values(self.operation, RDF_TYPE)
+    def _completion_receipt(self, metadata=None):
+        def one(field):
+            if metadata is None:
+                return self.one(self.operation, field)
+            values = metadata.get(field, [])
+            if len(values) != 1:
+                raise ProcessingError('Native extraction field missing or duplicated: '+field)
+            return self._scalar_value(values[0])
+        present = (self.values(self.operation, RDF_TYPE) if metadata is None
+            else metadata.get(RDF_TYPE, []))
         if not present:
             if self.indexed:
                 raise ProcessingError("Native extraction identity index references a missing paid operation")
             return None
         if present != [self.ox.NamedNode(F + "ExtractionOperation")]:
             raise ProcessingError("Invalid native extraction receipt type")
-        if self.one(self.operation, "operationIdentity") != self.operation.value:
+        if one("operationIdentity") != self.operation.value:
             raise ProcessingError("Native extraction receipt identity mismatch")
         for key, expected in self.binding.items():
-            if self.one(self.operation, "binding" + key[0].upper() + key[1:]) != expected:
+            if one("binding" + key[0].upper() + key[1:]) != expected:
                 raise ExtractionIdentityStaleError("Native extraction indexed binding differs")
-        if self.stage in {"entities", "relations"} and self.one(self.operation, "extractionStage") != self.stage:
+        if self.stage in {"entities", "relations"} and one("extractionStage") != self.stage:
             raise ProcessingError("Native extraction indexed stage differs")
         for field in ("operationDigest", "factsDigest"):
-            digest = self.one(self.operation, field)
+            digest = one(field)
             if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
                 raise ProcessingError("Native extraction completion digest is corrupt")
         for field, maximum in (("resultCount", MAX_RECORDS), ("ownedCount", MAX_OWNED), ("quadCount", MAX_QUADS)):
-            value = self.one(self.operation, field)
+            value = one(field)
             if type(value) is not int or not 0 <= value <= maximum:
                 raise ProcessingError("Native extraction completion count is corrupt")
-        accepted = self.one(self.operation, "acceptedDigest")
+        accepted = one("acceptedDigest")
         if not isinstance(accepted, str) or not accepted:
             raise ProcessingError("Native extraction accepted digest is corrupt")
-        return {"operation_id": self.operation.value, "accepted_digest": accepted, "count": self.one(self.operation, "resultCount")}
+        return {"operation_id": self.operation.value, "accepted_digest": accepted, "count": one("resultCount")}
 
     def _verify_receipt(self):
         receipt = self._completion_receipt()

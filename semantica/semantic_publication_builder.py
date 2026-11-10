@@ -22,7 +22,7 @@ from dataclasses import dataclass, replace
 from contextlib import contextmanager
 from contextvars import ContextVar, copy_context
 from hashlib import sha256
-from itertools import chain
+from itertools import chain, islice
 from pathlib import Path
 from typing import Any
 
@@ -993,9 +993,10 @@ def _extract_project_sources(parsed_sources, request, progress, *, completed_ope
             for index in range(max(map(len, batches), default=0))
             for source_index, items in enumerate(batches) if index < len(items)]
     try:
-        phase("embedding", jobs,
-              lambda job: _embed_source_range(windows[job[0]], job[1], request.relays["embedding"]),
-              embedded, 60, 30)
+        with _embedding_phase():
+            phase("embedding", jobs,
+                  lambda job: _embed_source_range(windows[job[0]], job[1], request.relays["embedding"]),
+                  embedded, 60, 30)
     except ProcessingError as exc:
         raise _typed_extraction_error(exc) from exc
     return [_assemble_source_results(windows[index], extracted[index], embedded[index],
@@ -1372,6 +1373,21 @@ def _project_model_provider(relay: Any, operation: str = "structured_extraction"
 
 
 _native_embedding_ranges = ContextVar('native_embedding_ranges', default=None)
+_native_embedding_owners = ContextVar('native_embedding_owners', default=None)
+
+
+@contextmanager
+def _embedding_phase():
+    # Connections are phase resources, not one resource per source range.
+    owners, lock = {}, threading.Lock()
+    token = _native_embedding_owners.set((owners, lock))
+    try:
+        yield
+    finally:
+        _native_embedding_owners.reset(token)
+        for owner in owners.values():
+            owner.close()
+
 _native_embedding_vectors_required = ContextVar('native_embedding_vectors_required', default=True)
 
 
@@ -1417,11 +1433,55 @@ def _embedding_owner_binding(texts, relay):
     return SQLiteVecStore, native[2], binding, space, str(path)
 
 
+def _embedding_native_ranges(scalar_ranges, start, end):
+    """Retain serializer separators at vector boundaries without claiming scalar text."""
+    from .semantic_source_artifact import _NativeSourceRanges
+    def selected(lo, hi):
+        return (scalar_ranges.window(lo, hi) if isinstance(scalar_ranges, _NativeSourceRanges)
+                else (v for v in scalar_ranges if v['windowEnd'] > lo and v['windowStart'] < hi))
+    proof = list(islice(selected(start, end), 129))
+    if len(proof) > 128:
+        raise SemanticArtifactError('Embedding native scalar ranges exceed address budget')
+    ranges = _window_native_ranges(proof, start, end)
+    if not ranges:
+        raise SemanticArtifactError('Embedding has no native scalar extent')
+    prefix, suffix = ranges[0]['windowStart'], end-start-ranges[-1]['windowEnd']
+    if prefix:
+        join = proof[0].get('joinBefore', '')
+        if not 0 < prefix <= len(join):
+            raise SemanticArtifactError('Embedding prefix has no serializer proof')
+        ranges[0]['joinBefore'] = join[-prefix:]
+    if suffix:
+        following = next(iter(selected(end, end+2)), None)
+        join = following.get('joinBefore', '') if following else ''
+        if (not following or not 0 < suffix <= len(join)
+                or following['windowStart']-len(join) != end-suffix):
+            raise SemanticArtifactError('Embedding suffix has no serializer proof')
+        ranges[-1]['joinAfter'] = join[:suffix]
+    return [{key: value for key, value in item.items()
+             if key in {'nativeRef', 'start', 'end', 'joinBefore', 'joinAfter'}} for item in ranges]
+
+
 def _embed_texts(texts: list[str] | None, relay: Any, *, read_texts=None) -> tuple[list[list[float] | None], ModelReceipt]:
     include_vectors = _native_embedding_vectors_required.get()
     from .utils.exceptions import ValidationError
     owner_type, cache, binding, space, path = _embedding_owner_binding(texts, relay)
-    owner = owner_type.open_embedding_space(path, space)
+    resources = _native_embedding_owners.get()
+    def open_owner(dimension=None):
+        if resources is None:
+            return owner_type.open_embedding_space(path, space, dimension)
+        owners, lock = resources
+        with lock:
+            if path not in owners:
+                opened = owner_type.open_embedding_space(path, space, dimension)
+                if opened is not None:
+                    owners[path] = opened
+                return opened
+            current = owners[path]
+            if current.embedding_space_identity != space or (dimension is not None and current.dimension != dimension):
+                raise SemanticArtifactError('Embedding phase owner binding differs')
+            return current
+    owner = open_owner()
     try:
         if texts is None:
             existing = owner.read_embedding_range_binding(binding) if owner is not None else None
@@ -1457,7 +1517,7 @@ def _embed_texts(texts: list[str] | None, relay: Any, *, read_texts=None) -> tup
                 pending = {'vectors': vectors, 'receipt': receipt.model_dump(mode='json')}
                 accepted = cache.accept('embedding', key, pending)
             if owner is None:
-                owner = owner_type.open_embedding_space(path, space, len(pending['vectors'][0]))
+                owner = open_owner(len(pending['vectors'][0]))
             adopted = owner.adopt_embedding(binding, pending['vectors'], pending['receipt'],
                                             accepted_digest=accepted, include_vectors=include_vectors)
             if include_vectors:
@@ -1473,12 +1533,10 @@ def _embed_texts(texts: list[str] | None, relay: Any, *, read_texts=None) -> tup
         if scalar_ranges is None:
             raise SemanticArtifactError('Embedding has no admitted native scalar addresses')
         start, end = binding['ranges'][0]
-        object.__setattr__(receipt, '_native_vector_ranges', [
-            {key:value for key,value in item.items() if key in {'nativeRef','start','end','joinBefore'}}
-            for item in _window_native_ranges(scalar_ranges,start,end)])
+        object.__setattr__(receipt, '_native_vector_ranges', _embedding_native_ranges(scalar_ranges, start, end))
         return adopted.get('vectors', [None] * len(adopted['ids'])), receipt
     finally:
-        if owner is not None:
+        if resources is None and owner is not None:
             owner.close()
 
 
@@ -2264,15 +2322,10 @@ def _resolve_native_entities(mentions: list[KnowledgeEntity], *, property_schema
     return entities, remap, registry
 
 
-def _native_canonical_entities(index, hydrate, *, summarize, model_recipe,
-                               ids=None, evidence_ids=None):
-    """Read committed member/field decisions; never resolve them a second time.
-
-    Only selected field owners restore a full entity. Other members contribute
-    bounded address/name provenance and never cause original-text reads.
-    """
+def _native_canonical_entities(index, hydrate, *, ids=None, evidence_ids=None):
+    """Read representative and selected fields, independently of support count."""
     from .triplet_store.extraction_records import F
-    from .triplet_store.publication_records import MAX_BYTES
+    from .triplet_store.publication_records import MAX_BYTES, P
     wanted = None if ids is None else set(ids)
     evidence = None if evidence_ids is None else set(evidence_ids)
     if wanted == set() or evidence == set():
@@ -2294,34 +2347,18 @@ def _native_canonical_entities(index, hydrate, *, summarize, model_recipe,
         from .semantic_worker_context import check_query_cancellation
         check_query_cancellation()
         node = p.iri(reference['id'])
-        members, selectors = p._canonical_references(node)
+        selectors = p._canonical_selectors(node)
+        graph = p.record_graph(node)
+        def require_member(ref):
+            if next(p.owner.store.quads_for_pattern(node, p.ox.NamedNode(P+'member'),
+                    p.iri(ref), graph), None) is None:
+                raise SemanticArtifactError('native field owner is not a canonical member',
+                    code='NATIVE_PUBLICATION_INCOMPLETE')
         representative = reference['representative']
-        if representative not in members:
-            raise SemanticArtifactError('native canonical representative is not a member',
-                code='NATIVE_PUBLICATION_INCOMPLETE')
-        # Preserve decision input order (native ordinals), rather than lexical
-        # physical addresses, for ordered provenance and selected metadata.
-        members.sort(key=lambda ref: int(p.one(p.iri(ref),'identityOrdinal')))
-        summaries,summary_bytes = [],0
-        for ref in members:
-            item=summarize(ref)
-            summary_bytes+=len(json.dumps(item,ensure_ascii=False).encode())
-            if summary_bytes>MAX_BYTES:
-                raise SemanticArtifactError('native member provenance exceeds byte budget',code='NATIVE_PUBLICATION_INCOMPLETE')
-            summaries.append(item)
-        by_ref=dict(zip(members,summaries))
+        require_member(representative)
         base = hydrate(representative)
         value = base.model_dump()
         value['id'] = reference['id']
-        if model_recipe and len(members)>1:
-            value.update(description='',context='')
-            for member in summaries:
-                if member['id']==base.id: continue
-                for key,item in member['metadata'].items():
-                    current=value['metadata'].get(key)
-                    if key not in value['metadata']: value['metadata'][key]=item
-                    elif isinstance(current,list) and isinstance(item,list): value['metadata'][key]=[*current,*item]
-                    elif isinstance(current,dict) and isinstance(item,dict): value['metadata'][key]={**current,**item}
         fields, properties = {}, {}
         for selector in selectors:
             field, record = selector['field'], selector['record']
@@ -2336,10 +2373,8 @@ def _native_canonical_entities(index, hydrate, *, summarize, model_recipe,
         retained_bytes = len(json.dumps(value,ensure_ascii=False).encode())
         def selected_entity(ref):
             nonlocal retained_bytes
-            if ref not in members:
-                raise SemanticArtifactError('native field owner is not a canonical member',
-                    code='NATIVE_PUBLICATION_INCOMPLETE')
             if ref not in selected:
+                require_member(ref)
                 entity = hydrate(ref)
                 retained_bytes += len(entity.model_dump_json().encode())
                 if retained_bytes > MAX_BYTES:
@@ -2353,13 +2388,13 @@ def _native_canonical_entities(index, hydrate, *, summarize, model_recipe,
                 if not profiles or not profiles[0] or any(profile != profiles[0] for profile in profiles):
                     raise SemanticArtifactError('native identity profile selections conflict',
                         code='NATIVE_SELECTION_UNREPRESENTABLE')
-                value['metadata']['identity_profile'] = profiles[0]
+                chosen = selected_entity(owners[0])
+                value['metadata'].update({key: chosen.metadata[key] for key in
+                    ('identity_profile', 'description_evidence_ids', 'identity_context_evidence_id')
+                    if key in chosen.metadata})
                 continue
             key = 'canonical_name' if field == 'name' else field
-            if any(owner not in by_ref for owner in owners):
-                raise SemanticArtifactError('native field owner is not a canonical member',code='NATIVE_PUBLICATION_INCOMPLETE')
-            values = ([by_ref[owner][key] for owner in owners] if field in ('name','type')
-                else [getattr(selected_entity(owner),key) for owner in owners])
+            values = [getattr(selected_entity(owner), key) for owner in owners]
             if not values or any(item != values[0] for item in values):
                 raise SemanticArtifactError('native scalar selections conflict',
                     code='NATIVE_SELECTION_UNREPRESENTABLE')
@@ -2427,21 +2462,21 @@ def _native_canonical_entities(index, hydrate, *, summarize, model_recipe,
             if property_bytes>MAX_BYTES:
                 raise SemanticArtifactError('native selected properties exceed byte budget',code='NATIVE_PUBLICATION_INCOMPLETE')
             value['attributes'][name]=values[0]
-        if model_recipe:
-            value['aliases']=sorted({name for member in summaries for name in
-                [member['canonical_name'],*member.get('aliases',[])] if name!=value['canonical_name']})
-            value['evidence_ids']=sorted({ref for member in summaries for ref in member['evidence_ids']})
-            value['metadata'].update(mention_ids=[member['id'] for member in summaries],
-                source_ids=sorted({source for member in summaries for source in member['metadata'].get('source_ids',[])}))
-            if len(members)>1:
-                value['metadata']['provenance']=dict(merged_from=[dict(id=member['id'],
-                    name=member['canonical_name'],source=member['metadata'].get('source')) for member in summaries],
-                    merge_count=len(members))
+        # Evidence belongs to selected fields. Complete support provenance is
+        # read through membership pages, never copied into this scalar DTO.
+        value['evidence_ids'] = sorted({ref for entity in selected.values() for ref in entity.evidence_ids})
+        if evidence is not None:
+            # Ground cited memberships even when their mention did not own a
+            # selected scalar field; return only the explicitly requested scope.
+            values = ' '.join(str(p.scalar(ref)) for ref in sorted(evidence))
+            value['evidence_ids'] = sorted(row['evidence'].value for row in p.owner.store.query(f"""
+                SELECT DISTINCT ?evidence WHERE {{ VALUES ?evidence {{ {values} }}
+                    GRAPH {p.graph} {{ ?native <{P}identityEvidence> ?evidence }}
+                    GRAPH {graph} {{ {node} <{P}member> ?native }} }}"""))
         if len(json.dumps(value,ensure_ascii=False).encode())>MAX_BYTES:
             raise SemanticArtifactError('native canonical entity exceeds byte budget',code='NATIVE_PUBLICATION_INCOMPLETE')
         entity=KnowledgeEntity.model_validate(value)
-        index.canonical_reference(entity.id)
-        if evidence is None or evidence.intersection(entity.evidence_ids):
+        if evidence is None or entity.evidence_ids:
             yield entity
 
 
@@ -2807,7 +2842,7 @@ def _native_community_operation(topology):
     return CommunityDetector().detect_communities(graph, algorithm="greedy_modularity")
 
 
-def _semantic_organization(topology: dict) -> list[KnowledgeCommunity]:
+def _semantic_organization(topology: dict, *, read_names=None) -> list[KnowledgeCommunity]:
     """Organize only the minimal native topology; grounding has its own owner."""
     from .pipeline.parallelism_manager import ParallelismManager, Task
     from .semantic_worker_context import query_cancellation
@@ -2828,7 +2863,9 @@ def _semantic_organization(topology: dict) -> list[KnowledgeCommunity]:
         index = component_by_entity.get(relation["source"])
         if index is not None and component_by_entity.get(relation["target"]) == index:
             relations_by_component[index].append(relation["id"])
-    names = {entity["id"]: entity["name"] for entity in topology["entities"]}
+    title_ids = list(dict.fromkeys(ref for component in components for ref in component[:3]))
+    names = (read_names(title_ids) if read_names is not None else
+             {entity["id"]: entity["name"] for entity in topology["entities"]})
     communities: list[KnowledgeCommunity] = []
     for index, component in enumerate(components):
         internal_relations = relations_by_component[index]
@@ -2987,7 +3024,7 @@ def _project_stage(stage, adapter, compute, progress, percent):
         return result
 
 
-def _publish_native_topics(request, store, generation, source_builds, topics):
+def _publish_native_topics(request, publication, generation, source_builds, topics):
     """Translate temporary section citations to the current native evidence owner."""
     if not topics:
         return
@@ -3019,7 +3056,7 @@ def _publish_native_topics(request, store, generation, source_builds, topics):
             for address in ranges:
                 after = None
                 while True:
-                    page = store.read_grounded_reference_page(request.project_id, generation,
+                    page = publication.grounded_reference_page(generation,
                         dict(source=built['source'].source_id, **{key:address[key] for key in ('nativeRef','start','end')}),
                         after=after, limit=128)
                     for item in page['items']:
@@ -3038,7 +3075,7 @@ def _publish_native_topics(request, store, generation, source_builds, topics):
         organization = topic.metadata['organization']
         evidence_ids = sorted(references)
         for offset in range(0, max(len(topic.entity_ids), len(evidence_ids)), 128):
-            store.stage_publication_topics(request.project_id, generation, [dict(
+            publication.stage_topics(generation, [dict(
                 id=topic.id, title=topic.title, report_id=organization['report_id'],
                 input_digest=organization['input_digest'], members=topic.entity_ids[offset:offset+128],
                 member_count=len(topic.entity_ids), evidence_ids=evidence_ids[offset:offset+128],
@@ -3352,10 +3389,6 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                 for offset in range(start,end,TEXT_WINDOW_CHARS))
         return KnowledgeEntity.model_validate(records.read_identity_projection(ref,read_text=read))
 
-    def summarize_entity(ref):
-        store = _native_build.get()[1]
-        return ExtractionRecords.from_identity_reference(store, request.project_id, ref).read_identity_summary(ref)
-
     def entity_resolution(_):
         nonlocal identity_index
         from .triplet_store.identity_candidate_index import IdentityCandidateIndex
@@ -3522,17 +3555,21 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                 if cursor is None:
                     break
         def native_entities(**scope):
-            return _native_canonical_entities(identity_index,hydrate_entity,
-                summarize=summarize_entity,model_recipe=request.recipe.id=='model',**scope)
+            return _native_canonical_entities(identity_index,hydrate_entity,**scope)
         def native_facts(kind,**scope):
             return pages(lambda **query: fact_index.canonical_page(kind,**query),**scope)
         def organize():
             # Exact community detection needs complete topology, not fact bodies.
             publication = identity_index.publication
-            topology=dict(entities=[dict(id=item['id'], name=publication._scene_name(publication.iri(item['id']),None))
+            topology=dict(entities=[dict(id=item['id'])
                 for item in pages(identity_index.canonical_references)],
                 relationships=list(pages(fact_index.topology_page)))
-            groups = _semantic_organization(topology)
+            def title_names(ids):
+                names = {}
+                for offset in range(0, len(ids), 128):
+                    names.update(publication.canonical_names(ids[offset:offset+128]))
+                return names
+            groups = _semantic_organization(topology, read_names=title_names)
             if request.recipe.id != 'model':
                 return groups, [], []
             scores=CommunitySummarizer(cache_enabled=False)._compute_centrality(topology,
@@ -3580,12 +3617,15 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
         # the current source and canonical-selection references to those values.
         with _project_progress(progress, "artifact_writing", 90):
             store = _native_build.get()[1]
-            for community in communities:
-                for offset in range(0, len(community.entity_ids), 128):
-                    store.stage_publication_communities(request.project_id, generation, [dict(
-                        id=community.id, member_count=len(community.entity_ids),
-                        members=community.entity_ids[offset:offset + 128])])
-            _publish_native_topics(request, store, generation, source_builds, topics)
+            from .triplet_store.publication_records import PublicationRecords
+            publication = PublicationRecords(store, request.project_id)
+            with publication.checkpointed(generation):
+                for community in communities:
+                    for offset in range(0, len(community.entity_ids), 128):
+                        publication.stage_communities(generation, [dict(
+                            id=community.id, member_count=len(community.entity_ids),
+                            members=community.entity_ids[offset:offset + 128])])
+                _publish_native_topics(request, publication, generation, source_builds, topics)
             native_indexes = _publish_native_indexes(request, generation, source_builds)
             if native_indexes.get('semantic') is not None:
                 store.activate_publication(request.project_id, generation,

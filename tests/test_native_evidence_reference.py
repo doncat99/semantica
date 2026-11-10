@@ -41,11 +41,11 @@ def test_structural_reference_replays_native_scalar_without_linear_coordinates(t
     assert [item.id for item in builder._docling_cell_evidence(built)] == [span.id]
     from semantica.semantic_artifact_schema import KnowledgeTopic
     positions, published = [], []
-    def read(project, generation, position, **query):
+    def read(generation, position, **query):
         positions.append(position)
         return dict(items=[dict(evidence='urn:native:evidence')], next_cursor=None)
-    store = SimpleNamespace(read_grounded_reference_page=read,
-        stage_publication_topics=lambda project, generation, rows: published.extend(rows))
+    store = SimpleNamespace(grounded_reference_page=read,
+        stage_topics=lambda generation, rows: published.extend(rows))
     topic = KnowledgeTopic(id='topic:one', title='Theme', entity_ids=['urn:entity'],
         evidence_ids=[span.id], metadata=dict(organization=dict(report_id='report:one', input_digest='sha256:input')))
     builder._publish_native_topics(SimpleNamespace(project_id='p'), store, 'g', [built], [topic])

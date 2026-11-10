@@ -197,7 +197,8 @@ def _document_hit(request,row,metrics,match_index):
     page = read_document_reader(reader.model_copy(update={'selection':DocumentReaderSelection.model_validate(
         dict(field='ranges',ranges=selected,maxBytes=262144))}))
     metrics['canonicalBytes'] += page['readBytes']
-    text = ''.join(item.get('joinBefore','')+value['text'] for item,value in zip(ranges,page['items'],strict=True))
+    text = ''.join(item.get('joinBefore','')+value['text']+item.get('joinAfter','')
+                   for item,value in zip(ranges,page['items'],strict=True))
     first = ranges[0]
     location = row.get('locator',page['items'][0]['locator'])
     locator = DocumentLocator(representation_id=reader.representation_revision,nativeRef=first['nativeRef'],

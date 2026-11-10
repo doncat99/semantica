@@ -10,6 +10,19 @@ from types import SimpleNamespace
 import pytest
 
 
+@pytest.mark.parametrize('start,end', [(4, 12), (5, 12), (0, 5), (0, 6), (2, 10)])
+def test_vector_addresses_preserve_clipped_serializer_joins(start, end):
+    from semantica.semantic_publication_builder import _embedding_native_ranges
+    from semantica.semantic_source_artifact import _native_grounding_ranges
+    document = dict(format='epub', sections=[dict(text='Acme'), dict(text='Engine')])
+    text = 'Acme\n\nEngine'
+    proof = _native_grounding_ranges(document, text)
+    addresses = _embedding_native_ranges(proof, start, end)
+    values = {'#/document/sections/0/text': 'Acme', '#/document/sections/1/text': 'Engine'}
+    assert ''.join(a.get('joinBefore', '') + values[a['nativeRef']][a['start']:a['end']]
+                   + a.get('joinAfter', '') for a in addresses) == text[start:end]
+
+
 def test_embedding_identity_ignores_publication_recipe_and_unrelated_producers(tmp_path, monkeypatch):
     from semantica import semantic_publication_builder as builder
     relay = SimpleNamespace(model_id='model', binding_id='binding')
@@ -123,7 +136,31 @@ def child(root, fault='none', dimension='3'):
             assert cause.diagnostic['modelReceiptId'] == 'receipt'
             assert cause.diagnostic['usage'] == {'input_tokens': 7}
             raise
-    vectors, receipt = embed(None)
+    if fault == 'phase':
+        opened, closed = [], []
+        original_open = SQLiteVecStore.open_embedding_space
+        original_close = SQLiteVecStore.close
+        def counted_open(*args, **kwargs):
+            owner = original_open(*args, **kwargs)
+            if owner is not None:
+                opened.append(owner)
+            return owner
+        def counted_close(owner):
+            closed.append(owner)
+            return original_close(owner)
+        SQLiteVecStore.open_embedding_space = counted_open
+        SQLiteVecStore.close = counted_close
+        try:
+            with builder._embedding_phase():
+                vectors, receipt = embed(None)
+                builder._native_parallel_map(list(range(12)), embed, 4)
+                assert len(opened) == 1 and not closed
+                raise RuntimeError('stop phase')
+        except RuntimeError as error:
+            assert str(error) == 'stop phase'
+        assert closed == opened
+    else:
+        vectors, receipt = embed(None)
     assert vectors == [None]
     assert receipt._native_vector_ids and Path(receipt._native_vector_path).is_file()
     if fault == 'reused':
@@ -183,3 +220,9 @@ def test_invalid_paid_provider_response_fails_once_with_cost_evidence(tmp_path, 
         assert conn.execute('SELECT count(*) FROM cache WHERE accepted_digest IS NOT NULL').fetchone()[0] == 0
         assert conn.execute('SELECT count(*) FROM accepted_receipts').fetchone()[0] == 0
     assert not list(tmp_path.glob('embedding-*.sqlite'))
+
+
+def test_embedding_phase_reuses_owner_and_closes_on_failure(tmp_path):
+    result = run(tmp_path, 'phase')
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path/'calls').read_text().splitlines() == ['model']

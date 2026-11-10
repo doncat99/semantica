@@ -66,3 +66,32 @@ Focused contract and bundle verification: 45 tests passed in
 `tests/test_semantic_artifact_contract.py` and `tests/test_bundle.py`.
 This is supporting contract evidence only. It does not close the ready-query,
 real-model, immutable release or product acceptance gates described above.
+
+
+## 2026-11-11 — Explorer consumes bounded completed fields
+
+Knowledge Map previously called the full scene hydration contract, expanding
+canonical members, field selectors and evidence for every visible node. The
+existing owner now supplies exactly `id/name/entityType` and visible relation
+`id/source/target/predicate/status` projections. Explorer selects these fields
+explicitly; selected scalar resolution shares the existing canonical-name owner.
+There is no additional store, snapshot, build stage or persistent map model.
+Full support/evidence reads remain with their actual detail consumers.
+
+The native Explorer renders Concept objects with their business entity type,
+and one directed edge per completed relation with its recorded fact status.
+Completed semantic topics are selectable as Themes; topology communities remain
+separate. Standalone literal claims, structured formulas and explicit conflict
+objects are not present in this graph contract. This change does not fabricate
+these objects or claim that all seven semantic categories are supplied. Evidence
+is not preloaded into overview pages.
+
+Regression evidence: minimal projections were rejected in the red run; 75
+Explorer/publication tests pass after the fix, including source isolation,
+visible-endpoint restrictions and cancellation. A persisted fanout fixture with
+1 versus 5,000 unselected supports verifies identical exact scalar lookup calls
+and rows, and rejects member enumeration or SPARQL joins in that scalar owner.
+This proves the field hydration bound, not constant work for source admission.
+Rows, bytes, pagination and the daemon's existing 15-second deadline remain
+unchanged. Explorer production TypeScript/Vite build passes. Packaged real-corpus
+selection and user-level acceptance are recorded separately in the host audit.

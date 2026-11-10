@@ -21,6 +21,7 @@ def operation_identity(binding):
 
 
 class ClassificationRecords(ExtractionRecords):
+    binding_fields = BINDING
     def __init__(self, owner, binding):
         self.owner, self.ox, self.binding = owner, owner._oxigraph, binding
         self.logical = self.ox.NamedNode(operation_identity(binding))
@@ -174,12 +175,27 @@ class ClassificationRecords(ExtractionRecords):
         if len(dimensions) != 1:
             raise ProcessingError('Classification dimension absent or duplicated')
         literal = self.ox.Literal(dimension_id)
-        query = f'''SELECT ?assignment ?item ?confidence WHERE {{ GRAPH {self.graph} {{
+        patterns = f'''GRAPH {self.graph} {{
             {root} <{F}batch> ?batch . ?batch <{F}classificationResult> ?result .
             ?result <{F}assignment> ?assignment . ?assignment <{F}dimension> ?dimension ;
                 <{F}item> ?itemNode ; <{F}confidence> ?confidence .
             ?dimension <{F}dimensionId> {literal} . ?itemNode <{F}itemId> ?item .
-        }} }} ORDER BY ?item ?assignment LIMIT 1025'''
+        }}'''
+        cardinality = self.one(dimensions[0], 'cardinality')
+        probe = list(self.owner.store.query(f'SELECT DISTINCT ?item WHERE {{ {patterns} }} LIMIT 2'))
+        unclassified = not probe or (cardinality == 'single' and len(probe) != 1)
+        result = dict(dimensionId=dimension_id, unclassified=unclassified, assignments=[], nextCursor=None)
+        if unclassified:
+            return result
+        cursor = f'FILTER(STR(?item) > {self.ox.Literal(after)})' if after is not None else ''
+        item_rows = list(self.owner.store.query(
+            f'SELECT DISTINCT ?item WHERE {{ {patterns} {cursor} }} ORDER BY ?item LIMIT {limit + 1}'))
+        item_ids = [row['item'].value for row in item_rows]
+        selected = item_ids[:limit]
+        if not selected:
+            return result
+        values = ' '.join(str(self.ox.Literal(item)) for item in selected)
+        query = f'SELECT ?assignment ?item ?confidence WHERE {{ {patterns} VALUES ?item {{ {values} }} }} ORDER BY ?item ?assignment LIMIT 1025'
         rows = list(self.owner.store.query(query))
         if len(rows) > 1024:
             raise ProcessingError('Classification dimension candidate reference budget exceeded')
@@ -196,17 +212,15 @@ class ClassificationRecords(ExtractionRecords):
                 raise ProcessingError('Reduced classification evidence budget exceeded')
             if len(json.dumps(grouped, ensure_ascii=False).encode()) > 2097152:
                 raise ProcessingError('Classification reduction candidate byte budget exceeded')
-        unclassified = not grouped or (self.one(dimensions[0], 'cardinality') == 'single' and len(grouped) != 1)
-        items = [] if unclassified else [grouped[key] for key in sorted(grouped) if after is None or key > after]
-        result = dict(dimensionId=dimension_id, unclassified=unclassified, assignments=[], nextCursor=None)
-        for item in items[:limit]:
+        items = [grouped[key] for key in selected]
+        for item in items:
             result['assignments'].append(item)
             if len(json.dumps(result, ensure_ascii=False).encode()) > max_bytes:
                 result['assignments'].pop()
                 if not result['assignments']:
                     raise ProcessingError('Classification assignment exceeds byte budget')
                 break
-        if len(items) > len(result['assignments']):
+        if len(item_ids) > len(result['assignments']):
             result['nextCursor'] = result['assignments'][-1]['itemId']
         return result
 

@@ -1,11 +1,10 @@
 import pytest
 
-from semantica.explorer.native_scope import NativeScope, F
+from semantica.explorer.native_scope import NativeScope
 
 
 def node(identity='urn:canonical:one'):
-    return dict(id=identity,type=F+'Entity',fields={F+'name':[dict(value='Acme')],
-        F+'entityType':[dict(value='ORG')]},sourceIds=['source'],evidenceIds=['urn:evidence'])
+    return dict(id=identity, name='Acme', entityType='ORG')
 
 
 def scope():
@@ -24,9 +23,11 @@ def test_native_scope_explicit_page_and_existing_native_graph(monkeypatch):
     session,selected=owner.select(dict(sourceId='source'))
     assert session.read_only and session._source_path is None
     assert session.get_node('urn:canonical:one')['content']=='Acme'
+    assert session.get_node('urn:canonical:one')['type']=='Concept'
+    assert session.get_node('urn:canonical:one')['properties']['entityType']=='ORG'
     assert selected['next_cursor']=='urn:canonical:one'
     assert selected['selection']==dict(sourceId='source')
-    assert calls==[dict(kind='nodes',sourceIds=['source']),dict(kind='links',visibleIds=['urn:canonical:one'])]
+    assert calls==[dict(kind='nodes',sourceIds=['source'],fields=['id','name','entityType']),dict(kind='links',visibleIds=['urn:canonical:one'],fields=['id','source','target','predicate','status'])]
     owner.select(dict(sourceId='source',after=selected['next_cursor']))
     assert calls[-2]['after']=='urn:canonical:one'
 
@@ -83,3 +84,22 @@ def test_native_scope_api_does_not_load_project_until_selected(monkeypatch):
 def test_native_scope_requires_loopback(endpoint):
     with pytest.raises(ValueError,match='loopback'):
         NativeScope(endpoint,'token','p','g')
+
+
+def test_completed_topic_scope_uses_same_concepts_and_fact_edges(monkeypatch):
+    owner = scope()
+    calls = []
+    def page(selection):
+        calls.append(selection)
+        if selection['kind'] == 'nodes':
+            return dict(nodes=[node('urn:a'), node('urn:b')], links=[], next_cursor=None)
+        return dict(nodes=[], links=[dict(id='urn:fact', source='urn:a', target='urn:b',
+            predicate='owns', status='disputed')], next_cursor=None)
+    monkeypatch.setattr(owner, 'page', page)
+    session, selected = owner.select(dict(topicId='topic:completed'))
+    assert calls[0]['topicId'] == 'topic:completed'
+    assert selected['nodeCount'] == 2 and selected['linkCount'] == 1
+    assert session.get_node('urn:a')['type'] == 'Concept'
+    edges, total = session.get_edges()
+    assert total == 1
+    assert edges[0]['properties']['status'] == 'disputed'

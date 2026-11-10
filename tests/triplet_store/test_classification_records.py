@@ -87,6 +87,34 @@ def test_native_reduction_references_batches_preserves_conflict_minimum_and_unio
     assert conflicting.read_reduced_dimension('sector')['assignments'] == []
 
 
+def test_reduction_pages_distinct_items_and_preserves_evidence(tmp_path):
+    from semantica.triplet_store.classification_records import ClassificationRecords
+    profile, binding, receipt, value = inputs()
+    profile_data = profile.model_dump(mode='json', by_alias=True)
+    profile_data['dimensions'][1]['vocabulary'].extend([
+        {'id': 'private', 'label': 'Private'}, {'id': 'research', 'label': 'Research'},
+    ])
+    profile = ClassificationProfile.model_validate(profile_data)
+    binding['taxonomy'] = stable_digest(profile.model_dump(mode='json', by_alias=True))
+    value = SourceClassification.model_validate(dict(source_id='source', profile_id='taxonomy', profile_version='1',
+        assignments=[dict(dimension_id='audience', item_id=item, confidence=.8, evidence_ids=['evidence-1'])
+            for item in ('public', 'private', 'research')], unclassified_dimension_ids=['sector'], model_receipt_ids=['receipt']))
+    store = OxigraphStore(tmp_path / 'facts')
+    batch = ClassificationRecords(store, binding)
+    batch.adopt(value, profile=profile, allowed_evidence_ids=['evidence-1'], accepted_digest='paid', receipts=[receipt])
+    reduction = ClassificationRecords(store, dict(binding, context_digest='reduced'))
+    reduction.adopt_reduction([batch.operation.value], profile=profile)
+    first = reduction.read_reduced_dimension('audience', limit=1)
+    second = reduction.read_reduced_dimension('audience', after=first['nextCursor'], limit=1)
+    third = reduction.read_reduced_dimension('audience', after=second['nextCursor'], limit=1)
+    assert [page['assignments'][0]['itemId'] for page in (first, second, third)] == ['private', 'public', 'research']
+    assert all(page['assignments'][0]['evidenceRefs'] == ['evidence-1'] for page in (first, second, third))
+    assert third['nextCursor'] is None
+    assert reduction.read_reduced_dimension('audience', after='research', limit=1) == dict(
+        dimensionId='audience', unclassified=False, assignments=[], nextCursor=None)
+    store.close()
+
+
 @pytest.mark.parametrize("defect", ["taxonomy", "source", "evidence", "cardinality", "unclassified", "receipt-model"])
 def test_classification_bad_identity_or_assignment_never_publishes(tmp_path, defect):
     profile, binding, receipt, value = inputs()

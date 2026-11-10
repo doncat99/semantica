@@ -130,7 +130,9 @@ def test_withdrawn_operation_is_excluded_before_coordination(tmp_path):
     try:
         index=prepare_native_fact_decisions(store,generation,relations)
         decision=index.canonical_page('relation')['records'][0]
-        assert decision.metadata['support_observation_ids']==['r:'+relations[0]]
+        assert 'support_observation_ids' not in decision.metadata
+        store.activate_publication('p',generation,indexes=indexes())
+        assert publication.fact_members(generation,decision.id)['members']==[relations[0]]
     finally:
         store.close()
 

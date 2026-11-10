@@ -25,6 +25,23 @@ def publish(tmp_path, text):
     return target, receipt, reader
 
 
+def test_repeated_positions_do_not_repeat_term_queries_or_maintain_inverted_index(tmp_path, monkeypatch):
+    connect, statements = sqlite3.connect, []
+    def traced(*args, **kwargs):
+        db = connect(*args, **kwargs)
+        db.set_trace_callback(statements.append)
+        return db
+    monkeypatch.setattr(sqlite3, 'connect', traced)
+    path, _, _ = publish(tmp_path, 'Acme report ' * 2000)
+    lookups = [sql for sql in statements if sql.startswith('SELECT id FROM terms WHERE term=')]
+    assert len(lookups) == 3  # Two words and the literal space, regardless of support count.
+    insertions = [n for n, sql in enumerate(statements) if sql.startswith('INSERT INTO positions VALUES')]
+    index = next(n for n, sql in enumerate(statements) if sql.startswith('CREATE INDEX positions_term'))
+    assert len(insertions) == 8000 and index > max(insertions)
+    with connect(path) as db:
+        assert db.execute('SELECT count(*) FROM positions').fetchone()[0] == 8000
+
+
 def test_native_keyword_has_every_position_across_reader_segments_and_restart(tmp_path):
     text = 'before ' + 'x ' * 8185 + 'ESG ESG/esg ESG\nESG end'
     path, receipt, reader = publish(tmp_path, text)

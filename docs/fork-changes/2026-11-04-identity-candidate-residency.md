@@ -216,3 +216,86 @@ head registration semantics when merging native storage changes.
 Native owner `QualifiedFactIndex._references` and `stage_reconciled` formerly joined the full head observation set before selecting one partition/identity. Real current ESG has 56,700 observations and 21,620 partitions. A read-only exact-field query returned the same 8 records in 1046.380ms before versus 0.946ms with partition-first lookup and correlated current-head membership validation (`.tmp/identity-fact-partition-real.json` in the host workspace). This is query evidence, not whole-stage timing.
 
 Replace both joins in place with the existing indexed partition/identity lookup plus a current-head membership point check. No new index, schema, owner, paid-result copy or semantic change. Caller remains the existing builder fact reducer and canonical page reader. Regression fails before the state-write fix and verifies orphan exclusion, seek query shape, exact qualified oracle, cancellation, withdrawal and page coverage. Related native tests: 19 passed in 5.94s. New immutable App qualification and real adoption remain pending; installed artifacts are not hot-patched.
+
+## 2026-11-10 selected-field reads and build resource lifetime
+
+Inspected fork main bf72221141e8ecac431778e118a8223b70d4d494. Real ESG run
+40cfdf28-fcc8-4473-8fa7-9a7c02980990 failed after 151.485s: organization restored
+all member summaries for a 380-member canonical entity, exceeding the existing
+256 KiB budget at member 328. This was fork-owned read amplification, not native
+community detection. Replace `_native_canonical_entities` in place: hydrate the
+representative and actual field selectors only, verify each selected membership,
+and read cited evidence through exact membership queries. Complete provenance
+stays in the existing paged membership owner. Remove summary aggregation and its
+production callback. Canonical fact DTO reads likewise stop enumerating support
+observations; `PublicationRecords.fact_members` retains exact bounded details.
+No support record, semantic decision, evidence binding or budget is removed.
+
+Organization retains native `CommunityDetector` greedy modularity. Title names
+are fetched through bounded selected-name projections after detection, instead
+of a per-entity name read for the whole graph. `ExtractionRecords.from_operations`
+and publication admission project receipt bindings in bounded pages and retain
+logical/physical identity, completion and corruption validation. Embedding SQLite
+owners live for the concurrent embedding phase and close on success or failure,
+instead of reopening per range; vector integrity checks remain intact.
+
+Affected callers: publication builder organization, canonical entity/fact readers,
+source admission, embedding dispatch. Regression coverage includes large support,
+selected-field/foreign-member rejection, exact paged support, semantic oracle,
+withdrawal/restart, one-row receipt projection and phase connection cleanup.
+Packaged and real ESG results are pending and are not implied by focused tests.
+Upstream merge assessment: selected-field and publication owners are fork code;
+retain upstream community semantics and vector-store locking/lifetime guarantees.
+
+Selected-title follow-up: the first dynamic-graph bulk query regressed on the
+real multi-graph store (128 names did not finish within 15 seconds). It is
+removed. `PublicationRecords.canonical_names` now reads exact graph/address
+indexes, checks selected membership and scalar uniqueness, and retains page and
+byte bounds. A regression rejects query joins and support enumeration. The
+same real page took 0.300 seconds; 9,200 title names took 2.989 seconds, within
+a 20.827-second upstream community computation. These are owner measurements;
+packaged ready and repeated ensure still require separate acceptance.
+
+2026-11-10 artifact-publication follow-up (source implemented, packaging pending):
+real run `5c585e8d-048d-4557-9560-7ae25d4e0e63` passed the former canonical
+entity failure, completed organization in 154.325s, then failed vector publication
+after about 265s of artifact work. Accepted vector ranges may include serializer
+newlines before/after a scalar; extraction grounding intentionally excludes those
+boundary characters. The vector address producer incorrectly reused that trimmed
+proof for an exact accepted-input extent. `_embedding_native_ranges` now retains
+proven boundary separators with bounded addresses; publication validates their
+whitespace, placement and exact extent, and `_document_hit` reconstructs both.
+Extraction proof, operation identity, paid vector rows and receipts are unchanged.
+All 8,349 real accepted extents passed a read-only address check (10.663s).
+
+`GraphSearchIndex.publish_native_positions` maintained its inverted B-tree for
+every token with a 2 MiB SQLite cache and repeatedly selected the same interned
+terms. Defer that index until all positions are inserted in the transaction and
+use a 1 MiB bounded term-ID memo. The same lexical schema and query semantics
+remain; cancellation removes an unfinished target. A real 38-source scratch
+publication took 30.772s, produced 541,085,696 bytes and peaked at 121,126,912 RSS
+bytes. This is not whole-build acceptance. New regressions cover exact boundary
+reconstruction, rollback on extent damage and repeated-token SQL work. Both
+owners are fork additions; no upstream algorithm or input-specific shortcut was
+introduced. Final ready, activation budget and repeated ensure remain pending.
+
+2026-11-10 publication write-boundary correction: real run
+`3f5a3067-dfa5-4e5f-b2cd-3f2047dab640` finished native artifact writing in
+789.010s, then the host rejected its partial-work receipt manifest. Sampling
+found 1094/1206 main-thread samples in RocksDB flush waits during the sampled
+window; this is not whole-stage attribution. Builder community/topic writes
+had recreated PublicationRecords through store wrappers, bypassing its existing
+checkpointed write boundary. Both callers now share one PublicationRecords and
+its existing bounded checkpointed scope; no new checkpoint store or result
+carrier is introduced. Production-path tests require the shared active scope.
+
+Grounding formerly restored range bounds before establishing source admission.
+It now proves the current source/operation first, ignores unrelated ranges and
+retains exact record/evidence ownership and overlap checks. A red regression
+places malformed ranges in another source. Real read-only sampling still took
+6.592s for 128 vectors/1201 scalar positions; source-local physical access is
+not yet a proven performance win. Broader SPARQL and URI-derived admission
+experiments were confined to ignored host scratch and were rejected; neither
+experimental implementation enters production. Native activation, packaged ready
+and repeated reuse must still be measured. Upstream assessment: these are fork
+publication-owner/caller defects, not upstream community detection changes.

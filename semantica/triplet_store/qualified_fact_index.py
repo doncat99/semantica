@@ -532,8 +532,7 @@ class QualifiedFactIndex:
             item['evidence_ids'].sort()
             item['support_ids']=list(item['evidence_ids'])
             item['metadata']={**item.get('metadata',{}),
-                'representative_observation_id':observation,
-                'support_observation_ids':self._support_observations(decision,kind,identity,max_bytes)}
+                'representative_observation_id':observation}
             item=(KnowledgeAssertion if kind=='assertion' else KnowledgeRelation).model_validate(item)
             if len(json.dumps([value.model_dump() for value in values]+[item.model_dump()],ensure_ascii=False).encode())>max_bytes:
                 if not values:
@@ -542,29 +541,6 @@ class QualifiedFactIndex:
             values.append(item)
         self._fence()
         return dict(records=values,next_cursor=values[-1].id if len(rows)>len(values) else None)
-
-    def _support_observations(self,decision,kind,identity,max_bytes):
-        """Consume existing membership, rather than persist a second support index."""
-        p=self.publication
-        result,size=[],0
-        for visited,q in enumerate(p.qualified_members(decision=decision),1):
-            check_query_cancellation()
-            if visited>4096:
-                raise ProcessingError('Native canonical support exceeds row budget')
-            records=ExtractionRecords.from_fact_reference(self.owner,p.project,q.object.value)
-            field='buildAssertionId' if kind=='assertion' else 'buildRelationId'
-            values=list(islice(self.owner.store.quads_for_pattern(q.object,
-                p.ox.NamedNode(F+field),None,records.fact_projection_graph),2))
-            if len(values)!=1 or not isinstance(values[0].object,p.ox.Literal):
-                raise ProcessingError('Native canonical support selection missing')
-            observation=values[0].object.value
-            size+=len(observation.encode())+1
-            if size+2>max_bytes:
-                raise ProcessingError('Native canonical support exceeds byte budget')
-            result.append(observation)
-        if not result:
-            raise ProcessingError('Native canonical support missing')
-        return sorted(set(result))
 
     def _scoped_decisions(self,field,values):
         """Seek existing decision fields, excluding pointers from other stages."""

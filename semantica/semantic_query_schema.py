@@ -219,7 +219,7 @@ class SemanticQueryResult(StrictModel):
 class QueryWorkerRequest(StrictModel):
     protocol: Literal[QUERY_PROTOCOL] = QUERY_PROTOCOL
     id: str
-    method: Literal["query", "schema", "records", "section", "scene", "classification", "bindings", "evidence", "reader", "acquire_store", "release_store"]
+    method: Literal["query", "schema", "records", "section", "scene", "classification", "classification_batch", "bindings", "evidence", "reader", "acquire_store", "release_store"]
     params: Dict[str, object] = Field(default_factory=dict)
 
 
@@ -269,6 +269,22 @@ class NativeClassificationRequest(StrictModel):
     def validate_project(self):
         if self.project_id != self.semantic_store.project:
             raise ValueError('native classification project differs from request project')
+        return self
+
+
+class NativeClassificationBatchRequest(StrictModel):
+    project_id: str = Field(alias='projectId', min_length=1, max_length=4096)
+    semantic_store: NativeStoreRef = Field(alias='semanticStore')
+    selections: List[NativeClassificationSelection] = Field(min_length=1, max_length=32)
+    max_bytes: int = Field(default=262144, alias='maxBytes', ge=1, le=262144)
+
+    @model_validator(mode='after')
+    def validate_project(self):
+        if self.project_id != self.semantic_store.project:
+            raise ValueError('native classification project differs from request project')
+        keys = [(item.source_id, item.dimension_id, item.after) for item in self.selections]
+        if len(set(keys)) != len(keys):
+            raise ValueError('native classification batch contains duplicate selections')
         return self
 
 

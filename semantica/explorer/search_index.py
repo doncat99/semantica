@@ -145,19 +145,29 @@ class GraphSearchIndex:
                     CREATE TABLE positions(source TEXT,ref TEXT,ordinal INTEGER,scalar INTEGER,term INTEGER,
                         start INTEGER,end INTEGER,expansions TEXT,locator TEXT,
                         PRIMARY KEY(source,ref,ordinal)) WITHOUT ROWID;
-                    CREATE INDEX positions_term ON positions(term,source,scalar,ordinal);
                 ''')
                 db.executemany('INSERT INTO metadata VALUES (?,?)',
                     [('project', project), ('generation', generation), ('recipe', recipe)])
+                terms, term_bytes = OrderedDict(), 0
                 def intern(token):
+                    nonlocal term_bytes
+                    if token in terms:
+                        terms.move_to_end(token)
+                        return terms[token]
                     row = db.execute('SELECT id FROM terms WHERE term=?', (token,)).fetchone()
                     if row:
-                        return row[0]
-                    term_id = db.execute('INSERT INTO terms(term) VALUES (?)', (token,)).lastrowid
-                    # Indexed literal substring candidates for short queries too.
-                    for width in (1, 2, 3):
-                        db.executemany('INSERT INTO grams VALUES (?,?)',
-                            ((gram, term_id) for gram in sorted({token[n:n+width] for n in range(len(token)-width+1)})))
+                        term_id = row[0]
+                    else:
+                        term_id = db.execute('INSERT INTO terms(term) VALUES (?)', (token,)).lastrowid
+                        # Indexed literal substring candidates for short queries too.
+                        for width in (1, 2, 3):
+                            db.executemany('INSERT INTO grams VALUES (?,?)',
+                                ((gram, term_id) for gram in sorted({token[n:n+width] for n in range(len(token)-width+1)})))
+                    terms[token] = term_id
+                    term_bytes += len(token.encode()) + 192
+                    while term_bytes > 1048576:
+                        old, _ = terms.popitem(last=False)
+                        term_bytes -= len(old.encode()) + 192
                     return term_id
                 for reader in readers:
                     check_query_cancellation()
@@ -214,6 +224,12 @@ class GraphSearchIndex:
                         after = page['nextCursor']
                     if pending:
                         emit_token(pending, pending_start, pending_locator)
+                # Build the inverted B-tree once, rather than random writes per token.
+                db.set_progress_handler(lambda: (check_query_cancellation() or 0), 1000)
+                try:
+                    db.execute('CREATE INDEX positions_term ON positions(term,source,scalar,ordinal)')
+                finally:
+                    db.set_progress_handler(None, 0)
             with index_path.open('rb') as stream:
                 store_id = 'sha256:' + file_digest(stream, 'sha256').hexdigest()
             return {'kind':'native-scalar-positions', 'store_id':store_id, 'recipe_digest':recipe}

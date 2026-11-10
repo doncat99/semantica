@@ -19,7 +19,6 @@ from .markdown_resources import MarkdownResourceRegistry
 from .session import GraphSession
 
 MAX_BYTES = 262144
-F = 'urn:semantica:field:'
 
 
 class NativeScope:
@@ -62,14 +61,16 @@ class NativeScope:
         try:
             self._cancelled.clear()
             if (not isinstance(selection, dict)
-                    or set(selection)-{'sourceId','communityId','nodeIds','after'}
-                    or sum(key in selection for key in ('sourceId','communityId','nodeIds')) != 1):
-                raise ValueError('Choose exactly one source, community, or explicit node set')
-            native = dict(kind='nodes')
+                    or set(selection)-{'sourceId','communityId','topicId','nodeIds','after'}
+                    or sum(key in selection for key in ('sourceId','communityId','topicId','nodeIds')) != 1):
+                raise ValueError('Choose exactly one source, community, topic, or explicit node set')
+            native = dict(kind='nodes', fields=['id','name','entityType'])
             if 'sourceId' in selection:
                 native['sourceIds'] = [selection['sourceId']]
             if 'communityId' in selection:
                 native['communityId'] = selection['communityId']
+            if 'topicId' in selection:
+                native['topicId'] = selection['topicId']
             if 'nodeIds' in selection:
                 nodes = selection['nodeIds']
                 if (not isinstance(nodes,list) or not 1 <= len(nodes) <= 128
@@ -82,7 +83,7 @@ class NativeScope:
             if self._cancelled.is_set():
                 raise ValueError('Native scene selection cancelled')
             identities = [node['id'] for node in page['nodes']]
-            edges = self.page(dict(kind='links',visibleIds=identities)) if identities else dict(links=[],next_cursor=None)
+            edges = self.page(dict(kind='links',visibleIds=identities,fields=['id','source','target','predicate','status'])) if identities else dict(links=[],next_cursor=None)
             if self._cancelled.is_set():
                 raise ValueError('Native scene selection cancelled')
             if edges.get('next_cursor') is not None:
@@ -91,11 +92,8 @@ class NativeScope:
             if len(json.dumps([page,edges],ensure_ascii=False).encode()) > MAX_BYTES:
                 raise ValueError('Selected graph exceeds byte budget; select fewer explicit nodes')
             graph = ContextGraph(advanced_analytics=False)
-            def scalar(node, field):
-                values = node['fields'].get(F+field,[])
-                return values[0]['value'] if len(values)==1 else None
-            graph.add_nodes([dict(id=node['id'],type=scalar(node,'entityType') or node['type'],
-                content=scalar(node,'name') or node['id'],properties=node) for node in page['nodes']])
+            graph.add_nodes([dict(id=node['id'], type='Concept', content=node['name'],
+                properties=node) for node in page['nodes']])
             graph.add_edges([dict(id=edge['id'],source_id=edge['source'],target_id=edge['target'],
                 type=edge['predicate'],properties=edge) for edge in edges['links']])
             session = GraphSession(graph)
@@ -119,7 +117,7 @@ def install_native_scope(app, scope):
 
     @app.get('/api/native-scope/catalog', dependencies=[Depends(require_auth)])
     def catalog(kind: str, after: str = None):
-        if kind not in {'sources','communities'}:
+        if kind not in {'sources','communities','topics'}:
             raise HTTPException(422, 'Invalid native catalog')
         try:
             return scope.page(dict(kind=kind,**({'after':after} if after is not None else {})))

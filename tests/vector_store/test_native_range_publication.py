@@ -8,6 +8,29 @@ from semantica.utils.exceptions import ProcessingError, ValidationError
 from tests.vector_store.test_embedding_handoff import SPACE, BINDING, RECEIPT
 
 
+def test_publication_preserves_boundary_joins_and_rejects_extent_damage(tmp_path):
+    owner = SQLiteVecStore.open_embedding_space(str(tmp_path/'vectors.sqlite'), SPACE, 3)
+    binding = {**BINDING, 'ranges': [[4, 12]]}
+    adopted = owner.adopt_embedding(binding, [[1., 0., 0.]], RECEIPT, accepted_digest='paid')
+    link = dict(vector_id=adopted['ids'][0], binding=binding,
+        ranges=[dict(nativeRef='#/document/sections/1/text', start=0, end=6, joinBefore='\n\n')])
+    try:
+        owner.publish_native_ranges('project-1', 'g', [link])
+        damaged = copy.deepcopy(link)
+        damaged['ranges'][0]['joinBefore'] = '\n'
+        with pytest.raises(ValidationError, match='extent'):
+            owner.publish_native_ranges('project-1', 'next', [damaged])
+        assert owner._conn.execute('SELECT generation FROM embeddings_native_publications').fetchone() == ('g',)
+        link['ranges'] = [dict(nativeRef='#/document/sections/0/text', start=0, end=6, joinAfter='\n\n')]
+        owner.publish_native_ranges('project-1', 'next', [link])
+        damaged = copy.deepcopy(link)
+        damaged['ranges'][0]['joinAfter'] = 'xx'
+        with pytest.raises(ValidationError, match='invalid'):
+            owner.publish_native_ranges('project-1', 'bad', [damaged])
+    finally:
+        owner.close()
+
+
 def test_identity_migration_invalidates_old_publication_and_republishes_same_vectors(tmp_path):
     from semantica.vector_store.sqlite_vec_store import EmbeddingSpaceStaleError
     path = str(tmp_path/'vectors.sqlite')

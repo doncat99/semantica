@@ -847,8 +847,8 @@ class SQLiteVecStore:
                     if not isinstance(ranges, list) or not 1 <= len(ranges) <= 128:
                         raise ValidationError('Native vector address fanout exceeds budget')
                     previous = 0
-                    for item in ranges:
-                        if (not isinstance(item, dict) or set(item)-{'nativeRef','start','end','joinBefore'}
+                    for range_index, item in enumerate(ranges):
+                        if (not isinstance(item, dict) or set(item)-{'nativeRef','start','end','joinBefore','joinAfter'}
                                 or not {'nativeRef','start','end'} <= set(item)
                                 or not isinstance(item['nativeRef'],str) or not item['nativeRef'].startswith('#/document/')
                                 or len(item['nativeRef'].encode()) > 4096
@@ -856,9 +856,13 @@ class SQLiteVecStore:
                                 or not 0 <= item['start'] < item['end'] or item['end']-item['start'] > 65536
                                 or not isinstance(item.get('joinBefore',''), str)
                                 or len(item.get('joinBefore','').encode()) > 8
-                                or item.get('joinBefore','').strip()):
+                                or item.get('joinBefore','').strip()
+                                or not isinstance(item.get('joinAfter',''), str)
+                                or len(item.get('joinAfter','').encode()) > 8
+                                or item.get('joinAfter','').strip()
+                                or ('joinAfter' in item and range_index != len(ranges)-1)):
                             raise ValidationError('Native vector scalar address is invalid')
-                        previous += item['end']-item['start']+len(item.get('joinBefore',''))
+                        previous += item['end']-item['start']+len(item.get('joinBefore',''))+len(item.get('joinAfter',''))
                     vector_index = vector_indexes[link['vector_id']]
                     if previous != binding['ranges'][vector_index][1]-binding['ranges'][vector_index][0]:
                         raise ValidationError('Native vector scalar addresses differ from accepted input extent')

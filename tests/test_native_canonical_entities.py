@@ -43,33 +43,22 @@ def test_native_canonical_entities_match_oracle_and_skip_unrelated_components(tm
             raise AssertionError('Reading completed canonical decisions must not run a resolver or restore a component')
         monkeypatch.setattr(builder,'_resolve_native_entities',forbidden)
         monkeypatch.setattr(index,'hydrate_component',forbidden)
-        summaries=[]
-        def summarize(ref):
-            summaries.append(ref)
-            entity=mentions[refs.index(ref)]
-            return {key:value for key,value in entity.model_dump().items()
-                if key in {'id','canonical_name','type','aliases','evidence_ids','metadata'}}
         hydrated=[]
         def hydrate(ref):
             hydrated.append(ref)
             return mentions[refs.index(ref)].model_copy(deep=True)
         def serialized(values):
-            return sorted((value.model_dump(mode='json') for value in values),key=lambda value:value['id'])
-        assert serialized(builder._native_canonical_entities(index,hydrate,summarize=summarize,
-            model_recipe=model_recipe))==serialized(oracle)
+            return sorted(({key: value.model_dump(mode='json')[key] for key in ('id','canonical_name','type','attributes')} for value in values),key=lambda value:value['id'])
+        assert serialized(builder._native_canonical_entities(index,hydrate))==serialized(oracle)
         assert len(hydrated)<=len(refs)
-        assert len(summaries)==len(refs)
         target=next(entity for entity in oracle if 'e0' in entity.evidence_ids)
         hydrated.clear()
-        assert serialized(builder._native_canonical_entities(index,hydrate,summarize=summarize,
-            model_recipe=model_recipe,ids=[target.id]))==serialized([target])
+        assert serialized(builder._native_canonical_entities(index,hydrate,ids=[target.id]))==serialized([target])
         assert refs[2] not in hydrated
         hydrated.clear()
-        assert serialized(builder._native_canonical_entities(index,hydrate,summarize=summarize,
-            model_recipe=model_recipe,evidence_ids=['e0']))==serialized([target])
+        assert serialized(builder._native_canonical_entities(index,hydrate,evidence_ids=['e0']))==serialized([target])
         assert refs[2] not in hydrated
-        assert list(builder._native_canonical_entities(index,hydrate,summarize=summarize,
-            model_recipe=model_recipe,ids=[]))==[]
+        assert list(builder._native_canonical_entities(index,hydrate,ids=[]))==[]
     finally:
         store.close()
 
@@ -106,21 +95,17 @@ def test_canonical_reads_apply_decisions_without_hydrating_unselected_members(tm
         def hydrate(ref):
             hydrated.append(ref)
             return mentions[refs.index(ref)].model_copy(deep=True)
-        def summarize(ref):
-            entity=mentions[refs.index(ref)]
-            return {key:value for key,value in entity.model_dump().items()
-                if key in {'id','canonical_name','type','aliases','evidence_ids','metadata'}}
-        entity,=builder._native_canonical_entities(index,hydrate,summarize=summarize,model_recipe=True)
+        entity,=builder._native_canonical_entities(index,hydrate)
         assert entity.id=='canonical:test'
         assert entity.canonical_name=='Name 1'
         assert entity.description=='Description 1'
         assert entity.context=='Context 1'
         assert entity.attributes=={'metric':37}
-        assert entity.evidence_ids==['ev:0','ev:1','ev:2']
-        assert entity.aliases==['Name 0','Name 2']
+        assert entity.evidence_ids==['ev:0','ev:1']
+        assert entity.aliases==[]
         assert entity.metadata['description_mention_id']=='mention:1'
-        assert entity.metadata['mention_ids']==['mention:0','mention:1','mention:2']
-        assert entity.metadata['source_ids']==['source:0','source:1','source:2']
+        assert 'mention_ids' not in entity.metadata
+        assert entity.metadata['source_ids']==['source:0']
         assert hydrated==refs[:2]
     finally:
         store.close()
@@ -231,10 +216,40 @@ def test_canonical_metadata_preserves_owner_only_identity_profile(tmp_path):
         def selected(ref):
             hydrated.append(ref)
             return mentions[refs.index(ref)].model_copy(deep=True)
-        result=list(builder._native_canonical_entities(index,selected,
-            summarize=summary,model_recipe=True))
+        result=list(builder._native_canonical_entities(index,selected))
         assert result[0].metadata['identity_profile']==profile
         assert result[0].metadata['description_evidence_ids']==['profile-evidence']
         assert hydrated==refs
+    finally:
+        store.close()
+
+
+def test_report_entity_read_is_independent_of_support_count(tmp_path, monkeypatch):
+    """A valid large component must not restore or serialize its support summaries."""
+    store, generation, refs = staged(tmp_path, 137, canonical_count=None)
+    index = IdentityCandidateIndex(store, 'p', generation,
+        builder.EntityResolver(strategy='contextual').duplicate_detector)
+    try:
+        index.build(lambda: iter((ref, dict(id=ref, name='Shared', type='ORG',
+            properties={}, metadata={})) for ref in refs), resolve_candidates=False)
+        store.stage_publication_canonical('p', generation, [dict(id='canonical:large',
+            representative=refs[0], members=refs[:128], member_count=len(refs),
+            selectors=[], selector_count=0)])
+        for offset in range(128, len(refs), 128):
+            store.stage_publication_canonical('p', generation, [dict(id='canonical:large',
+                representative=refs[0], members=refs[offset:offset+128], member_count=len(refs),
+                selectors=[], selector_count=0)])
+        store.seal_publication_canonical_count('p', generation, 1)
+        def forbidden(*args, **kwargs):
+            raise AssertionError('Report reads must not expand complete membership')
+        monkeypatch.setattr(index.publication, '_canonical_references', forbidden)
+        hydrated = []
+        def hydrate(ref):
+            hydrated.append(ref)
+            return KnowledgeEntity(id='mention:representative', canonical_name='Shared', type='ORG')
+        entity, = builder._native_canonical_entities(index, hydrate,
+            ids=['canonical:large'])
+        assert entity.id == 'canonical:large'
+        assert hydrated == [refs[0]]
     finally:
         store.close()

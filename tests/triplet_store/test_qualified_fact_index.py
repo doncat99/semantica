@@ -10,6 +10,7 @@ from semantica.triplet_store.oxigraph_store import OxigraphStore
 from semantica.utils.exceptions import ProcessingError
 from tests.triplet_store.test_canonical_fact_publication import stage_duplicate_observations
 from tests.triplet_store.test_fact_direct_decisions import projections
+from tests.triplet_store.test_publication_records import indexes
 
 
 def oracle_views(row):
@@ -73,11 +74,19 @@ def test_completed_read_never_reconciles_or_serializes_support_bodies(tmp_path,m
     try:
         index.reconcile_and_stage(input_key='input')
         monkeypatch.setattr(ConflictDetector,'reconcile_qualified_facts',lambda *a,**k:pytest.fail('read reran reducer'))
-        for kind in ('assertion','relation'):
-            item=page_all(index,kind)[0]
-            assert len(item.metadata['support_observation_ids'])==2
-            assert 'support_observations' not in item.metadata
+        with monkeypatch.context() as guard:
+            guard.setattr(index.publication,'qualified_members',lambda *a,**k:pytest.fail('ordinary read enumerated supports'))
+            for kind in ('assertion','relation'):
+                item=page_all(index,kind)[0]
+                assert 'support_observation_ids' not in item.metadata
+                assert 'support_observations' not in item.metadata
+        identity=page_all(index,'relation')[0].id
         assert index.topology_page()['records'] and index.family_page()['records']
+        store.activate_publication('p',generation,indexes=indexes())
+        first=index.publication.fact_members(generation,identity,limit=1)
+        second=index.publication.fact_members(generation,identity,after=first['next_cursor'],limit=1)
+        assert first['members']+second['members']==sorted(refs)
+        assert second['next_cursor'] is None
     finally:
         store.close()
 
@@ -470,7 +479,9 @@ def test_native_groups_preserve_polarity_and_separate_recorded_conditions(tmp_pa
         expected=ConflictDetector.reconcile_qualified_facts('p',observations=observations)
         index.reconcile_and_stage(input_key='input')
         for kind,oracle in zip(('assertion','relation'),expected[:2]):
-            assert page_all(index,kind)==oracle
+            expected=[item.model_copy(update={'metadata':{key:value for key,value in item.metadata.items()
+                if key!='support_observation_ids'}}) for item in oracle]
+            assert page_all(index,kind)==expected
         assertions=page_all(index,'assertion')
         assert sorted(item.status for item in assertions)==['candidate','contradicted','contradicted']
         assert len({item.qualifiers['time'] for item in assertions})==2
@@ -504,7 +515,9 @@ def test_source_removal_replaces_only_affected_final_memberships(tmp_path,monkey
         for kind in ('assertion','relation'):
             records=page_all(index,kind)
             assert len(records)==1
-            assert records[0].metadata['support_observation_ids']==[('a:' if kind=='assertion' else 'r:')+'0']
+            assert 'support_observation_ids' not in records[0].metadata
+        assert [q.object.value for q in index.publication.qualified_members(
+            decision=p.iri(page_all(index,'relation')[0].id))]==[refs[0]]
         assert ExtractionRecords.from_fact_reference(store,'p',refs[1]).receipt() is not None
         store.close()
         store=OxigraphStore(tmp_path/'facts')

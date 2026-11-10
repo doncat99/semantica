@@ -4,14 +4,24 @@ from semantica.triplet_store.oxigraph_store import OxigraphStore
 import pytest
 
 
-def test_deterministic_build_keeps_native_pattern_facts_without_aggregate(tmp_path):
+def test_deterministic_build_keeps_native_pattern_facts_without_aggregate(tmp_path, monkeypatch):
     from semantica.semantic_publication_builder import build_semantic_artifacts
     from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest
     from tests.test_semantic_artifact import _request
     source = tmp_path / 'source.txt'
     source.write_text('Ada Lovelace designed the Analytical Engine.')
     request = SemanticArtifactBuildRequest.model_validate(_request(source, tmp_path / 'published')['params'])
+    from semantica.triplet_store.publication_records import PublicationRecords
+    stages = []
+    for name in ('stage_communities', 'stage_topics'):
+        original = getattr(PublicationRecords, name)
+        def checked(self, generation, records, original=original):
+            assert self._checkpoint['generation'] == generation
+            stages.append(original.__name__)
+            return original(self, generation, records)
+        monkeypatch.setattr(PublicationRecords, name, checked)
     result = build_semantic_artifacts(request)
+    assert 'stage_communities' in stages
     assert result['publication']['state'] == 'pending'
     assert result['publication']['source_count'] == 1
     assert result['publication']['canonical_count'] > 0
@@ -38,7 +48,8 @@ def test_topic_publication_fails_closed_on_unmapped_citations(tmp_path, missing)
         evidence_ids=['span:unknown' if missing == 'unknown' else span.id],
         metadata=dict(organization=dict(report_id='report:one', input_digest='sha256:input')))
     with pytest.raises(SemanticArtifactError) as error:
-        _publish_native_topics(SimpleNamespace(project_id='p'), store, generation, [built], [topic])
+        from semantica.triplet_store.publication_records import PublicationRecords
+        _publish_native_topics(SimpleNamespace(project_id='p'), PublicationRecords(store, 'p'), generation, [built], [topic])
     assert error.value.code == 'NATIVE_TOPIC_GROUNDING_MISSING'
     assert store.publication_status('p')['state'] == 'pending'
     store.close()
@@ -77,7 +88,7 @@ def test_actual_model_build_publishes_ready_native_references_without_aggregate(
     calls = (tmp_path / 'build-calls.jsonl').read_bytes()
     next_result = build_child(tmp_path, stop_before_publication=False)
     assert (tmp_path / 'build-calls.jsonl').read_bytes() == calls
-    assert next_result['publication']['generation'] != result['publication']['generation']
+    assert next_result['publication']['generation'] == result['publication']['generation']
     store = OxigraphStore(result['semantic_store']['path'])
     try:
         assert sorted(str(quad) for quad in store.store if quad.graph_name.value.startswith('urn:semantica:project:')) == original

@@ -22,6 +22,10 @@ MAX_BYTES = 262144
 P = "urn:semantica:publication:"
 
 
+class ClassificationMissingError(ProcessingError):
+    """No completed classification is bound to this published source."""
+
+
 class _TripleStream(io.RawIOBase):
     def __init__(self, batches):
         self.batches=iter(batches)
@@ -749,33 +753,27 @@ class PublicationRecords:
             raise ProcessingError("Publication batch must contain 1..128 records")
 
     def verify_operation(self, identity, source):
-        """Verify native completion and source binding; offline maintenance calls audit."""
-        operation = self.iri(identity)
-        for field, expected in dict(project=self.project, **{k: source[k] for k in ("source", "material", "representation")}).items():
-            predicate = self.ox.NamedNode(F + "binding" + field[0].upper() + field[1:])
-            actual = list(islice(self.owner.store.quads_for_pattern(operation, predicate, None, self.facts), 2))
-            if len(actual) != 1 or actual[0].object.value != expected:
-                raise ProcessingError("Publication operation belongs to another source or binding")
-        classification = identity.startswith("urn:semantica:classification:")
-        if classification:
-            from .classification_records import BINDING as classification_fields, ClassificationRecords
-        binding = {}
-        for field in classification_fields if classification else BINDING:
-            predicate = self.ox.NamedNode(F + "binding" + field[0].upper() + field[1:])
-            values = list(islice(self.owner.store.quads_for_pattern(operation, predicate, None, self.facts), 2))
-            if len(values) != 1:
-                raise ProcessingError("Publication operation binding incomplete")
-            binding[field] = int(values[0].object.value) if field in {"window_start", "window_end"} else values[0].object.value
-        stage = None
-        if not classification:
-            stages = list(islice(self.owner.store.quads_for_pattern(operation, self.ox.NamedNode(F + "extractionStage"), None, self.facts), 2))
-            if len(stages) != 1 or stages[0].object.value not in {"entities", "relations"}:
-                raise ProcessingError("Publication extraction requires offline identity migration")
-            stage = stages[0].object.value
-        records = ClassificationRecords(self.owner, binding) if classification else ExtractionRecords(self.owner, binding, stage) if stage else None
-        if records is None or records.operation.value != identity or records.receipt() is None:
-            raise ProcessingError("Publication operation has no valid native receipt")
-        return records
+        return self.verify_operations([identity], source)[0]
+
+    def verify_operations(self, identities, source):
+        """Verify native completion and exact bindings in bounded address pages."""
+        from .classification_records import ClassificationRecords
+        self.batch(identities)
+        for identity in identities:
+            self.iri(identity)
+        admitted = {}
+        for cls in (ExtractionRecords, ClassificationRecords):
+            selected = [identity for identity in identities
+                if identity.startswith('urn:semantica:classification:') == (cls is ClassificationRecords)]
+            if not selected:
+                continue
+            for records in cls.from_operations(self.owner, selected, self.project):
+                if any(records.binding[field] != expected for field, expected in
+                        dict(project=self.project, **{key: source[key] for key in
+                            ('source', 'material', 'representation')}).items()):
+                    raise ProcessingError('Publication operation belongs to another source or binding')
+                admitted[records.operation.value] = records
+        return [admitted[identity] for identity in identities]
 
     @_locked
     @_stage(None)
@@ -801,12 +799,10 @@ class PublicationRecords:
             triples.append(self.triple(source_node, "operationCount", self.ox.Literal(source["operation_count"])))
             for field in ("source", "material", "representation", "recipe"):
                 triples.append(self.triple(source_node, field, self.scalar(source[field])))
+            # Validate the accepted receipts before admitting their references.
+            self.verify_operations(source["operations"], source)
             for identity in source["operations"]:
                 operation = self.iri(identity)
-                # Admission validates the owner's accepted receipt, not merely
-                # its binding labels or row count. A dangling or corrupted paid
-                # contribution must never become a current publication.
-                self.verify_operation(identity, source)
                 triples.append(self.triple(source_node, "operation", operation))
         window, size = [], 0
         for triple in triples:
@@ -1058,6 +1054,21 @@ class PublicationRecords:
                 response["next_cursor"] = response["members"][-1]
         self.fence(generation)
         return response
+
+    @_stage('fact')
+    def _projected_scene_link(self, row, *, status=False):
+        node = self.iri(row['id'].value)
+        representative = self.iri(self.one(node, 'representative'))
+        predicates = list(islice(self.owner.store.quads_for_pattern(
+            representative, self.ox.NamedNode(F+'predicateName'), None, self.facts), 2))
+        if len(predicates) != 1 or not isinstance(predicates[0].object, self.ox.Literal):
+            raise ProcessingError('Native relation predicate missing or duplicated')
+        predicate = predicates[0].object.value
+        item = dict(id=node.value, source=row['source'].value, target=row['target'].value,
+                    predicate=normalize_fact_predicate(predicate))
+        if status:
+            item['status'] = self.one(node, 'status')
+        return item
 
     @_stage('fact')
     def _fact_scene_link(self, generation, row):
@@ -1385,7 +1396,12 @@ class PublicationRecords:
             return bounds[0]<position['end'] and bounds[1]>position['start']
         for address in seek(None,self.iri(F+'nativeRef'),ref,self.facts):
             check_query_cancellation()
-            if not overlaps(address.subject):
+            # Prove source admission before decoding another document's range.
+            operations = list(islice((q.subject for q in seek(None,self.iri(F+'ownedRecord'),address.subject,self.facts)
+                if next(seek(member,self.iri(P+'operation'),q.subject,self.graph),None)),2))
+            if len(operations)>1:
+                raise ProcessingError('Native range has multiple admitted owners')
+            if not operations or not overlaps(address.subject):
                 continue
             for evidence_link in seek(None,self.iri(F+'nativeRange'),address.subject,self.facts):
                 evidence=evidence_link.subject
@@ -1399,9 +1415,8 @@ class PublicationRecords:
                         record=link.subject
                         if field=='evidence' and next(seek(record,self.iri(F+'mention'),evidence,self.facts),None):
                             continue
-                        for owner in seek(None,self.iri(F+'ownedRecord'),evidence,self.facts):
-                            operation=owner.subject
-                            if (next(seek(member,self.iri(P+'operation'),operation,self.graph),None)
+                        for operation in operations:
+                            if (next(seek(operation,self.iri(F+'ownedRecord'),evidence,self.facts),None)
                                     and next(seek(operation,self.iri(F+'ownedRecord'),record,self.facts),None)):
                                 yield dict(id=record.value,evidence=evidence.value,source=source)
                                 break
@@ -1567,6 +1582,14 @@ class PublicationRecords:
             if size > max_bytes:
                 raise ProcessingError('Canonical read exceeds byte budget')
             members.append(quad.object.value)
+        return sorted(members), self._canonical_selectors(node, max_bytes-size)
+
+    @_stage('identity')
+    def _canonical_selectors(self, node, max_bytes=MAX_BYTES):
+        """Read field decisions only; support membership has its own paged API."""
+        from ..semantic_worker_context import check_query_cancellation
+        size, selectors = 0, []
+        graph = self.record_graph(node)
         for quad in self.owner.store.quads_for_pattern(node, self.ox.NamedNode(P+'selector'), None, graph):
             check_query_cancellation()
             item = dict(field=self.one(quad.object,'field'), record=self.one(quad.object,'record'))
@@ -1574,7 +1597,7 @@ class PublicationRecords:
             if size > max_bytes:
                 raise ProcessingError('Canonical read exceeds byte budget')
             selectors.append((int(self.one(quad.object,'position')), item))
-        return sorted(members), [item for _,item in sorted(selectors,key=lambda value:value[0])]
+        return [item for _,item in sorted(selectors,key=lambda value:value[0])]
 
     def _selected_scene_fields(self, generation, representative, selectors, source_ids):
         """Hydrate native owner's field selections without materializing facts.
@@ -1685,7 +1708,7 @@ class PublicationRecords:
         from ..semantic_worker_context import check_query_cancellation
         check_query_cancellation()
         self.fence(generation)
-        if not isinstance(selection, dict) or set(selection) - {'kind','after','limit','maxBytes'}:
+        if not isinstance(selection, dict) or set(selection) - {'kind','sourceIds','after','limit','maxBytes'}:
             raise ProcessingError('Invalid source scene selection')
         limit, budget = selection.get('limit', MAX_ROWS), selection.get('maxBytes', MAX_BYTES)
         if type(limit) is not int or not 1 <= limit <= MAX_ROWS or type(budget) is not int or not 1 <= budget <= MAX_BYTES:
@@ -1694,9 +1717,16 @@ class PublicationRecords:
         if after is not None and (not isinstance(after, str) or not after or len(after) > 1024):
             raise ProcessingError('Invalid source scene cursor')
         cursor = f'FILTER(STR(?source) > {self.scalar(after)})' if after is not None else ''
+        selected = selection.get('sourceIds')
+        scope = ''
+        if selected is not None:
+            self.batch(selected)
+            if len(set(selected)) != len(selected):
+                raise ProcessingError('Duplicate source scene identities')
+            scope = 'VALUES ?source { ' + ' '.join(str(self.scalar(source)) for source in selected) + ' }'
         query = f'''SELECT ?source ?material ?representation WHERE {{ GRAPH {self.graph} {{
             {self.head} <{P}source> ?membership . ?membership <{P}source> ?source ;
-            <{P}material> ?material ; <{P}representation> ?representation . }} {cursor}
+            <{P}material> ?material ; <{P}representation> ?representation . }} {scope} {cursor}
             }} ORDER BY ?source LIMIT {limit + 1}'''
         rows = list(self.owner.store.query(query))
         result = dict(project=self.project, generation=generation, nodes=[], links=[], next_cursor=None)
@@ -1727,8 +1757,10 @@ class PublicationRecords:
                 <{P}operation> ?operation . }} GRAPH {self.facts} {{
                 ?operation <{F}classificationReduction> ?root . }} }} LIMIT 2'''
         rows = list(self.owner.store.query(query))
+        if not rows:
+            raise ClassificationMissingError('Current source classification reduction is not bound')
         if len(rows) != 1:
-            raise ProcessingError('Current source classification reduction missing or duplicated')
+            raise ProcessingError('Current source classification reduction duplicated')
         operation, root = rows[0]['operation'], rows[0]['root']
         binding = {}
         for field in fields:
@@ -1742,7 +1774,7 @@ class PublicationRecords:
             raise ProcessingError('Classification reduction receipt missing')
         result = dict(project=self.project, generation=generation, sourceId=source,
             operationId=operation.value, profileId=owner.one(root, 'profileId'),
-            profileVersion=owner.one(root, 'profileVersion'))
+            profileVersion=owner.one(root, 'profileVersion'), taxonomyDigest=binding['taxonomy'])
         if dimension_id is None:
             result['dimensionIds'] = sorted(owner.one(node, 'dimensionId') for node in owner.values(root, 'dimension'))
         else:
@@ -1796,11 +1828,74 @@ class PublicationRecords:
         fields = selection.get('fields')
         if 'fields' not in selection:
             return None
-        allowed = ([['id'], ['id','name','sourceIds']] if selection.get('kind') == 'nodes'
+        allowed = ([['id'], ['id','name','sourceIds'], ['id','name','entityType']] if selection.get('kind') == 'nodes'
+                   else [['id','source','target','predicate'], ['id','source','target','predicate','status']] if selection.get('kind') == 'links'
                    else [['id','source','target','predicate']] if selection.get('kind') in {'incident','topology'} else [])
         if fields not in allowed:
             raise ProcessingError('Invalid native scene field projection')
         return fields
+
+    @_stage('identity')
+    def canonical_names(self, identities):
+        """Read selected title scalars by exact graph/address, without support joins."""
+        self.batch(identities)
+        names, size = {}, 0
+        for identity in identities:
+            node = self.iri(identity)
+            if next(self.owner.store.quads_for_pattern(
+                    self.stage_head('identity'), self.ox.NamedNode(P+'canonical'),
+                    node, self.stage_graph('identity')), None) is None:
+                raise ProcessingError('Canonical name selection is missing from current stage')
+            value = self._canonical_scalar(node, 'name')
+            size += len(identity.encode()) + len(value.encode())
+            if size > MAX_BYTES:
+                raise ProcessingError('Canonical name hydration exceeds byte budget')
+            names[identity] = value
+        return names
+
+    @_stage('identity')
+    def _canonical_scalar(self, node, field):
+        # A completed decision selects fields; graph reads never restore its supports.
+        graph = self.record_graph(node)
+        chosen, size, count = None, 0, 0
+        for link in self.owner.store.quads_for_pattern(node, self.ox.NamedNode(P+'selector'), None, graph):
+            check_query_cancellation()
+            count += 1
+            if count > MAX_ROWS:
+                raise ProcessingError('Canonical field selection exceeds byte/row budget')
+            selector = link.object
+            fields = self.values(selector, 'field', graph=graph)
+            if len(fields) != 1:
+                raise ProcessingError('Canonical field selector missing or duplicated')
+            if fields[0].value != field:
+                continue
+            selected = self.values(selector, 'record', graph=graph)
+            if len(selected) != 1:
+                raise ProcessingError('Canonical field selection missing or duplicated')
+            record = selected[0]
+            if next(self.owner.store.quads_for_pattern(
+                    node, self.ox.NamedNode(P+'member'), record, graph), None) is None:
+                raise ProcessingError('Canonical field selection is missing from membership')
+            value = self._native_scalar(record, field)
+            if chosen is not None and chosen != value:
+                raise ProcessingError('Canonical scalar selection has conflicting native values')
+            chosen = value
+            size += len(str(selector).encode()) + len(str(value).encode())
+            if count > MAX_ROWS or size > MAX_BYTES:
+                raise ProcessingError('Canonical field selection exceeds byte/row budget')
+        if chosen is None:
+            records = self.values(node, 'representative', graph=graph)
+            if len(records) != 1:
+                raise ProcessingError('Canonical field selection missing or duplicated')
+            chosen = self._native_scalar(records[0], field)
+        return chosen.value
+
+    def _native_scalar(self, record, field):
+        values = list(islice(self.owner.store.quads_for_pattern(
+            record, self.ox.NamedNode(F+field), None, self.facts), 2))
+        if len(values) != 1 or not isinstance(values[0].object, self.ox.Literal):
+            raise ProcessingError('Canonical field selector requires one native scalar')
+        return values[0].object
 
     @_stage('identity')
     def _scene_name(self, node, source_ids):
@@ -1976,7 +2071,9 @@ class PublicationRecords:
                 node = self.iri(identity)
                 if projection is not None:
                     item = dict(id=identity)
-                    if 'name' in projection:
+                    if 'entityType' in projection:
+                        item.update(name=self._canonical_scalar(node, 'name'), entityType=self._canonical_scalar(node, 'entityType'))
+                    elif 'name' in projection:
                         item.update(name=self._scene_name(node, source_ids), sourceIds=self._scene_sources(node, source_ids))
                     target = response['nodes']
                 else:
@@ -1998,7 +2095,7 @@ class PublicationRecords:
                         evidenceIds=evidence, members=members, selectors=selectors)
                     target = response['nodes']
             else:
-                item = self._fact_scene_link(generation, row)
+                item = self._projected_scene_link(row, status='status' in projection) if projection is not None else self._fact_scene_link(generation, row)
                 target = response['links']
             target.append(item)
             response['next_cursor'] = identity
@@ -2061,15 +2158,7 @@ class PublicationRecords:
         for row in rows[:limit]:
             check_query_cancellation()
             if projection is not None:
-                representative = self.one(self.iri(row['id'].value), 'representative')
-                # The ready decision already proves membership; read its one native field directly.
-                predicates = [quad.object for quad in islice(self.owner.store.quads_for_pattern(
-                    self.iri(representative), self.ox.NamedNode(F+'predicateName'), None, self.facts), 2)]
-                if len(predicates) != 1 or not isinstance(predicates[0], self.ox.Literal):
-                    raise ProcessingError('Native relation predicate missing or duplicated')
-                predicate = predicates[0].value
-                link = dict(id=row['id'].value, source=row['source'].value, target=row['target'].value,
-                            predicate=normalize_fact_predicate(predicate))
+                link = self._projected_scene_link(row)
                 missing = []
             else:
                 link = self._fact_scene_link(generation, row)

@@ -320,6 +320,10 @@ def test_community_references_restart_and_canonical_membership_uniqueness(tmp_pa
     assert scene['nodes'] == [dict(id='s', kind='source', material='m', representation='r', source_ids=['s'], evidence_ids=[])]
     assert scene['links'] == [] and scene['next_cursor'] is None
     assert store.read_native_source_scene('p', generation, dict(kind='sources', after='s'))['nodes'] == []
+    assert store.read_native_source_scene('p', generation, dict(kind='sources', sourceIds=['s']))['nodes'] == scene['nodes']
+    assert store.read_native_source_scene('p', generation, dict(kind='sources', sourceIds=['other']))['nodes'] == []
+    with pytest.raises(ProcessingError, match='Duplicate'):
+        store.read_native_source_scene('p', generation, dict(kind='sources', sourceIds=['s', 's']))
     with pytest.raises(ProcessingError, match='byte budget'):
         store.read_native_source_scene('p', generation, dict(kind='sources', maxBytes=10))
     store.close()
@@ -718,6 +722,10 @@ def test_visible_native_scene_links_preserve_relation_qualifiers(tmp_path, monke
     assert projected['links']==[{key:link[key] for key in fields}]
     topology=store.read_publication_scene('p',generation,dict(kind='topology',fields=fields,limit=128))
     assert topology==projected
+    map_fields=['id','source','target','predicate','status']
+    visible=store.read_publication_scene('p',generation,dict(kind='links',visibleIds=['urn:canonical:0','urn:canonical:1'],fields=map_fields))
+    assert visible['links']==[dict(projected['links'][0],status='candidate')]
+    assert store.read_publication_scene('p',generation,dict(kind='links',visibleIds=['urn:canonical:0'],fields=map_fields))['links']==[]
     assert store.read_publication_scene('p',generation,dict(kind='topology',fields=fields,after=link['id']))['links']==[]
     with pytest.raises(ProcessingError):
         store.read_publication_scene('p',generation,dict(kind='topology',fields=fields,nodeId='urn:canonical:0'))
@@ -1380,6 +1388,7 @@ def test_grounding_seeks_indexes_and_deduplicates_intersecting_ranges(tmp_path, 
     evidence = ox.NamedNode(expected[0]['evidence'])
     extra = ox.NamedNode(evidence.value + ':extra-range')
     store.store.add(ox.Quad(evidence, ox.NamedNode(F+'nativeRange'), extra, owner.facts))
+    store.store.add(ox.Quad(ox.NamedNode(receipt['operation_id']), ox.NamedNode(F+'ownedRecord'), extra, owner.facts))
     for field, value in [('nativeRef', '#/document/text'), ('start', 1), ('end', 3)]:
         store.store.add(ox.Quad(extra, ox.NamedNode(F+field), ox.Literal(value), owner.facts))
     # A second expression of the same evidence must not duplicate the reference.
@@ -1394,3 +1403,154 @@ def test_grounding_seeks_indexes_and_deduplicates_intersecting_ranges(tmp_path, 
     assert list(owner._grounded_references(position)) == expected
     assert list(owner._grounded_references(dict(position, source='foreign'))) == []
     assert list(owner._grounded_references(dict(position, start=4, end=5))) == []
+
+
+def test_admission_reads_one_projected_row_per_operation_and_rejects_corruption(tmp_path):
+    from semantica.triplet_store.publication_records import PublicationRecords
+    store, binding, receipt, identity = fixture(tmp_path)
+    native = store.store
+    try:
+        owner = PublicationRecords(store, 'p')
+        second = {**binding, 'grounding': 'second'}
+        entity = Entity('Acme', 'ORG', 0, 4, .7, {'mention_id': 'other', 'span_occurrence': 0})
+        other = store.adopt_extraction(second, 'entities', [entity], text='Acme', native_ranges=RANGES, accepted_digest='paid-other')
+        addresses = [receipt['operation_id'], other['operation_id']]
+        source = dict(source='s', material='m', representation='r')
+        class MeasuredStore:
+            def __init__(self, native): self.native, self.rows, self.queries = native, 0, 0
+            def __getattr__(self, name): return getattr(self.native, name)
+            def query(self, query):
+                self.queries += 1
+                for row in self.native.query(query):
+                    self.rows += 1
+                    yield row
+        native = store.store
+        measured = MeasuredStore(native)
+        store.store = measured
+        assert [r.operation.value for r in owner.verify_operations(addresses, source)] == addresses
+        assert (measured.queries, measured.rows) == (1, 2)
+        store.store = native
+        operation = owner.iri(addresses[0])
+        native.add(owner.ox.Quad(operation, owner.iri(F+'acceptedDigest'), owner.scalar('different'), owner.facts))
+        with pytest.raises(ProcessingError, match='duplicated'):
+            owner.verify_operations(addresses, source)
+    finally:
+        store.store = native
+        store.close()
+
+
+def test_canonical_title_reads_selected_name_and_rejects_foreign_selection(tmp_path):
+    from semantica.triplet_store.publication_records import PublicationRecords, P
+    store, _, receipt, identity = fixture(tmp_path)
+    try:
+        generation = stage(store, receipt, identity)
+        owner = PublicationRecords(store, 'p')
+        with owner.build_scope(generation):
+            native = store.store
+            class IndexedNames:
+                def __getattr__(self, name): return getattr(native, name)
+                def query(self, query):
+                    raise AssertionError('Selected names must not join decision graphs')
+                def quads_for_pattern(self, subject, predicate, obj, graph):
+                    assert subject is not None and predicate is not None and graph is not None
+                    if predicate.value == P+'member':
+                        assert obj is not None, 'Title reading must not enumerate supports'
+                    return native.quads_for_pattern(subject, predicate, obj, graph)
+            store.store = IndexedNames()
+            try:
+                assert owner.canonical_names(['urn:canonical:acme']) == {'urn:canonical:acme': 'Acme'}
+            finally:
+                store.store = native
+            node = owner.iri('urn:canonical:acme')
+            graph = owner.record_graph(node)
+            selector = owner.values(node, 'selector', graph=graph)[0]
+            store.store.update(f'DELETE WHERE {{ GRAPH {graph} {{ {selector} <{P}record> ?record }} }}')
+            store.store.add(owner.ox.Quad(selector, owner.iri(P+'record'), owner.iri('urn:foreign'), graph))
+            with pytest.raises(ProcessingError, match='missing'):
+                owner.canonical_names(['urn:canonical:acme'])
+            store.store.remove(owner.ox.Quad(owner.stage_head('identity'), owner.iri(P+'canonical'), node, owner.stage_graph('identity')))
+            with pytest.raises(ProcessingError, match='current stage'):
+                owner.canonical_names(['urn:canonical:acme'])
+    finally:
+        store.close()
+
+
+def test_grounding_does_not_read_ranges_outside_admitted_source(tmp_path):
+    from semantica.triplet_store.publication_records import PublicationRecords
+    store, _, receipt, identity = fixture(tmp_path)
+    try:
+        generation = stage(store, receipt, identity)
+        owner = PublicationRecords(store, 'p')
+        unrelated = owner.iri('urn:unrelated:range')
+        store.store.add(owner.ox.Quad(unrelated, owner.iri(F+'nativeRef'),
+            owner.scalar('#/document/text'), owner.facts))
+        store.store.add(owner.ox.Quad(owner.iri('urn:unrelated:operation'),
+            owner.iri(F+'ownedRecord'), unrelated, owner.facts))
+        # Out-of-scope ranges deliberately lack bounds: they must not be hydrated.
+        page = owner.grounded_reference_page(generation,
+            dict(source='s', nativeRef='#/document/text', start=0, end=4))
+        assert [item['id'] for item in page['items']] == [identity]
+        assert page['next_cursor'] is None
+    finally:
+        store.close()
+
+
+def test_explorer_projection_never_restores_support_or_evidence(tmp_path, monkeypatch):
+    from semantica.triplet_store.publication_records import PublicationRecords
+    store, _, receipt, identity = fixture(tmp_path)
+    generation = stage(store, receipt, identity)
+    store.activate_publication('p', generation, indexes=indexes())
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Map restored unused support, evidence or full records')
+    for method in ('_canonical_references', '_selected_scene_fields', '_scene_references', '_read', '_scene_sources'):
+        monkeypatch.setattr(PublicationRecords, method, forbidden)
+    fields = ['id', 'name', 'entityType']
+    page = store.read_publication_scene('p', generation, dict(kind='nodes', sourceIds=['s'], fields=fields))
+    assert page['nodes'] == [dict(id='urn:canonical:acme', name='Acme', entityType='ORG')]
+    assert store.read_publication_scene('p', generation, dict(kind='nodes', sourceIds=['foreign'], fields=fields))['nodes'] == []
+    with pytest.raises(ProcessingError, match='outside'):
+        store.read_publication_scene('p', generation, dict(kind='nodes', sourceIds=['foreign'], nodeIds=['urn:canonical:acme'], fields=fields))
+    store.close()
+
+
+def test_map_selected_scalars_do_not_scale_with_support_members(tmp_path):
+    from semantica.triplet_store.publication_records import PublicationRecords, P
+    store, _, receipt, identity = fixture(tmp_path)
+    native = store.store
+    try:
+        generation = stage(store, receipt, identity)
+        owner = PublicationRecords(store, 'p')
+        with owner.build_scope(generation):
+            node = owner.iri('urn:canonical:acme')
+            graph = owner.record_graph(node)
+            class Measured:
+                calls = 0
+                rows = 0
+                def __getattr__(self, name): return getattr(native, name)
+                def query(self, query):
+                    raise AssertionError('Selected scalars must use exact addresses')
+                def quads_for_pattern(self, subject, predicate, obj, graph):
+                    assert subject is not None and predicate is not None and graph is not None
+                    if predicate.value == P+'member':
+                        assert obj is not None, 'Map must not enumerate support members'
+                    self.calls += 1
+                    for quad in native.quads_for_pattern(subject, predicate, obj, graph):
+                        self.rows += 1
+                        yield quad
+            measurements = []
+            for count in (1, 5000):
+                # Fanout-only storage fixture: unselected supports have no display fields.
+                if count > 1:
+                    native.extend(owner.ox.Quad(node, owner.iri(P+'member'),
+                        owner.iri(f'urn:support:{index}'), graph) for index in range(count-1))
+                measured = Measured()
+                store.store = measured
+                assert owner._canonical_scalar(node, 'name') == 'Acme'
+                assert owner._canonical_scalar(node, 'entityType') == 'ORG'
+                measurements.append((measured.calls, measured.rows))
+                store.store = native
+            assert measurements[0] == measurements[1]
+            assert measurements[1][1] < 20
+    finally:
+        store.store = native
+        store.close()

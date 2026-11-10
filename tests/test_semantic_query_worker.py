@@ -146,6 +146,33 @@ def test_classification_rpc_preserves_dimension_and_budget_and_fences_borrow(mon
     assert len(calls) == 1
 
 
+def test_classification_batch_fences_project_and_limits_total_bytes(monkeypatch):
+    from semantica import semantic_query_worker as worker
+    from semantica.utils.exceptions import ProcessingError
+    calls, borrows = [], []
+    class Owner:
+        def read_native_classification_dimension(self, project, generation, source, dimension, **kwargs):
+            calls.append((source, dimension))
+            return dict(project=project, generation=generation, sourceId=source, assignments=[])
+    def borrow(reference, project):
+        borrows.append(project)
+        return Owner()
+    monkeypatch.setattr(worker._native_store, 'borrow', borrow)
+    raw = dict(id='batch', method='classification_batch', protocol='semantica.semantic-query.v1', params=dict(
+        projectId='project-p', semanticStore=dict(path='/tmp/native-classification', project='project-p', generation='g'),
+        selections=[dict(sourceId='s1'), dict(sourceId='s2', dimensionId='framework')], maxBytes=2048))
+    result = worker.handle_request(raw)['result']
+    assert [page['sourceId'] for page in result['pages']] == ['s1', 's2']
+    assert calls == [('s1', None), ('s2', 'framework')]
+    assert borrows == ['project-p', 'project-p']
+    raw['params']['maxBytes'] = 1
+    with pytest.raises(ProcessingError, match='byte budget'):
+        worker.handle_request(raw)
+    raw['params']['projectId'] = 'other'
+    with pytest.raises(ValueError, match='project'):
+        worker.handle_request(raw)
+
+
 def test_section_rpc_delegates_only_requested_native_ranges(monkeypatch):
     from semantica import semantic_query_worker as worker
     calls = []

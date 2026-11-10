@@ -48,6 +48,21 @@ def request(result, **extra):
         query='Ada', target='documents', **extra))
 
 
+def test_vector_document_hydration_preserves_serializer_boundary_joins(tmp_path):
+    from types import SimpleNamespace
+    from semantica.semantic_query import _document_hit
+    from semantica.semantic_document_reader import write_reader_artifact
+    from tests.test_native_document_reader import payload, request as reader_request
+    path = tmp_path/'reader.json'
+    reader = reader_request(path, write_reader_artifact(path, payload(dict(format='text', text='Acme'))))
+    request_value = SimpleNamespace(source_artifacts={reader.source_id: reader}, mode='semantic')
+    hit = _document_hit(request_value, dict(sourceId=reader.source_id,
+        ranges=[dict(nativeRef='#/document/text', start=0, end=4, joinBefore='\n', joinAfter='\n\n')]),
+        dict(canonicalBytes=0), 0)
+    assert hit.text == '\nAcme\n\n'
+    assert hit.locator.quote == 'Acme'
+
+
 def test_actual_native_keyword_two_phase_hydration_and_reopen(ready):
     result, reader, session = ready
     selected = query_semantic_artifact(request(result), session=session)

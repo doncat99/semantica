@@ -170,3 +170,22 @@ def test_graph_validation_runs_inside_the_monitored_operation(monkeypatch):
     communities = builder._semantic_organization(_topology(entities, relations))
     assert len(invoked) == 1
     assert {ref for group in communities for ref in group.entity_ids} == {item.id for item in entities}
+
+
+def test_titles_read_names_only_after_community_detection(monkeypatch):
+    from semantica.pipeline.parallelism_manager import ParallelismManager
+    topology = {'entities': [{'id': 'entity:' + str(i)} for i in range(5)], 'relationships': []}
+    detected = []
+    def isolate(self, task, **limits):
+        assert task.args[0] == topology
+        detected.append(True)
+        return {'communities': [['entity:0', 'entity:1', 'entity:2', 'entity:3'], ['entity:4']]}
+    reads = []
+    def names(ids):
+        assert detected
+        reads.append(ids)
+        return {identity: 'Name ' + identity.split(':')[1] for identity in ids}
+    monkeypatch.setattr(ParallelismManager, 'execute_isolated_task', isolate)
+    groups = builder._semantic_organization(topology, read_names=names)
+    assert reads == [['entity:0', 'entity:1', 'entity:2', 'entity:4']]
+    assert [group.title for group in groups] == ['Name 0 / Name 1 / Name 2 +1', 'Name 4']
