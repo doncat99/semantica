@@ -69,15 +69,42 @@ def test_single_reduction_preserves_independent_public_representatives(tmp_path,
         store.close()
 
 
-@pytest.mark.parametrize('field',['id','assertion'])
-def test_single_reduction_rejects_duplicate_observation_identity(tmp_path,field):
+@pytest.mark.parametrize('reverse',[False,True])
+def test_distinct_native_supports_may_share_public_projection_ids(tmp_path,monkeypatch,reverse):
+    from semantica.triplet_store.extraction_records import ExtractionRecords
+    store,generation,refs,_=stage_duplicate_observations(tmp_path)
+    try:
+        for number,reference in enumerate(refs):
+            records=ExtractionRecords.from_fact_reference(store,'p',reference)
+            records.write_fact_projection(reference,assertion_id='a:shared',relation_id='r:shared',
+                source_id='urn:canonical:0',target_id='urn:canonical:1',predicate='owns',
+                qualifiers={'polarity':'positive'},evidence_ids=[f'e:{number}'])
+        index=QualifiedFactIndex(store,'p',generation)
+        if reverse:
+            rows=list(index._physical_rows())
+            monkeypatch.setattr(index,'_physical_rows',lambda:iter(reversed(rows)))
+        index.reconcile_and_stage(input_key='input')
+        for kind in ('assertion','relation'):
+            item=index.canonical_page(kind)['records'][0]
+            assert item.evidence_ids==['e:0','e:1']
+            assert item.metadata['representative_observation_id']==('a:shared' if kind=='assertion' else 'r:shared')
+        p=index.publication
+        from semantica.triplet_store.publication_records import P
+        decisions=list(store.store.quads_for_pattern(p.head,p.ox.NamedNode(P+'qualifiedDecision'),None,p.graph))
+        assert len(decisions)==1
+        assert {q.object.value for q in store.store.quads_for_pattern(decisions[0].object,p.ox.NamedNode(P+'member'),None,p.graph)}==set(refs)
+    finally:
+        store.close()
+
+
+def test_single_reduction_rejects_duplicate_native_reference(tmp_path):
     from semantica.utils.exceptions import ProcessingError
     store,generation,refs,_=stage_duplicate_observations(tmp_path)
     try:
         projections(store,refs)
         index=QualifiedFactIndex(store,'p',generation)
         rows=list(index._physical_rows())
-        rows[1][1][field]=rows[0][1][field]
+        rows[1]=(rows[0][0],rows[1][1])
         with pytest.raises(ProcessingError,match='Duplicate native observation'):
             index._reduce_partition(rows,())
     finally:

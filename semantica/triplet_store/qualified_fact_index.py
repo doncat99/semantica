@@ -155,34 +155,38 @@ class QualifiedFactIndex:
         members={}
         representations={}
         relation_selections={}
-        relation_ids={}
-        seen_relations=set()
+        selection_keys={}
+        rows_by_reference=dict(rows)
+        if len(rows_by_reference)!=len(rows):
+            raise ProcessingError('Duplicate native observation identity')
+        current_reference=None
         def observations():
+            nonlocal current_reference
             for reference,row in rows:
-                if row['assertion'] in selected or row['id'] in seen_relations:
-                    raise ProcessingError('Duplicate native observation identity')
-                seen_relations.add(row['id'])
-                selected[row['assertion']]=reference
-                relation_ids[row['assertion']]=row['id']
+                current_reference=reference
                 yield 'assertion',dict(id=row['assertion'],subject_id=row['source'],
                     object_entity_id=row['target'],predicate=row['predicate'],object=row['object'],
                     qualifiers=row['qualifiers'],evidence_ids=row['evidence'],
                     support_ids=row['evidence'],status='candidate',metadata={})
         def admit(item,identity,encoded_bytes):
-            reference=selected[item['id']]
+            reference=current_reference
             row=rows_by_reference[reference]
+            # Public projection IDs identify propositions, not physical supports.
+            key=json.dumps(item,sort_keys=True,ensure_ascii=False,separators=(',',':'))
+            if item['id'] not in selection_keys or key<selection_keys[item['id']]:
+                selection_keys[item['id']]=key
+                selected[item['id']]=reference
             members.setdefault(identity,[]).append(reference)
             representations.setdefault(identity,set()).add(row['representation'])
             # Preserve the public graph representative without a second merge,
             # validation, evidence accumulator or membership collection.
             # Sorted model JSON compares evidence_ids, then unique id. Later
             # graph fields cannot break that ordering; no second DTO is needed.
-            graph_id=relation_ids[item['id']]
+            graph_id=row['id']
             key=json.dumps(dict(evidence_ids=item['evidence_ids'],id=graph_id),
                 sort_keys=True,ensure_ascii=False,separators=(',',':'))
             if identity not in relation_selections or key<relation_selections[identity][0]:
                 relation_selections[identity]=(key,reference,graph_id)
-        rows_by_reference=dict(rows)
         assertions,_,_=ConflictDetector.reconcile_qualified_facts(p.project,
             observations=observations(),functional_predicates=functional_predicates,admit=admit)
         return assertions,selected,members,representations,relation_selections

@@ -271,3 +271,33 @@ was 28.998 s: native read 14.892 s, semantic reduction 1.842 s, completion commi
 0.137 s, completed lookup 0.008 s. The completion budget remains 5 s. Neither
 that fixture nor the read-only trace proves packaged end-to-end acceptance;
 updated packaged ESG and unchanged-input verification are pending below.
+
+### 2026-11-10 physical support identity correction
+
+Packaged `d744ba75` ESG run `e7235dee-1acf-45ad-8eb3-9ec2b95b86d6`
+reused entity completion in 35 ms but rejected fact processing after 6.53 s.
+Read-only inspection proved operation `db4cfadede056afaea2cdbdf8ea69285f5c8dd8010e99c3ba81543dd8199b5cf`
+relations 0 and 3 are different native supports of the same public projection.
+Commit `4f2b87548` introduced a uniqueness check on public assertion/relation
+IDs, contrary to `_build_source`'s existing proposition identity. Its test
+incorrectly required that rejection. This is our fork ownership error, not an
+upstream reducer failure or corrupt paid data. The dynamic-graph reader added
+in `bd6a25f32` was a separate query amplification already replaced above.
+
+Repair is in `QualifiedFactIndex._reduce_partition` only: reject duplicate
+native references; admit every physical support once; retain the reducer's
+exact normalized representative ordering when several supports share one
+public ID. Public IDs, canonical IDs and evidence references are unchanged.
+No data rewrite, alternate engine, observation copy or temporary file is added.
+The former public-ID rejection specification is replaced by shared-public-ID
+coverage/evidence tests in both traversal orders and duplicate-native-reference
+rejection. Both new identity specifications failed before the source fix.
+
+Focused owner/consumer/corruption regression: 110 passed before adding reverse
+order; reverse-order focused file: 8 passed. A read-only real traversal reduced
+all 28,350 physical observations in 21,620 partitions without identity failures
+in 65.648 s, RSS 224.95 MiB. Concurrent scale/regression execution measured the
+56,700 fixture at 42.793 s (read 17.062, reduce 4.347, completion 0.689,
+completed lookup 0.0033 s); this contended measurement is not a performance
+pass or a comparison with the previous isolated measurement. Packaged final
+ready and unchanged-input evidence remain mandatory and are not yet proven.
