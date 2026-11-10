@@ -454,3 +454,70 @@ def test_generation_change_interrupts_before_final_import(tmp_path,monkeypatch):
         assert not p.values(p.head,'factStageInput')
     finally:
         store.close()
+
+
+def test_physical_projection_uses_indexed_endpoint_membership_not_graph_joins(tmp_path):
+    store,generation,refs,index=prepared(tmp_path,70)
+    try:
+        query=store.store.query
+        calls=[]
+        def bounded_query(text,*args,**kwargs):
+            if 'SELECT ?reference' in text:
+                calls.append(text)
+                assert '?targetDecisionGraph' not in text
+                assert '?otherDecisionGraph' not in text
+                assert '?sourceDecisionGraph' not in text
+            return query(text,*args,**kwargs)
+        original=store.store
+        class ObservedStore:
+            def __getattr__(self,name):
+                return bounded_query if name=='query' else getattr(original,name)
+        store.store=ObservedStore()
+        rows=list(index._physical_rows())
+        assert len(rows)==len(refs) and not calls
+        assert {row['target'] for _,row in rows}=={'urn:canonical:1'}
+    finally:
+        store.close()
+
+
+def test_physical_read_many_operations_and_decision_graphs_has_bounded_index_work(tmp_path):
+    from time import perf_counter
+    store,generation,refs,_=stage_duplicate_observations(tmp_path,
+        source_ids=tuple('source:'+str(i) for i in range(64)))
+    projections(store,refs)
+    index=QualifiedFactIndex(store,'p',generation)
+    p=index.publication
+    graph,head=p.stage_graph('identity'),p.stage_head('identity')
+    try:
+        old=list(store.store.quads_for_pattern(head,p.iri(P+'canonical'),None,graph))
+        members=[q.object for canonical in old for q in store.store.quads_for_pattern(
+            canonical.object,p.iri(P+'member'),None,graph)]
+        for quad in old:
+            store.store.remove(quad)
+        for number,member in enumerate(members):
+            node=p.iri('urn:canonical:isolated:'+str(number))
+            location=p.iri('urn:decision:isolated:'+str(number))
+            for quad in (p.ox.Quad(head,p.iri(P+'canonical'),node,graph),
+                         p.ox.Quad(node,p.iri(P+'canonicalGraph'),location,graph),
+                         p.ox.Quad(node,p.iri(P+'member'),member,location)):
+                store.store.add(quad)
+        original=store.store
+        calls=[]
+        class ObservedStore:
+            def __getattr__(self,name):
+                return getattr(original,name)
+            def query(self,*args,**kwargs):
+                pytest.fail('physical reader reintroduced cross-graph SPARQL')
+            def quads_for_pattern(self,*args):
+                calls.append(args)
+                return original.quads_for_pattern(*args)
+        store.store=ObservedStore()
+        started=perf_counter()
+        rows=list(index._physical_rows())
+        elapsed=perf_counter()-started
+        assert {reference for reference,_ in rows}==set(refs)
+        assert len({row['source'] for _,row in rows})==64
+        assert len(calls)<len(refs)*80+256
+        assert elapsed<5, dict(seconds=elapsed,index_seeks=len(calls))
+    finally:
+        store.close()

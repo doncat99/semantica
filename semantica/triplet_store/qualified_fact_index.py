@@ -1,6 +1,7 @@
 """Reference-only native partitions for the current qualified-fact owner."""
 import hashlib
 import json
+from functools import lru_cache
 from itertools import groupby
 from itertools import islice
 
@@ -52,64 +53,82 @@ class QualifiedFactIndex:
         p=self.publication
         from ..semantic_extract.schemas import validate_fact_qualifiers
         graph,head=p.stage_graph('identity'),p.stage_head('identity')
+        @lru_cache(maxsize=128)
+        def endpoint(member):
+            # Seek the indexed member first; never join every canonical graph.
+            matches=set()
+            for link in self.owner.store.quads_for_pattern(None,p.iri(P+'member'),member,None):
+                check_query_cancellation()
+                if (next(self.owner.store.quads_for_pattern(head,p.iri(P+'canonical'),link.subject,graph),None)
+                        and p.values(link.subject,'canonicalGraph',graph=graph)==[link.graph_name]):
+                    matches.add(link.subject)
+                    if len(matches)>1:
+                        raise ProcessingError('Native fact requires unique canonical endpoint membership')
+            if not matches:
+                raise ProcessingError('Native fact field missing or duplicated; unique canonical endpoint membership required')
+            return next(iter(matches))
         for canonical in self.owner.store.quads_for_pattern(head,p.iri(P+'canonical'),None,graph):
             check_query_cancellation()
             # Bound sorting to one canonical subject, as required by the conflict
             # rules. Missing columns stay visible and fail instead of losing rows.
-            query=f'''SELECT ?reference ?target ?predicate ?assertion ?id ?object ?representation
-                    ?polarity ?condition ?time ?unit ?value ?evidence ?position ?ambiguous WHERE {{
-                {p.canonical_pattern(canonical.object, f'{canonical.object} <{P}member> ?rawSource', variable='?sourceDecisionGraph')}
-                GRAPH {p.facts} {{ ?reference <{F}sourceEntity> ?rawSource ; <{RDF_TYPE}> <{F}Relation> }}
-                BIND(IRI(REPLACE(STR(?reference), ":relation:[0-9]+$", "")) AS ?operation)
-                GRAPH {p.publication_graph} {{ {p.publication_head} <{P}source> ?source . ?source <{P}operation> ?operation }}
-                BIND(IRI(CONCAT(STR(?operation), ":fact-projection")) AS ?projection)
-                BIND(IRI(CONCAT(REPLACE(STR(?rawSource), ":entity:[^:]+$", ""), ":identity-projection")) AS ?identity)
-                OPTIONAL {{ GRAPH {p.facts} {{ ?operation <{F}ownedRecord> ?reference .
-                    ?reference <{F}targetEntity> ?rawTarget . ?rawTarget <{F}name> ?object }} }}
-                OPTIONAL {{ {p.canonical_pattern('?target', f'?target <{P}member> ?rawTarget', variable='?targetDecisionGraph')} }}
-                OPTIONAL {{ GRAPH ?identity {{ ?rawSource <{F}buildRepresentationId> ?representation }} }}
-                OPTIONAL {{ GRAPH ?projection {{ ?reference <{F}buildPredicate> ?predicate }} }}
-                OPTIONAL {{ GRAPH ?projection {{ ?reference <{F}buildAssertionId> ?assertion }} }}
-                OPTIONAL {{ GRAPH ?projection {{ ?reference <{F}buildRelationId> ?id }} }}
-                OPTIONAL {{ GRAPH ?projection {{ ?reference <{F}buildEvidence> ?child .
-                    ?child <{F}position> ?position ; <{F}referenceId> ?evidence }} }}
-                OPTIONAL {{ GRAPH {p.facts} {{ ?reference <{F}polarity> ?polarity }} }}
-                OPTIONAL {{ GRAPH {p.facts} {{ ?reference <{F}condition> ?condition }} }}
-                OPTIONAL {{ GRAPH {p.facts} {{ ?reference <{F}time> ?time }} }}
-                OPTIONAL {{ GRAPH {p.facts} {{ ?reference <{F}unit> ?unit }} }}
-                OPTIONAL {{ GRAPH {p.facts} {{ ?reference <{F}qualifiedValue> ?value }} }}
-                BIND(EXISTS {{ {p.canonical_pattern('?other', f'?other <{P}member> ?rawSource . FILTER(?other != {canonical.object})', variable='?otherDecisionGraph')} }} AS ?ambiguous)
-            }} ORDER BY ?reference ?position'''
+            locations=p.values(canonical.object,'canonicalGraph',graph=graph)
+            if len(locations)!=1:
+                raise ProcessingError('Completed identity decision graph missing or duplicated')
             rows=[]
             size=0
-            for reference,records in groupby(self.owner.store.query(query),key=lambda row:row['reference']):
-                check_query_cancellation()
-                first=None
-                evidence=[]
-                for record in records:
-                    fields=tuple(record[name] for name in ('target','predicate','assertion','id','object',
-                        'representation','polarity','condition','time','unit','value'))
-                    if (any(value is None for value in fields[:6]) or record['evidence'] is None
-                            or record['position'] is None):
+            def field(node, name, location, required=True):
+                values=[]
+                for quad in self.owner.store.quads_for_pattern(node,p.iri(F+name),None,location):
+                    values.append(quad.object)
+                    if len(values)>1:
                         raise ProcessingError('Native fact field missing or duplicated')
-                    if record['ambiguous'].value=='true':
+                if required and not values:
+                    raise ProcessingError('Native fact field missing or duplicated')
+                return values[0] if values else None
+            for membership in self.owner.store.quads_for_pattern(
+                    canonical.object,p.iri(P+'member'),None,locations[0]):
+                raw_source=membership.object
+                for link in self.owner.store.quads_for_pattern(None,p.iri(F+'sourceEntity'),raw_source,p.facts):
+                    check_query_cancellation()
+                    reference=link.subject
+                    if not next(self.owner.store.quads_for_pattern(reference,p.iri(RDF_TYPE),p.iri(F+'Relation'),p.facts),None):
+                        continue
+                    operation=p.iri(reference.value.rsplit(':relation:',1)[0])
+                    if not any(next(self.owner.store.quads_for_pattern(p.publication_head,p.iri(P+'source'),q.subject,p.publication_graph),None)
+                            for q in self.owner.store.quads_for_pattern(None,p.iri(P+'operation'),operation,p.publication_graph)):
+                        continue
+                    if not next(self.owner.store.quads_for_pattern(operation,p.iri(F+'ownedRecord'),reference,p.facts),None):
+                        raise ProcessingError('Native fact field missing or duplicated')
+                    if field(reference,'sourceEntity',p.facts)!=raw_source or endpoint(raw_source)!=canonical.object:
                         raise ProcessingError('Native fact requires unique canonical endpoint membership')
-                    if first is not None and fields!=first:
-                        raise ProcessingError('Native fact field missing or duplicated; unique canonical endpoint membership required')
-                    first=fields
-                    if len(evidence)>=128 or int(record['position'].value)!=len(evidence):
+                    target=field(reference,'targetEntity',p.facts)
+                    projection=p.iri(operation.value+':fact-projection')
+                    identity=p.iri(raw_source.value.rsplit(':entity:',1)[0]+':identity-projection')
+                    evidence=[]
+                    for q in self.owner.store.quads_for_pattern(reference,p.iri(F+'buildEvidence'),None,projection):
+                        if len(evidence)>=128:
+                            raise ProcessingError('Native fact evidence order missing or duplicated')
+                        evidence.append((int(field(q.object,'position',projection).value),
+                            field(q.object,'referenceId',projection).value))
+                    evidence.sort()
+                    if not evidence or [position for position,_ in evidence]!=list(range(len(evidence))):
                         raise ProcessingError('Native fact evidence order missing or duplicated')
-                    evidence.append(record['evidence'].value)
-                qualifiers={key:value.value.removeprefix(F) if key=='polarity' else value.value
-                    for key,value in zip(('polarity','condition','time','unit','value'),first[6:]) if value is not None}
-                qualifiers=validate_fact_qualifiers(qualifiers)
-                row=dict(source=canonical.object.value,target=first[0].value,predicate=first[1].value,
-                    assertion=first[2].value,id=first[3].value,object=first[4].value.strip(),
-                    representation=first[5].value,qualifiers=qualifiers,evidence=evidence)
-                size+=len(reference.value.encode())+len(json.dumps(row,ensure_ascii=False).encode())
-                if len(rows)>=131072 or size>128*1024*1024:
-                    raise ProcessingError('Native fact subject sort key byte/row budget exceeded')
-                rows.append((reference.value,row))
+                    qualifiers={}
+                    for key,name in (('polarity','polarity'),('condition','condition'),('time','time'),('unit','unit'),('value','qualifiedValue')):
+                        value=field(reference,name,p.facts,False)
+                        if value is not None:
+                            qualifiers[key]=value.value.removeprefix(F) if key=='polarity' else value.value
+                    row=dict(source=canonical.object.value,target=endpoint(target).value,
+                        predicate=field(reference,'buildPredicate',projection).value,
+                        assertion=field(reference,'buildAssertionId',projection).value,
+                        id=field(reference,'buildRelationId',projection).value,
+                        object=field(target,'name',p.facts).value.strip(),
+                        representation=field(raw_source,'buildRepresentationId',identity).value,
+                        qualifiers=validate_fact_qualifiers(qualifiers),evidence=[value for _,value in evidence])
+                    size+=len(reference.value.encode())+len(json.dumps(row,ensure_ascii=False).encode())
+                    if len(rows)>=131072 or size>128*1024*1024:
+                        raise ProcessingError('Native fact subject sort key byte/row budget exceeded')
+                    rows.append((reference.value,row))
             rows.sort(key=lambda entry:(entry[1]['predicate'],tuple(sorted(
                 (key,value) for key,value in entry[1]['qualifiers'].items() if key!='polarity')),entry[0]))
             yield from rows

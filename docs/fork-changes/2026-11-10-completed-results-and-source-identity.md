@@ -237,3 +237,37 @@ pending at this source commit. Real-data offline rebind is not claimed here.
 No schema, semantic rule or upstream merge changed in this correction. Keep this
 owner repair on upstream merge only while upstream lacks these publication
 contracts; do not preserve it as an alternate engine.
+
+### 2026-11-10 packaged ESG follow-through: physical fact reader
+
+Packaged revision `c9d8357e` confirmed source projection 38/38 reused,
+classification 110 ms and entity completion 68 ms, with zero entity preparation,
+indexing and comparisons. The next, distinct blocker was
+`QualifiedFactIndex._physical_rows`: the worker sampled inside Oxigraph nested
+loop joins before the first fact partition. This is fork publication-query logic,
+not the upstream semantic reducer. The query joined the current publication's
+operation set and dynamically addressed source/target identity graphs for every
+canonical subject. The two-subject scale fixture did not represent 25,286 real
+canonical entities and 14,823 operations.
+
+The existing reader now follows indexed canonical-member and native-source
+adjacency, filters operations against the current publication, and reads only
+required fact/projection fields. Endpoint membership is checked against the
+current head and exact decision-graph pointer; ambiguous membership, missing or
+duplicate fields, evidence ordering, qualifier schema and subject byte/row limits
+still reject. A bounded 128-entry endpoint memo lasts only for this traversal;
+no new persisted index, temporary observation carrier, engine or fallback exists.
+Completed fact lookups still return before this traversal.
+
+Regression protection forbids cross-graph SPARQL in the physical reader and
+measures indexed seeks with 64 separate source operations and 128 separate
+identity decision graphs, as well as existing corruption and semantic-oracle
+cases. A dynamic-graph SPARQL rewrite was measured and rejected; it retained
+query-plan amplification. Direct indexed reads completed the real read-only
+28,350-observation traversal in 59.266 s / 232.16 MiB. This is not a performance
+pass: read-only RocksDB sampling showed repeated random index/string reads.
+On the persistent 56,700-observation / 21,620-group fixture the full first build
+was 28.998 s: native read 14.892 s, semantic reduction 1.842 s, completion commit
+0.137 s, completed lookup 0.008 s. The completion budget remains 5 s. Neither
+that fixture nor the read-only trace proves packaged end-to-end acceptance;
+updated packaged ESG and unchanged-input verification are pending below.
