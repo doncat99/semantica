@@ -56,6 +56,7 @@ class OxigraphStore:
 
     def close(self):
         """Flush and release the native handle before a process handoff."""
+        self._publication_cursor = None
         if hasattr(self, "store"):
             try:
                 self.flush()

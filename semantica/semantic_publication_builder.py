@@ -1851,7 +1851,20 @@ def _classify_source_batch(built: dict[str, Any], profile: Any, relay: Any) -> t
     return value, receipts
 
 
-def _overview_knowledge(entities, assertions, relations, evidence_by_id, *, ranking_graph=None):
+def _admitted_report_families(families):
+    """Consume ranked metadata once, retaining all conflict families."""
+    counts={}
+    for family in families:
+        sources=family['representations']
+        choose=any(counts.get(source,0)<4 for source in sources)
+        if choose or family['required']:
+            yield family
+        if choose:
+            for source in sources:
+                counts[source]=counts.get(source,0)+1
+
+
+def _overview_knowledge(entities, assertions, relations, evidence_by_id):
     """Reading admits four central proposition families per source, not a fact dump.
 
     A family retains all values, qualifiers and statuses for its subject/predicate;
@@ -1861,9 +1874,7 @@ def _overview_knowledge(entities, assertions, relations, evidence_by_id, *, rank
     graph = {"entities": [{"id": item.id} for item in entities],
              "relationships": [{"source": item.source_entity_id, "target": item.target_entity_id,
                                 "type": item.type} for item in relations]}
-    scores = CommunitySummarizer(cache_enabled=False)._compute_centrality(
-        ranking_graph if ranking_graph is not None else graph,
-        [item["id"] for item in ranking_graph["entities"]] if ranking_graph is not None else [item.id for item in entities])
+    scores = CommunitySummarizer(cache_enabled=False)._compute_centrality(graph,[item.id for item in entities])
     families, sources, required = {}, {}, set()
     for kind, items in (("assertions", assertions), ("relations", relations)):
         for item in items:
@@ -1875,12 +1886,8 @@ def _overview_knowledge(entities, assertions, relations, evidence_by_id, *, rank
             if item.status in {"contradicted", "retracted", "rejected"}:
                 required.add(key)
     ranked = sorted(families, key=lambda key: (-scores.get(key[0], 0), key))
-    counts, selected = {}, set(required)
-    for key in ranked:
-        if any(counts.get(source, 0) < 4 for source in sources[key]):
-            selected.add(key)
-            for source in sources[key]:
-                counts[source] = counts.get(source, 0) + 1
+    selected={(family['subject'],family['predicate']) for family in _admitted_report_families(
+        dict(subject=key[0],predicate=key[1],representations=sources[key],required=key in required) for key in ranked)}
     admitted = {kind: [] for kind in ("assertions", "relations")}
     for key in ranked:
         if key in selected:
@@ -2035,8 +2042,8 @@ def _organization_report_product(action, identity, *, report=None, receipts=None
 def _explanation_reports(project_id: str, source_builds: list[dict[str, Any]], entities: list[KnowledgeEntity],
                          assertions: list[KnowledgeAssertion], relations: list[KnowledgeRelation],
                          communities: list[KnowledgeCommunity], topics: list[KnowledgeTopic],
-                         evidence: Iterable[EvidenceSpan], relay: Any, target_ids: list[str] | None = None,
-                         *, ranking_graph=None) -> tuple[list[KnowledgeReport], list[ModelReceipt]]:
+                         evidence: Iterable[EvidenceSpan], relay: Any, target_ids: list[str] | None = None
+                         ) -> tuple[list[KnowledgeReport], list[ModelReceipt]]:
     evidence_by_id = {span.id: span for span in evidence}
     if target_ids is None:
         planned = set(_default_reading_report_targets(project_id, entities, assertions, relations, topics))
@@ -2087,9 +2094,11 @@ def _explanation_reports(project_id: str, source_builds: list[dict[str, Any]], e
         if topic:
             selected_entities = [item.model_copy(update={"evidence_ids": [ref for ref in item.evidence_ids if ref in allowed_evidence]})
                 for item in selected_entities]
-        if selected_assertions or selected_relations:
+        # The overview caller already admitted native families before hydration.
+        # Scoped reports select within their own membership instead.
+        if kind != 'overview' and (selected_assertions or selected_relations):
             selected_entities, selected_assertions, selected_relations = _overview_knowledge(
-                selected_entities, selected_assertions, selected_relations, evidence_by_id, ranking_graph=ranking_graph)
+                selected_entities, selected_assertions, selected_relations, evidence_by_id)
         context, spans = _reading_report_context(
             {"id": target_id, "type": kind, "title": title}, selected_entities,
             selected_assertions, selected_relations, evidence_by_id, source_builds)
@@ -3530,17 +3539,10 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                 [item['id'] for item in topology['entities']])
             subjects=sorted((item['id'] for item in topology['entities']),
                 key=lambda subject:(-scores.get(subject,0),subject))
-            counts,admitted={},[]
-            for offset in range(0,len(subjects),128):
-                for family in pages(fact_index.family_page,subject_ids=subjects[offset:offset+128]):
-                    sources=family['representations']
-                    choose=any(counts.get(source,0)<4 for source in sources)
-                    if choose or family['required']:
-                        admitted.append((family['subject'],family['predicate']))
-                    if choose:
-                        for source in sources:
-                            counts[source]=counts.get(source,0)+1
-            del subjects,scores,counts
+            families=(family for offset in range(0,len(subjects),128)
+                for family in pages(fact_index.family_page,subject_ids=subjects[offset:offset+128]))
+            admitted=[(family['subject'],family['predicate']) for family in _admitted_report_families(families)]
+            del subjects,scores,families
             claims,links=[],[]
             for subject,predicate in admitted:
                 claims.extend(native_facts('assertion',subject_ids=[subject],predicates=[predicate]))
@@ -3552,7 +3554,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
             scoped_evidence=(span for built in source_builds for span in _selected_evidence(built,needed))
             reports, receipts = _explanation_reports(request.project_id, source_builds,
                 selected, claims, links, groups, [], scoped_evidence,
-                request.relays['model'], target_ids=[request.project_id],ranking_graph=topology)
+                request.relays['model'], target_ids=[request.project_id])
             del selected,claims,links,topology,admitted,endpoints,needed,scoped_evidence
             # Ground only cited memberships; complete supports remain on each selected claim.
             cited=sorted({ref for report in reports for section in report.sections for ref in section.evidence_ids})

@@ -716,6 +716,11 @@ def test_visible_native_scene_links_preserve_relation_qualifiers(tmp_path, monke
     projected=store.read_publication_scene('p',generation,dict(kind='incident',nodeId='urn:canonical:0',fields=fields))
     assert projected['fields']==fields and projected['nodes']==[]
     assert projected['links']==[{key:link[key] for key in fields}]
+    topology=store.read_publication_scene('p',generation,dict(kind='topology',fields=fields,limit=128))
+    assert topology==projected
+    assert store.read_publication_scene('p',generation,dict(kind='topology',fields=fields,after=link['id']))['links']==[]
+    with pytest.raises(ProcessingError):
+        store.read_publication_scene('p',generation,dict(kind='topology',fields=fields,nodeId='urn:canonical:0'))
     assert store.read_publication_scene('p',generation,dict(kind='incident',nodeId='urn:canonical:0',fields=fields,after=link['id']))['links']==[]
     with pytest.raises(ProcessingError,match='outside current'):
         store.read_publication_scene('p',generation,dict(kind='incident',nodeId='urn:foreign',fields=fields))
@@ -1285,3 +1290,107 @@ def test_final_reference_stream_checks_cancellation_between_windows():
                 stream.readinto(bytearray(7))
     finally:
         query_cancellation.reset(token)
+
+
+def topology_fixture(tmp_path):
+    from tests.triplet_store.test_canonical_fact_publication import stage_duplicate_observations, prepare_native_fact_decisions
+    store, generation, refs, _ = stage_duplicate_observations(tmp_path, source_ids=('a','b','c','d','e'))
+    ox = store._oxigraph
+    for index, ref in enumerate(refs):
+        for quad in list(store.store.quads_for_pattern(ox.NamedNode(ref), ox.NamedNode(F+'predicateName'), None, None)):
+            store.store.remove(quad)
+            store.store.add(ox.Quad(quad.subject, quad.predicate, ox.Literal('predicate'+str(index)), quad.graph_name))
+    prepare_native_fact_decisions(store, generation, refs)
+    store.activate_publication('p', generation, indexes=indexes())
+    return store, generation, refs
+
+
+def test_topology_continuation_uses_one_query_and_preserves_budget_lookahead(tmp_path, monkeypatch):
+    store, generation, _ = topology_fixture(tmp_path)
+    native, queries = store.store, []
+    class Measured:
+        def __getattr__(self, key):
+            return getattr(native, key)
+        def query(self, query, **kwargs):
+            if 'SELECT DISTINCT ?id ?source ?target' in query:
+                queries.append(query)
+            return native.query(query, **kwargs)
+    monkeypatch.setattr(store, 'store', Measured())
+    selection=dict(kind='topology', fields=['id','source','target','predicate'], limit=2)
+    found, after = [], None
+    while True:
+        page=store.read_publication_scene('p', generation, dict(selection, after=after))
+        found.extend(link['id'] for link in page['links'])
+        after=page['next_cursor']
+        if after is None:
+            break
+    assert len(found)==len(set(found))==5
+    assert len(queries)==1
+    assert store._publication_cursor is None
+    first=store.read_publication_scene('p', generation, dict(selection, limit=1))
+    budget=len(__import__('json').dumps(first,ensure_ascii=False).encode())
+    found, after = [], None
+    while True:
+        page=store.read_publication_scene('p', generation, dict(selection, limit=5, maxBytes=budget, after=after))
+        assert len(page['links'])==1
+        found.extend(link['id'] for link in page['links'])
+        after=page['next_cursor']
+        if after is None:
+            break
+    assert len(found)==len(set(found))==5
+    store.close()
+    assert store._publication_cursor is None
+
+
+@pytest.mark.parametrize('duplicate', [False, True])
+def test_topology_rejects_missing_or_duplicate_predicate_without_losing_retry(tmp_path, duplicate):
+    store, generation, refs = topology_fixture(tmp_path)
+    ox=store._oxigraph
+    original=next(store.store.quads_for_pattern(ox.NamedNode(refs[0]),ox.NamedNode(F+'predicateName'),None,None))
+    bad=ox.Quad(original.subject,original.predicate,ox.Literal('bad'),original.graph_name)
+    if duplicate:
+        store.store.add(bad)
+    else:
+        store.store.remove(original)
+    selection=dict(kind='topology',fields=['id','source','target','predicate'],limit=128)
+    with pytest.raises(ProcessingError,match='predicate missing or duplicated'):
+        store.read_publication_scene('p',generation,selection)
+    assert store._publication_cursor is None
+    if duplicate:
+        store.store.remove(bad)
+    else:
+        store.store.add(original)
+    assert len(store.read_publication_scene('p',generation,selection)['links'])==5
+    store.close()
+
+
+def test_grounding_seeks_indexes_and_deduplicates_intersecting_ranges(tmp_path, monkeypatch):
+    from semantica.triplet_store.publication_records import PublicationRecords
+    store, _, receipt, _ = fixture(tmp_path)
+    generation = store.begin_publication('p', expected_generation=None,
+        source_count=1, canonical_count=0)['generation']
+    store.stage_publication_sources('p', generation, [dict(source='s', material='m',
+        representation='r', recipe='recipe', operation_count=1,
+        operations=[receipt['operation_id']])])
+    owner = PublicationRecords(store, 'p')
+    position = dict(source='s', nativeRef='#/document/text', start=0, end=4)
+    expected = list(owner._grounded_references(position))
+    assert len(expected) == 1
+    ox = store._oxigraph
+    evidence = ox.NamedNode(expected[0]['evidence'])
+    extra = ox.NamedNode(evidence.value + ':extra-range')
+    store.store.add(ox.Quad(evidence, ox.NamedNode(F+'nativeRange'), extra, owner.facts))
+    for field, value in [('nativeRef', '#/document/text'), ('start', 1), ('end', 3)]:
+        store.store.add(ox.Quad(extra, ox.NamedNode(F+field), ox.Literal(value), owner.facts))
+    # A second expression of the same evidence must not duplicate the reference.
+    store.store.add(ox.Quad(ox.NamedNode(expected[0]['id']), ox.NamedNode(F+'evidence'), evidence, owner.facts))
+    native = store.store
+    class IndexedOnly:
+        def __getattr__(self, key):
+            return getattr(native, key)
+        def query(self, *args, **kwargs):
+            raise AssertionError('Grounding must seek native indexes, not run graph joins')
+    monkeypatch.setattr(store, 'store', IndexedOnly())
+    assert list(owner._grounded_references(position)) == expected
+    assert list(owner._grounded_references(dict(position, source='foreign'))) == []
+    assert list(owner._grounded_references(dict(position, start=4, end=5))) == []

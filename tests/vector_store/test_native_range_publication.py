@@ -110,6 +110,30 @@ def test_native_vector_publication_restart_scope_and_no_vector_copy(tmp_path):
     owner.close()
 
 
+def test_publication_checks_each_contiguous_paid_batch_once_without_float_expansion(tmp_path,monkeypatch):
+    owner=SQLiteVecStore.open_embedding_space(str(tmp_path/'vectors.sqlite'),SPACE,3)
+    try:
+        adopted=owner.adopt_embedding(BINDING,[[1.,0.,0.],[0.,1.,0.]],RECEIPT,accepted_digest='accepted')
+        links=[dict(vector_id=identity,binding=BINDING,
+            ranges=[dict(nativeRef='#/document/text',start=start,end=end)])
+            for identity,(start,end) in zip(adopted['ids'],BINDING['ranges'])]
+        original=owner._read_embedding
+        reads=[]
+        def checked(conn,identity,*,include_vectors=True):
+            assert include_vectors is False, 'publication expanded unused vector bodies'
+            reads.append(identity)
+            return original(conn,identity,include_vectors=include_vectors)
+        monkeypatch.setattr(owner,'_read_embedding',checked)
+        owner.publish_native_ranges('project-1','generation-1',links)
+        assert len(reads)==1
+        owner._conn.execute('UPDATE embeddings SET embedding=? WHERE id=?',
+            (b'\0'*12,adopted['ids'][1]))
+        with pytest.raises(ProcessingError,match='digest differs'):
+            owner.publish_native_ranges('project-1','generation-2',links)
+    finally:
+        owner.close()
+
+
 def test_native_vector_scope_participates_in_knn_not_postfilter(tmp_path):
     owner = SQLiteVecStore.open_embedding_space(str(tmp_path/'vectors.sqlite'),SPACE,3)
     a = owner.adopt_embedding(BINDING,[[1.,0.,0.],[0.,1.,0.]],RECEIPT,accepted_digest='a')

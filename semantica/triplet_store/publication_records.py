@@ -9,6 +9,7 @@ import json
 import uuid
 from contextlib import contextmanager
 from functools import wraps
+from heapq import nsmallest
 from itertools import chain, islice
 
 from ..utils.exceptions import ProcessingError
@@ -1199,12 +1200,12 @@ class PublicationRecords:
                 raise ProcessingError('Nested native build plan scope')
             self._build_fence(generation)
             self.owner._build_plan_scope = (self.publication_graph.value, generation)
-            self.owner._build_cursor = None
+            self.owner._publication_cursor = None
             try:
                 yield
             finally:
                 self.owner._build_plan_scope = None
-                self.owner._build_cursor = None
+                self.owner._publication_cursor = None
             self._build_fence(generation)
 
     @_stage(None)
@@ -1221,17 +1222,19 @@ class PublicationRecords:
         if next(iter(incomplete), None) is not None:
             raise ProcessingError("Native build operation plan is incomplete")
 
-    def query_window(self, generation, scope, after, query, limit):
-        """Reuse one ordered traversal inside an immutable, locked build scope."""
-        scoped = getattr(self.owner, '_build_plan_scope', None) == (self.publication_graph.value, generation)
-        current = getattr(self.owner, '_build_cursor', None) if scoped else None
+    def query_window(self, generation, scope, after, query, limit, *, streaming=False):
+        """One bounded DB cursor over an immutable publication, never result copies."""
+        scoped = streaming or getattr(self.owner, '_build_plan_scope', None) == (self.publication_graph.value, generation)
+        current = getattr(self.owner, '_publication_cursor', None) if scoped else None
+        if scoped:
+            self.owner._publication_cursor = None
         stream = (current[2] if current is not None and current[:2] == (scope, after)
                   else iter(self.owner.store.query(query + ('' if scoped else f' LIMIT {limit+1}'))))
         return list(islice(stream, limit+1)), stream
 
-    def retain_window(self, generation, scope, cursor, rows, consumed, stream):
-        if getattr(self.owner, '_build_plan_scope', None) == (self.publication_graph.value, generation):
-            self.owner._build_cursor = ((scope, cursor, chain(rows[consumed:], stream))
+    def retain_window(self, generation, scope, cursor, rows, consumed, stream, *, streaming=False):
+        if streaming or getattr(self.owner, '_build_plan_scope', None) == (self.publication_graph.value, generation):
+            self.owner._publication_cursor = ((scope, cursor, chain(rows[consumed:], stream))
                                        if cursor is not None else None)
 
     @_locked
@@ -1301,7 +1304,7 @@ class PublicationRecords:
                     yield item['record'].value
 
         scoped = getattr(self.owner, '_build_plan_scope', None) == (self.graph.value, generation)
-        current = getattr(self.owner, '_build_cursor', None) if scoped else None
+        current = getattr(self.owner, '_publication_cursor', None) if scoped else None
         stream = current[2] if current is not None and current[:2] == (scope, after) else traverse()
         ids = list(islice(stream, limit + 1))
         selected = ids[:limit]
@@ -1312,7 +1315,7 @@ class PublicationRecords:
             raise ProcessingError("Native build page exceeds byte budget")
         if scoped:
             # Retain one iterator and one lookahead reference, never result DTOs.
-            self.owner._build_cursor = ((scope, result['next_cursor'], chain(ids[limit:], stream))
+            self.owner._publication_cursor = ((scope, result['next_cursor'], chain(ids[limit:], stream))
                 if result['next_cursor'] is not None else None)
         self._build_fence(generation)
         check_query_cancellation()
@@ -1359,6 +1362,50 @@ class PublicationRecords:
             raise ProcessingError('Source is not a current publication member')
         return {key:self.one(node,key) for key in ('source','material','representation')}
 
+    def _grounded_references(self, position):
+        """Seek scalar ranges first, then prove record/evidence share an admitted operation."""
+        source=self.scalar(position['source']).value
+        member=self.ox.NamedNode(self.graph.value+':source:'+hashlib.sha256(source.encode()).hexdigest())
+        seek=self.owner.store.quads_for_pattern
+        if not next(seek(self.head,self.iri(P+'source'),member,self.graph),None):
+            return
+        ref=self.scalar(position['nativeRef'])
+        def overlaps(node):
+            if not next(seek(node,self.iri(F+'nativeRef'),ref,self.facts),None):
+                return False
+            bounds=[]
+            for field in ('start','end'):
+                values=[q.object for q in islice(seek(node,self.iri(F+field),None,self.facts),2)]
+                if len(values)!=1 or not isinstance(values[0],self.ox.Literal):
+                    raise ProcessingError('Native scalar range bounds missing or duplicated')
+                try:
+                    bounds.append(int(values[0].value))
+                except ValueError:
+                    raise ProcessingError('Invalid native scalar range bounds') from None
+            return bounds[0]<position['end'] and bounds[1]>position['start']
+        for address in seek(None,self.iri(F+'nativeRef'),ref,self.facts):
+            check_query_cancellation()
+            if not overlaps(address.subject):
+                continue
+            for evidence_link in seek(None,self.iri(F+'nativeRange'),address.subject,self.facts):
+                evidence=evidence_link.subject
+                # Multiple intersecting ranges must still emit the evidence only once.
+                if any(q.object.value<address.subject.value and overlaps(q.object)
+                    for q in seek(evidence,self.iri(F+'nativeRange'),None,self.facts)):
+                    continue
+                for field in ('mention','evidence'):
+                    for link in seek(None,self.iri(F+field),evidence,self.facts):
+                        check_query_cancellation()
+                        record=link.subject
+                        if field=='evidence' and next(seek(record,self.iri(F+'mention'),evidence,self.facts),None):
+                            continue
+                        for owner in seek(None,self.iri(F+'ownedRecord'),evidence,self.facts):
+                            operation=owner.subject
+                            if (next(seek(member,self.iri(P+'operation'),operation,self.graph),None)
+                                    and next(seek(operation,self.iri(F+'ownedRecord'),record,self.facts),None)):
+                                yield dict(id=record.value,evidence=evidence.value,source=source)
+                                break
+
     @_stage(None)
     def grounded_candidates(self, generation, positions, *, limit=MAX_ROWS, max_bytes=MAX_BYTES):
         """Exact source/scalar addresses join to native typed observations.
@@ -1380,19 +1427,9 @@ class PublicationRecords:
                     or not 0<=position['start']<position['end']):
                 raise ProcessingError('Native candidate scalar address is invalid')
             self.source_binding(generation,position['source'])
-            member = self.ox.NamedNode(self.graph.value+':source:'+hashlib.sha256(position['source'].encode()).hexdigest())
-            query=f'''SELECT DISTINCT ?record ?evidence WHERE {{
-                GRAPH {self.graph} {{ {member} <{P}operation> ?operation }}
-                GRAPH {self.facts} {{
-                    ?range <{F}nativeRef> {self.scalar(position['nativeRef'])} ; <{F}start> ?start ; <{F}end> ?end .
-                    FILTER(?start < {position['end']} && ?end > {position['start']})
-                    ?evidence <{F}nativeRange> ?range .
-                    ?operation <{F}ownedRecord> ?evidence ; <{F}ownedRecord> ?record .
-                    {{ ?record <{F}mention> ?evidence }} UNION {{ ?record <{F}evidence> ?evidence }}
-                }} }} LIMIT {limit+1}'''
-            for row in self.owner.store.query(query):
+            for row in self._grounded_references(position):
                 check_query_cancellation()
-                identity, ev=row['record'].value,row['evidence'].value
+                identity, ev=row['id'],row['evidence']
                 if identity not in selected:
                     if len(selected)>=limit:
                         raise ProcessingError('Native knowledge candidates require a bounded continuation')
@@ -1417,26 +1454,16 @@ class PublicationRecords:
                 or type(position['start']) is not int or type(position['end']) is not int
                 or not 0 <= position['start'] < position['end']):
             raise ProcessingError('Invalid native grounding page')
-        member = self.ox.NamedNode(self.graph.value+':source:'+hashlib.sha256(position['source'].encode()).hexdigest())
-        cursor = ''
         if after is not None:
             if not isinstance(after, (tuple,list)) or len(after) != 2:
                 raise ProcessingError('Invalid native grounding cursor')
-            a,b = (self.scalar(item) for item in after)
-            cursor = f'FILTER(STR(?record) > {a} || (STR(?record) = {a} && STR(?evidence) > {b}))'
-        query=f'''SELECT DISTINCT ?record ?evidence WHERE {{
-            GRAPH {self.graph} {{ {self.head} <{P}source> {member} . {member} <{P}operation> ?operation }}
-            GRAPH {self.facts} {{
-                ?range <{F}nativeRef> {self.scalar(position['nativeRef'])} ; <{F}start> ?start ; <{F}end> ?end .
-                FILTER(?start < {position['end']} && ?end > {position['start']})
-                ?evidence <{F}nativeRange> ?range .
-                ?operation <{F}ownedRecord> ?evidence ; <{F}ownedRecord> ?record .
-                ?record (<{F}mention>|<{F}evidence>) ?evidence .
-            }} {cursor} }} ORDER BY ?record ?evidence LIMIT {limit+1}'''
+            after=tuple(self.scalar(item).value for item in after)
+        key=lambda item:(item['id'],item['evidence'])
+        rows=nsmallest(limit+1,(item for item in self._grounded_references(position)
+            if after is None or key(item)>after),key=key)
         values, size = [], 0
-        for row in self.owner.store.query(query):
+        for item in rows:
             check_query_cancellation()
-            item = dict(id=row['record'].value,evidence=row['evidence'].value,source=position['source'])
             size += len(json.dumps(item).encode())
             if len(values) == limit or size > MAX_BYTES:
                 if not values:
@@ -1770,7 +1797,7 @@ class PublicationRecords:
         if 'fields' not in selection:
             return None
         allowed = ([['id'], ['id','name','sourceIds']] if selection.get('kind') == 'nodes'
-                   else [['id','source','target','predicate']] if selection.get('kind') == 'incident' else [])
+                   else [['id','source','target','predicate']] if selection.get('kind') in {'incident','topology'} else [])
         if fields not in allowed:
             raise ProcessingError('Invalid native scene field projection')
         return fields
@@ -1864,8 +1891,8 @@ class PublicationRecords:
             return self.source_scene(generation, selection)
         if kind in {'communities', 'topics'}:
             return self.organization_scene(generation, selection)
-        if kind == 'incident':
-            return self._incident(generation, selection)
+        if kind in {'incident','topology'}:
+            return self._relation_page(generation, selection)
         permitted = {'kind','after','limit','maxBytes','fields'} | ({'nodeIds','recordIds','sourceIds','communityId','topicId'} if kind == 'nodes' else {'visibleIds'})
         limit, max_bytes = selection.get('limit', MAX_ROWS), selection.get('maxBytes', MAX_BYTES)
         if (kind not in {'nodes','links'} or set(selection) - permitted
@@ -1989,33 +2016,41 @@ class PublicationRecords:
         self.fence(generation)
         return response
 
-    def _incident(self, generation, selection):
-        """Seek incident native relations and only their canonical endpoints."""
+    def _relation_page(self, generation, selection):
+        """Read topology once, or seek one incident neighborhood; hydrate only selected fields."""
         from ..semantic_worker_context import check_query_cancellation
         self.fence(generation)
         projection = self._scene_projection(selection)
-        if set(selection) - {'kind', 'nodeId', 'after', 'limit', 'maxBytes', 'fields'}:
+        topology=selection.get('kind')=='topology'
+        allowed={'kind','after','limit','maxBytes','fields'} | (set() if topology else {'nodeId'})
+        if set(selection)-allowed or topology and projection is None:
             raise ProcessingError('Invalid incident selection fields')
-        focus = self.iri(selection.get('nodeId'))
-        limit, budget = selection.get('limit', 32), selection.get('maxBytes', MAX_BYTES)
-        if type(limit) is not int or not 1 <= limit <= 32 or type(budget) is not int or not 1 <= budget <= MAX_BYTES:
+        focus = None if topology else self.iri(selection.get('nodeId'))
+        maximum=MAX_ROWS if topology else 32
+        limit, budget = selection.get('limit', maximum), selection.get('maxBytes', MAX_BYTES)
+        if type(limit) is not int or not 1 <= limit <= maximum or type(budget) is not int or not 1 <= budget <= MAX_BYTES:
             raise ProcessingError('Invalid incident selection budget')
         after = selection.get('after')
         if after is not None:
             self.iri(after)
-        admitted = self.owner.store.query(f'ASK {{ GRAPH {self.stage_graph("identity")} {{ {self.stage_head("identity")} <{P}canonical> {focus} }} }}')
-        if not bool(admitted):
-            raise ProcessingError('Incident focus is outside current publication')
+        if focus is not None:
+            admitted = self.owner.store.query(f'ASK {{ GRAPH {self.stage_graph("identity")} {{ {self.stage_head("identity")} <{P}canonical> {focus} }} }}')
+            if not bool(admitted):
+                raise ProcessingError('Incident focus is outside current publication')
         cursor = f'FILTER(STR(?id) > {self.scalar(after)})' if after is not None else ''
+        endpoint_filter=f'FILTER(?source = {focus} || ?target = {focus})' if focus is not None else ''
         query = f'''SELECT DISTINCT ?id ?source ?target WHERE {{
             {self.fact_pattern('?id', f'?id <{P}source> ?source ; <{P}target> ?target .')}
-            FILTER(?source = {focus} || ?target = {focus})
-            {cursor} }} ORDER BY ?id LIMIT {limit + 1}'''
-        rows = list(self.owner.store.query(query))
+            {endpoint_filter} {cursor} }} ORDER BY ?id'''
+        scope = ('scene-topology', self.project, generation)
+        if topology:
+            rows, stream = self.query_window(generation, scope, after, query, limit, streaming=True)
+        else:
+            rows = list(self.owner.store.query(query + f' LIMIT {limit + 1}'))
         if len({row['id'].value for row in rows}) != len(rows):
             raise ProcessingError('Native incident endpoints require unique canonical membership')
         response = dict(project=self.project, generation=generation, nodes=[], links=[], next_cursor=None)
-        identities = {focus.value}
+        identities = {focus.value} if focus is not None else set()
         if projection is not None:
             response['fields'] = projection
         else:
@@ -2027,12 +2062,14 @@ class PublicationRecords:
             check_query_cancellation()
             if projection is not None:
                 representative = self.one(self.iri(row['id'].value), 'representative')
-                record = self._read([representative], fields=[F+'predicateName'])[0]
-                predicates = record['fields'].get(F+'predicateName', [])
-                if len(predicates) != 1 or predicates[0]['type'] != 'literal':
+                # The ready decision already proves membership; read its one native field directly.
+                predicates = [quad.object for quad in islice(self.owner.store.quads_for_pattern(
+                    self.iri(representative), self.ox.NamedNode(F+'predicateName'), None, self.facts), 2)]
+                if len(predicates) != 1 or not isinstance(predicates[0], self.ox.Literal):
                     raise ProcessingError('Native relation predicate missing or duplicated')
+                predicate = predicates[0].value
                 link = dict(id=row['id'].value, source=row['source'].value, target=row['target'].value,
-                            predicate=normalize_fact_predicate(predicates[0]['value']))
+                            predicate=normalize_fact_predicate(predicate))
                 missing = []
             else:
                 link = self._fact_scene_link(generation, row)
@@ -2048,6 +2085,8 @@ class PublicationRecords:
                     raise ProcessingError('Native incident item exceeds byte budget')
                 response['next_cursor'] = emitted[-1]
                 self.fence(generation)
+                if topology:
+                    self.retain_window(generation, scope, response['next_cursor'], rows, len(emitted), stream, streaming=True)
                 return response
             response['nodes'].extend(added)
             response['links'].append(link)
@@ -2055,6 +2094,8 @@ class PublicationRecords:
             emitted.append(link['id'])
         response['next_cursor'] = emitted[-1] if len(rows) > limit else None
         self.fence(generation)
+        if topology:
+            self.retain_window(generation, scope, response['next_cursor'], rows, len(emitted), stream, streaming=True)
         return response
 
     @_stage(None)

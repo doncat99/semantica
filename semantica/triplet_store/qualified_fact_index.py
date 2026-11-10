@@ -1,6 +1,7 @@
 """Reference-only native partitions for the current qualified-fact owner."""
 import hashlib
 import json
+from heapq import nsmallest
 from functools import lru_cache
 from itertools import groupby
 from itertools import islice
@@ -409,10 +410,17 @@ class QualifiedFactIndex:
                     if len(mentions)!=1:
                         raise ProcessingError('Native fact requires unique canonical endpoint membership')
                     selected=None
-                    for link in self.owner.store.query(f'SELECT ?canonical WHERE {{ {p.canonical_pattern("?canonical", f"?canonical <{P}member> {mentions[0].object}")} }} LIMIT 2'):
+                    graph,head=p.stage_graph('identity'),p.stage_head('identity')
+                    for link in self.owner.store.quads_for_pattern(None,p.iri(P+'member'),mentions[0].object,None):
+                        check_query_cancellation()
+                        canonical=link.subject
+                        if not next(self.owner.store.quads_for_pattern(head,p.iri(P+'canonical'),canonical,graph),None):
+                            continue
+                        if p.values(canonical,'canonicalGraph',graph=graph)!=[link.graph_name]:
+                            continue
                         if selected is not None:
                             raise ProcessingError('Native fact requires unique canonical endpoint membership')
-                        selected=link['canonical'].value
+                        selected=canonical.value
                     if selected is None:
                         raise ProcessingError('Native fact requires unique canonical endpoint membership')
                     endpoints.append(selected)
@@ -470,25 +478,35 @@ class QualifiedFactIndex:
         if kind not in {'assertion','relation'}:
             raise ProcessingError('Unknown qualified fact kind')
         p=self.publication
-        filters=[]
+        scopes=[]
         for field,values in (('qualifiedSubject',subject_ids),('qualifiedSelectedEvidence',evidence_ids),('qualifiedPredicate',predicates)):
             if values is not None:
                 if not isinstance(values,(list,tuple)) or len(values)>MAX_ROWS:
                     raise ProcessingError('Native canonical admission scope exceeds page limit')
                 if not values:
                     return dict(records=[],next_cursor=None)
-                name='selected'+field
-                filters.append(f'?decision <{P}{field}> ?{name} . VALUES ?{name} {{ '+
-                    ' '.join(str(p.scalar(value)) for value in values)+' }')
+                scopes.append((field,tuple(sorted({p.scalar(value).value for value in values}))))
         cursor=f'FILTER(STR(?identity) > {p.scalar(after)})' if after is not None else ''
         with self.owner._publication_lock:
             self._fence()
             identity_binding=f'?decision <{P}qualifiedAssertionId> ?identity .' if kind=='assertion' else ''
             identity_projection='BIND(STR(?decision) AS ?identity)' if kind=='relation' else ''
-            rows=list(self.owner.store.query(f'''SELECT DISTINCT ?decision ?identity WHERE {{
-                {p.fact_pattern('?decision', f"{identity_binding} {' '.join(filters)}")}
-                {identity_projection} {cursor}
-                }} ORDER BY ?identity LIMIT {limit+1}'''))
+            if scopes:
+                def candidates():
+                    field,selected=scopes[0]
+                    for decision,location in self._scoped_decisions(field,selected):
+                        if any(not any(next(self.owner.store.quads_for_pattern(decision,p.iri(P+key),p.scalar(value),location),None)
+                            for value in allowed) for key,allowed in scopes[1:]):
+                            continue
+                        identity=p.one(decision,'qualifiedAssertionId') if kind=='assertion' else decision.value
+                        if after is None or identity>after:
+                            yield dict(decision=decision,identity=p.scalar(identity))
+                rows=nsmallest(limit+1,candidates(),key=lambda row:row['identity'].value)
+            else:
+                rows=list(self.owner.store.query(f'''SELECT DISTINCT ?decision ?identity WHERE {{
+                    {p.fact_pattern('?decision', identity_binding)}
+                    {identity_projection} {cursor}
+                    }} ORDER BY ?identity LIMIT {limit+1}'''))
         values=[]
         for row in rows[:limit]:
             identity = row['identity'].value
@@ -548,6 +566,25 @@ class QualifiedFactIndex:
             raise ProcessingError('Native canonical support missing')
         return sorted(set(result))
 
+    def _scoped_decisions(self,field,values):
+        """Seek existing decision fields, excluding pointers from other stages."""
+        p=self.publication
+        graph,head=p.stage_graph('fact'),p.stage_head('fact')
+        previous=[]
+        for value in values:
+            for q in self.owner.store.quads_for_pattern(None,p.iri(P+field),p.scalar(value),None):
+                check_query_cancellation()
+                decision,location=q.subject,q.graph_name
+                if not next(self.owner.store.quads_for_pattern(head,p.iri(P+'fact'),decision,graph),None):
+                    continue
+                if p.values(decision,'factDecisionGraph',graph=graph)!=[location]:
+                    continue
+                if any(next(self.owner.store.quads_for_pattern(decision,p.iri(P+field),p.scalar(prior),location),None)
+                    for prior in previous):
+                    continue
+                yield decision,location
+            previous.append(value)
+
     def family_page(self,*,after=None,limit=MAX_ROWS,max_bytes=MAX_BYTES,
                     max_family_sources=4096,subject_ids=None):
         """Reference metadata for exact report admission, before DTO hydration.
@@ -557,10 +594,8 @@ class QualifiedFactIndex:
         comes from each accepted native observation's immutable source binding.
         """
         self._page_budget(limit,max_bytes)
-        # Ranking is supplied by the native summarizer. Join only a bounded
-        # subject window, preserving that order without collecting every family.
-        selection=''
-        order='?subject ?predicate'
+        # Seek subjects in ranking order. A variable-graph join here repeatedly
+        # expanded the entire publication for every family and subject window.
         ranks=None
         if subject_ids is not None:
             if (not isinstance(subject_ids,(list,tuple)) or len(subject_ids)>MAX_ROWS or
@@ -570,15 +605,12 @@ class QualifiedFactIndex:
             if not subject_ids:
                 return dict(records=[],next_cursor=None)
             ranks={subject:rank for rank,subject in enumerate(subject_ids)}
-            selection='VALUES (?subject ?rank) { '+ ' '.join(
-                f'({self.publication.scalar(subject)} {rank})' for subject,rank in ranks.items())+' }'
-            order='?rank ?predicate'
         if type(max_family_sources) is not int or not 1<=max_family_sources<=4096:
             raise ProcessingError('Invalid qualified family source budget')
         p=self.publication
         with self.owner._publication_lock:
             self._fence()
-            cursor=''
+            cursor=None
             if after is not None:
                 try:
                     subject,predicate=json.loads(after)
@@ -586,42 +618,54 @@ class QualifiedFactIndex:
                     raise ProcessingError('Invalid native family cursor') from None
                 if not all(isinstance(v,str) for v in (subject,predicate)):
                     raise ProcessingError('Invalid native family cursor')
-                if ranks is not None:
-                    if subject not in ranks:
-                        raise ProcessingError('Invalid native family cursor scope')
-                    cursor=f'''FILTER(?rank > {ranks[subject]} ||
-                        (?rank = {ranks[subject]} && STR(?predicate) > {p.scalar(predicate)}))'''
-                else:
-                    cursor=f'''FILTER(STR(?subject) > {p.scalar(subject)} ||
-                        (STR(?subject) = {p.scalar(subject)} && STR(?predicate) > {p.scalar(predicate)}))'''
-            rows=list(self.owner.store.query(f'''SELECT DISTINCT ?subject ?predicate WHERE {{
-                {selection}
-                {p.fact_pattern('?decision', f'?decision <{P}qualifiedSubject> ?subject ; <{P}qualifiedPredicate> ?predicate .')}
-                {cursor} }} ORDER BY {order} LIMIT {limit+1}'''))
-            values=[]
-            for row in rows[:limit]:
-                subject,predicate=row['subject'].value,row['predicate'].value
-                pattern=f'''?decision <{P}qualifiedSubject> {p.scalar(subject)} ;
-                    <{P}qualifiedPredicate> {p.scalar(predicate)} .'''
-                sources=set()
-                decisions=self.owner.store.query(f'SELECT ?decision WHERE {{ {p.fact_pattern("?decision",pattern)} }}')
-                for row in decisions:
-                    for q in self.owner.store.quads_for_pattern(row['decision'],p.ox.NamedNode(P+'qualifiedRepresentation'),None,p.record_graph(row['decision'])):
-                        sources.add(q.object.value)
-                        if len(sources)>max_family_sources:
+                if ranks is not None and subject not in ranks:
+                    raise ProcessingError('Invalid native family cursor scope')
+                cursor=(ranks[subject] if ranks is not None else subject,predicate)
+            if subject_ids is None:
+                subject_ids=(row['subject'].value for row in self.owner.store.query(f'''SELECT DISTINCT ?subject WHERE {{
+                    {p.fact_pattern('?decision', f'?decision <{P}qualifiedSubject> ?subject .')}
+                    }} ORDER BY ?subject'''))
+            values,size=[],2
+            for subject in subject_ids:
+                check_query_cancellation()
+                rank=ranks[subject] if ranks is not None else subject
+                if cursor is not None and rank<cursor[0]:
+                    continue
+                families,metadata_bytes={},0
+                for decision,location in self._scoped_decisions('qualifiedSubject',[subject]):
+                    predicates=p.values(decision,'qualifiedPredicate',graph=location)
+                    if len(predicates)!=1 or not isinstance(predicates[0],p.ox.Literal):
+                        raise ProcessingError('Native qualified family predicate missing or duplicated')
+                    predicate=predicates[0].value
+                    if cursor is not None and (rank,predicate)<=cursor:
+                        continue
+                    if predicate not in families:
+                        families[predicate]=dict(subject=subject,predicate=predicate,representations=set(),required=False)
+                        metadata_bytes+=len(subject.encode())+len(predicate.encode())+64
+                    family=families[predicate]
+                    for support in self.owner.store.quads_for_pattern(decision,p.iri(P+'qualifiedRepresentation'),None,location):
+                        if support.object.value not in family['representations']:
+                            family['representations'].add(support.object.value)
+                            metadata_bytes+=len(support.object.value.encode())+16
+                        if len(family['representations'])>max_family_sources:
                             raise ProcessingError('Native qualified family source budget exceeded')
-                if len(sources)>max_family_sources:
-                    raise ProcessingError('Native qualified family source budget exceeded')
-                status_pattern=f'''{pattern} ?decision (<{P}qualifiedSelectedStatus>|<{P}qualifiedAssertionStatus>) ?status .
-                    VALUES ?status {{ "contradicted" "retracted" "rejected" }}'''
-                required=bool(self.owner.store.query(f'ASK {{ {p.fact_pattern("?decision",status_pattern)} }}'))
-                value=dict(subject=subject,predicate=predicate,
-                    representations=sorted(sources),required=required)
-                if len(json.dumps(values+[value],ensure_ascii=False).encode())>max_bytes:
-                    if not values:
-                        raise ProcessingError('Native qualified family exceeds byte budget')
-                    break
-                values.append(value)
-            cursor=(json.dumps([values[-1]['subject'],values[-1]['predicate']],
-                ensure_ascii=False,separators=(',',':')) if len(rows)>len(values) else None)
-            return dict(records=values,next_cursor=cursor)
+                    for field in ('qualifiedSelectedStatus','qualifiedAssertionStatus'):
+                        statuses=p.values(decision,field,graph=location)
+                        if len(statuses)!=1:
+                            raise ProcessingError('Native qualified family status missing or duplicated')
+                        family['required'] |= statuses[0].value in {'contradicted','retracted','rejected'}
+                    if len(families)>65536 or metadata_bytes>16*1024*1024:
+                        raise ProcessingError('Native qualified subject metadata exceeds budget')
+                for predicate in sorted(families):
+                    value=families[predicate]
+                    value['representations']=sorted(value['representations'])
+                    encoded=len(json.dumps(value,ensure_ascii=False).encode())+2
+                    if len(values)==limit or size+encoded>max_bytes:
+                        if not values:
+                            raise ProcessingError('Native qualified family exceeds byte budget')
+                        return dict(records=values,next_cursor=json.dumps(
+                            [values[-1]['subject'],values[-1]['predicate']],ensure_ascii=False,separators=(',',':')))
+                    values.append(value)
+                    size+=encoded
+            self._fence()
+            return dict(records=values,next_cursor=None)

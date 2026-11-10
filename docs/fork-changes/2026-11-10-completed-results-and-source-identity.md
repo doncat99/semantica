@@ -320,3 +320,65 @@ canonical references in 5.78 s, selected names in 10.08 s, 27,111 topology
 edges in 6.00 s. These timings do not prove complete organization performance.
 At the user's request, further performance work is deferred in favor of
 finishing the packaged real build and checking its final published result.
+
+
+## Critical organization and downstream audit (2026-11-10)
+
+Canceled real run `2cfe5436-f1fd-4a8b-a282-1ed97bec3909` spent more than ten
+minutes in organization. Process sampling showed Oxigraph/RocksDB computation,
+not an idle model request. The event interval cannot retrospectively be divided
+into exact function totals. The custom publication/report owners are fork
+code; upstream GraphBuilder/CommunityDetector and CommunitySummarizer remain
+responsible for graph grouping and centrality. Report admission entered in
+fork commit `52fa9451`; the preceding topology sorting fix did not cover its
+family-selection and endpoint-hydration queries.
+
+Removed work, in existing owners:
+
+- QualifiedFactIndex family selection no longer joins variable decision graphs
+  for every subject window and every family. Existing indexed fields seek
+  current decisions; current-head and exact decision-graph checks remain.
+  Endpoint hydration similarly follows the indexed mention/member address,
+  retaining rejection of ambiguous canonical membership.
+- Report overview no longer ranks and admits the same already-selected facts
+  again after hydration. Scoped reports still select within their membership;
+  conflict families, qualifiers and per-source admission remain intact.
+- Structured organizer metrics stream topology once rather than reading every
+  node's incident neighborhood. The temporary SQL relation deduplication table
+  is deleted. The same publication owner serves projected topology with one
+  ordered DB iterator, bounded lookahead and cancellation/close cleanup.
+- Native vector publication reads each consecutive accepted operation's batch
+  once and does not expand vector floats merely to locate vector IDs. Binding,
+  receipt, digest, dimensionality and transaction validation remain.
+- Grounded references seek native scalar ranges, evidence and shared admitted
+  operation membership directly. Both candidate and publication consumers use
+  that path; the two broad range/evidence/operation/record joins are deleted.
+  Multiple overlapping ranges and mention/evidence aliases emit one pair.
+
+Read-only measurements on the canceled native store (separate measurements,
+not additive stage accounting):
+
+| Operation | Evidence |
+| --- | --- |
+| 14 selected fact DTOs | 10.424 s before, 1.171 s after indexed endpoint membership |
+| All 132 admitted families / 264 DTO calls / 772 DTOs | 6.809 s |
+| Three 128-subject family windows | 0.217 / 0.313 / 0.191 s |
+| Upstream grouping, same topology | 17.045 s; 6,346 communities; no model |
+| Upstream centrality | 0.227 s |
+| Projected topology | 27,111 edges / 212 pages / 24.256 s; one query |
+| Five scalar reference positions, 1–2 results each | before 2.848 / 3.207 / 3.090 / 2.951 / 3.035 s; after 0.0727 / 0.0644 / 0.0217 / 0.0126 / 0.0039 s |
+
+No knowledge results, IDs, paid receipts or real data were rewritten. These
+read-only pending-generation diagnostics are not readiness acceptance. The
+keyword index, topic evidence bindings, vector associations and exact atomic
+activation checks remain because search, report/topic navigation and safe
+publication consume them. Model report latency and complete activation remain
+unmeasured; activation checks still have material cost (identity plans 3.806 s,
+fact plans 0.904 s, outside-publication check 3.514 s, separately measured).
+No claim that the activation budget or complete ESG build now passes.
+
+Owner regression: 212 tests passed in 108.84 s, then the added indexed-grounding
+and overlap/alias dedup regression passed with the existing 257-observation
+pagination specification (2 passed). The full run includes native evidence and
+worker consumers. Raw read-only profiles are in the host's ignored `.tmp/identity-*`
+files. No real build, model call or packaging was started during this audit.

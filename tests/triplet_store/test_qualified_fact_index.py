@@ -82,6 +82,47 @@ def test_completed_read_never_reconciles_or_serializes_support_bodies(tmp_path,m
         store.close()
 
 
+def test_ranked_family_admission_uses_indexed_fields_not_per_family_queries(tmp_path,monkeypatch):
+    store,generation,refs,index=prepared(tmp_path,70)
+    try:
+        index.reconcile_and_stage(input_key='input')
+        expected=index.family_page()['records']
+        native=store.store
+        class IndexedOnly:
+            def __getattr__(self,name): return getattr(native,name)
+            def query(self,*args,**kwargs):
+                pytest.fail('ranked family admission executed SPARQL instead of indexed metadata reads')
+        with index.publication.build_scope(generation):
+            monkeypatch.setattr(store,'store',IndexedOnly())
+            actual=index.family_page(subject_ids=['urn:canonical:0'],limit=1)
+            monkeypatch.setattr(store,'store',native)
+        assert actual==dict(records=expected,next_cursor=None)
+    finally:
+        store.close()
+
+
+def test_scoped_canonical_reads_seek_decisions_without_global_graph_joins(tmp_path,monkeypatch):
+    store,generation,refs,index=prepared(tmp_path,70)
+    try:
+        index.reconcile_and_stage(input_key='input')
+        expected={kind:index.canonical_page(kind)['records'] for kind in ('assertion','relation')}
+        native=store.store
+        class IndexedOnly:
+            def __getattr__(self,name): return getattr(native,name)
+            def query(self,*args,**kwargs):
+                pytest.fail('scoped canonical read executed a global graph query')
+        with index.publication.build_scope(generation):
+            monkeypatch.setattr(store,'store',IndexedOnly())
+            try:
+                for kind in expected:
+                    actual=index.canonical_page(kind,subject_ids=['urn:canonical:0'],predicates=['owns'])
+                    assert actual==dict(records=expected[kind],next_cursor=None)
+            finally:
+                monkeypatch.setattr(store,'store',native)
+    finally:
+        store.close()
+
+
 def test_build_topology_traverses_once_and_preserves_byte_limited_lookahead(tmp_path,monkeypatch):
     store,generation,refs,_=stage_duplicate_observations(tmp_path,relations_per_source=10)
     index=QualifiedFactIndex(store,'p',generation)
@@ -112,7 +153,7 @@ def test_build_topology_traverses_once_and_preserves_byte_limited_lookahead(tmp_
                 if cursor is None: break
         assert actual==expected
         assert len(queries)==1
-        assert store._build_cursor is None
+        assert store._publication_cursor is None
     finally:
         store.close()
 

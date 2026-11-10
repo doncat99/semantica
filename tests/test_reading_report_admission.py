@@ -37,6 +37,22 @@ def span(ref, quote, representation="source:1", start=0):
                      start_char=start, end_char=start + len(quote), quality="precise"))
 
 
+def test_overview_consumes_admitted_families_without_ranking_or_selecting_again(monkeypatch):
+    evidence=[span('support','Acme owns Plant')]
+    entities=[KnowledgeEntity(id='acme',canonical_name='Acme',type='ORG')]
+    claims=[KnowledgeAssertion(id='claim',subject_id='acme',predicate='owns',object='Plant',
+        qualifiers={'polarity':'positive'},evidence_ids=['support'])]
+    monkeypatch.setattr(pipeline,'_overview_knowledge',lambda *a,**k:
+        pytest.fail('overview repeated native family admission'))
+    monkeypatch.setattr(pipeline,'_grounded_explanation',lambda *a,**k:
+        ([pipeline.ReportSection(title='Summary',text='Grounded',evidence_ids=['support'])],[]))
+    from tests.artifact_helpers import organization_report_owner
+    with organization_report_owner(monkeypatch):
+        reports,_=pipeline._explanation_reports('project',[],entities,claims,[],[],[],evidence,
+            SimpleNamespace(model_id='test'),target_ids=['project'])
+    assert len(reports)==1 and reports[0].evidence_ids==['support']
+
+
 def test_topics_are_grounded_report_sections_not_connected_component_names():
     from semantica.semantic_artifact_schema import KnowledgeReport, ReportSection
     evidence = [span("s1", "A cuts energy use."), span("s2", "B cuts energy use.", "source:2"),
@@ -138,8 +154,7 @@ def test_native_canonical_identity_does_not_depend_on_build_directory(tmp_path, 
     request["params"]["outputDir"] = str(tmp_path / "second")
     second = handle_request(request)
     assert first["ok"] and second["ok"]
-    assert first_selections and first_selections == selections
-    # Generations identify publication attempts; canonical selections identify content.
+    assert first_selections and not selections  # Moving output reuses the completed decisions.
     assert first["result"]["semanticStore"]["path"] == second["result"]["semanticStore"]["path"]
     for directory in ("first", "second"):
         assert not (tmp_path / directory / "semantic-graph.json").exists()

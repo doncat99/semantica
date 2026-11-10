@@ -825,6 +825,7 @@ class SQLiteVecStore:
                 conn.execute('BEGIN IMMEDIATE')
                 conn.execute(f'DELETE FROM {table} WHERE project=?', (project,))
                 conn.execute(f'DELETE FROM {table}_records WHERE project=?', (project,))
+                previous_operation, adopted, vector_indexes = None, None, {}
                 for link in links:
                     check_query_cancellation()
                     if not isinstance(link, dict) or set(link) != {'vector_id','binding','ranges'}:
@@ -836,9 +837,12 @@ class SQLiteVecStore:
                     space = self.embedding_space_identity
                     if binding['space'] != space['binding'] or any(binding[k] != space[k] for k in ('model','recipe')):
                         raise ValidationError('Native vector link differs from its embedding space')
-                    physical = self._embedding_physical_id(conn, operation)
-                    adopted = self._read_embedding(conn, physical) if physical else None
-                    if adopted is None or link['vector_id'] not in adopted['ids']:
+                    if operation != previous_operation:
+                        physical = self._embedding_physical_id(conn, operation)
+                        adopted = self._read_embedding(conn, physical, include_vectors=False) if physical else None
+                        vector_indexes = {identity: index for index, identity in enumerate(adopted['ids'])} if adopted else {}
+                        previous_operation = operation
+                    if adopted is None or link['vector_id'] not in vector_indexes:
                         raise ProcessingError('Native vector link has no accepted native vector')
                     if not isinstance(ranges, list) or not 1 <= len(ranges) <= 128:
                         raise ValidationError('Native vector address fanout exceeds budget')
@@ -855,7 +859,7 @@ class SQLiteVecStore:
                                 or item.get('joinBefore','').strip()):
                             raise ValidationError('Native vector scalar address is invalid')
                         previous += item['end']-item['start']+len(item.get('joinBefore',''))
-                    vector_index = adopted['ids'].index(link['vector_id'])
+                    vector_index = vector_indexes[link['vector_id']]
                     if previous != binding['ranges'][vector_index][1]-binding['ranges'][vector_index][0]:
                         raise ValidationError('Native vector scalar addresses differ from accepted input extent')
                     encoded = json.dumps(ranges, sort_keys=True, separators=(',', ':'), ensure_ascii=False)
