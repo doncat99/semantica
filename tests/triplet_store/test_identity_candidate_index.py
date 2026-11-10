@@ -575,8 +575,11 @@ def test_completed_identity_survives_generation_without_copy_and_exact_dependenc
             source_count=1, canonical_count=None)['generation']
         assert p.identity_stage_status(retry, 'exact-input')['canonical_count'] == 3
         p.reset_identity_stage(retry)
-        assert p.identity_stage_status(retry, 'exact-input') is None
         assert not p.values(p.head, 'canonical')
+        assert p.identity_stage_status(retry, 'changed-input') is None
+        restored = store.begin_publication('p', expected_generation=retry,
+            source_count=1, canonical_count=None)['generation']
+        assert p.identity_stage_status(restored, 'exact-input')['canonical_count'] == 3
     finally:
         store.close()
 
@@ -700,6 +703,55 @@ def test_rebuild_cannot_mutate_a_completed_identity_stage(tmp_path, monkeypatch)
         store.close()
 
 
+@pytest.mark.parametrize('retry_mode', ['same-generation', 'next-generation', 'empty-generation'])
+def test_interrupted_preparation_reuses_committed_features_after_restart(tmp_path, monkeypatch, retry_mode):
+    from semantica.triplet_store.publication_records import PublicationRecords
+    store, generation, ids = staged(tmp_path, 3, canonical_count=None)
+    resolver = EntityResolver(strategy='contextual')
+    index = IdentityCandidateIndex(store, 'p', generation, resolver.duplicate_detector)
+    rows = [dict(id=str(n), name='Name '+str(n), type='ORG') for n in range(3)]
+
+    def interrupt(*args, **kwargs):
+        raise ProcessingError('interrupted after feature commit')
+
+    monkeypatch.setattr(resolver.duplicate_detector.disambiguator, 'prepare', interrupt)
+    with pytest.raises(ProcessingError, match='interrupted'):
+        index.build(lambda: iter(zip(ids, rows)), policy_key='rules')
+    assert not index.publication.values(index.publication.head, 'identityStageInput')
+    store.close()
+    from semantica.triplet_store.oxigraph_store import OxigraphStore
+    store = OxigraphStore(tmp_path / 'facts')
+    try:
+        if retry_mode != 'same-generation':
+            generation = store.begin_publication('p', expected_generation=generation,
+                source_count=1, canonical_count=None)['generation']
+            if retry_mode == 'empty-generation':
+                empty = PublicationRecords(store, 'p', stage='identity')
+                empty._bind_stage('identity', 'empty-input')
+                empty.mutate(generation, [empty.triple(empty.head, 'identityDecisionPolicy', empty.scalar('rules'))])
+                generation = store.begin_publication('p', expected_generation=generation,
+                    source_count=1, canonical_count=None)['generation']
+        from semantica.triplet_store.publication_records import PublicationRecords
+        p = PublicationRecords(store, 'p')
+        previous = p._pointer(p.publication_head, 'previousIdentityGraph', p.publication_graph) or p.stage_graph('identity')
+        # Reuse the accepted source plan by reference, never the unfinished decisions.
+        old = p.ox.NamedNode(previous.value.removesuffix(':identity'))
+        source = next(store.store.quads_for_pattern(p.ox.NamedNode(old.value+':head'),
+            p.iri(P+'source'), None, old)).object
+        operation = next(store.store.quads_for_pattern(source, p.iri(P+'operation'), None, old)).object.value
+        store.stage_publication_sources('p', generation, [dict(source='s', material='m',
+            representation='r', recipe='recipe', operation_count=1, operations=[operation])])
+        resolver = EntityResolver(strategy='contextual')
+        index = IdentityCandidateIndex(store, 'p', generation, resolver.duplicate_detector)
+        def no_hydration():
+            pytest.fail('Committed features must not reopen original entities after cancellation')
+        retained = index.build(lambda: iter((identity, no_hydration) for identity in ids), policy_key='rules')
+        assert retained['retained_components'] == 0
+        assert sum(len(group) for group in index.iter_components()) == 3
+    finally:
+        store.close()
+
+
 def test_component_dependencies_stream_beyond_single_write_budget(tmp_path):
     import json
     from semantica.triplet_store.publication_records import P, MAX_BYTES
@@ -783,5 +835,64 @@ def test_identity_seal_checks_exact_coverage_without_per_mention_queries(tmp_pat
         assert p.seal_identity_stage(generation, 'input') == 3
         # Seven bounded checks include missing member/selector count rejection.
         assert len(queries) <= 7
+    finally:
+        store.close()
+
+@pytest.mark.parametrize('damage', [None, 'policy', 'member', 'unsealed', 'index-count', 'duplicate-member'])
+def test_offline_identity_rebinding_requires_exact_complete_semantics(tmp_path, monkeypatch, damage):
+    from semantica.triplet_store.publication_records import PublicationRecords
+    store, generation, ids = staged(tmp_path, 3, canonical_count=None)
+    index = IdentityCandidateIndex(store, 'p', generation, EntityResolver(strategy='contextual').duplicate_detector)
+    try:
+        p = index.publication
+        p._bind_stage('identity', 'old-contract')
+        p.mutate(generation, [p.triple(p.head, 'identityDecisionPolicy', p.scalar('rules')),
+            p.triple(p.head, 'identityIndexSealed', p.ox.Literal(3))])
+        for n, ref in enumerate(ids):
+            p.mutate(generation, [p.triple(p.head, 'identityMember', p.iri(ref))])
+            p.stage_canonical(generation, [dict(id='urn:c:'+str(n), representative=ref,
+                members=[ref], member_count=1, selectors=[], selector_count=0)])
+        p.seal_identity_stage(generation, 'old-contract')
+        old_graph = p.graph
+        old_head = p.head
+        operation = ids[0].split(':entity:')[0]
+        generation = store.begin_publication('p', expected_generation=generation,
+            source_count=1, canonical_count=None)['generation']
+        store.stage_publication_sources('p', generation, [dict(source='s', material='m',
+            representation='r', recipe='recipe', operation_count=1, operations=[operation])])
+        p = PublicationRecords(store, 'p')
+        if damage == 'member':
+            store.store.remove(p.ox.Quad(old_head, p.iri(P+'identityMember'), p.iri(ids[0]), old_graph))
+            store.store.add(p.ox.Quad(old_head, p.iri(P+'identityMember'), p.iri('urn:foreign'), old_graph))
+        if damage == 'unsealed':
+            store.store.remove(p.ox.Quad(old_head, p.iri(P+'identityIndexSealed'), p.ox.Literal(3), old_graph))
+        if damage == 'index-count':
+            store.store.remove(p.ox.Quad(old_head, p.iri(P+'identityIndexSealed'), p.ox.Literal(3), old_graph))
+            store.store.add(p.ox.Quad(old_head, p.iri(P+'identityIndexSealed'), p.ox.Literal(4), old_graph))
+        if damage == 'duplicate-member':
+            canonical = p.iri('urn:c:1')
+            store.store.add(p.ox.Quad(canonical, p.iri(P+'member'), p.iri(ids[0]), old_graph))
+            store.store.remove(p.ox.Quad(canonical, p.iri(P+'memberCount'), p.ox.Literal(1), old_graph))
+            store.store.add(p.ox.Quad(canonical, p.iri(P+'memberCount'), p.ox.Literal(2), old_graph))
+        if damage:
+            with pytest.raises(ProcessingError, match='migration'):
+                p.migrate_identity_completion(generation, input_key='current-contract',
+                    completed_input='old-contract', policy_key='changed' if damage == 'policy' else 'rules')
+            assert p.identity_stage_status(generation, 'current-contract') is None
+        else:
+            assert p.migrate_identity_completion(generation, input_key='current-contract',
+                completed_input='old-contract', policy_key='rules') is True
+            assert p.migrate_identity_completion(generation, input_key='current-contract',
+                completed_input='old-contract', policy_key='rules') is False
+            native = store.store
+            class PointReadsOnly:
+                def __getattr__(self, name):
+                    return getattr(native, name)
+                def query(self, *args, **kwargs):
+                    pytest.fail('Completion lookup must not scan or reconcile')
+            monkeypatch.setattr(store, 'store', PointReadsOnly())
+            assert p.identity_stage_status(generation, 'current-contract')['canonical_count'] == 3
+            assert p.stage_graph('identity') == old_graph
+            assert p.values(old_head, 'identityStageInput', graph=old_graph) == [p.scalar('old-contract')]
     finally:
         store.close()

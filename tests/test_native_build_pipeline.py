@@ -171,7 +171,9 @@ def test_native_identity_components_match_project_oracle_across_sources_and_rest
     captured,refs=[],{}
     def capture(*args,**kwargs):
         result=original(*args,**kwargs)
-        captured.extend(result['entities'])
+        parsed = kwargs.get('parsed') or args[3]
+        captured.extend((result['native_entity_refs'][entity.id][0], parsed.reader)
+            for entity in result['entities'])
         refs.update(result['native_entity_refs'])
         return result
     monkeypatch.setattr(builder,'_build_source',capture)
@@ -179,7 +181,15 @@ def test_native_identity_components_match_project_oracle_across_sources_and_rest
     observed=[]
     def verify(topology,*args):
         resolver=builder.EntityResolver(strategy='contextual',deduplication={'similarity':{'property_schema':{}}})
-        oracle,_,_=builder._resolve_native_entities(captured,resolver=resolver)
+        from semantica.triplet_store.extraction_records import ExtractionRecords
+        from semantica.semantic_artifact_schema import KnowledgeEntity
+        request, store, _ = builder._native_build.get()
+        entities = [KnowledgeEntity.model_validate(
+            ExtractionRecords.from_identity_reference(store, request.project_id, ref).read_identity_projection(
+                ref, read_text=lambda start, end, reader=reader:
+                    builder._read_source_projection_text(reader, start, end)))
+            for ref, reader in captured]
+        oracle,_,_=builder._resolve_native_entities(entities,resolver=resolver)
         assert sorted(topology['entities'],key=lambda x:x['id']) == sorted(
             ({'id':x.id,'name':x.canonical_name} for x in oracle),key=lambda x:x['id'])
         request,store,_=builder._native_build.get()

@@ -182,3 +182,58 @@ its particular field-level cause is not established by this change.
   No user data, extraction receipts or completed decisions were rewritten.
   App repackaging, real ESG rerun and host change-verification were not performed
   for this focused correction; the installed App still requires a new artifact.
+
+### 2026-11-10 entity preparation regression: interrupted stages and many small operations
+
+Inspected revision `ca6c59f3fda119b65acbb53cd9e3b15657c1a034`.
+The existing owners are `PublicationRecords.build_page`,
+`IdentityCandidateIndex.build`, and the builder's `native_rows` caller.
+No upstream resolver replacement is involved.
+
+The production-shaped trace had 14,823 operations and 45,580 entity mentions.
+The first 12 pages (1,536 mentions) spent 5.266 of 7.60 seconds sorting the
+same operation set 12 times, and 2.05 seconds querying 645 individual operations.
+The repeated paging dates to `2cf2e28f`; feature reuse in `76c81d2e` incorrectly
+required the whole previous decision stage to be complete. `bd6a25f3` retained
+that condition. Thus cancellation repeated raw preparation. The previous
+64-source fixture with one dense operation per source did not expose this
+many-small-operations access pattern. Historical 39 ms completion reuse was not
+a first-preparation timing.
+
+Repairs in the existing owners:
+
+- A build-scoped iterator retains only its next address, sorts operations once,
+  and queries bounded 128-operation windows. Cursor restart, scope isolation,
+  cancellation and byte limits remain. Address-only consumers pass `fields=[]`;
+  they do not restore a name dictionary that is immediately discarded.
+- Compact identity features are checkpointed in their existing RDF owner,
+  independently of whole-stage completion. Same-policy immutable native
+  references reuse features after same-attempt and cross-generation restart.
+  Empty attempts do not hide earlier feature stages. Removed the temporary-file
+  feature carrier; native raw input is consumed once, context preparation uses
+  compact features, and progress distinguishes preparation from indexing.
+- Detaching a shared stage no longer deletes its global completion binding.
+- An explicit offline completion rebind audits rule policy, exact native mention
+  sets, complete decision plans, exact decision coverage, unique ownership and
+  sealed counts before adding a registry reference. It copies no result data.
+  Normal lookups never search old keys or perform this audit.
+- Decision-plan count casts run after per-decision aggregation rather than per
+  support row. Member and selector joins remain separate; malformed, missing,
+  negative and duplicate counts still fail.
+
+Verification: 148 affected owner/pipeline tests passed in 97.43 seconds;
+6 offline migration corruption cases passed separately after adding index-count
+and duplicate-member cases. The 45,580-member seal took 2.048 seconds in one
+and 3.579 seconds in eight decision graphs in the focused scale run. The existing
+5-second budget is unchanged. Read-only traversal of all 45,580 real native
+addresses took 9.765 seconds, 121 SPARQL calls, one operation sort and 4,297 quad
+seeks (RSS 231.73 MiB), versus the previous field-restoring path's 56.737 seconds
+and 457,495 quad seeks. This traversal is necessary only on a completion miss;
+it is not a completed-result lookup benchmark.
+
+Acceptance: `capability-library-prepare`, primary owner `journey-library`, Case
+delta keep. Full packaged ESG ready and unchanged-input verification remain
+pending at this source commit. Real-data offline rebind is not claimed here.
+No schema, semantic rule or upstream merge changed in this correction. Keep this
+owner repair on upstream merge only while upstream lacks these publication
+contracts; do not preserve it as an alternate engine.

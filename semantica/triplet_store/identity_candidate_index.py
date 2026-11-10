@@ -2,7 +2,6 @@
 import hashlib
 import json
 from contextlib import contextmanager
-from tempfile import TemporaryFile
 
 from ..semantic_worker_context import check_query_cancellation
 from ..utils.exceptions import ProcessingError
@@ -20,10 +19,10 @@ class IdentityCandidateIndex:
         self.owner, self.generation, self.detector = owner, generation, detector
         self.publication = PublicationRecords(owner, project, stage='identity')
 
-    def build(self, rows, *, resolve_candidates=True, policy_key=None):
+    def build(self, rows, *, resolve_candidates=True, policy_key=None, progress=None):
         """Read native rows once; replay only bounded compact identity features."""
         p = self.publication
-        with self.owner._publication_lock, p.build_scope(self.generation), TemporaryFile(mode='w+b') as features:
+        with self.owner._publication_lock, p.build_scope(self.generation):
             p._build_fence(self.generation)
             # Reserve the generation-local stage before writing any index rows.
             # Completion later binds this same graph to the semantic input key.
@@ -39,8 +38,10 @@ class IdentityCandidateIndex:
             prior_head = p.ox.NamedNode(prior_graph.value + ':head')
             reusable = bool(p.values(prior_head, 'identityStageInput', graph=prior_graph)) and policy_key is not None
             previous_policy = p.values(prior_head, 'identityDecisionPolicy', graph=prior_graph)
-            reuse_features = reusable and len(previous_policy) == 1 and previous_policy[0].value == policy_key
-            reusable = reuse_features
+            reuse_features = policy_key is not None and len(previous_policy) == 1 and previous_policy[0].value == policy_key
+            reusable = reusable and reuse_features
+            local_policy = p.values(p.head, 'identityDecisionPolicy', graph=p.graph)
+            reuse_local_features = policy_key is not None and local_policy == [p.scalar(policy_key)]
             self._context = None
             self.owner._update_derived_graph(p.graph, delete='?s ?predicate ?o',
                 where=f'''GRAPH {p.graph} {{ ?s ?predicate ?o . VALUES ?predicate {{
@@ -52,7 +53,7 @@ class IdentityCandidateIndex:
                 <{P}identityKeyParent> <{P}identityNextMember> <{P}identityHead> <{P}identityOrdinalMember>
                 <{P}identityRootHead> <{P}identityNextRoot> <{P}identityRetained> }} }}''')
             self.owner.flush()
-            if not reuse_features:
+            if not reuse_local_features:
                 self.owner._update_derived_graph(p.graph, delete='?s ?predicate ?o',
                     where=f'GRAPH {p.graph} {{ ?s ?predicate ?o . VALUES ?predicate {{ <{P}identityFeatures> <{P}identityDecisionPolicy> }} }}')
             # Reused features still belong to this stage's explicit rule policy.
@@ -60,36 +61,44 @@ class IdentityCandidateIndex:
                 p.mutate(self.generation, [p.triple(p.head, 'identityDecisionPolicy', p.scalar(policy_key))])
             indexed_rows = rows
             if resolve_candidates:
-                # Reopen only the compact identity features. Raw entities and
-                # source text cross the native hydration boundary exactly once.
-                for identity, row in rows():
-                    check_query_cancellation()
-                    p._build_fence(self.generation)
-                    prior = p.values(p.iri(identity), 'identityFeatures', graph=prior_graph) if reuse_features else []
-                    if prior:
-                        if len(prior) != 1:
-                            raise ProcessingError('Native identity features are duplicated')
-                        feature = json.loads(prior[0].value)
-                    else:
-                        feature = self.detector.disambiguator.identity_projection(row() if callable(row) else row)
-                    schema = self.detector.similarity_calculator.property_schema
-                    fields = {name for name, spec in schema.items() if spec.get('identity')}
-                    fields.update(key for name in tuple(fields) for key in schema[name].get('scope', []))
-                    feature = {**feature, 'properties': {key: value
-                        for key, value in feature.get('properties', {}).items() if key in fields}}
-                    payload = json.dumps([identity, feature], ensure_ascii=False,
-                        separators=(',', ':')).encode()
-                    if len(payload) > MAX_BYTES:
-                        raise ProcessingError('Native identity feature exceeds byte budget')
-                    features.write(payload + b'\n')
-                features.flush()
+                schema = self.detector.similarity_calculator.property_schema
+                fields = {name for name, spec in schema.items() if spec.get('identity')}
+                fields.update(key for name in tuple(fields) for key in schema[name].get('scope', []))
+                # Commit compact features to their existing owner, not a second
+                # temporary carrier. An unfinished decision does not invalidate
+                # an immutable mention's feature under the same rule policy.
+                with p.checkpointed(self.generation):
+                    for ordinal, (identity, row) in enumerate(rows()):
+                        check_query_cancellation()
+                        node = p.iri(identity)
+                        p.member(node)
+                        if p.values(node, 'identityOrdinal'):
+                            raise ProcessingError('Duplicate native identity index member')
+                        prior = p.values(node, 'identityFeatures', graph=p.graph) if reuse_local_features else []
+                        if not prior and reuse_features and prior_graph != p.graph:
+                            prior = p.values(node, 'identityFeatures', graph=prior_graph)
+                        if prior:
+                            if len(prior) != 1:
+                                raise ProcessingError('Native identity features are duplicated')
+                            feature = json.loads(prior[0].value)
+                        else:
+                            feature = self.detector.disambiguator.identity_projection(row() if callable(row) else row)
+                        feature = {**feature, 'properties': {key: value
+                            for key, value in feature.get('properties', {}).items() if key in fields}}
+                        payload = json.dumps(feature, ensure_ascii=False, separators=(',', ':'))
+                        p.mutate(self.generation, [p.triple(node, 'identityFeatures', p.ox.Literal(payload)),
+                            p.triple(p.head, 'identityMember', node),
+                            p.triple(node, 'identityOrdinal', p.ox.Literal(ordinal))])
+                        if progress is not None:
+                            progress(preparedMentions=ordinal+1, preparationPhase='features')
 
                 def indexed_rows():
-                    features.seek(0)
-                    for payload in features:
+                    for result in self.owner.store.query(f'''SELECT ?member WHERE {{ GRAPH {p.graph} {{
+                        {p.head} <{P}identityMember> ?member .
+                        ?member <{P}identityOrdinal> ?ordinal }} }} ORDER BY ?ordinal'''):
                         check_query_cancellation()
-                        identity, feature = json.loads(payload)
-                        yield identity, feature
+                        node = result['member']
+                        yield node.value, json.loads(p.one(node, 'identityFeatures'))
 
                 context = NativeIdentityContext(self.owner, p.project, self.generation)
                 self._context = context
@@ -149,18 +158,11 @@ class IdentityCandidateIndex:
                 if not next(self.owner.store.quads_for_pattern(node,
                         p.ox.NamedNode(RDF_TYPE), p.ox.NamedNode(F+'Entity'), p.facts), None):
                     raise ProcessingError('Candidate index requires native Entity membership')
-                if next(self.owner.store.quads_for_pattern(node,
+                if not resolve_candidates and next(self.owner.store.quads_for_pattern(node,
                         p.ox.NamedNode(P+'identityOrdinal'), None, p.graph), None):
                     raise ProcessingError('Duplicate native identity index member')
                 triples = [p.triple(p.head, 'identityMember', node),
                            p.triple(node, 'identityOrdinal', p.ox.Literal(ordinal))]
-                if resolve_candidates:
-                    payload = json.dumps(row, ensure_ascii=False, separators=(',', ':'))
-                    if len(payload.encode()) > MAX_BYTES:
-                        raise ProcessingError('Native identity feature exceeds byte budget')
-                    # Features remain in the current derived index owner. They
-                    # contain decisions' observations, never original prose.
-                    stage([p.triple(node, 'identityFeatures', p.ox.Literal(payload))])
                 # Identical logical mentions may have several accepted native
                 # references (overlapping windows). Their membership is complete
                 # even when the deterministic recipe performs no identity merge.
@@ -210,6 +212,8 @@ class IdentityCandidateIndex:
                     replace(root, 'identitySize', p.ox.Literal(size + other_size))
                     replace(root, 'identityRepresentative', representative)
                 count += 1
+                if progress is not None:
+                    progress(indexedMentions=count, preparationPhase='candidates')
                 pending_rows += 1
                 if pending_rows >= MAX_ROWS:
                     checkpoint()

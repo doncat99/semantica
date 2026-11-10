@@ -195,31 +195,30 @@ class PublicationRecords:
             {self.stage_head('fact')} <{P}fact> {node} .
             {node} <{P}factDecisionGraph> {variable} }} GRAPH {variable} {{ {pattern} }}'''
 
-    def _check_decision_plans(self, kind):
+    def _check_decision_plans(self, kind, *, graph=None):
         role, pointer = ('canonical', 'canonicalGraph') if kind == 'identity' else ('fact', 'factDecisionGraph')
-        graph, head = self.stage_graph(kind), self.stage_head(kind)
+        graph = graph or self.stage_graph(kind)
+        head = self.ox.NamedNode(graph.value + ':head')
         invalid=self.owner.store.query(f'''SELECT ?node WHERE {{ GRAPH {graph} {{
             {head} <{P+role}> ?node . OPTIONAL {{ ?node <{P+pointer}> ?location }} }} }}
             GROUP BY ?node HAVING(COUNT(?location) != 1) LIMIT 1''')
         if next(iter(invalid),None) is not None:
             raise ProcessingError('Completed '+kind+' decision graph missing or duplicated')
-        pattern = self.canonical_pattern if kind == 'identity' else self.fact_pattern
         for field,count in [('member','memberCount')]+([('selector','selectorCount')] if kind=='identity' else []):
-            missing = self.owner.store.query(f'''ASK {{ GRAPH {graph} {{
-                {head} <{P+role}> ?node . ?node <{P+pointer}> ?location }}
-                MINUS {{ SELECT ?node ?location WHERE {{
-                    GRAPH {graph} {{ {head} <{P+role}> ?node . ?node <{P+pointer}> ?location }}
-                    GRAPH ?location {{ ?node <{P+count}> ?expected }} }} }} }}''')
-            body=f'''?node <{P+count}> ?expected .
-                BIND(IF(datatype(?expected) IN (xsd:integer, xsd:string),
-                    xsd:integer(?expected), 1/0) AS ?integer)
-                OPTIONAL {{ ?node <{P+field}> ?ref }}'''
-            invalid=self.owner.store.query(f'''SELECT ?node WHERE {{ {pattern('?node',body)} }}
-                GROUP BY ?node HAVING(COUNT(DISTINCT ?expected) != 1 ||
-                    COUNT(?integer) != COUNT(?expected) || MIN(?integer) < 0 ||
-                    COUNT(?ref) != MIN(?integer)) LIMIT 1''',
+            body=f'''GRAPH {graph} {{ {head} <{P+role}> ?node .
+                    ?node <{P+pointer}> ?location }}
+                OPTIONAL {{ GRAPH ?location {{ ?node <{P+count}> ?expected }} }}
+                OPTIONAL {{ GRAPH ?location {{ ?node <{P+field}> ?ref }} }}'''
+            invalid=self.owner.store.query(f'''SELECT ?node WHERE {{
+                {{ SELECT ?node (COUNT(DISTINCT ?expected) AS ?expectedCount)
+                    (SAMPLE(?expected) AS ?value) (COUNT(?ref) AS ?actual)
+                    WHERE {{ {body} }} GROUP BY ?node }}
+                BIND(IF(datatype(?value) IN (xsd:integer, xsd:string),
+                    xsd:integer(?value), 1/0) AS ?integer)
+                FILTER(?expectedCount != 1 || !BOUND(?integer) ||
+                    ?integer < 0 || ?actual != ?integer) }} LIMIT 1''',
                 prefixes={'xsd':'http://www.w3.org/2001/XMLSchema#'})
-            if bool(missing) or next(iter(invalid),None) is not None:
+            if next(iter(invalid),None) is not None:
                 label = 'Canonical' if kind == 'identity' else 'Canonical fact'
                 label += ' membership' if field == 'member' else ' selector'
                 raise ProcessingError(label+' plan is incomplete')
@@ -494,6 +493,9 @@ class PublicationRecords:
             raise ProcessingError("Publication CAS conflict")
         generation = hashlib.sha256(uuid.uuid4().bytes).hexdigest()
         previous_identity = self.stage_graph('identity') if current else None
+        if current and not (self.values(self.stage_head('identity'), 'identityStageInput', graph=previous_identity)
+                or next(self.owner.store.quads_for_pattern(None, self.iri(P+'identityFeatures'), None, previous_identity), None)):
+            previous_identity = self._pointer(self.publication_head, 'previousIdentityGraph', self.publication_graph) or previous_identity
         previous_fact = self.stage_graph('fact') if current else None
         self.generation = self.scalar(generation)
         triples = [self.triple(self.head, k, self.ox.Literal(v)) for k, v in dict(
@@ -621,12 +623,65 @@ class PublicationRecords:
             return None
         if len(values) != 1:
             raise ProcessingError('Invalid native identity completion marker')
-        if values[0].value != input_key:
+        if values[0].value != input_key and self._pointer(
+                stage_key, 'completedGraph', self.registry) != self.graph:
             return None
         if not self.values(self.head, 'identityIndexSealed'):
             raise ProcessingError('Native identity completion lacks sealed index')
         return dict(input_key=input_key,
                     canonical_count=int(self.one(self.head, 'identityStageCount')))
+
+    @_locked
+    def migrate_identity_completion(self, generation, *, input_key, completed_input, policy_key):
+        """Offline rebind after an identity-contract change; audit exact native membership."""
+        self._build_fence(generation)
+        for value in (input_key, completed_input, policy_key):
+            self.scalar(value)
+        old = self._pointer(self._completion_key('identity', completed_input), 'completedGraph', self.registry)
+        if old is None:
+            raise ProcessingError('Offline identity migration requires a completed stage')
+        old_head = self.iri(old.value + ':head')
+        if (self.values(old_head, 'identityStageInput', graph=old) != [self.scalar(completed_input)]
+                or self.values(old_head, 'identityDecisionPolicy', graph=old) != [self.scalar(policy_key)]
+                or len(self.values(old_head, 'identityIndexSealed', graph=old)) != 1):
+            raise ProcessingError('Offline identity migration completion or policy differs')
+        key = self._completion_key('identity', input_key)
+        existing = self._pointer(key, 'completedGraph', self.registry)
+        if existing is not None:
+            if existing != old:
+                raise ProcessingError('Offline identity migration destination differs')
+            return False
+        self._check_decision_plans('identity', graph=old)
+        current = f"""GRAPH {self.publication_graph} {{
+            {self.publication_head} <{P}source> ?source . ?source <{P}operation> ?operation }}
+            GRAPH {self.facts} {{ ?operation <{F}ownedRecord> ?mention .
+                ?mention <{RDF_TYPE}> <{F}Entity> }}"""
+        previous = f'GRAPH {old} {{ {old_head} <{P}identityMember> ?mention }}'
+        for left, right in ((current, previous), (previous, current)):
+            if bool(self.owner.store.query(f'ASK {{ {{ SELECT DISTINCT ?mention WHERE {{ {left} }} }} MINUS {{ SELECT DISTINCT ?mention WHERE {{ {right} }} }} }}')):
+                raise ProcessingError('Offline identity migration native membership differs')
+        canonical = f"""GRAPH {old} {{ {old_head} <{P}canonical> ?canonical .
+            ?canonical <{P}canonicalGraph> ?location }}
+            GRAPH ?location {{ ?canonical <{P}member> ?mention }}"""
+        for left, right in ((previous, canonical), (canonical, previous)):
+            if bool(self.owner.store.query(f'ASK {{ {{ SELECT DISTINCT ?mention WHERE {{ {left} }} }} MINUS {{ SELECT DISTINCT ?mention WHERE {{ {right} }} }} }}')):
+                raise ProcessingError('Offline identity migration decision coverage differs')
+        duplicate = self.owner.store.query(f'''SELECT ?mention WHERE {{ {canonical} }}
+            GROUP BY ?mention HAVING(COUNT(?canonical) != 1) LIMIT 1''')
+        if next(iter(duplicate), None) is not None:
+            raise ProcessingError('Offline identity migration decision membership is not unique')
+        members = next(iter(self.owner.store.query(f'''SELECT (COUNT(?mention) AS ?count)
+            WHERE {{ {previous} }}''')))['count'].value
+        if self.values(old_head, 'identityIndexSealed', graph=old) != [self.ox.Literal(int(members))]:
+            raise ProcessingError('Offline identity migration index count differs')
+        actual = next(iter(self.owner.store.query(f"""SELECT (COUNT(?canonical) AS ?count)
+            WHERE {{ GRAPH {old} {{ {old_head} <{P}canonical> ?canonical }} }}""")))['count'].value
+        if self.values(old_head, 'identityStageCount', graph=old) != [self.ox.Literal(int(actual))]:
+            raise ProcessingError('Offline identity migration decision count differs')
+        self._build_fence(generation)
+        self.owner.store.add(self.ox.Quad(key, self.iri(P+'completedGraph'), old, self.registry))
+        self.owner.flush()
+        return True
 
     @_locked
     @_stage('identity')
@@ -636,10 +691,6 @@ class PublicationRecords:
         local = self.ox.NamedNode(self.publication_graph.value + ':identity')
         if self.graph not in (self.publication_graph, local):
             # Detach this attempt; never delete a shared completed decision.
-            input_key = self.one(self.head, 'identityStageInput')
-            key = self._completion_key('identity', input_key)
-            self.owner.store.remove(self.ox.Quad(key,
-                self.ox.NamedNode(P+'completedGraph'), self.graph, self.registry))
             self.owner.store.remove(self.ox.Quad(self.publication_head,
                 self.ox.NamedNode(P+'identityGraph'), self.graph, self.publication_graph))
             self.owner.store.add(self.ox.Quad(self.publication_head,
@@ -1148,10 +1199,12 @@ class PublicationRecords:
                 raise ProcessingError('Nested native build plan scope')
             self._build_fence(generation)
             self.owner._build_plan_scope = (self.publication_graph.value, generation)
+            self.owner._build_cursor = None
             try:
                 yield
             finally:
                 self.owner._build_plan_scope = None
+                self.owner._build_cursor = None
             self._build_fence(generation)
 
     @_stage(None)
@@ -1187,7 +1240,7 @@ class PublicationRecords:
         from ..semantic_worker_context import check_query_cancellation
         check_query_cancellation()
         self._build_fence(generation)
-        ExtractionRecords._read_options(fields, max_bytes)
+        ExtractionRecords._read_options(None if fields == [] else fields, max_bytes)
         if kind not in {"Entity", "Relation", "Mention", "Evidence", "IdentityProfile",
                         "AttributeValue", "AttributeElement", "NativeRange", "Qualifier"}:
             raise ProcessingError("Invalid native build record kind")
@@ -1209,43 +1262,45 @@ class PublicationRecords:
                     or len(parts[3]) != 64 or any(c not in '0123456789abcdef' for c in parts[3])):
                 raise ProcessingError('Invalid native build record cursor')
             operation_after = ':'.join(parts[:4])
-        ids = []
-        inclusive = identity is not None
-        # Native record IRIs extend their operation IRI; preserve lexical order
-        # while sorting only bounded operation pages and one operation's records.
-        while len(ids) <= limit:
-            check_query_cancellation()
-            seek = (f"FILTER(STR(?operation) {'>=' if inclusive else '>'} {self.scalar(operation_after)})"
+        def traverse():
+            # A computation traverses its immutable plan once. Re-running a
+            # sorted query for every transport page sorts the whole plan again.
+            seek = (f"FILTER(STR(?operation) >= {self.scalar(operation_after)})"
                     if operation_after is not None else '')
-            operations = [row['operation'] for row in self.owner.store.query(f"""
+            operations = self.owner.store.query(f"""
                 SELECT DISTINCT ?operation WHERE {{ GRAPH {self.graph} {{
                     {self.head} <{P}source> ?source .
                     ?source <{P}operation> ?operation . {source_filter}
-                }} {seek} }} ORDER BY ?operation LIMIT {MAX_ROWS}""")]
-            if not operations:
-                break
-            for operation in operations:
+                }} {seek} }} ORDER BY ?operation""")
+            while batch := list(islice(operations, MAX_ROWS)):
                 check_query_cancellation()
-                cursor = f"FILTER(STR(?record) > {self.scalar(identity)})" if identity is not None else ''
-                query = f"""SELECT DISTINCT ?record WHERE {{ GRAPH {self.facts} {{
-                    {operation} <{F}ownedRecord> ?record .
-                    ?record <{RDF_TYPE}> <{F}{kind}> }} {cursor}
-                }} ORDER BY ?record LIMIT {limit + 1 - len(ids)}"""
-                records = [row['record'].value for row in self.owner.store.query(query)]
-                if any(not record.startswith(operation.value + ':') for record in records):
-                    raise ProcessingError('Native record does not belong to its operation namespace')
-                ids.extend(records)
-                if len(ids) > limit:
-                    break
-            if len(ids) > limit or len(operations) < MAX_ROWS:
-                break
-            operation_after = operations[-1].value
-            inclusive = False
+                values = ' '.join(str(item['operation']) for item in batch)
+                cursor = f'FILTER(STR(?record) > {self.scalar(identity)})' if identity is not None else ''
+                # Push kind selection into native indexes. The join and sort
+                # are bounded by one admitted operation window, not the project.
+                for item in self.owner.store.query(f'''SELECT ?operation ?record WHERE {{
+                    VALUES ?operation {{ {values} }} GRAPH {self.facts} {{
+                    ?operation <{F}ownedRecord> ?record . ?record <{RDF_TYPE}> <{F}{kind}> }}
+                    {cursor} }} ORDER BY ?record'''):
+                    check_query_cancellation()
+                    if not item['record'].value.startswith(item['operation'].value + ':'):
+                        raise ProcessingError('Native record does not belong to its operation namespace')
+                    yield item['record'].value
+
+        scoped = getattr(self.owner, '_build_plan_scope', None) == (self.graph.value, generation)
+        current = getattr(self.owner, '_build_cursor', None) if scoped else None
+        stream = current[2] if current is not None and current[:2] == (scope, after) else traverse()
+        ids = list(islice(stream, limit + 1))
         selected = ids[:limit]
-        records = self._read(selected, fields=fields, max_bytes=max_bytes) if selected else []
+        records = ([dict(id=identity, fields={}) for identity in selected] if fields == [] else
+                   self._read(selected, fields=fields, max_bytes=max_bytes) if selected else [])
         result = dict(records=records, next_cursor=prefix + selected[-1] if len(ids) > limit else None)
         if len(json.dumps(result, ensure_ascii=False).encode()) > max_bytes:
             raise ProcessingError("Native build page exceeds byte budget")
+        if scoped:
+            # Retain one iterator and one lookahead reference, never result DTOs.
+            self.owner._build_cursor = ((scope, result['next_cursor'], chain(ids[limit:], stream))
+                if result['next_cursor'] is not None else None)
         self._build_fence(generation)
         check_query_cancellation()
         return result

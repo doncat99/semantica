@@ -94,8 +94,9 @@ def test_build_pages_sort_only_operation_scoped_records(tmp_path, monkeypatch):
             return getattr(native, key)
 
         def query(self, query, *args, **kwargs):
-            assert not ('?operation <'+F+'ownedRecord> ?record' in query), \
-                'Record paging must not sort the project-wide operation/record join'
+            if '?operation <'+F+'ownedRecord> ?record' in query:
+                assert 'VALUES ?operation {' in query, 'Record joins must have a bounded operation window'
+                assert query.count('urn:semantica:extraction:') <= 128
             return native.query(query, *args, **kwargs)
 
     monkeypatch.setattr(store, 'store', OperationPagesOnly())
@@ -113,7 +114,41 @@ def test_build_pages_sort_only_operation_scoped_records(tmp_path, monkeypatch):
         store.close()
 
 
-def test_build_cursor_crosses_operation_pages_without_loss_or_source_leak(tmp_path):
+def test_scoped_build_traversal_does_not_resort_operations_per_page(tmp_path, monkeypatch):
+    from semantica.triplet_store.publication_records import PublicationRecords
+    store, generation, expected = staged(tmp_path, 137)
+    native, queries = store.store, []
+
+    class Measured:
+        def __getattr__(self, key):
+            return getattr(native, key)
+
+        def query(self, query, **options):
+            queries.append(query)
+            return native.query(query, **options)
+
+    monkeypatch.setattr(store, 'store', Measured())
+    try:
+        found, cursor = [], None
+        with PublicationRecords(store, 'p').build_scope(generation):
+            while True:
+                page = store.read_build_records('p', generation, kind='Entity',
+                    fields=[F+'name'], after=cursor, limit=7)
+                found.extend(row['id'] for row in page['records'])
+                cursor = page['next_cursor']
+                if cursor is None:
+                    break
+        assert found == expected
+        assert sum('SELECT DISTINCT ?operation' in query for query in queries) == 1
+        assert not any('SELECT DISTINCT ?record' in query for query in queries)
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize('restart', [False, True])
+def test_build_cursor_crosses_operation_pages_without_loss_or_source_leak(tmp_path, monkeypatch, restart):
+    from contextlib import nullcontext
+    from semantica.triplet_store.publication_records import PublicationRecords
     store = OxigraphStore(tmp_path / 'facts')
     sources, expected = [], []
     for index in range(130):
@@ -133,17 +168,33 @@ def test_build_cursor_crosses_operation_pages_without_loss_or_source_leak(tmp_pa
     for offset in range(0, len(sources), 128):
         store.stage_publication_sources('p', generation, sources[offset:offset+128])
     found, cursor = [], None
+    queries = []
+    native = store.store
+    class Measured:
+        def __getattr__(self, key):
+            return getattr(native, key)
+        def query(self, query, **options):
+            queries.append(query)
+            return native.query(query, **options)
+    if not restart:
+        monkeypatch.setattr(store, 'store', Measured())
+    else:
+        native = None
     try:
-        while True:
-            page = store.read_build_records('p', generation, kind='Entity',
-                fields=[F+'name'], after=cursor, limit=17)
-            found.extend(row['id'] for row in page['records'])
-            cursor = page['next_cursor']
-            if cursor is None:
-                break
-            store.close()
-            store = OxigraphStore(tmp_path / 'facts')
+        with nullcontext() if restart else PublicationRecords(store, 'p').build_scope(generation):
+            while True:
+                page = store.read_build_records('p', generation, kind='Entity',
+                    fields=[F+'name'], after=cursor, limit=17)
+                found.extend(row['id'] for row in page['records'])
+                cursor = page['next_cursor']
+                if cursor is None:
+                    break
+                if restart:
+                    store.close()
+                    store = OxigraphStore(tmp_path / 'facts')
         assert found == sorted(expected)
+        if not restart:
+            assert sum('SELECT DISTINCT ?operation' in query for query in queries) == 1
         assert store.read_build_records('p', generation, kind='Entity', source='s3')['records'][0]['id'] == expected[3]
         assert store.read_build_records('p', generation, kind='Relation')['records'] == []
     finally:
@@ -233,5 +284,20 @@ def test_build_scope_reuses_plan_validation_but_never_stale_generation(tmp_path,
                     source_count=0, canonical_count=0)
                 store.read_build_nodes('p', generation, ids[:1])
         assert store._build_plan_scope is None
+    finally:
+        store.close()
+
+
+def test_reference_only_build_page_does_not_restore_fields(tmp_path, monkeypatch):
+    from semantica.triplet_store.publication_records import PublicationRecords
+    store, generation, expected = staged(tmp_path, 3)
+    def forbidden(*args, **kwargs):
+        pytest.fail('Reference traversal must not restore native fields')
+    monkeypatch.setattr(PublicationRecords, '_read', forbidden)
+    try:
+        page = store.read_build_records('p', generation, kind='Entity', fields=[])
+        assert page['records'] == [dict(id=ref, fields={}) for ref in expected]
+        with pytest.raises(ProcessingError, match='byte budget'):
+            store.read_build_records('p', generation, kind='Entity', fields=[], max_bytes=8)
     finally:
         store.close()

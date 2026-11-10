@@ -3359,7 +3359,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
             cursor = None
             while True:
                 page = store.read_build_records(request.project_id,generation,kind='Entity',
-                    fields=['urn:semantica:field:name'],after=cursor,limit=128)
+                    fields=[],after=cursor,limit=128)
                 for item in page['records']:
                     ref = item['id']
                     # Immutable existing feature owners can satisfy this row
@@ -3413,6 +3413,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
         index = identity_index = IdentityCandidateIndex(store,request.project_id,generation,identity_resolver.duplicate_detector)
         with _project_progress(progress,"entity_resolution",90) as metadata:
             metadata.update(completedComponents=0, canonicalEntities=0, processedMentions=0,
+                preparedMentions=0, indexedMentions=0, preparationPhase='lookup',
                 featureGroups=0, pairComparisons=0)
             input_key = stable_digest(dict(
                 mode=request.recipe.id,
@@ -3430,7 +3431,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                 return
             retained = index.build(native_rows,resolve_candidates=request.recipe.id == 'model',
                 policy_key=stable_digest(dict(mode=request.recipe.id,
-                    identity_properties=request.identity_property_schema)))
+                    identity_properties=request.identity_property_schema)), progress=lambda **values: metadata.update(values))
             canonical_count = retained['retained_canonical_count']
             metadata.update(retainedComponents=retained['retained_components'],
                 canonicalEntities=canonical_count)
