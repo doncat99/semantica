@@ -77,6 +77,20 @@ its particular field-level cause is not established by this change.
 
 ## Dated follow-ups
 
+- Packaged ESG run `b6131e14-edfe-4166-92c2-483a3abbfbd1` reached source 6/38
+  then failed with `Native source projection address budget exceeded`. The
+  inspected owner at `8e92ce34`, `ExtractionRecords.source_projection`, incorrectly
+  capped a streamed document at 16 MiB / 100,000 addresses. The existing owner now
+  bounds each address and retained write batch, not the complete traversal.
+  Selected evidence reads retain their cumulative response budget. Completion
+  still follows durable writes, cancellation leaves no completion, and oversized
+  individual addresses remain rejected. No alternate store or reader was added.
+  The new >16 MiB streaming regression failed before this repair; it verifies
+  bounded batch rows/bytes, one-address point lookup and complete traversal.
+  Extraction/projection lifecycle specifications passed (29 tests); packaged
+  continuation and first-build performance remain pending. Upstream merge review
+  must preserve these bounds in this fork-owned source projection owner.
+
 - Packaged ESG run `2d60dabb-c0a1-4944-8c4f-e797589a4237` exposed an omitted
   migration: the interrupted publication was stored in the flat registry graph,
   with no generation/latest pointer. New-generation CAS therefore matched no row.

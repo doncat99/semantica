@@ -199,7 +199,7 @@ class ExtractionRecords:
                     count=int(values[0].object.value)
                 except (TypeError,ValueError) as exc:
                     raise ProcessingError('Native source projection completion corrupt') from exc
-                if not 1<=count<=100000:
+                if count<1:
                     raise ProcessingError('Native source projection count invalid')
                 def read():
                     total=0
@@ -239,7 +239,7 @@ class ExtractionRecords:
                         if len(rows)!=1 or not isinstance(rows[0].object,ox.Literal) or len(rows[0].object.value.encode())>MAX_PAGE_BYTES:
                             raise ProcessingError('Native source projection address missing or oversized')
                         total+=len(rows[0].object.value.encode())
-                        if total>16*1024*1024:
+                        if evidence_ids is not None and total>16*1024*1024:
                             raise ProcessingError('Native source projection byte budget exceeded')
                         try:
                             value=validate(json.loads(rows[0].object.value),number)
@@ -255,16 +255,17 @@ class ExtractionRecords:
             owner.store.update('CLEAR SILENT GRAPH '+str(graph))
             batch=[]
             batch_bytes=0
-            total=count=0
+            count=0
             for value in records:
                 check_query_cancellation()
                 validate(value,count)
                 encoded=json.dumps(value,ensure_ascii=False,separators=(',',':'))
                 size=len(encoded.encode())
-                total+=size
-                if size>MAX_PAGE_BYTES or total>16*1024*1024 or count>=100000:
+                if size>MAX_PAGE_BYTES:
                     raise ProcessingError('Native source projection address budget exceeded')
-                if batch and batch_bytes+size>MAX_PAGE_BYTES:
+                # Bound retained batches, not the size of a streamed document.
+                row_count=1+(1+int(value['passage']) if count else 0)
+                if batch and (batch_bytes+size>MAX_PAGE_BYTES or len(batch)+row_count>MAX_PAGE_ROWS):
                     owner.store.extend(batch)
                     batch=[]
                     batch_bytes=0

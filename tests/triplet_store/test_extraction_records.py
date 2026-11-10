@@ -440,6 +440,65 @@ def test_source_projection_completion_is_durable_and_rejects_corruption(tmp_path
         store.close()
 
 
+def test_source_projection_stream_exceeds_document_budget_with_bounded_batches(tmp_path):
+    import json
+    from semantica.semantic_artifact_schema import DocumentRepresentation, EvidenceSpan, DocumentLocator
+    from semantica.triplet_store.extraction_records import MAX_PAGE_BYTES, MAX_PAGE_ROWS
+    revision='b3-'+'a'*64
+    key='sha256:'+'c'*64
+    header=dict(representation=DocumentRepresentation(id='rep',source_id='ss',material_revision_id=revision,
+        input_revision=revision,media_type='text/plain',content_hash=revision,parser='fixture',parser_version='1',
+        recipe_id='fixture',recipe_digest='a'*64,origin='native',artifact_ref_id='artifact').model_dump(),
+        artifact_id='artifact',operations=[])
+    store=OxigraphStore(tmp_path/'projection')
+    native=store.store
+    written=read=0
+    batches=[]
+    class ObservedStore:
+        def __getattr__(self,name):
+            return getattr(native,name)
+        def extend(self,quads):
+            quads=list(quads)
+            batches.append((len(quads),sum(len(q.object.value.encode()) for q in quads
+                if q.predicate.value==F+'address')))
+            return native.extend(quads)
+        def quads_for_pattern(self,subject,predicate,obj,graph):
+            nonlocal read
+            if predicate.value==F+'address':
+                read+=1
+            return native.quads_for_pattern(subject,predicate,obj,graph)
+    store.store=ObservedStore()
+    def addresses():
+        nonlocal written
+        yield header
+        for number in range(160):
+            span=EvidenceSpan(id='e:'+str(number),representation_id='rep',quote='',
+                locator=DocumentLocator(representation_id='rep',origin='native',quote='',
+                    start_char=number,end_char=number+1,quality='precise'),
+                metadata={'fixture':'x'*(112*1024)})
+            fields=span.model_dump(exclude={'quote','locator'})
+            fields['locator']=span.locator.model_dump(exclude={'quote'})
+            value=dict(fields=fields,quote_length=1,quote_digest='sha256:'+'a'*64,passage=False)
+            written+=len(json.dumps(value).encode())
+            yield value
+    try:
+        ExtractionRecords.source_projection(store,'p',key,addresses())
+        assert written>16*1024*1024
+        assert all(rows<=MAX_PAGE_ROWS and size<=MAX_PAGE_BYTES for rows,size in batches)
+        selected=list(ExtractionRecords.source_projection(store,'p',key,evidence_ids=['e:159']))
+        assert selected[0]['fields']['id']=='e:159'
+        assert read==1
+        assert sum(1 for _ in ExtractionRecords.source_projection(store,'p',key))==161
+        selected[0]['fields']['metadata']['fixture']='x'*MAX_PAGE_BYTES
+        incomplete='sha256:'+'d'*64
+        with pytest.raises(ProcessingError,match='address budget exceeded'):
+            ExtractionRecords.source_projection(store,'p',incomplete,iter([header,selected[0]]))
+        assert ExtractionRecords.source_projection(store,'p',incomplete) is None
+    finally:
+        store.store=native
+        store.close()
+
+
 def test_source_projection_point_reads_and_offline_index_preserve_addresses(tmp_path,monkeypatch):
     from semantica.semantic_artifact_schema import DocumentRepresentation, EvidenceSpan, DocumentLocator
     key='sha256:'+'b'*64
