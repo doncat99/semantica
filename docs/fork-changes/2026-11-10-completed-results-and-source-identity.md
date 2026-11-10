@@ -110,3 +110,75 @@ its particular field-level cause is not established by this change.
   maintenance, source traversal, publication, qualified facts and vector handoff).
   Source-removal specifications verify affected membership replacement and
   immutable preservation of prior decisions; unchanged partitions skip reduction.
+
+- Packaged ESG run `7353a3fe-a64a-4efb-9fdc-7b96af1098b7` was canceled after
+  completing 45,580 mentions and 25,286 canonical entities: native sampling found
+  the worker inside Oxigraph Cartesian-product evaluation during identity sealing.
+  An isolated persistent-store reproduction of the correlated coverage query took
+  54.551 seconds for only 1,000 members. `PublicationRecords.seal_identity_stage`
+  now subtracts the projected registered-decision member set once with SPARQL
+  MINUS, rather than reevaluating all canonical/graph combinations per mention.
+  Exact coverage semantics and missing member/selector/count rejection remain;
+  an unregistered canonical cannot satisfy coverage. The new structural red spec
+  failed on the preceding implementation. The replacement coverage query took
+  0.270 seconds for 45,580 members; complete owner sealing took 2.836 and 4.431
+  seconds in two persistent synthetic runs. The scale regression requires <5 s.
+  These measurements do not certify full first-build performance, report output,
+  or a zero-work second packaged build; requalification is required.
+
+- 2026-11-10 regression correction (inspected `aaab34054728`):
+  `76c81d2e` had explicitly forbidden correlated coverage queries.
+  `bd6a25f3` (2026-11-10 05:45:56 +08:00) introduced immutable decision graph
+  references, replaced that coverage lookup with correlated `FILTER NOT EXISTS`,
+  and removed the corresponding test assertion in the same change. A query-count
+  assertion on three members did not constrain query execution work. This repair
+  keeps immutable graph references and replaces only the defective coverage plan.
+  The restored structural guard fails before executing the known Cartesian plan;
+  persistent 45,580-member tests also enforce the existing <5-second full-seal
+  budget for both one and eight decision graphs. Equal-count member replacement
+  and unregistered decisions must fail exact coverage without publishing a
+  completion marker. These specifications run in the existing main/PR CI suite.
+
+  `IdentityCandidateIndex.build` also omitted the current stage's explicit rule
+  policy when reusing previous features. The next generation consequently lost
+  reuse eligibility. It now persists that policy for reused features too.
+  Multi-generation specifications forbid raw-row restoration, compare prior
+  completed graph contents, and require a changed policy to restore raw rows.
+  The obsolete same-stage rebuild fixture now creates a new generation; the
+  existing prohibition on mutating completed stages remains. Returning to an
+  already completed input must reuse the entire stage, without indexing or
+  hydrating components. No alternate owner or compatibility path was added.
+
+  Red verification temporarily restored both defective methods in memory only:
+  all three selected cases failed (missing rule policy and both coverage guard
+  variants). No production data was changed. Focused green results and packaged
+  delivery are recorded below after verification completes. Library acceptance
+  remains `capability-library-prepare`, primary owner `journey-library`, delta
+  `keep`; these owner specifications do not replace product acceptance.
+
+- Final regression verification for this correction: 100 owner specifications
+  passed in 206.97 seconds; both fact-query structural cases passed separately
+  after their final guard edit. A serial persistent-scale receipt passed all
+  three cases in 39.31 seconds (including fixture construction): identity sealing
+  for 45,580 members took 3.019 seconds in one decision graph and 4.949 seconds
+  in eight; activation for 56,700 relations / 21,620 facts took 1.999 seconds.
+  The <5-second identity and <=5-second activation budgets were not relaxed.
+  The eight-graph result has little budget headroom; these are local runs, not
+  p95 certification. Earlier full-run activation failures above five seconds
+  motivated the additional access-plan correction; isolated success was not
+  treated as sufficient evidence.
+
+  Activation now subtracts the projected admissible relation set and groups
+  membership by relation to reject duplicate fact ownership, avoiding correlated
+  membership checks and a member-table self-join. Missing member/selector counts
+  retain their separate exact check, scoped to registered decision graphs with
+  MINUS; malformed, fractional and negative counts still fail. A trial combining
+  that check via OPTIONAL caused an optimizer stall and was discarded. The final
+  specifications also reject equal-count foreign replacement and cross-fact
+  duplicate membership, leaving the publication pending.
+
+  Evidence: /tmp/semantica-protection-final.log and
+  /tmp/semantica-protection-scale-receipt.log (local ignored test evidence).
+  No user data, extraction receipts or completed decisions were rewritten.
+  App repackaging, real ESG rerun and host change-verification were not performed
+  for this focused correction; the installed App still requires a new artifact.

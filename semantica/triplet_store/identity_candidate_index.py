@@ -55,7 +55,8 @@ class IdentityCandidateIndex:
             if not reuse_features:
                 self.owner._update_derived_graph(p.graph, delete='?s ?predicate ?o',
                     where=f'GRAPH {p.graph} {{ ?s ?predicate ?o . VALUES ?predicate {{ <{P}identityFeatures> <{P}identityDecisionPolicy> }} }}')
-            if policy_key is not None and not reuse_features:
+            # Reused features still belong to this stage's explicit rule policy.
+            if policy_key is not None:
                 p.mutate(self.generation, [p.triple(p.head, 'identityDecisionPolicy', p.scalar(policy_key))])
             indexed_rows = rows
             if resolve_candidates:

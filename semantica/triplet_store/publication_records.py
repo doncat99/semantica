@@ -207,7 +207,9 @@ class PublicationRecords:
         for field,count in [('member','memberCount')]+([('selector','selectorCount')] if kind=='identity' else []):
             missing = self.owner.store.query(f'''ASK {{ GRAPH {graph} {{
                 {head} <{P+role}> ?node . ?node <{P+pointer}> ?location }}
-                FILTER NOT EXISTS {{ GRAPH ?location {{ ?node <{P+count}> ?expected }} }} }}''')
+                MINUS {{ SELECT ?node ?location WHERE {{
+                    GRAPH {graph} {{ {head} <{P+role}> ?node . ?node <{P+pointer}> ?location }}
+                    GRAPH ?location {{ ?node <{P+count}> ?expected }} }} }} }}''')
             body=f'''?node <{P+count}> ?expected .
                 BIND(IF(datatype(?expected) IN (xsd:integer, xsd:string),
                     xsd:integer(?expected), 1/0) AS ?integer)
@@ -661,9 +663,11 @@ class PublicationRecords:
         if not self.values(self.head, 'identityIndexSealed'):
             raise ProcessingError('Native identity candidate index is not sealed')
         self._check_decision_plans('identity')
+        # Evaluate registered decision membership once; correlated NOT EXISTS
+        # makes Oxigraph enumerate canonical graph combinations per mention.
         uncovered=self.owner.store.query(f'''ASK {{ GRAPH {self.graph} {{
-            {self.head} <{P}identityMember> ?mention }} FILTER NOT EXISTS {{
-            {self.canonical_pattern('?canonical', f'?canonical <{P}member> ?mention')} }} }}''')
+            {self.head} <{P}identityMember> ?mention }} MINUS {{ SELECT ?mention WHERE {{
+            {self.canonical_pattern('?canonical', f'?canonical <{P}member> ?mention')} }} }} }}''')
         if bool(uncovered):
             raise ProcessingError('Canonical identity membership coverage is incomplete')
         count = int(next(iter(self.owner.store.query(f"""SELECT (COUNT(?canonical) AS ?count)
@@ -1088,17 +1092,16 @@ class PublicationRecords:
         if bool(invalid):
             raise ProcessingError("Canonical fact representative is not a member")
         invalid_member = self.owner.store.query(f"""ASK {{ {self.fact_pattern('?fact', f'?fact <{P}member> ?relation')}
-            FILTER NOT EXISTS {{ GRAPH {self.facts} {{
+            MINUS {{ SELECT ?relation WHERE {{ GRAPH {self.facts} {{
                 ?operation <{F}ownedRecord> ?relation . ?relation <{RDF_TYPE}> <{F}Relation> }}
                 GRAPH {self.publication_graph} {{ {self.publication_head} <{P}source> ?sourceOwner .
-                    ?sourceOwner <{P}operation> ?operation }} }} }}""")
+                    ?sourceOwner <{P}operation> ?operation }} }} }} }}""")
         if bool(invalid_member):
             raise ProcessingError("Canonical fact member is outside the current publication")
-        duplicate_member = self.owner.store.query(f"""ASK {{
-            {self.fact_pattern('?left', f'?left <{P}member> ?relation',variable='?leftFactGraph')}
-            {self.fact_pattern('?right', f'?right <{P}member> ?relation',variable='?rightFactGraph')}
-            FILTER(?left != ?right) }}""")
-        if bool(duplicate_member):
+        duplicate_member = self.owner.store.query(f"""SELECT ?relation WHERE {{
+            {self.fact_pattern('?fact', f'?fact <{P}member> ?relation')}
+            }} GROUP BY ?relation HAVING(COUNT(DISTINCT ?fact) > 1) LIMIT 1""")
+        if next(iter(duplicate_member), None) is not None:
             raise ProcessingError("Native Relation belongs to multiple canonical facts")
         relation_scope = f"""GRAPH {self.publication_graph} {{ {self.publication_head} <{P}source> ?membership .
             ?membership <{P}operation> ?operation }} GRAPH {self.facts} {{

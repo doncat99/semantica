@@ -29,6 +29,22 @@ def test_unchanged_native_features_do_not_reopen_raw_rows(tmp_path):
                 index.seal_component(ref, [canonical])
         index.publication.seal_identity_stage(generation, 'input')
 
+        def next_attempt():
+            nonlocal generation, index
+            p = index.publication
+            source = p.values(p.publication_head, 'source', graph=p.publication_graph)[0]
+            operations = [value.value for value in p.values(source, 'operation', graph=p.publication_graph)]
+            generation = store.begin_publication('p', expected_generation=generation,
+                source_count=1, canonical_count=None)['generation']
+            store.stage_publication_sources('p', generation, [dict(source='s', material='m',
+                representation='r', recipe='recipe', operation_count=len(operations), operations=operations)])
+            index = IdentityCandidateIndex(store, 'p', generation, resolver.duplicate_detector)
+
+        completed_graph = index.publication.graph
+        completed_rows = set(store.store.quads_for_pattern(None, None, None, completed_graph))
+        # Reuse occurs in a new attempt; completed stages remain immutable.
+        next_attempt()
+
         def forbidden():
             raise AssertionError('immutable native features must not restore raw entities')
 
@@ -36,6 +52,13 @@ def test_unchanged_native_features_do_not_reopen_raw_rows(tmp_path):
             policy_key='explicit-identity-policy')
         assert retained['retained_components'] == 3
         assert retained['retained_canonical_count'] == 3
+        assert set(store.store.quads_for_pattern(None, None, None, completed_graph)) == completed_rows
+        assert index.publication.one(index.publication.head, 'identityDecisionPolicy') == 'explicit-identity-policy'
+        index.publication.seal_identity_stage(generation, 'second-input')
+        next_attempt()
+        retained = index.build(lambda: iter((ref, forbidden) for ref in refs),
+            policy_key='explicit-identity-policy')
+        assert retained == dict(retained_components=3, retained_canonical_count=3)
 
         reads = []
         def changed(n):
@@ -185,8 +208,12 @@ def test_source_add_change_withdraw_only_resolves_affected_components(tmp_path, 
     assert set(after_addition).difference(before).isdisjoint(after_change)
 
     withdrawn = parameters()
-    withdrawal, withdrawal_written = build(withdrawn)
+    # Returning to a completed input references its entire stage, without indexing.
+    with monkeypatch.context() as guard:
+        guard.setattr(IdentityCandidateIndex, 'build', forbidden)
+        guard.setattr(IdentityCandidateIndex, 'hydrate_component', forbidden)
+        withdrawal, withdrawal_written = build(withdrawn)
     assert withdrawal['completedComponents'] == 0
-    assert withdrawal['retainedComponents'] > 0
+    assert withdrawal['reused'] is True
     assert not withdrawal_written
     assert decisions(withdrawn) == before

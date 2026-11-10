@@ -147,6 +147,9 @@ def test_fact_coverage_uses_relation_index_not_all_fact_pairs(tmp_path, monkeypa
         def __getattr__(self, name):
             return getattr(native, name)
         def query(self, query, **kwargs):
+            if f'<{P}member> ?relation' in query:
+                assert 'FILTER NOT EXISTS' not in query
+                assert '?leftFactGraph' not in query and '?rightFactGraph' not in query
             if 'COUNT(DISTINCT ?relation)' in query or 'SUM(xsd:integer(?expected))' in query:
                 coverage_queries.append(query)
             return native.query(query, **kwargs)
@@ -187,7 +190,29 @@ def test_activation_rejects_equal_count_foreign_member_replacement(tmp_path):
     store.close()
 
 
-def test_publication_activation_at_esg_observation_scale(tmp_path):
+def test_activation_rejects_cross_fact_duplicate_membership(tmp_path):
+    from semantica.triplet_store.publication_records import P, PublicationRecords
+    store, generation, relations, _ = stage_duplicate_observations(tmp_path)
+    index = prepare_native_fact_decisions(store, generation, relations)
+    publication = PublicationRecords(store, 'p')
+    fact = publication.iri(index.canonical_page('relation')['records'][0].id)
+    extra = publication.iri('urn:test:duplicate-fact')
+    graph = publication.record_graph(fact)
+    try:
+        store.store.add(publication.ox.Quad(publication.stage_head('fact'),
+            publication.iri(P+'fact'), extra, publication.stage_graph('fact')))
+        store.store.add(publication.ox.Quad(extra, publication.iri(P+'factDecisionGraph'),
+            graph, publication.stage_graph('fact')))
+        for quad in list(store.store.quads_for_pattern(fact, None, None, graph)):
+            store.store.add(publication.ox.Quad(extra, quad.predicate, quad.object, graph))
+        with pytest.raises(ProcessingError, match='multiple canonical facts'):
+            store.activate_publication('p', generation, indexes=indexes())
+        assert store.publication_status('p')['state'] == 'pending'
+    finally:
+        store.close()
+
+
+def test_publication_activation_at_esg_observation_scale(tmp_path, monkeypatch):
     from semantica.triplet_store.publication_records import P, PublicationRecords
     from semantica.triplet_store.extraction_records import F, RDF_TYPE
     from semantica.triplet_store.oxigraph_store import OxigraphStore
@@ -229,6 +254,19 @@ def test_publication_activation_at_esg_observation_scale(tmp_path):
     store.flush()
     store.close()
     store = OxigraphStore(tmp_path / 'scale')
+
+    native = store.store
+    class TimedStore:
+        def __getattr__(self, name):
+            return getattr(native, name)
+        def query(self, query, **options):
+            started = perf_counter()
+            result = native.query(query, **options)
+            if not isinstance(result, ox.QueryBoolean):
+                result = list(result)
+            print(f'activation query: {perf_counter()-started:.3f}s {query[:110]}', flush=True)
+            return result
+    monkeypatch.setattr(store, 'store', TimedStore())
 
     started = perf_counter()
     store.activate_publication('scale', generation, indexes=indexes())

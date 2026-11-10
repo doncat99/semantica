@@ -42,6 +42,54 @@ def test_native_components_keep_alias_bridges_identifiers_and_input_order(tmp_pa
         store.close()
 
 
+@pytest.mark.parametrize('graph_count', [1, 8])
+def test_identity_seal_persistent_45580_member_scale(tmp_path, monkeypatch, graph_count):
+    import time
+    from semantica.triplet_store.publication_records import PublicationRecords
+
+    store, generation, _ = staged(tmp_path, 1, canonical_count=None)
+    p = PublicationRecords(store, 'p', stage='identity')
+    ox = store._oxigraph
+    size = 45580
+    try:
+        p.mutate(generation, [p.triple(p.head, 'identityIndexSealed', ox.Literal(size))])
+        def quads():
+            for i in range(size):
+                canonical, mention = ox.NamedNode('urn:c:'+str(i)), ox.NamedNode('urn:m:'+str(i))
+                location = ox.NamedNode(p.graph.value+':decision:'+str(i % graph_count))
+                for subject, field, value, graph in (
+                        (p.head, 'canonical', canonical, p.graph),
+                        (p.head, 'identityMember', mention, p.graph),
+                        (canonical, 'canonicalGraph', location, p.graph),
+                        (canonical, 'member', mention, location),
+                        (canonical, 'memberCount', ox.Literal(1), location),
+                        (canonical, 'selectorCount', ox.Literal(0), location)):
+                    yield ox.Quad(subject, ox.NamedNode(P+field), value, graph)
+        store.store.extend(quads())
+        store.flush()
+        native = store.store
+        class TimedStore:
+            def __getattr__(self, name):
+                return getattr(native, name)
+            def query(self, query, **options):
+                if f'<{P}identityMember>' in query:
+                    assert 'FILTER NOT EXISTS' not in query, 'Coverage must not correlate decisions per mention'
+                start = time.perf_counter()
+                result = native.query(query, **options)
+                if not isinstance(result, ox.QueryBoolean):
+                    result = list(result)
+                print(f'seal query: {time.perf_counter()-start:.3f}s {query[:110]}', flush=True)
+                return result
+        monkeypatch.setattr(store, 'store', TimedStore())
+        start = time.perf_counter()
+        assert p.seal_identity_stage(generation, 'scale') == size
+        elapsed = time.perf_counter()-start
+        print(f'identity seal: {size} members, {elapsed:.3f}s')
+        assert elapsed < 5
+    finally:
+        store.close()
+
+
 def test_unsealed_incomplete_or_foreign_index_never_serves_partial_components(tmp_path):
     store, generation, ids = staged(tmp_path, 3)
     resolver = EntityResolver(strategy='contextual')
@@ -685,7 +733,8 @@ def test_component_dependencies_stream_beyond_single_write_budget(tmp_path):
         store.close()
 
 
-def test_identity_seal_checks_exact_coverage_without_per_mention_queries(tmp_path, monkeypatch):
+@pytest.mark.parametrize('damage', ['unregistered', 'replaced-member'])
+def test_identity_seal_checks_exact_coverage_without_per_mention_queries(tmp_path, monkeypatch, damage):
     from semantica.triplet_store.publication_records import P
     store, generation, ids = staged(tmp_path, 3, canonical_count=None)
     resolver = EntityResolver(strategy='contextual')
@@ -706,6 +755,9 @@ def test_identity_seal_checks_exact_coverage_without_per_mention_queries(tmp_pat
             def __getattr__(self, key):
                 return getattr(native, key)
             def query(self, query, **options):
+                if f'<{P}identityMember>' in query:
+                    assert 'FILTER NOT EXISTS' not in query, \
+                        'Coverage must subtract the completed member set once, not correlate all decisions per mention'
                 queries.append(query)
                 return native.query(query, **options)
             def quads_for_pattern(self, s, pred, o, graph):
@@ -713,13 +765,19 @@ def test_identity_seal_checks_exact_coverage_without_per_mention_queries(tmp_pat
                     pytest.fail('seal must not issue one membership point read per mention')
                 yield from native.quads_for_pattern(s, pred, o, graph)
         monkeypatch.setattr(store, 'store', IndexedCoverage())
-        # A reference from an unregistered canonical must not satisfy coverage.
         target = ox.NamedNode('urn:canonical:2')
-        quad = ox.Quad(p.head, canonical, target, p.graph)
+        # Equal counts cannot disguise a substituted or unregistered member.
+        quad = (ox.Quad(p.head, canonical, target, p.graph) if damage == 'unregistered'
+            else ox.Quad(target, member, ox.NamedNode(ids[2]), p.record_graph(target)))
         native.remove(quad)
+        replacement = ox.Quad(target, member, ox.NamedNode('urn:foreign:mention'), p.record_graph(target))
+        if damage == 'replaced-member':
+            native.add(replacement)
         with pytest.raises(ProcessingError, match='coverage'):
             p.seal_identity_stage(generation, 'input')
         assert not p.values(p.head, 'identityStageInput')
+        if damage == 'replaced-member':
+            native.remove(replacement)
         native.add(quad)
         queries.clear()
         assert p.seal_identity_stage(generation, 'input') == 3

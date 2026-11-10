@@ -68,8 +68,9 @@ def test_flat_migration_rejects_incomplete_identity_before_mutating(tmp_path):
         store.close()
 
 
-@pytest.mark.parametrize('value', ['not-a-number', '1.5', '-1'])
-def test_activation_rejects_invalid_decision_count(tmp_path, value):
+@pytest.mark.parametrize('field', ['memberCount', 'selectorCount'])
+@pytest.mark.parametrize('value', [None, 'not-a-number', '1.5', '-1'])
+def test_activation_rejects_invalid_decision_count(tmp_path, value, field):
     from semantica.triplet_store.publication_records import P, PublicationRecords
     store, _, receipt, identity = fixture(tmp_path)
     try:
@@ -77,11 +78,12 @@ def test_activation_rejects_invalid_decision_count(tmp_path, value):
         owner = PublicationRecords(store, 'p')
         node = owner.iri('urn:canonical:acme')
         graph = owner.record_graph(node)
-        predicate = owner.iri(P+'memberCount')
+        predicate = owner.iri(P+field)
         for quad in list(store.store.quads_for_pattern(node, predicate, None, graph)):
             store.store.remove(quad)
-        store.store.add(owner.ox.Quad(node, predicate, owner.scalar(value), graph))
-        with pytest.raises(ProcessingError, match='membership plan is incomplete'):
+        if value is not None:
+            store.store.add(owner.ox.Quad(node, predicate, owner.scalar(value), graph))
+        with pytest.raises(ProcessingError, match='plan is incomplete'):
             owner.activate(generation, indexes=indexes())
         assert owner.status()['state'] == 'pending'
     finally:
