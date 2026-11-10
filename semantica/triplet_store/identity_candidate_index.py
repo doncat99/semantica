@@ -621,15 +621,17 @@ class IdentityCandidateIndex:
                     {p.canonical_pattern('?id', f'?id <{P}member> ?native')}
                     GRAPH {p.graph} {{ ?native <{P}identityEvidence> ?evidence }}"""
             cursor_clause = '' if position is None else f'FILTER(STR(?id) > {p.scalar(position)})'
-            rows = list(self.owner.store.query(f"""SELECT DISTINCT ?id ?representative WHERE {{
+            window_scope = ('canonical-references', scope)
+            rows, stream = p.query_window(self.generation, window_scope, after, f"""SELECT DISTINCT ?id ?representative WHERE {{
                 {p.canonical_pattern('?id', f'?id <{P}representative> ?representative')}
-                {evidence_clause} {cursor_clause} }} ORDER BY STR(?id) LIMIT {limit+1}"""))
+                {evidence_clause} {cursor_clause} }} ORDER BY STR(?id)""", limit)
             selected = rows[:limit]
             response = dict(records=[dict(id=row['id'].value,
                 representative=row['representative'].value) for row in selected],
                 next_cursor=prefix+selected[-1]['id'].value.encode().hex() if len(rows)>limit else None)
             if len(json.dumps(response, ensure_ascii=False).encode()) > max_bytes:
                 raise ProcessingError('Native canonical reference page exceeds byte budget')
+            p.retain_window(self.generation, window_scope, response['next_cursor'], rows, len(selected), stream)
             self._fence()
             return response
 

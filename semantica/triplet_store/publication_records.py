@@ -1221,6 +1221,19 @@ class PublicationRecords:
         if next(iter(incomplete), None) is not None:
             raise ProcessingError("Native build operation plan is incomplete")
 
+    def query_window(self, generation, scope, after, query, limit):
+        """Reuse one ordered traversal inside an immutable, locked build scope."""
+        scoped = getattr(self.owner, '_build_plan_scope', None) == (self.publication_graph.value, generation)
+        current = getattr(self.owner, '_build_cursor', None) if scoped else None
+        stream = (current[2] if current is not None and current[:2] == (scope, after)
+                  else iter(self.owner.store.query(query + ('' if scoped else f' LIMIT {limit+1}'))))
+        return list(islice(stream, limit+1)), stream
+
+    def retain_window(self, generation, scope, cursor, rows, consumed, stream):
+        if getattr(self.owner, '_build_plan_scope', None) == (self.publication_graph.value, generation):
+            self.owner._build_cursor = ((scope, cursor, chain(rows[consumed:], stream))
+                                       if cursor is not None else None)
+
     @_locked
     def build_read(self, generation, record_ids, *, fields=None, max_bytes=MAX_BYTES):
         """Point reads for computation; public consumers still require ready state."""

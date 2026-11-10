@@ -82,6 +82,41 @@ def test_completed_read_never_reconciles_or_serializes_support_bodies(tmp_path,m
         store.close()
 
 
+def test_build_topology_traverses_once_and_preserves_byte_limited_lookahead(tmp_path,monkeypatch):
+    store,generation,refs,_=stage_duplicate_observations(tmp_path,relations_per_source=10)
+    index=QualifiedFactIndex(store,'p',generation)
+    try:
+        for number,reference in enumerate(refs):
+            records=ExtractionRecords.from_fact_reference(store,'p',reference)
+            # Distinct qualifiers produce distinct decisions with identical endpoints.
+            store.store.add(records.ox.Quad(records.ox.NamedNode(reference),records.ox.NamedNode(F+'time'),
+                records.ox.Literal(str(number)),records.graph))
+            records.write_fact_projection(reference,assertion_id=f'a:{number}',relation_id=f'r:{number}',
+                source_id='urn:canonical:0',target_id='urn:canonical:1',predicate='owns',
+                qualifiers={'polarity':'positive','time':str(number)},evidence_ids=[f'e:{number}'])
+        index.reconcile_and_stage(input_key='input')
+        expected=index.topology_page()['records']
+        native=store.store
+        queries=[]
+        class Counted:
+            def __getattr__(self,name): return getattr(native,name)
+            def query(self,query,**options):
+                if 'SELECT ?id ?source ?target ?predicate' in query: queries.append(query)
+                return native.query(query,**options)
+        monkeypatch.setattr(store,'store',Counted())
+        with index.publication.build_scope(generation):
+            cursor=None;actual=[]
+            while True:
+                page=index.topology_page(after=cursor,limit=13,max_bytes=600)
+                actual.extend(page['records']);cursor=page['next_cursor']
+                if cursor is None: break
+        assert actual==expected
+        assert len(queries)==1
+        assert store._build_cursor is None
+    finally:
+        store.close()
+
+
 def test_small_groups_use_projected_input_and_one_import(tmp_path,monkeypatch):
     store,generation,refs,_=stage_duplicate_observations(tmp_path,relations_per_source=70)
     try:

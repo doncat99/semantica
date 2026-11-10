@@ -896,3 +896,32 @@ def test_offline_identity_rebinding_requires_exact_complete_semantics(tmp_path, 
             assert p.values(old_head, 'identityStageInput', graph=old_graph) == [p.scalar('old-contract')]
     finally:
         store.close()
+
+
+def test_build_canonical_pages_execute_one_sorted_traversal(tmp_path, monkeypatch):
+    store,generation,ids=staged(tmp_path,260,canonical_count=None)
+    resolver=EntityResolver(strategy='contextual')
+    index=IdentityCandidateIndex(store,'p',generation,resolver.duplicate_detector)
+    try:
+        index.build(lambda:iter(zip(ids,[dict(id=str(n),name='N'+str(n),type='ORG') for n in range(260)])),resolve_candidates=False)
+        for offset in range(0,260,128):
+            store.stage_publication_canonical('p',generation,[dict(id=f'urn:c:{n:04}',representative=ref,
+                members=[ref],member_count=1,selectors=[],selector_count=0) for n,ref in enumerate(ids[offset:offset+128],offset)])
+        store.seal_publication_canonical_count('p',generation,260)
+        native=store.store
+        queries=[]
+        class Counted:
+            def __getattr__(self,name): return getattr(native,name)
+            def query(self,query,**options):
+                if 'SELECT DISTINCT ?id ?representative' in query: queries.append(query)
+                return native.query(query,**options)
+        monkeypatch.setattr(store,'store',Counted())
+        with index.publication.build_scope(generation):
+            cursor=None;actual=[]
+            while True:
+                page=index.canonical_references(after=cursor,limit=13)
+                actual.extend(v['id'] for v in page['records']);cursor=page['next_cursor']
+                if cursor is None: break
+        assert actual==[f'urn:c:{n:04}' for n in range(260)]
+        assert len(queries)==1, 'Full topology traversal must not sort all decisions per page'
+    finally: store.close()

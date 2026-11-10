@@ -301,3 +301,22 @@ in 65.648 s, RSS 224.95 MiB. Concurrent scale/regression execution measured the
 completed lookup 0.0033 s); this contended measurement is not a performance
 pass or a comparison with the previous isolated measurement. Packaged final
 ready and unchanged-input evidence remain mandatory and are not yet proven.
+
+## Organization traversal handoff
+
+The real build subsequently exposed repeated full sorting in topology paging:
+canonical-reference pages took about 2 s each and topology pages 2–3 s each.
+The existing locked immutable build scope now retains one query iterator and
+bounded page lookahead, as the native input traversal already does. No decision
+rows are copied or persisted; cancellation/scope exit clears the iterator.
+Byte-limited topology pages retain unconsumed references without dropping rows.
+Outside that build scope, existing seek cursors retain their independent reads.
+
+The canonical regression first failed with 20 sorted queries for 20 pages and
+now requires one. The topology regression covers byte-limited lookahead and
+scope cleanup. Focused identity/fact/publication tests: 91 passed (59.27 s),
+plus the added topology test passed. Read-only real full traversal: 25,286
+canonical references in 5.78 s, selected names in 10.08 s, 27,111 topology
+edges in 6.00 s. These timings do not prove complete organization performance.
+At the user's request, further performance work is deferred in favor of
+finishing the packaged real build and checking its final published result.

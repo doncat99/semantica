@@ -433,10 +433,11 @@ class QualifiedFactIndex:
         with self.owner._publication_lock:
             self._fence()
             cursor=f'FILTER(STR(?id) > {p.scalar(after)})' if after is not None else ''
-            rows=list(self.owner.store.query(f'''SELECT ?id ?source ?target ?predicate WHERE {{
+            scope=('fact-topology',p.project,self.generation)
+            rows,stream=p.query_window(self.generation,scope,after,f'''SELECT ?id ?source ?target ?predicate WHERE {{
                 {p.fact_pattern('?id', f'?id <{P}source> ?source ; <{P}target> ?target ; <{P}representative> ?representative . {cursor}')}
                 GRAPH {p.facts} {{ ?representative <{F}predicateName> ?predicate }}
-                }} ORDER BY ?id LIMIT {limit+1}'''))
+                }} ORDER BY ?id''',limit)
         values=[]
         for row in rows[:limit]:
             value={key:row[key].value for key in ('id','source','target')}
@@ -446,7 +447,11 @@ class QualifiedFactIndex:
                     raise ProcessingError('Native topology item exceeds byte budget')
                 break
             values.append(value)
-        return dict(records=values,next_cursor=values[-1]['id'] if len(rows)>len(values) else None)
+        result=dict(records=values,next_cursor=values[-1]['id'] if len(rows)>len(values) else None)
+        with self.owner._publication_lock:
+            self._fence()
+            p.retain_window(self.generation,scope,result['next_cursor'],rows,len(values),stream)
+        return result
 
     def _selected_observation(self,reference,kind,observation):
         records=ExtractionRecords.from_fact_reference(self.owner,self.publication.project,reference)
