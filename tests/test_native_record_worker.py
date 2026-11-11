@@ -20,7 +20,7 @@ def test_release_before_initial_publication_requires_no_fabricated_generation(tm
 
 
 @pytest.fixture
-def publication(tmp_path):
+def publication(tmp_path, request):
     path = tmp_path / 'facts'
     owner = OxigraphStore(path)
     binding = dict(project='project-1', source='source-1', material='m', representation='r',
@@ -44,6 +44,10 @@ def publication(tmp_path):
     owner.stage_publication_topics('project-1', generation, [dict(id='topic:acme', title='Acme theme',
         report_id='report:overview', input_digest='sha256:input', members=['urn:canonical:acme'],
         member_count=1, evidence_ids=[evidence], evidence_count=1)])
+    for index in range(getattr(request, 'param', 0)):
+        owner.stage_publication_topics('project-1', generation, [dict(id=f'topic:batch:{index:04}', title='测量' * 100,
+            report_id='report:overview', input_digest='sha256:input', members=['urn:canonical:acme'],
+            member_count=1, evidence_ids=[evidence], evidence_count=1)])
     owner.activate_publication('project-1', generation, indexes={
         'keyword': dict(kind='native-keyword', store_id='keyword', recipe_digest='recipe'),
         'semantic': dict(kind='native-vector', store_id='vector', recipe_digest='recipe', space_id='space')})
@@ -248,3 +252,84 @@ def test_jsonl_native_store_release_ack_precedes_writer_open(publication):
             child.wait(timeout=10)
         child.stdout.close()
         child.stderr.close()
+
+
+def test_build_streams_are_explicit_interleaved_and_bound(publication):
+    ref, _ = publication
+    def call(method, **params):
+        return handle_request(dict(id=method, method=method, params=dict(
+            projectId=ref['project'], semanticStore=ref, buildId='build-1', **params)))['result']
+    nodes = call('open_stream', selection=dict(kind='nodes', fields=['id'], limit=1))
+    topics = call('open_stream', selection=dict(kind='topics', limit=1))
+    assert nodes['streamId'] != topics['streamId']
+    assert call('next_stream', streamId=nodes['streamId'], sequence=0)['page']['nodes'] == [dict(id='urn:canonical:acme')]
+    assert call('next_stream', streamId=topics['streamId'], sequence=0)['page']['nodes'][0]['id'] == 'topic:acme'
+    members = call('open_stream', selection=dict(kind='members', limit=1))
+    assert call('next_stream', streamId=members['streamId'], sequence=0)['page']['members'] == [dict(parent='topic:acme', child='urn:canonical:acme')]
+    with pytest.raises(Exception, match='stream'):
+        call('next_stream', streamId=nodes['streamId'], sequence=0)
+    assert call('close_stream', streamId=nodes['streamId'])['closed']
+
+
+@pytest.mark.parametrize('publication', [260], indirect=True)
+@pytest.mark.parametrize('budget', [262144, 2048])
+def test_build_streams_cross_pages_once_without_losing_byte_lookahead(publication, monkeypatch, budget):
+    import json
+    from semantica.semantic_query_worker import _native_store
+    ref, _ = publication
+    native = _native_store.owner.store
+    queries = []
+    class ObservedStore:
+        def query(self, query, *args, **kwargs):
+            queries.append(query)
+            return native.query(query, *args, **kwargs)
+        def __getattr__(self, key):
+            return getattr(native, key)
+    monkeypatch.setattr(_native_store.owner, 'store', ObservedStore())
+    def call(method, **params):
+        return handle_request(dict(id=method, method=method, params=dict(
+            projectId=ref['project'], semanticStore=ref, buildId='build-many', **params)))['result']
+    handles = {kind: call('open_stream', selection=dict(kind=kind, limit=128, maxBytes=budget))['streamId']
+               for kind in ('topics', 'members')}
+    rows = {kind: [] for kind in handles}
+    sequence = dict.fromkeys(handles, 0)
+    while handles:
+        for kind, handle in list(handles.items()):
+            result = call('next_stream', streamId=handle, sequence=sequence[kind])
+            sequence[kind] += 1
+            assert len(json.dumps(result, ensure_ascii=False).encode()) <= budget
+            batch = result['page']['nodes' if kind == 'topics' else 'members']
+            assert len(batch) <= 128
+            rows[kind].extend(batch)
+            if result['done']:
+                del handles[kind]
+    assert len(rows['topics']) == 261
+    assert len({row['id'] for row in rows['topics']}) == 261
+    assert {row['id'] for row in rows['topics']} == {row['parent'] for row in rows['members']}
+    assert len(rows['members']) == 261
+    primary = [query for query in queries if 'ORDER BY ?id LIMIT' in query or 'ORDER BY ?id' in query or 'ORDER BY ?parent ?child' in query]
+    assert len(primary) == 2, primary
+    assert not _native_store.streams
+
+
+def test_build_stream_lifecycle_rejects_foreign_replay_and_release(publication):
+    from semantica.semantic_query_worker import _native_store
+    ref, _ = publication
+    def call(method, build='build', **params):
+        return handle_request(dict(id=method, method=method, params=dict(
+            projectId=ref['project'], semanticStore=ref, buildId=build, **params)))['result']
+    handles = [call('open_stream', selection=dict(kind='topics'))['streamId'] for _ in range(8)]
+    with pytest.raises(Exception, match='capacity'):
+        call('open_stream', selection=dict(kind='topics'))
+    with pytest.raises(Exception, match='identity'):
+        call('next_stream', build='foreign', streamId=handles[0], sequence=0)
+    with pytest.raises(Exception, match='sequence'):
+        call('next_stream', streamId=handles[0], sequence=1)
+    assert len(_native_store.streams) == 8
+    call('close_stream', streamId=handles[0])
+    assert len(_native_store.streams) == 7
+    handle_request(release_request(ref))
+    assert not _native_store.streams
+    handle_request(dict(id='acquire', method='acquire_store', params=dict(semanticStore=ref)))
+    with pytest.raises(Exception, match='missing'):
+        call('next_stream', streamId=handles[1], sequence=0)

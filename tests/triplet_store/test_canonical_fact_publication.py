@@ -93,6 +93,12 @@ def test_duplicate_native_observations_publish_one_canonical_fact_with_all_suppo
     scene = store.read_publication_scene('p', generation, dict(kind='links', visibleIds=['urn:canonical:0', 'urn:canonical:1']))
     assert len(scene['links']) == 1
     assert set(scene['links'][0]['sourceIds']) == {'s1', 's2'}
+    nodes = store.read_publication_scene('p', generation, dict(kind='nodes', fields=['id', 'name', 'entityType', 'sourceIds']))['nodes']
+    assert len(nodes) == 2
+    assert all(node['sourceIds'] == ['s1', 's2'] for node in nodes)
+    scoped = store.read_publication_scene('p', generation, dict(kind='nodes', fields=['id', 'name', 'entityType', 'sourceIds'], sourceIds=['s2']))['nodes']
+    assert len(scoped) == 2
+    assert all(node['sourceIds'] == ['s2'] for node in scoped)
     assert len(scene['links'][0]['evidenceIds']) == 2
     assert store.read_publication_scene('p', generation, dict(kind='incident',nodeId='urn:canonical:0'))['links'] == scene['links']
     assert {n['id'] for n in store.read_publication_scene('p', generation, dict(kind='nodes',recordIds=[plan['id']]))['nodes']} == {'urn:canonical:0','urn:canonical:1'}
@@ -317,3 +323,28 @@ def test_only_production_fact_decision_writer_is_exposed():
     assert not hasattr(OxigraphStore, 'stage_publication_facts')
     assert not hasattr(PublicationRecords, 'stage_facts')
     assert not hasattr(PublicationRecords, '_fact_triples')
+
+
+def test_fact_cards_read_completed_decisions_without_support_hydration(tmp_path, monkeypatch):
+    from semantica.triplet_store.publication_records import PublicationRecords
+    store, generation, refs, _ = stage_duplicate_observations(tmp_path)
+    prepare_native_fact_decisions(store, generation, refs)
+    store.activate_publication('p', generation, indexes=indexes())
+    def forbidden(*args, **kwargs):
+        raise AssertionError('Overview must not hydrate support or recompute knowledge')
+    monkeypatch.setattr(PublicationRecords, '_fact_scene_link', forbidden)
+    monkeypatch.setattr(PublicationRecords, '_canonical_references', forbidden)
+    page = store.read_publication_scene('p', generation, dict(kind='facts', limit=1))
+    assert page['next_cursor'] is None
+    fact = page['nodes'][0]
+    assert fact['kind'] == 'fact'
+    assert fact['label'] == 'Acme owns Engine'
+    assert fact['source'] == 'urn:canonical:0'
+    assert fact['target'] == 'urn:canonical:1'
+    assert not {'members', 'evidenceIds', 'fields'} & fact.keys()
+    assert store.read_publication_scene('p', generation, dict(kind='facts', factIds=[fact['id']])) == page
+    with pytest.raises(ProcessingError):
+        store.read_publication_scene('p', generation, dict(kind='facts', factIds=['urn:missing']))
+    with pytest.raises(ProcessingError):
+        store.read_publication_scene('p', generation, dict(kind='facts', factIds=[fact['id']], after=fact['id']))
+    store.close()

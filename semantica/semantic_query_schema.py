@@ -219,7 +219,7 @@ class SemanticQueryResult(StrictModel):
 class QueryWorkerRequest(StrictModel):
     protocol: Literal[QUERY_PROTOCOL] = QUERY_PROTOCOL
     id: str
-    method: Literal["query", "schema", "records", "section", "scene", "classification", "classification_batch", "bindings", "evidence", "reader", "acquire_store", "release_store"]
+    method: Literal["query", "schema", "records", "section", "scene", "classification", "classification_batch", "bindings", "evidence", "reader", "acquire_store", "release_store", "open_stream", "next_stream", "close_stream"]
     params: Dict[str, object] = Field(default_factory=dict)
 
 
@@ -244,6 +244,30 @@ class NativeSceneRequest(StrictModel):
         if len(self.selection) > 8:
             raise ValueError('native scene selection exceeds field budget')
         return self
+
+
+class NativeStreamIdentity(StrictModel):
+    project_id: str = Field(alias='projectId', min_length=1, max_length=4096)
+    semantic_store: NativeStoreRef = Field(alias='semanticStore')
+    build_id: str = Field(alias='buildId', min_length=1, max_length=128)
+
+    @model_validator(mode='after')
+    def validate_identity(self):
+        if self.project_id != self.semantic_store.project:
+            raise ValueError('native stream project differs from request project')
+        return self
+
+
+class NativeStreamOpen(NativeStreamIdentity):
+    selection: Dict[str, object]
+
+
+class NativeStreamClose(NativeStreamIdentity):
+    stream_id: str = Field(alias='streamId', min_length=1, max_length=128)
+
+
+class NativeStreamNext(NativeStreamClose):
+    sequence: int = Field(ge=0, strict=True)
 
 
 class NativeClassificationSelection(StrictModel):

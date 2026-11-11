@@ -25,10 +25,60 @@ def admit_native_store(reference, project, owner):
     return owner
 
 
+class NativeTraversal:
+    """One native iterator and at most one bounded lookahead batch."""
+    def __init__(self, request):
+        self.reference = request.semantic_store
+        self.build_id = request.build_id
+        self.selection = dict(request.selection)
+        allowed = {'nodes', 'facts', 'sources', 'communities', 'topics', 'topology', 'members'}
+        if (self.selection.get('kind') not in allowed
+                or set(self.selection) - {'kind', 'fields', 'limit', 'maxBytes'}):
+            raise QueryError('invalid native stream selection')
+        self.selection.setdefault('limit', 128)
+        self.selection.setdefault('maxBytes', 262144)
+        if (type(self.selection['limit']) is not int or not 1 <= self.selection['limit'] <= 128
+                or type(self.selection['maxBytes']) is not int or not 1 <= self.selection['maxBytes'] <= 262144):
+            raise QueryError('invalid native stream budget')
+        self.max_bytes = self.selection['maxBytes']
+        if self.max_bytes <= 128:
+            raise QueryError('native stream byte budget cannot fit an envelope')
+        self.selection['maxBytes'] -= 128
+        self.iterator = None
+        self.rows = []
+        self.sequence = 0
+        self.touched = time.monotonic()
+
+    def window(self, store, query, limit):
+        from itertools import islice
+        import re
+        if self.iterator is None:
+            self.iterator = iter(store.query(re.sub(r' LIMIT \d+\s*$', '', query)))
+        self.rows = list(islice(self.iterator, limit + 1))
+        return self.rows
+
+    def read(self, owner):
+        from itertools import chain
+        from .triplet_store.publication_records import PublicationRecords
+        records = PublicationRecords(owner, self.reference.project)
+        if self.selection['kind'] == 'members':
+            result = records.stream_members(self.reference.generation, self.selection, self)
+            consumed = len(result['members'])
+        else:
+            result = records.scene(self.reference.generation, self.selection, self)
+            consumed = len(result['nodes']) + len(result['links'])
+        self.iterator = chain(self.rows[consumed:], self.iterator)
+        self.rows = []
+        self.sequence += 1
+        self.touched = time.monotonic()
+        return result
+
+
 class NativeQueryStore:
     """One exclusive native handle in the existing serial query worker."""
     def __init__(self):
         self.owner = self.reference = None
+        self.streams = {}
 
     def acquire(self, reference):
         from .triplet_store.oxigraph_store import OxigraphStore
@@ -60,6 +110,47 @@ class NativeQueryStore:
             raise QueryError('native store must be acquired for this identity')
         return admit_native_store(reference, project, self.owner)
 
+    def stream(self, method, request):
+        from uuid import uuid4
+        owner = self.borrow(request.semantic_store, request.project_id)
+        now = time.monotonic()
+        for key in list(self.streams):
+            if now - self.streams[key].touched > 60:
+                del self.streams[key]
+        if method == 'open_stream':
+            if len(self.streams) >= 8:
+                raise QueryError('native stream capacity exceeded')
+            stream = NativeTraversal(request)
+            key = str(uuid4())
+            self.streams[key] = stream
+            return dict(streamId=key)
+        key = request.stream_id
+        stream = self.streams.get(key)
+        if stream is None:
+            if method == 'close_stream':
+                return dict(closed=True)
+            raise QueryError('native stream missing or expired')
+        if stream.reference != request.semantic_store or stream.build_id != request.build_id:
+            raise QueryError('native stream identity differs')
+        if method == 'close_stream':
+            del self.streams[key]
+            return dict(closed=True)
+        if request.sequence != stream.sequence:
+            raise QueryError('native stream sequence differs')
+        try:
+            page = stream.read(owner)
+            self.borrow(request.semantic_store, request.project_id)
+            done = page['next_cursor'] is None
+            result = dict(page=page, done=done, sequence=request.sequence)
+            if len(json.dumps(result, ensure_ascii=False).encode()) > stream.max_bytes:
+                raise QueryError('native stream response exceeds byte budget')
+            if done:
+                del self.streams[key]
+            return result
+        except BaseException:
+            self.streams.pop(key, None)
+            raise
+
     def release(self, reference):
         if self.owner is not None and (reference.path, reference.project) != (self.reference.path, self.reference.project):
             raise QueryError('native store release identity does not match')
@@ -67,6 +158,7 @@ class NativeQueryStore:
         return dict(project=reference.project, released=True)
 
     def close(self):
+        self.streams.clear()
         if self.owner is not None:
             self.owner.close()
             self.owner, self.reference = None, None

@@ -134,6 +134,10 @@ def handle_request(raw: Dict[str, Any]) -> Dict[str, Any]:
             after=selection.after, limit=selection.limit, max_bytes=selection.max_bytes)
         _native_store.borrow(selected.semantic_store, selected.project_id)
         return _response(request.id, True, result=result)
+    if request.method in {'open_stream', 'next_stream', 'close_stream'}:
+        from .semantic_query_schema import NativeStreamOpen, NativeStreamNext, NativeStreamClose
+        schema = {'open_stream': NativeStreamOpen, 'next_stream': NativeStreamNext, 'close_stream': NativeStreamClose}[request.method]
+        return _response(request.id, True, result=_native_store.stream(request.method, schema.model_validate(request.params)))
     if request.method == 'scene':
         selected = NativeSceneRequest.model_validate(request.params)
         owner = _native_store.borrow(selected.semantic_store, selected.project_id)

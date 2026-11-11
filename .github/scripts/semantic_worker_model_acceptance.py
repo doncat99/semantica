@@ -294,6 +294,49 @@ def verify_model_paths(root, destination):
                     assert document_page.get("nextPosition") is None
                     if mode == "keyword":
                         assert set(visited) == set(readers) and document_page["total"] == 2
+                # Full builds hold independent iterators in this same native worker.
+                stream_params = {"projectId": "native", "semanticStore": built["semanticStore"], "buildId": "native-acceptance"}
+                handles, streamed = {}, {}
+                for kind in ("nodes", "facts", "sources", "communities", "topics", "topology", "members"):
+                    selection = {"kind": kind, "limit": 1, "maxBytes": 262144}
+                    if kind == "nodes":
+                        selection["fields"] = ["id", "name", "entityType", "sourceIds"]
+                    elif kind == "topology":
+                        selection["fields"] = ["id", "source", "target", "predicate"]
+                    opened = session.call("open_stream", {**stream_params, "selection": selection})
+                    handles[kind] = [opened["streamId"], 0]
+                    streamed[kind] = []
+                while handles:
+                    for kind, (handle, sequence) in list(handles.items()):
+                        batch = session.call("next_stream", {**stream_params, "streamId": handle, "sequence": sequence})
+                        assert batch["sequence"] == sequence
+                        assert len(json.dumps(batch, ensure_ascii=False).encode()) <= 262144
+                        page = batch["page"]
+                        assert page["generation"] == built["publication"]["generation"]
+                        rows = page.get("members", page.get("nodes", []) + page.get("links", []))
+                        assert len(rows) <= 1
+                        streamed[kind].extend(rows)
+                        if batch["done"]:
+                            del handles[kind]
+                        else:
+                            handles[kind][1] += 1
+                for kind in ("nodes", "facts", "sources", "communities", "topics", "topology"):
+                    selection = {"kind": kind, "limit": 128, "maxBytes": 262144}
+                    if kind == "nodes":
+                        selection["fields"] = ["id", "name", "entityType", "sourceIds"]
+                    elif kind == "topology":
+                        selection["fields"] = ["id", "source", "target", "predicate"]
+                    expected = session.call("scene", {**scene_params, "selection": selection})
+                    assert expected["next_cursor"] is None
+                    assert streamed[kind] == expected["nodes"] + expected["links"], (kind, streamed[kind], expected)
+                expected_members = set()
+                for parent in streamed["topics"] + streamed["communities"]:
+                    expected = session.call("scene", {**scene_params, "selection": {"kind": "nodes",
+                        "topicId" if parent["kind"] == "topic" else "communityId": parent["id"], "limit": 128}})
+                    assert expected["next_cursor"] is None
+                    expected_members.update((parent["id"], child["id"]) for child in expected["nodes"])
+                assert {(row["parent"], row["child"]) for row in streamed["members"]} == expected_members
+                assert len(streamed["members"]) == len(expected_members)
                 session.call("release_store", {"semanticStore": {key: built["semanticStore"][key]
                     for key in ("path", "project")}})
             # A second fresh process must acquire the same ready publication explicitly.
@@ -321,6 +364,7 @@ def verify_model_paths(root, destination):
                 "operations": calls, "queryModes": ["keyword", "semantic"], "semanticOriginalRanges": True,
                 "nativeAcquisitionReopen": True, "boundedCanonicalRecords": True,
                 "nativeGroundedTopics": True, "nativeTopicMembers": True,
+                "nativeBuildStreams": True, "interleavedStreams": 7,
                 "modelReceipts": len(built["relayReceiptManifest"]), "explanationReceipts": explained["receiptCount"]}
             destination.write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
             return result
