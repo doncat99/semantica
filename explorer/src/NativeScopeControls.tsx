@@ -3,8 +3,8 @@ import { useQueryClient } from '@tanstack/react-query';
 
 type CatalogKind = 'sources' | 'communities' | 'topics';
 type CatalogPage = { nodes: Array<{ id: string; title?: string; memberCount?: number }>; next_cursor: string | null };
-type Selection = { sourceId?: string; communityId?: string; topicId?: string; nodeIds?: string[]; after?: string };
-type Active = { selection: Selection; next_cursor: string | null; nodeCount: number; linkCount: number };
+type Selection = { sourceId?: string; communityId?: string; topicId?: string; nodeIds?: string[] };
+type Active = { selection: Selection; nodeCount: number; linkCount: number };
 
 async function read<T>(url: string, signal: AbortSignal, selection?: Selection): Promise<T> {
   const response = await fetch(url, { signal, ...(selection ? { method: 'POST',
@@ -16,8 +16,9 @@ async function read<T>(url: string, signal: AbortSignal, selection?: Selection):
   return response.json() as Promise<T>;
 }
 
-/** Explicit input to existing native algorithms; no automatic project traversal. */
-export function NativeScopeControls({ onChange }: { onChange: () => void }) {
+/** Optional filters for the automatically loaded Project graph. */
+export function NativeScopeControls({ onChange, onReady }: { onChange: () => void; onReady?: () => void }) {
+  const ready = useRef(onReady);
   const client = useQueryClient();
   const [available, setAvailable] = useState(false);
   const [kind, setKind] = useState<CatalogKind>('sources');
@@ -25,7 +26,6 @@ export function NativeScopeControls({ onChange }: { onChange: () => void }) {
   const [chosen, setChosen] = useState('');
   const [ids, setIds] = useState('');
   const [active, setActive] = useState<Active | null>(null);
-  const [history, setHistory] = useState<Selection[]>([]);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState('');
   const pending = useRef<AbortController | null>(null);
@@ -36,6 +36,7 @@ export function NativeScopeControls({ onChange }: { onChange: () => void }) {
       if (!response.ok) throw new Error('Native scope is unavailable');
       const status = await response.json() as { available: boolean; active: Active | null };
       setAvailable(status.available); setActive(status.active);
+      if (status.available && status.active) ready.current?.();
       setCatalog(await read<CatalogPage>('/api/native-scope/catalog?kind=sources', controller.signal));
     }).catch((cause: unknown) => { if (!controller.signal.aborted) setError(String(cause)); });
     return () => { controller.abort(); pending.current?.abort(); };
@@ -53,12 +54,11 @@ export function NativeScopeControls({ onChange }: { onChange: () => void }) {
       setKind(nextKind); setChosen('');
     });
   }
-  async function select(selection: Selection, nextHistory: Selection[] = []) {
-    if (nextHistory.length > 64) { setError('Navigation history is limited to 64 pages. Open a new scope or explicit node set.'); return; }
+  async function select(selection: Selection) {
     await perform(async signal => {
       const result = await read<Active>('/api/native-scope/select',signal,selection);
       await client.cancelQueries(); client.clear();
-      setActive(result); setHistory(nextHistory);
+      setActive(result);
       // Remount existing owners after clearing the old scene's query cache.
       onChange();
     });
@@ -66,24 +66,22 @@ export function NativeScopeControls({ onChange }: { onChange: () => void }) {
   if (!available) return error ? <div role="alert">{error}</div> : null;
   return <section aria-label="Native graph scope" style={{ padding: '10px 16px', borderBottom: '1px solid var(--ws-border)',
     color: 'var(--ws-text)', background: 'var(--ws-bg)', fontSize: 12, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
-    <label>Browse <select aria-label="Scope kind" value={kind} disabled={busy}
+    <button disabled={busy} onClick={() => void select({})}>Project graph</button>
+    <label>Filter by <select aria-label="Scope kind" value={kind} disabled={busy}
       onChange={event => void browse(event.target.value as CatalogKind)}>
       <option value="sources">Sources</option><option value="topics">Themes</option><option value="communities">Topology communities</option>
     </select></label>
     <select aria-label="Select native scope" value={chosen} onChange={event => setChosen(event.target.value)} disabled={busy} style={{ maxWidth: 280 }}>
-      <option value="">Choose a scope</option>
+      <option value="">Optional scope filter</option>
       {catalog.nodes.map(node => <option key={node.id} value={node.id}>{node.title ?? node.id}{node.memberCount !== undefined ? ` (${node.memberCount} members)` : ''}</option>)}
     </select>
-    <button disabled={busy || !chosen} onClick={() => void select(kind === 'sources' ? { sourceId: chosen } : kind === 'topics' ? { topicId: chosen } : { communityId: chosen })}>Open first node page</button>
+    <button disabled={busy || !chosen} onClick={() => void select(kind === 'sources' ? { sourceId: chosen } : kind === 'topics' ? { topicId: chosen } : { communityId: chosen })}>Open scope</button>
     <button disabled={busy || !catalog.next_cursor} onClick={() => void browse(kind,catalog.next_cursor!)}>More scopes</button>
     <button disabled={busy} onClick={() => void browse(kind)}>First scopes</button>
     <label>Node IDs <input aria-label="Explicit native node identities" value={ids} onChange={event => setIds(event.target.value)} placeholder="Comma-separated IDs" /></label>
     <button disabled={busy || !ids.trim()} onClick={() => void select({ nodeIds: ids.split(',').map(id => id.trim()).filter(Boolean) })}>Open nodes</button>
-    {active ? <>
-      <span role="status">Node page {history.length + 1}: {active.nodeCount} nodes, {active.linkCount} links within this page{active.next_cursor ? '; more nodes available' : '; end of scope'}</span>
-      <button disabled={busy || history.length === 0} onClick={() => void select(history[history.length - 1]!,history.slice(0,-1))}>Previous node page</button>
-      <button disabled={busy || !active.next_cursor} onClick={() => void select({ ...active.selection, after: active.next_cursor! },[...history,active.selection])}>Next node page</button>
-    </> : <span role="status">Choose a scope. No project graph is loaded.</span>}
+    {active ? <span role="status">{active.nodeCount} nodes, {active.linkCount} links</span>
+      : <span role="status">Project graph is unavailable.</span>}
     {busy && <button onClick={() => {
       // Keep awaiting the operation so a cancelled selection cannot be mistaken
       // for an installed scene, and do not allow another selection meanwhile.

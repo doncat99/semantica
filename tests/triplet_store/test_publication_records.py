@@ -725,6 +725,9 @@ def test_visible_native_scene_links_preserve_relation_qualifiers(tmp_path, monke
     map_fields=['id','source','target','predicate','status']
     visible=store.read_publication_scene('p',generation,dict(kind='links',visibleIds=['urn:canonical:0','urn:canonical:1'],fields=map_fields))
     assert visible['links']==[dict(projected['links'][0],status='candidate')]
+    for selection in (dict(kind='topology'), dict(kind='incident', nodeId='urn:canonical:0')):
+        complete = store.read_publication_scene('p', generation, dict(selection, fields=map_fields))
+        assert complete['links'] == visible['links'] and complete['nodes'] == []
     assert store.read_publication_scene('p',generation,dict(kind='links',visibleIds=['urn:canonical:0'],fields=map_fields))['links']==[]
     assert store.read_publication_scene('p',generation,dict(kind='topology',fields=fields,after=link['id']))['links']==[]
     with pytest.raises(ProcessingError):
@@ -1313,7 +1316,8 @@ def topology_fixture(tmp_path):
     return store, generation, refs
 
 
-def test_topology_continuation_uses_one_query_and_preserves_budget_lookahead(tmp_path, monkeypatch):
+@pytest.mark.parametrize('status', [False, True])
+def test_topology_continuation_uses_one_query_and_preserves_budget_lookahead(tmp_path, monkeypatch, status):
     store, generation, _ = topology_fixture(tmp_path)
     native, queries = store.store, []
     class Measured:
@@ -1324,7 +1328,7 @@ def test_topology_continuation_uses_one_query_and_preserves_budget_lookahead(tmp
                 queries.append(query)
             return native.query(query, **kwargs)
     monkeypatch.setattr(store, 'store', Measured())
-    selection=dict(kind='topology', fields=['id','source','target','predicate'], limit=2)
+    selection=dict(kind='topology', fields=['id','source','target','predicate'] + (['status'] if status else []), limit=2)
     found, after = [], None
     while True:
         page=store.read_publication_scene('p', generation, dict(selection, after=after))

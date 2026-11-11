@@ -2030,7 +2030,7 @@ export default function App() {
           ))}
         </aside>
         <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0 }}>
-          <NativeScopeControls onChange={() => setNativeScopeRevision(value => value + 1)} />
+          <NativeScopeControls onReady={() => { if (!hasOntologyUrlState()) setActiveWorkspace('explore'); }} onChange={() => setNativeScopeRevision(value => value + 1)} />
           <div key={nativeScopeRevision} style={{ display: 'flex', flex: 1, minHeight: 0 }}>{renderWorkspace()}</div>
         </div>
       </div>

@@ -109,11 +109,9 @@ def main(argv=None):
     native_scope = None
     if args.native_endpoint:
         from .native_scope import NativeScope
-        from ..context.context_graph import ContextGraph
         native_scope = NativeScope(args.native_endpoint, os.environ.get('SEMANTICA_NATIVE_SCENE_TOKEN'),
             os.environ.get('SEMANTICA_NATIVE_SCENE_PROJECT'),os.environ.get('SEMANTICA_NATIVE_SCENE_GENERATION'))
-        session = GraphSession(ContextGraph(advanced_analytics=False))
-        session._read_only = True
+        session, _ = native_scope.select({})
     else:
         with _out.status("[dim]Loading graph…[/dim]", spinner="dots"):
             session = GraphSession.from_file(args.graph, read_only=args.read_only)

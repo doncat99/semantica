@@ -1,11 +1,12 @@
-"""Explicit bounded scenes for the native Explorer, without another store handle.
+"""Load the native Explorer graph through bounded owner reads.
 
 The owner relay runs in the host's existing worker queue. This client neither
-opens RocksDB nor writes graph files. Native algorithms see only the selected
-page, whose continuation is always exposed to the caller.
+opens RocksDB nor writes graph files. Transport cursors are consumed internally;
+native graph algorithms receive the complete Project or optional filtered graph.
 """
 import json
 import threading
+import time
 from urllib.parse import urlsplit
 from urllib.request import Request, urlopen
 from urllib.error import HTTPError
@@ -19,6 +20,8 @@ from .markdown_resources import MarkdownResourceRegistry
 from .session import GraphSession
 
 MAX_BYTES = 262144
+MAX_GRAPH_BYTES = 128 * 1024 * 1024
+MAX_LOAD_SECONDS = 300
 
 
 class NativeScope:
@@ -35,7 +38,7 @@ class NativeScope:
         self._cancelled = threading.Event()
 
     def page(self, selection):
-        body = json.dumps(dict(selection, limit=128, maxBytes=MAX_BYTES)).encode()
+        body = json.dumps(dict(selection, limit=32 if selection['kind'] == 'incident' else 128, maxBytes=MAX_BYTES)).encode()
         if len(body) > MAX_BYTES:
             raise ValueError('Native scene selection exceeds byte budget')
         request = Request(self.endpoint, data=body, method='POST', headers={
@@ -61,9 +64,9 @@ class NativeScope:
         try:
             self._cancelled.clear()
             if (not isinstance(selection, dict)
-                    or set(selection)-{'sourceId','communityId','topicId','nodeIds','after'}
-                    or sum(key in selection for key in ('sourceId','communityId','topicId','nodeIds')) != 1):
-                raise ValueError('Choose exactly one source, community, topic, or explicit node set')
+                    or set(selection)-{'sourceId','communityId','topicId','nodeIds'}
+                    or sum(key in selection for key in ('sourceId','communityId','topicId','nodeIds')) > 1):
+                raise ValueError('Choose at most one source, community, topic, or explicit node set; no filter selects the Project')
             native = dict(kind='nodes', fields=['id','name','entityType'])
             if 'sourceId' in selection:
                 native['sourceIds'] = [selection['sourceId']]
@@ -73,33 +76,64 @@ class NativeScope:
                 native['topicId'] = selection['topicId']
             if 'nodeIds' in selection:
                 nodes = selection['nodeIds']
-                if (not isinstance(nodes,list) or not 1 <= len(nodes) <= 128
-                        or 'after' in selection):
+                if not isinstance(nodes,list) or not 1 <= len(nodes) <= 128:
                     raise ValueError('Explicit scene requires 1-128 node identities')
                 native['nodeIds'] = nodes
-            if 'after' in selection:
-                native['after'] = selection['after']
-            page = self.page(native)
-            if self._cancelled.is_set():
-                raise ValueError('Native scene selection cancelled')
-            identities = [node['id'] for node in page['nodes']]
-            edges = self.page(dict(kind='links',visibleIds=identities,fields=['id','source','target','predicate','status'])) if identities else dict(links=[],next_cursor=None)
-            if self._cancelled.is_set():
-                raise ValueError('Native scene selection cancelled')
-            if edges.get('next_cursor') is not None:
-                raise ValueError('Selected page has more than 128 links; select fewer explicit nodes')
-            # Keep both transport responses and the transient graph bounded.
-            if len(json.dumps([page,edges],ensure_ascii=False).encode()) > MAX_BYTES:
-                raise ValueError('Selected graph exceeds byte budget; select fewer explicit nodes')
+            deadline = time.monotonic() + MAX_LOAD_SECONDS
+            size = 0
+            def pages(query, field):
+                nonlocal size
+                after = None
+                while True:
+                    if self._cancelled.is_set():
+                        raise ValueError('Native scene selection cancelled')
+                    if time.monotonic() > deadline:
+                        raise ValueError('Native graph loading exceeded time budget')
+                    page = self.page(dict(query, **({'after': after} if after else {})))
+                    size += len(json.dumps(page, ensure_ascii=False).encode())
+                    if size > MAX_GRAPH_BYTES:
+                        raise ValueError('Native graph exceeds in-memory Explorer byte budget')
+                    if self._cancelled.is_set():
+                        raise ValueError('Native scene selection cancelled')
+                    yield page[field]
+                    cursor = page.get('next_cursor')
+                    if cursor is None:
+                        return
+                    if not isinstance(cursor, str) or not cursor or after is not None and cursor <= after:
+                        raise ValueError('Native graph cursor did not advance')
+                    after = cursor
             graph = ContextGraph(advanced_analytics=False)
-            graph.add_nodes([dict(id=node['id'], type='Concept', content=node['name'],
-                properties=node) for node in page['nodes']])
-            graph.add_edges([dict(id=edge['id'],source_id=edge['source'],target_id=edge['target'],
-                type=edge['predicate'],properties=edge) for edge in edges['links']])
+            identities = set()
+            for batch in pages(native, 'nodes'):
+                graph.add_nodes([dict(id=node['id'], type='Concept', content=node['name'],
+                    properties=node) for node in batch])
+                identities.update(node['id'] for node in batch)
+            fields = ['id','source','target','predicate','status']
+            if not selection:
+                queries = [dict(kind='topology', fields=fields)]
+            elif len(identities) <= 128:
+                queries = [dict(kind='links', visibleIds=sorted(identities), fields=fields)] if identities else []
+            else:
+                queries = (dict(kind='incident', nodeId=identity, fields=fields) for identity in sorted(identities))
+            edge_ids = set()
+            for query in queries:
+                for batch in pages(query, 'links'):
+                    edges = []
+                    for edge in batch:
+                        if edge['source'] not in identities or edge['target'] not in identities:
+                            if not selection:
+                                raise ValueError('Native Project relation has an unknown endpoint')
+                            continue
+                        if edge['id'] in edge_ids:
+                            continue
+                        edge_ids.add(edge['id'])
+                        edges.append(dict(id=edge['id'], source_id=edge['source'], target_id=edge['target'],
+                            type=edge['predicate'], properties=edge))
+                    graph.add_edges(edges)
             session = GraphSession(graph)
             session._read_only = True
-            selected = dict(selection=selection,next_cursor=page.get('next_cursor'),
-                nodeCount=len(identities),linkCount=len(edges['links']),project=self.project,generation=self.generation)
+            selected = dict(selection=selection, nodeCount=len(identities),linkCount=len(edge_ids),
+                project=self.project,generation=self.generation)
             if self._cancelled.is_set():
                 raise ValueError('Native scene selection cancelled')
             if install is not None:

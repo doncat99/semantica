@@ -85,7 +85,9 @@ def create_app(
             origin.strip() for origin in allowed_origins if origin.strip()
         ]
     prov_path = provenance_storage_path or settings.get("provenance_storage_path")
-    if session is None:
+    if session is None and native_scope is not None:
+        active_session, _ = native_scope.select({})
+    elif session is None:
         active_session = GraphSession(
             ContextGraph(advanced_analytics=False),
             provenance_storage_path=prov_path,

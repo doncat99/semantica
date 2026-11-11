@@ -1853,8 +1853,7 @@ class PublicationRecords:
         if 'fields' not in selection:
             return None
         allowed = ([['id'], ['id','name','sourceIds'], ['id','name','entityType'], ['id','name','entityType','sourceIds']] if selection.get('kind') == 'nodes'
-                   else [['id','source','target','predicate'], ['id','source','target','predicate','status']] if selection.get('kind') == 'links'
-                   else [['id','source','target','predicate']] if selection.get('kind') in {'incident','topology'} else [])
+                   else [['id','source','target','predicate'], ['id','source','target','predicate','status']] if selection.get('kind') in {'links','incident','topology'} else [])
         if fields not in allowed:
             raise ProcessingError('Invalid native scene field projection')
         return fields
@@ -2255,7 +2254,7 @@ class PublicationRecords:
         for row in rows[:limit]:
             check_query_cancellation()
             if projection is not None:
-                link = self._projected_scene_link(row)
+                link = self._projected_scene_link(row, status='status' in projection)
                 missing = []
             else:
                 link = self._fact_scene_link(generation, row)
