@@ -22,6 +22,13 @@ MAX_BYTES = 262144
 P = "urn:semantica:publication:"
 
 
+class SupplementaryReferenceError(ProcessingError):
+    """Located supplementary proof failed; reason is safe for build diagnostics."""
+    def __init__(self, reason, message):
+        super().__init__(message)
+        self.reason = reason
+
+
 class ClassificationMissingError(ProcessingError):
     """No completed classification is bound to this published source."""
 
@@ -1373,7 +1380,7 @@ class PublicationRecords:
             raise ProcessingError('Source is not a current publication member')
         return {key:self.one(node,key) for key in ('source','material','representation')}
 
-    def _grounded_references(self, position):
+    def _grounded_references(self, position, *, supporting_ref=None):
         """Seek scalar ranges first, then prove record/evidence share an admitted operation."""
         source=self.scalar(position['source']).value
         member=self.ox.NamedNode(self.graph.value+':source:'+hashlib.sha256(source.encode()).hexdigest())
@@ -1421,6 +1428,69 @@ class PublicationRecords:
                                 yield dict(id=record.value,evidence=evidence.value,source=source)
                                 break
 
+        if supporting_ref is not None:
+            # The current reader proved this structural address; require the relation
+            # and its existing evidence to share a source-admitted extraction owner.
+            for link in seek(None,self.iri(F+'supportingRef'),self.scalar(supporting_ref),self.facts):
+                check_query_cancellation()
+                record=link.subject
+                if not next(seek(record,self.iri(RDF_TYPE),self.iri(F+'Relation'),self.facts),None):
+                    continue
+                for owned in seek(None,self.iri(F+'ownedRecord'),record,self.facts):
+                    operation=owned.subject
+                    if not next(seek(member,self.iri(P+'operation'),operation,self.graph),None):
+                        continue
+                    for evidence in seek(record,self.iri(F+'evidence'),None,self.facts):
+                        check_query_cancellation()
+                        if any(overlaps(q.object) for q in seek(evidence.object,self.iri(F+'nativeRange'),None,self.facts)):
+                            continue  # Already emitted by the scalar join above.
+                        if next(seek(operation,self.iri(F+'ownedRecord'),evidence.object,self.facts),None):
+                            yield dict(id=record.value,evidence=evidence.object.value,source=source)
+
+    def _supporting_address(self, position, support):
+        from ..semantic_document_reader import read_source_locations, read_source_native_ranges
+        from ..semantic_source_artifact import _window_native_ranges
+        if not isinstance(support,dict) or set(support)!={'ref','reader'}:
+            raise ProcessingError('Invalid supplementary reference proof')
+        from ..semantic_query_schema import DocumentReaderRequest
+        reader=support['reader']
+        if not isinstance(reader,DocumentReaderRequest):
+            raise ProcessingError('Invalid supplementary reference reader')
+        member=self.ox.NamedNode(self.graph.value+':source:'+hashlib.sha256(position['source'].encode()).hexdigest())
+        if not next(self.owner.store.quads_for_pattern(self.head,self.iri(P+'source'),member,self.graph),None):
+            raise SupplementaryReferenceError('support-source', 'Supplementary reference source is not admitted')
+        binding={key:self.one(member,key) for key in ('source','material','representation')}
+        if (reader.source_id!=binding['source'] or reader.material_revision!=binding['material']
+                or reader.representation_revision!=binding['representation']):
+            raise SupplementaryReferenceError('support-ownership', 'Supplementary reference source ownership differs')
+        page=read_source_locations(reader,ref=support['ref'],hydrate=False,limit=2)
+        if len(page['items'])!=1 or page['nextCursor'] is not None:
+            raise SupplementaryReferenceError('support-unknown', 'Supplementary reference address missing or ambiguous')
+        address=page['items'][0]['quoteAddress']
+        if address['kind']=='native':
+            ranges=[dict(nativeRef=address['ref'],start=address['start'],end=address['end'])]
+        else:
+            # Indexed source-map reads, no hydrated text or structural collection scan.
+            ranges=[]
+            start,end=address['start'],address['end']
+            if end-start>128*12288:
+                raise ProcessingError('Supplementary reference address exceeds query budget')
+            for offset in range(start,end,12288):
+                after=-1
+                while True:
+                    check_query_cancellation()
+                    page=read_source_native_ranges(reader,start=offset,end=min(end,offset+12288),after=after)
+                    ranges.extend(_window_native_ranges(page['items'],offset,min(end,offset+12288)))
+                    if len(ranges)>128:
+                        raise ProcessingError('Supplementary reference ranges exceed query budget')
+                    after=page['nextCursor']
+                    if after is None:
+                        break
+        if not any(item['nativeRef']==position['nativeRef'] and
+                item['start']<=position['start']<position['end']<=item['end'] for item in ranges):
+            raise SupplementaryReferenceError('support-range', 'Supplementary reference scalar address differs')
+        return support['ref']
+
     @_stage(None)
     def grounded_candidates(self, generation, positions, *, limit=MAX_ROWS, max_bytes=MAX_BYTES):
         """Exact source/scalar addresses join to native typed observations.
@@ -1460,7 +1530,7 @@ class PublicationRecords:
         return records
 
     @_stage(None)
-    def grounded_reference_page(self, generation, position, *, after=None, limit=MAX_ROWS):
+    def grounded_reference_page(self, generation, position, *, after=None, limit=MAX_ROWS, support=None):
         """Maintenance-only, keyset pages of native record/evidence addresses."""
         from ..semantic_worker_context import check_query_cancellation
         self.fence(generation, 'pending')
@@ -1473,8 +1543,9 @@ class PublicationRecords:
             if not isinstance(after, (tuple,list)) or len(after) != 2:
                 raise ProcessingError('Invalid native grounding cursor')
             after=tuple(self.scalar(item).value for item in after)
+        supporting_ref=self._supporting_address(position,support) if support is not None else None
         key=lambda item:(item['id'],item['evidence'])
-        rows=nsmallest(limit+1,(item for item in self._grounded_references(position)
+        rows=nsmallest(limit+1,(item for item in self._grounded_references(position,supporting_ref=supporting_ref)
             if after is None or key(item)>after),key=key)
         values, size = [], 0
         for item in rows:
@@ -1655,9 +1726,14 @@ class PublicationRecords:
                         if names[0]['value'] == 'description':
                             values = attribute.get(F+'value', [])
                             break
+            elif name == 'identity_profile':
+                predicate = F+'identityProfile'
+                values = record.get(predicate, [])
+                if len(values) != 1 or values[0]['type'] != 'iri':
+                    raise ProcessingError('Canonical identity profile selection requires one native profile')
             else:
                 raise ProcessingError('Unsupported native canonical field selector')
-            if len(values) != 1 or values[0]['type'] != 'literal':
+            if len(values) != 1 or values[0]['type'] != ('iri' if name == 'identity_profile' else 'literal'):
                 raise ProcessingError('Canonical field selector requires one native scalar')
             target = selected.setdefault(predicate, [])
             if values[0] not in target:
@@ -1682,23 +1758,35 @@ class PublicationRecords:
     def _scene_references(self, identities, source_ids=None):
         """Only provenance addresses, scoped through current admitted operations."""
         sources, evidence, retained_bytes = set(), set(), 0
-        for offset in range(0, len(identities), MAX_ROWS):
-            values = ' '.join(str(self.iri(identity)) for identity in identities[offset:offset+MAX_ROWS])
-            scope = ('VALUES ?source { ' + ' '.join(str(self.scalar(s)) for s in source_ids) + ' }') if source_ids else ''
-            query = f"""SELECT DISTINCT ?source ?evidence WHERE {{
-                VALUES ?record {{ {values} }} {scope}
-                GRAPH {self.publication_graph} {{ {self.publication_head} <{P}source> ?membership .
-                    ?membership <{P}source> ?source ; <{P}operation> ?operation . }}
-                GRAPH {self.facts} {{ ?operation <{F}ownedRecord> ?record .
-                    OPTIONAL {{ {{ ?record <{F}mention> ?evidence }} UNION {{ ?record <{F}evidence> ?evidence }} }} }}
-            }}"""
-            for row in self.owner.store.query(query):
-                for field, retained in (('source', sources), ('evidence', evidence)):
-                    if row[field] is not None and row[field].value not in retained:
-                        retained_bytes += len(row[field].value.encode()) + 4
-                        retained.add(row[field].value)
+        selected = set(source_ids) if source_ids else None
+        lookup = self.owner.store.quads_for_pattern
+        def retain(value, target):
+            nonlocal retained_bytes
+            check_query_cancellation()
+            if value not in target:
+                retained_bytes += len(value.encode()) + 4
                 if retained_bytes > MAX_BYTES:
                     raise ProcessingError('Native scene provenance exceeds byte budget')
+                target.add(value)
+        for identity in identities:
+            check_query_cancellation()
+            record, admitted = self.iri(identity), False
+            # Start at the record index; a broad provenance join rescans operations per node.
+            for owned in lookup(None, self.iri(F+'ownedRecord'), record, self.facts):
+                check_query_cancellation()
+                for binding in lookup(None, self.iri(P+'operation'), owned.subject, self.publication_graph):
+                    check_query_cancellation()
+                    if next(lookup(self.publication_head, self.iri(P+'source'), binding.subject, self.publication_graph), None) is None:
+                        continue
+                    for source in lookup(binding.subject, self.iri(P+'source'), None, self.publication_graph):
+                        check_query_cancellation()
+                        if selected is None or source.object.value in selected:
+                            retain(source.object.value, sources)
+                            admitted = True
+            if admitted:
+                for predicate in ('mention', 'evidence'):
+                    for address in lookup(record, self.iri(F+predicate), None, self.facts):
+                        retain(address.object.value, evidence)
         return sorted(sources), sorted(evidence)
 
     @_locked

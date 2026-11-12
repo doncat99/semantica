@@ -845,7 +845,8 @@ def _extract_project_sources(parsed_sources, request, progress, *, completed_ope
         warning_count = skipped = 0
         retry_count = 0
         last_retry = None
-        last_warning = None
+        pending_warnings = []
+        warning_ready = threading.Condition(lock)
         started_at_ms = int(time.time() * 1000)
         started = time.monotonic()
         sources = [{"sourceId": source.source_id, "stage": stage,
@@ -857,6 +858,9 @@ def _extract_project_sources(parsed_sources, request, progress, *, completed_ope
         def emit():
             if progress:
                 with lock:
+                    warnings = pending_warnings[:]
+                    pending_warnings.clear()
+                    warning_ready.notify_all()
                     event = {"stage": stage, "percent": base + round(completed / max(1, total) * span),
                           "detail": f"{stage.capitalize()} {completed} / {total} chunks",
                           "metadata": {"completedChunks": completed, "restoredChunks": restored,
@@ -864,12 +868,12 @@ def _extract_project_sources(parsed_sources, request, progress, *, completed_ope
                                        "elapsedMs": round((time.monotonic() - started) * 1000),
                                        **({"lastRetry": last_retry} if last_retry is not None else {}),
                                        "warningCount": warning_count, "skippedExtractionChunks": skipped,
-                                       **({"warning": last_warning} if last_warning is not None else {}),
+                                       **({"warnings": warnings} if warnings else {}),
                                        "totalChunks": total, "sourceProgress": [dict(row) for row in sources]}}
                 progress(event)
 
         def dispatch(job):
-            nonlocal warning_count, skipped, last_warning
+            nonlocal warning_count, skipped
             if reporting_errors:
                 raise reporting_errors[0]
             source_index, _, item = job
@@ -903,7 +907,12 @@ def _extract_project_sources(parsed_sources, request, progress, *, completed_ope
                                 "diagnostic": {"rejectedCount": rejected}}
                             with lock:
                                 warning_count += rejected
-                                last_warning = warning
+                                if progress:
+                                    while len(pending_warnings) >= 128:
+                                        if reporting_errors:
+                                            raise reporting_errors[0]
+                                        warning_ready.wait(.25)
+                                    pending_warnings.append(warning)
                 return value
             except Exception:
                 with lock:
@@ -2976,17 +2985,27 @@ def _report_support_sources(representations, evidence, entities, assertions, rel
 
 
 
+# Observed build: classification ~5m, identity ~9m of ~24m. Reserve
+# the remaining budget for organization and publication; never advance by time.
+_PROJECT_PROGRESS_RANGES = {
+    'source_classification': (42, 62), 'entity_resolution': (62, 90),
+    'fact_reconciliation': (90, 93), 'semantic_organization': (93, 96),
+    'artifact_writing': (96, 99),
+}
+
+
 @contextmanager
-def _project_progress(progress, stage, percent):
+def _project_progress(progress, stage, percent=None):
     """Report native work without inventing item counts or time-based percentages."""
     started = time.monotonic()
+    lower, upper = _PROJECT_PROGRESS_RANGES[stage] if percent is None else (percent, percent)
     metadata = {"state": "running", "startedAtMs": int(time.time() * 1000)}
     stopped = threading.Event()
     errors = []
 
     def emit():
         if progress:
-            progress({"stage": stage, "percent": percent, "detail": stage,
+            progress({"stage": stage, "percent": upper if metadata["state"] == "completed" else lower, "detail": stage,
                       "metadata": {**metadata, "elapsedMs": round((time.monotonic() - started) * 1000)}})
 
     def heartbeat():
@@ -3024,7 +3043,7 @@ def _project_stage(stage, adapter, compute, progress, percent):
         return result
 
 
-def _publish_native_topics(request, publication, generation, source_builds, topics):
+def _publish_native_topics(request, publication, generation, source_builds, topics, *, progress=None):
     """Translate temporary section citations to the current native evidence owner."""
     if not topics:
         return
@@ -3033,32 +3052,47 @@ def _publish_native_topics(request, publication, generation, source_builds, topi
     for topic in topics:
         references, reference_bytes = set(), 0
         for evidence_id in topic.evidence_ids:
+            diagnostic = dict(topicId=topic.id, evidenceId=evidence_id)
+            def missing(message, reason):
+                raise SemanticArtifactError(message, code='NATIVE_TOPIC_GROUNDING_MISSING',
+                    diagnostic={'topicGrounding': {**diagnostic, 'reason': reason}})
             if evidence_id not in citations:
-                raise SemanticArtifactError('topic cites unknown build evidence', code='NATIVE_TOPIC_GROUNDING_MISSING')
+                missing('topic cites unknown build evidence', 'unknown')
             built, span = citations[evidence_id]
             locator = span.fields['locator'] if isinstance(span, _EvidenceReference) else span.locator.model_dump()
             start, end = locator['start_char'], locator['end_char']
             source_id = built['source'].source_id
+            diagnostic.update(sourceId=source_id, start=start, end=end)
             if 'native_scalar_ranges' not in built:
-                raise SemanticArtifactError('topic source lacks native scalar addresses', code='NATIVE_TOPIC_GROUNDING_MISSING')
+                missing('topic source lacks native scalar addresses', 'scalar-address')
             if start is None and end is None and span.metadata.get('structural_ref'):
                 address = None
                 for item in built['source_locations'].pages(ref=span.metadata['structural_ref'], hydrate=False):
                     address = item['quoteAddress']
                 if address is None or address['kind'] != 'native':
-                    raise SemanticArtifactError('topic evidence lacks native scalar proof', code='NATIVE_TOPIC_GROUNDING_MISSING')
+                    missing('topic evidence lacks native scalar proof', 'scalar-proof')
                 ranges = [dict(nativeRef=address['ref'], start=address['start'], end=address['end'])]
             else:
                 if start is None or end is None or start >= end:
-                    raise SemanticArtifactError('topic evidence lacks native scalar proof', code='NATIVE_TOPIC_GROUNDING_MISSING')
+                    missing('topic evidence lacks native scalar proof', 'scalar-proof')
                 ranges = _window_native_ranges(built['native_scalar_ranges'], start, end)
             mapped = False
             for address in ranges:
                 after = None
                 while True:
-                    page = publication.grounded_reference_page(generation,
-                        dict(source=built['source'].source_id, **{key:address[key] for key in ('nativeRef','start','end')}),
-                        after=after, limit=128)
+                    support_ref = span.metadata.get('structural_ref')
+                    if support_ref and 'reader' not in built:
+                        missing('topic supplementary reference lacks a current reader', 'support-address')
+                    try:
+                        page = publication.grounded_reference_page(generation,
+                            dict(source=built['source'].source_id, **{key:address[key] for key in ('nativeRef','start','end')}),
+                            after=after, limit=128,
+                            support=dict(ref=support_ref, reader=built['reader']) if support_ref else None)
+                    except (ProcessingError, ValueError) as exc:
+                        if support_ref:
+                            missing('topic supplementary reference address or ownership is invalid',
+                                getattr(exc, 'reason', 'support-address'))
+                        raise
                     for item in page['items']:
                         mapped = True
                         ref = item['evidence']
@@ -3071,7 +3105,9 @@ def _publish_native_topics(request, publication, generation, source_builds, topi
                     if after is None:
                         break
             if not mapped:
-                raise SemanticArtifactError('topic evidence has no current native reference', code='NATIVE_TOPIC_GROUNDING_MISSING')
+                diagnostic['rangeCount'] = len(ranges)
+                missing('topic evidence has no current native reference',
+                    ('supporting-reference' if span.metadata.get('structural_ref') else 'native-reference') if ranges else 'no-native-range')
         organization = topic.metadata['organization']
         evidence_ids = sorted(references)
         for offset in range(0, max(len(topic.entity_ids), len(evidence_ids)), 128):
@@ -3080,6 +3116,8 @@ def _publish_native_topics(request, publication, generation, source_builds, topi
                 input_digest=organization['input_digest'], members=topic.entity_ids[offset:offset+128],
                 member_count=len(topic.entity_ids), evidence_ids=evidence_ids[offset:offset+128],
                 evidence_count=len(evidence_ids))])
+        if progress:
+            progress()
 
 
 def _publish_native_indexes(request, generation, source_builds):
@@ -3242,7 +3280,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
             def source_progress(event):
                 if progress:
                     progress({**event,
-                        "percent": round(2 + 88 * (source_index - 1 + event["percent"] / 100) / len(request.sources)),
+                        "percent": round(2 + 40 * (source_index - 1 + event["percent"] / 100) / len(request.sources)),
                         "metadata": {**event.get("metadata", {}),
                             "sourceOrdinal": source_index, "sourceCount": len(request.sources)}})
             force_ocr = source.source_id in request.recipe.force_ocr_source_ids
@@ -3374,10 +3412,12 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
 
     def source_classification(_):
         if request.recipe.id == "model" and request.recipe.classification_profile:
-            with _project_progress(progress, "source_classification", 90):
+            with _project_progress(progress, "source_classification") as metadata:
+                metadata.update(completedSources=0, totalSources=len(source_builds))
                 for built_source in source_builds:
                     _, receipts = _classify_source(built_source, request.recipe.classification_profile, request.relays["model"])
                     model_receipts.extend(receipts)
+                    metadata["completedSources"] += 1
 
     def hydrate_entity(ref):
         store = _native_build.get()[1]
@@ -3453,7 +3493,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                     publication.stage_canonical(generation,[dict(plan,
                         members=[],selectors=selectors[offset:offset+128])])
         index = identity_index = IdentityCandidateIndex(store,request.project_id,generation,identity_resolver.duplicate_detector)
-        with _project_progress(progress,"entity_resolution",90) as metadata:
+        with _project_progress(progress,"entity_resolution") as metadata:
             metadata.update(completedComponents=0, canonicalEntities=0, processedMentions=0,
                 preparedMentions=0, indexedMentions=0, preparationPhase='lookup',
                 featureGroups=0, pairComparisons=0)
@@ -3532,7 +3572,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
         from .triplet_store.qualified_fact_index import QualifiedFactIndex
         store=_native_build.get()[1]
         index=fact_index=QualifiedFactIndex(store,request.project_id,generation)
-        with _project_progress(progress,'fact_reconciliation',90) as metadata, index.publication.build_scope(generation), index.publication.checkpointed(generation):
+        with _project_progress(progress,'fact_reconciliation') as metadata, index.publication.build_scope(generation), index.publication.checkpointed(generation):
             metadata.update(indexedObservations=0,completedPartitions=0,canonicalRelations=0)
             identity_publication = identity_index.publication
             input_key=stable_digest(dict(identity=identity_publication.one(identity_publication.head,'identityStageInput')))
@@ -3609,13 +3649,14 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
             communities, topics, receipts = _project_stage(
                 "semantic_organization",
                 TypeAdapter(tuple[list[KnowledgeCommunity], list[KnowledgeTopic], list[ModelReceipt]]),
-                organize, progress, 90)
+                organize, progress, None)
         model_receipts.extend(receipts)
 
     def artifact_writing(_):
         # Native extraction owns every business value. Publication stores only
         # the current source and canonical-selection references to those values.
-        with _project_progress(progress, "artifact_writing", 90):
+        with _project_progress(progress, "artifact_writing") as metadata:
+            metadata.update(substep="topic_grounding", completedTopics=0, totalTopics=len(topics))
             store = _native_build.get()[1]
             from .triplet_store.publication_records import PublicationRecords
             publication = PublicationRecords(store, request.project_id)
@@ -3625,9 +3666,13 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                         publication.stage_communities(generation, [dict(
                             id=community.id, member_count=len(community.entity_ids),
                             members=community.entity_ids[offset:offset + 128])])
-                _publish_native_topics(request, publication, generation, source_builds, topics)
+                def topic_completed():
+                    metadata['completedTopics'] += 1
+                _publish_native_topics(request, publication, generation, source_builds, topics, progress=topic_completed)
+            metadata['substep'] = 'index_publication'
             native_indexes = _publish_native_indexes(request, generation, source_builds)
             if native_indexes.get('semantic') is not None:
+                metadata['substep'] = 'activation'
                 store.activate_publication(request.project_id, generation,
                     indexes={name: descriptor['receipt'] for name, descriptor in native_indexes.items()},
                     completed_input=completion_key, index_addresses=native_indexes)

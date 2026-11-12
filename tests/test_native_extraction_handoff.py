@@ -299,3 +299,20 @@ def test_actual_build_restarts_without_rebuy_or_checkpoint_before_publication(tm
     assert not list((tmp_path/'published').glob('*.json'))
     with sqlite3.connect(tmp_path/'native-cache'/'accepted.sqlite') as db:
         assert db.execute('SELECT count(*) FROM cache WHERE accepted_digest IS NOT NULL').fetchone()[0] == 0
+
+
+def test_failed_publication_recovers_to_ready_without_repeating_paid_work(tmp_path):
+    command = [sys.executable, '-c',
+        "import runpy,sys; runpy.run_path(sys.argv[1])['build_child'](sys.argv[2], stop_before_publication=sys.argv[3]=='stop')",
+        str(Path(__file__).resolve()), str(tmp_path)]
+    crashed = subprocess.run([*command, 'stop'], capture_output=True, text=True, timeout=45)
+    assert crashed.returncode == 74, crashed.stderr
+    paid_before = (tmp_path/'build-calls.jsonl').read_text()
+    recovered = subprocess.run([*command, 'complete'], capture_output=True, text=True, timeout=45)
+    assert recovered.returncode == 0, recovered.stderr
+    assert (tmp_path/'build-calls.jsonl').read_text() == paid_before
+    # A third process verifies durable activation, without repeating model work.
+    from tests.test_native_extraction_handoff import build_child
+    result = build_child(tmp_path, stop_before_publication=False)
+    assert result['publication']['state'] == 'ready'
+    assert (tmp_path/'build-calls.jsonl').read_text() == paid_before

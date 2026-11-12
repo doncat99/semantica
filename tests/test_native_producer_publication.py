@@ -51,6 +51,13 @@ def test_topic_publication_fails_closed_on_unmapped_citations(tmp_path, missing)
         from semantica.triplet_store.publication_records import PublicationRecords
         _publish_native_topics(SimpleNamespace(project_id='p'), PublicationRecords(store, 'p'), generation, [built], [topic])
     assert error.value.code == 'NATIVE_TOPIC_GROUNDING_MISSING'
+    assert error.value.diagnostic['topicGrounding']['topicId'] == 'topic:one'
+    assert error.value.diagnostic['topicGrounding']['evidenceId'] == topic.evidence_ids[0]
+    assert error.value.diagnostic['topicGrounding']['reason'] == missing
+    if missing == 'native-reference':
+        assert error.value.diagnostic['topicGrounding']['sourceId'] == 's'
+        assert error.value.diagnostic['topicGrounding']['start'] == 5
+        assert error.value.diagnostic['topicGrounding']['end'] == 12
     assert store.publication_status('p')['state'] == 'pending'
     store.close()
 

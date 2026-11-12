@@ -129,7 +129,20 @@ def test_restore_coalesces_warnings_without_blocking_worker_lock(tmp_path, monke
     assert extraction[-1]['metadata']['warningCount'] == 2000
     assert extraction[-1]['metadata']['restoredChunks'] == 20
     assert receipt.metadata == {'rejected_count': 100}
-    assert extraction[-1]['metadata']['warning']['diagnostic'] == {'rejectedCount': 100}
+    warnings = [warning for event in extraction for warning in event['metadata'].get('warnings', [])]
+    assert len(warnings) == 20
+    assert len({warning['windowStart'] for warning in warnings}) == 20
+    assert all(warning['diagnostic'] == {'rejectedCount': 100} for warning in warnings)
+
+
+def test_rejected_receipts_without_progress_do_not_wait_for_a_consumer(tmp_path, monkeypatch):
+    receipt = SimpleNamespace(metadata={'rejected_count': 1})
+    monkeypatch.setattr(builder, '_extract_window', lambda *args:
+        ({'entities': [], 'relations': []}, [receipt] * 129, True))
+    monkeypatch.setattr(builder, '_embed_source_range', lambda *args: ([[1.]], SimpleNamespace()))
+    sources, request = scheduling_request(tmp_path, [('source-a', 'a')], 1)
+    result = builder._extract_project_sources(sources, request, None)
+    assert len(result) == 1
 
 
 def test_exhausted_transient_failure_stops_dispatching_new_chunks():
@@ -180,3 +193,19 @@ def test_flattened_failure_reports_actual_window_offsets(window):
     assert failure.value.parallel_context['sourceIndex'] == 2
     assert failure.value.parallel_context['windowStart'] == 500
     assert failure.value.parallel_context['windowEnd'] == 900
+
+
+def test_project_progress_reserves_late_work_and_does_not_advance_on_heartbeats():
+    events = []
+    for stage, (lower, upper) in builder._PROJECT_PROGRESS_RANGES.items():
+        with builder._project_progress(events.append, stage) as metadata:
+            metadata['completedSources'] = 1
+        assert events[-2]['percent'] == lower
+        assert events[-1]['percent'] == upper
+        assert events[-1]['metadata']['state'] == 'completed'
+    assert max(event['percent'] for event in events) == 99
+    failed = []
+    with pytest.raises(ValueError), builder._project_progress(failed.append, 'artifact_writing'):
+        raise ValueError('invalid evidence')
+    assert failed[-1]['percent'] == 96
+    assert failed[-1]['metadata']['state'] == 'failed'

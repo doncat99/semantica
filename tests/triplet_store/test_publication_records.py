@@ -454,6 +454,31 @@ def stage(store, receipt, identity, *, source="s"):
     return generation
 
 
+def test_scene_references_use_indexed_current_source_membership(tmp_path):
+    from types import SimpleNamespace
+    from semantica.triplet_store.publication_records import PublicationRecords, P
+    store, _, receipt, identity = fixture(tmp_path)
+    try:
+        generation = stage(store, receipt, identity)
+        owner = PublicationRecords(store, 'p')
+        expected = owner._scene_references([identity])
+        assert expected[0] == ['s']
+        assert expected[1]
+        store.store.update(f'''INSERT DATA {{ GRAPH {owner.publication_graph} {{
+            <urn:unadmitted> <{P}source> "foreign" ; <{P}operation> <{receipt['operation_id']}> .
+        }} }}''')
+        def reject_query(*args, **kwargs):
+            raise AssertionError('Provenance addresses must use indexed lookups')
+        owner.owner = SimpleNamespace(store=SimpleNamespace(
+            quads_for_pattern=store.store.quads_for_pattern, query=reject_query))
+        assert owner._scene_references([identity]) == expected
+        assert owner._scene_references([identity], ['s']) == expected
+        assert owner._scene_references([identity], ['foreign']) == ([], [])
+        assert owner._scene_references(['urn:unknown']) == ([], [])
+    finally:
+        store.close()
+
+
 def test_pending_ready_restart_withdraw_and_original_digest_unchanged(tmp_path):
     store, binding, receipt, identity = fixture(tmp_path)
     before = [str(q) for q in store.store if q.graph_name.value.startswith("urn:semantica:project:")]
@@ -635,6 +660,35 @@ store.close()
         assert row['responseBytes'] < 8192
         measurements.append(row)
     print('production-native-point-process-cost=' + json.dumps(measurements, sort_keys=True))
+
+
+def test_native_scene_hydrates_selected_identity_profile(tmp_path):
+    store = OxigraphStore(tmp_path / 'facts')
+    binding = dict(project='p', source='s', material='m', representation='r', recipe='recipe', model='model', specification='spec', parser='parser', grounding='grounding', window_start=0, window_end=4)
+    profile = dict(description='An organization', evidence='Acme', evidence_start=0, evidence_end=4)
+    entity = Entity('Acme', 'ORG', 0, 4, .7, {'identity_profile': profile, 'mention_id': 'mention', 'span_occurrence': 0})
+    try:
+        receipt = store.adopt_extraction(binding, 'entities', [entity], text='Acme', native_ranges=RANGES, accepted_digest='paid')
+        identity = ExtractionRecords(store, binding, 'entities').entity_node(entity).value
+        generation = stage(store, receipt, identity)
+        from semantica.triplet_store.publication_records import P, PublicationRecords
+        owner = PublicationRecords(store, 'p')
+        node = owner.iri('urn:canonical:acme')
+        graph = owner.record_graph(node)
+        selector = owner.iri('urn:test:profile-selector')
+        store.store.add(owner.ox.Quad(selector, owner.iri(P+'position'), owner.ox.Literal(1), graph))
+        store.store.add(owner.ox.Quad(node, owner.iri(P+'selector'), selector, graph))
+        store.store.add(owner.ox.Quad(selector, owner.iri(P+'field'), owner.scalar('identity_profile'), graph))
+        store.store.add(owner.ox.Quad(selector, owner.iri(P+'record'), owner.iri(identity), graph))
+        for quad in list(store.store.quads_for_pattern(node, owner.iri(P+'selectorCount'), None, graph)):
+            store.store.remove(quad)
+        store.store.add(owner.ox.Quad(node, owner.iri(P+'selectorCount'), owner.ox.Literal(2), graph))
+        store.activate_publication('p', generation, indexes=indexes())
+        result = store.read_publication_scene('p', generation, dict(kind='nodes', nodeIds=['urn:canonical:acme']))
+        assert result['nodes'][0]['fields'][F+'identityProfile'][0]['type'] == 'iri'
+        assert store.extraction_receipt(binding, 'entities') == receipt
+    finally:
+        store.close()
 
 
 def test_native_scene_is_bounded_reference_projection_and_generation_fenced(tmp_path):
@@ -1557,4 +1611,73 @@ def test_map_selected_scalars_do_not_scale_with_support_members(tmp_path):
             assert measurements[1][1] < 20
     finally:
         store.store = native
+        store.close()
+
+
+@pytest.mark.parametrize('invalid', [None, 'foreign-source', 'changed-representation', 'unknown-ref', 'out-of-range', 'unowned-relation'])
+def test_supporting_reference_requires_current_source_address_and_admitted_relation(tmp_path, invalid):
+    from docling_core.types.doc import DoclingDocument
+    from semantica.semantic_document_reader import write_reader_artifact
+    from tests.test_native_document_reader import payload, request
+    from semantica.semantic_extract.types import Relation
+    from semantica.triplet_store.publication_records import PublicationRecords
+    native = DoclingDocument(name='support')
+    native.add_text(label='text', text='Acme')
+    support = native.add_text(label='text', text='Supplement without independently extracted entities.')
+    path = tmp_path / 'support.json'
+    reader = request(path, write_reader_artifact(path, payload(dict(format='docling', document=native.export_to_dict()))))
+    store = OxigraphStore(tmp_path / 'facts')
+    binding = dict(project='p', source=reader.source_id, material=reader.material_revision,
+        representation=reader.representation_revision, recipe='recipe', model='model', specification='spec',
+        parser='parser', grounding='grounding', window_start=0, window_end=4)
+    entity = Entity('Acme', 'ORG', 0, 4, .9, dict(mention_id='a', span_occurrence=0))
+    entity_receipt = store.adopt_extraction(binding, 'entities', [entity], text='Acme', native_ranges=RANGES, accepted_digest='entities')
+    relation = Relation(entity, 'uses', entity, .9, 'Acme', dict(evidence_start=0, evidence_end=4, supporting_refs=[support.self_ref], qualifiers=dict(polarity="positive")))
+    receipt = store.adopt_extraction(binding, 'relations', [relation], text='Acme', native_ranges=RANGES, accepted_digest='relations')
+    generation = store.begin_publication('p', expected_generation=None, source_count=1, canonical_count=1)['generation']
+    store.stage_publication_sources('p', generation, [dict(source=reader.source_id, material=reader.material_revision,
+        representation=reader.representation_revision, recipe='recipe', operation_count=2, operations=[entity_receipt['operation_id'], receipt['operation_id']])])
+    identity = ExtractionRecords(store, binding, 'entities').entity_node(entity).value
+    store.stage_publication_canonical('p', generation, [dict(id='urn:canonical:acme', representative=identity,
+        members=[identity], selectors=[dict(field='name', record=identity)], member_count=1, selector_count=1)])
+    owner = PublicationRecords(store, 'p')
+    position = dict(source=reader.source_id, nativeRef='#/document/document/texts/1/text', start=0, end=10)
+    assert owner.grounded_reference_page(generation, position)['items'] == []
+    ref = support.self_ref
+    if invalid == 'foreign-source':
+        position['source'] = 'foreign'
+    if invalid == 'changed-representation':
+        reader = reader.model_copy(update=dict(representation_revision='representation:changed'))
+    if invalid == 'unknown-ref':
+        ref = '#/texts/9999'
+    if invalid == 'out-of-range':
+        position.update(start=999, end=1000)
+    if invalid == 'unowned-relation':
+        ox = store._oxigraph
+        operation = ox.NamedNode(receipt['operation_id'])
+        for quad in list(store.store.quads_for_pattern(operation, ox.NamedNode(F+'ownedRecord'), ox.NamedNode(receipt['operation_id']+':relation:0'), owner.facts)):
+            store.store.remove(quad)
+    try:
+        if invalid in ('foreign-source', 'changed-representation', 'unknown-ref', 'out-of-range'):
+            with pytest.raises((ProcessingError, ValueError)):
+                owner.grounded_reference_page(generation, position, support=dict(ref=ref, reader=reader))
+        else:
+            rows = owner.grounded_reference_page(generation, position, support=dict(ref=ref, reader=reader))['items']
+            assert bool(rows) is (invalid is None)
+            if rows:
+                assert rows == [dict(id=receipt['operation_id']+':relation:0', evidence=receipt['operation_id']+':evidence:0', source=reader.source_id)]
+                from types import SimpleNamespace
+                from semantica.semantic_artifact_schema import EvidenceSpan, DocumentLocator, KnowledgeTopic
+                from semantica.semantic_publication_builder import _publish_native_topics
+                span = EvidenceSpan(id='span:supplement', representation_id='representation:fixture', quote='Supplement',
+                    locator=DocumentLocator(representation_id='representation:fixture', origin='native', quality='precise',
+                        quote='Supplement', start_char=5, end_char=15), metadata=dict(structural_ref=ref))
+                built = dict(source=SimpleNamespace(source_id=reader.source_id), reader=reader, evidence=[span],
+                    native_scalar_ranges=[dict(nativeRef=position['nativeRef'], start=0, end=50, windowStart=5, windowEnd=55)])
+                topic = KnowledgeTopic(id='topic:supplement', title='Supplement', entity_ids=['urn:canonical:acme'],
+                    evidence_ids=[span.id], metadata=dict(organization=dict(report_id='report:one', input_digest='sha256:input')))
+                _publish_native_topics(SimpleNamespace(project_id='p'), owner, generation, [built], [topic])
+                assert owner.one(owner.iri(topic.id), 'evidenceCount') == '1'
+                assert owner.values(owner.iri(topic.id), 'evidence')[0].value == receipt['operation_id']+':evidence:0'
+    finally:
         store.close()
