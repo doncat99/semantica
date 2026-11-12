@@ -62,19 +62,26 @@ export function applyPresentation(value: Presentation) {
 }
 
 /** Presentation only. Bind messages to the actual embedding parent, not any window at its origin. */
-export function initializeEmbeddedPresentation() {
+export async function initializeEmbeddedPresentation() {
   const params = new URLSearchParams(window.location.search);
   if (window.parent === window || !params.has('hostOrigin')) return;
   const origin = params.get('hostOrigin')!;
-  if (!document.referrer || new URL(document.referrer).origin !== origin) throw new Error('Invalid Explorer presentation parent');
-  const encoded = params.get('presentation') ?? '';
-  if (encoded.length > 8192) throw new Error('Explorer presentation exceeds size limit');
-  const initial = parsePresentation(JSON.parse(encoded || 'null'));
-  if (!initial) throw new Error('Invalid Explorer presentation');
-  applyPresentation(initial);
-  window.addEventListener('message', event => {
-    if (event.origin !== origin || event.source !== window.parent) return;
-    const next = parsePresentation(event.data);
-    if (next) applyPresentation(next);
+  if (!origin || origin === 'null') throw new Error('Invalid Explorer presentation parent');
+  // Custom-scheme desktop parents do not send an HTTP Referrer. Authenticate the
+  // real sender instead, before rendering, and retain this listener for updates.
+  await new Promise<void>((resolve, reject) => {
+    const timeout = window.setTimeout(() => {
+      window.removeEventListener('message', receive);
+      reject(new Error('Explorer presentation parent did not respond'));
+    }, 10_000);
+    const receive = (event: MessageEvent) => {
+      if (event.origin !== origin || event.source !== window.parent) return;
+      const next = parsePresentation(event.data);
+      if (!next) return;
+      applyPresentation(next);
+      window.clearTimeout(timeout);
+      resolve();
+    };
+    window.addEventListener('message', receive);
   });
 }

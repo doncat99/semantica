@@ -97,9 +97,8 @@ test("visible legend follows loaded data, reloads, focused views, and distance m
     'border-strong': 'rgba(232, 238, 228, 0.3)', 'accent-strong': '#b5cf8b' } };
   const embedded = new URL(BASE_URL);
   embedded.searchParams.set('hostOrigin', BASE_URL);
-  embedded.searchParams.set('presentation', JSON.stringify(light));
   await host.route(`${BASE_URL}/presentation-host`, route => route.fulfill({ contentType: 'text/html', body:
-    `<html><body style="margin:0"><iframe title="Explorer" style="width:100vw;height:100vh;border:0" src="${embedded.href.replaceAll('&', '&amp;').replaceAll('"', '&quot;')}"></iframe></body></html>` }));
+    `<html><body style="margin:0"><iframe title="Explorer" referrerpolicy="no-referrer" style="width:100vw;height:100vh;border:0" onload='this.contentWindow.postMessage(${JSON.stringify(light)}, ${JSON.stringify(BASE_URL)})' src="${embedded.href.replaceAll('&', '&amp;').replaceAll('"', '&quot;')}"></iframe></body></html>` }));
   let nodes = initialNodes;
   let graphRequests = 0;
   await host.routeWebSocket("**/ws/graph-updates", () => {});

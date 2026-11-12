@@ -5,9 +5,8 @@ import { initializeEmbeddedPresentation } from './embeddedPresentation'
 import './embeddedPresentation.css'
 
 const root = createRoot(document.getElementById('root')!)
-try {
-  initializeEmbeddedPresentation()
+void initializeEmbeddedPresentation().then(() => {
   root.render(<App />)
-} catch {
+}).catch(() => {
   root.render(<main role="alert">Explorer presentation could not be initialized. Reload from the host application.</main>)
-}
+})
