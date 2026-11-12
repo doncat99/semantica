@@ -1,7 +1,7 @@
 import type { CSSProperties } from "react";
 import { Loader2 } from "lucide-react";
 import { graph } from "../../store/graphStore";
-import { GRAPH_THEME, withAlpha } from "./graphTheme";
+import { GRAPH_THEME, GRAPH_UI, withAlpha } from "./graphTheme";
 import type { FocusedUnavailableReason, GraphSelectedNodeKind } from "./types";
 import { focusedUnavailableReasonText } from "./graphViewCopy";
 import { MarkdownContentViewer } from "./MarkdownContentViewer";
@@ -314,10 +314,10 @@ export function GraphInspectorPanel({
   if (!nodeId) {
     return (
       <div style={{ padding: 32, textAlign: "center", display: "flex", flexDirection: "column", alignItems: "center", gap: 12, marginTop: 32 }}>
-        <div style={{ width: 40, height: 40, borderRadius: "50%", background: "rgba(98, 226, 205, 0.07)", border: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
-          <div style={{ width: 14, height: 14, borderRadius: "50%", background: GRAPH_THEME.ui.timeline.playheadSoft }} />
+        <div style={{ width: 40, height: 40, borderRadius: "50%", background: "rgba(98, 226, 205, 0.07)", border: `1px solid ${GRAPH_UI.surface.panelBorder}`, display: "flex", alignItems: "center", justifyContent: "center" }}>
+          <div style={{ width: 14, height: 14, borderRadius: "50%", background: GRAPH_UI.timeline.playheadSoft }} />
         </div>
-        <p style={{ color: GRAPH_THEME.ui.text.muted, fontSize: 14, margin: 0, lineHeight: 1.6 }}>
+        <p style={{ color: GRAPH_UI.text.muted, fontSize: 14, margin: 0, lineHeight: 1.6 }}>
           Search for a node or click one in the canvas to inspect its properties.
         </p>
       </div>
@@ -333,19 +333,19 @@ export function GraphInspectorPanel({
   if (!effectiveNodeId) {
     return (
       <aside style={{ padding: 24, display: "flex", flexDirection: "column", gap: 16 }}>
-        <div style={{ borderBottom: `1px solid ${GRAPH_THEME.ui.surface.divider}`, paddingBottom: 16 }}>
+        <div style={{ borderBottom: `1px solid ${GRAPH_UI.surface.divider}`, paddingBottom: 16 }}>
           <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
-            <span style={{ background: GRAPH_THEME.ui.timeline.playhead, boxShadow: "0 0 10px rgba(98, 226, 205, 0.34)", width: 8, height: 8, borderRadius: "50%" }} />
-            <span style={{ color: GRAPH_THEME.ui.timeline.playhead, fontSize: 12, fontWeight: 700 }}>Selection</span>
+            <span style={{ background: GRAPH_UI.timeline.playhead, boxShadow: "0 0 10px rgba(98, 226, 205, 0.34)", width: 8, height: 8, borderRadius: "50%" }} />
+            <span style={{ color: GRAPH_UI.timeline.playhead, fontSize: 12, fontWeight: 700 }}>Selection</span>
           </div>
-          <h3 style={{ margin: 0, color: GRAPH_THEME.ui.text.strong, fontSize: 20, fontWeight: 700, wordBreak: "break-word" }}>
+          <h3 style={{ margin: 0, color: GRAPH_UI.text.strong, fontSize: 20, fontWeight: 700, wordBreak: "break-word" }}>
             {nodeId}
           </h3>
-          <div style={{ color: GRAPH_THEME.ui.text.muted, fontSize: 12, marginTop: 6, fontFamily: "monospace", wordBreak: "break-all" }}>{nodeId}</div>
+          <div style={{ color: GRAPH_UI.text.muted, fontSize: 12, marginTop: 6, fontFamily: "monospace", wordBreak: "break-all" }}>{nodeId}</div>
         </div>
         <div style={groupedSelectionNoticeStyle}>
-          <div style={{ color: GRAPH_THEME.ui.text.strong, fontWeight: 600, marginBottom: 6 }}>Selected item is not directly inspectable in the current graph.</div>
-          <div style={{ color: GRAPH_THEME.ui.text.body, fontSize: 13, lineHeight: 1.6 }}>
+          <div style={{ color: GRAPH_UI.text.strong, fontWeight: 600, marginBottom: 6 }}>Selected item is not directly inspectable in the current graph.</div>
+          <div style={{ color: GRAPH_UI.text.body, fontSize: 13, lineHeight: 1.6 }}>
             {canActivateFocused
               ? "Use Focus to resolve this grouped selection to its canonical node."
               : focusedUnavailableReasonText(focusedUnavailableReason)}
@@ -380,23 +380,23 @@ export function GraphInspectorPanel({
   return (
     <aside style={{ padding: 24, display: "flex", flexDirection: "column", gap: 18 }}>
       {/* Node identity */}
-      <div style={{ borderBottom: `1px solid ${GRAPH_THEME.ui.surface.divider}`, paddingBottom: 16 }}>
+      <div style={{ borderBottom: `1px solid ${GRAPH_UI.surface.divider}`, paddingBottom: 16 }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10, marginBottom: 8 }}>
           <span style={{ background: accentColor, boxShadow: `0 0 10px ${accentColor}`, width: 8, height: 8, borderRadius: "50%" }} />
           <span style={{ color: accentColor, fontSize: 12, fontWeight: 700 }}>
             {groupedDisplaySelection ? "Grouped Selection" : (attributes?.nodeType || "Entity")}
           </span>
         </div>
-        <h3 style={{ margin: 0, color: GRAPH_THEME.ui.text.strong, fontSize: 20, fontWeight: 700, wordBreak: "break-word" }}>
+        <h3 style={{ margin: 0, color: GRAPH_UI.text.strong, fontSize: 20, fontWeight: 700, wordBreak: "break-word" }}>
           {String(attributes?.label ?? effectiveNodeId)}
         </h3>
-        <div style={{ color: GRAPH_THEME.ui.text.muted, fontSize: 12, marginTop: 6, fontFamily: "monospace", wordBreak: "break-all" }}>
+        <div style={{ color: GRAPH_UI.text.muted, fontSize: 12, marginTop: 6, fontFamily: "monospace", wordBreak: "break-all" }}>
           {groupedDisplaySelection ? nodeId : effectiveNodeId}
         </div>
         {groupedDisplaySelection ? (
           <div style={groupedSelectionNoticeStyle}>
-            <div style={{ color: GRAPH_THEME.ui.text.strong, fontWeight: 600, marginBottom: 6 }}>This grouped item stays display-level until you explicitly enter Focused mode.</div>
-            <div style={{ color: GRAPH_THEME.ui.text.body, fontSize: 13, lineHeight: 1.6 }}>
+            <div style={{ color: GRAPH_UI.text.strong, fontWeight: 600, marginBottom: 6 }}>This grouped item stays display-level until you explicitly enter Focused mode.</div>
+            <div style={{ color: GRAPH_UI.text.body, fontSize: 13, lineHeight: 1.6 }}>
               {canActivateFocused
                 ? `Canonical node available: ${effectiveNodeId}`
                 : focusedUnavailableReasonText(focusedUnavailableReason)}
@@ -507,8 +507,8 @@ export function GraphInspectorPanel({
                 >
                   <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 8 }}>
                     <div>
-                      <div style={{ color: GRAPH_THEME.ui.text.strong, fontWeight: 600 }}>{prediction.label || prediction.target}</div>
-                      <div style={{ color: GRAPH_THEME.ui.text.muted, fontSize: 12 }}>{prediction.type}</div>
+                      <div style={{ color: GRAPH_UI.text.strong, fontWeight: 600 }}>{prediction.label || prediction.target}</div>
+                      <div style={{ color: GRAPH_UI.text.muted, fontSize: 12 }}>{prediction.type}</div>
                     </div>
                     <div style={{ flexShrink: 0 }}>
                       <div style={{
@@ -516,9 +516,9 @@ export function GraphInspectorPanel({
                         borderRadius: 999,
                         fontSize: 10,
                         fontWeight: 700,
-                        background: GRAPH_THEME.ui.timeline.playheadSoft,
-                        border: `1px solid ${GRAPH_THEME.ui.control.activeBorder}`,
-                        color: GRAPH_THEME.ui.timeline.playhead,
+                        background: GRAPH_UI.timeline.playheadSoft,
+                        border: `1px solid ${GRAPH_UI.control.activeBorder}`,
+                        color: GRAPH_UI.timeline.playhead,
                       }}>
                         {(prediction.score * 100).toFixed(1)}%
                       </div>
@@ -546,8 +546,8 @@ export function GraphInspectorPanel({
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {attribution.map(({ key, value }) => (
                 <div key={key} style={propertyCardStyle}>
-                  <div style={{ color: GRAPH_THEME.ui.timeline.playhead, fontSize: 11, marginBottom: 4 }}>{key}</div>
-                  <div style={{ color: GRAPH_THEME.ui.text.body, fontSize: 13, wordBreak: "break-word" }}>
+                  <div style={{ color: GRAPH_UI.timeline.playhead, fontSize: 11, marginBottom: 4 }}>{key}</div>
+                  <div style={{ color: GRAPH_UI.text.body, fontSize: 13, wordBreak: "break-word" }}>
                     {typeof value === "object" ? JSON.stringify(value) : String(value)}
                   </div>
                 </div>
@@ -567,8 +567,8 @@ export function GraphInspectorPanel({
             <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
               {propertyEntries.map(([key, value]) => (
                 <div key={key} style={propertyCardStyle}>
-                  <div style={{ color: GRAPH_THEME.ui.timeline.playhead, fontSize: 11, marginBottom: 4 }}>{key}</div>
-                  <div style={{ color: GRAPH_THEME.ui.text.body, fontSize: 13, wordBreak: "break-word" }}>
+                  <div style={{ color: GRAPH_UI.timeline.playhead, fontSize: 11, marginBottom: 4 }}>{key}</div>
+                  <div style={{ color: GRAPH_UI.text.body, fontSize: 13, wordBreak: "break-word" }}>
                     {typeof value === "object" ? JSON.stringify(value) : String(value)}
                   </div>
                 </div>
@@ -587,9 +587,9 @@ export function GraphInspectorPanel({
 
 const inputStyle: CSSProperties = {
   width: "100%",
-  background: GRAPH_THEME.ui.control.inputBg,
-  border: `1px solid ${GRAPH_THEME.ui.control.inputBorder}`,
-  color: GRAPH_THEME.ui.text.strong,
+  background: GRAPH_UI.control.inputBg,
+  border: `1px solid ${GRAPH_UI.control.inputBorder}`,
+  color: GRAPH_UI.text.strong,
   borderRadius: 12,
   padding: "11px 13px",
   fontSize: 13,
@@ -600,14 +600,14 @@ const groupedSelectionNoticeStyle: CSSProperties = {
   marginTop: 12,
   padding: "10px 12px",
   background: "rgba(98, 226, 205, 0.07)",
-  border: `1px solid ${GRAPH_THEME.ui.control.activeBorder}`,
+  border: `1px solid ${GRAPH_UI.control.activeBorder}`,
   borderRadius: 12,
 };
 
 const actionButtonStyle: CSSProperties = {
-  background: GRAPH_THEME.ui.control.primaryBg,
-  color: GRAPH_THEME.ui.control.primaryText,
-  border: `1px solid ${GRAPH_THEME.ui.control.primaryBorder}`,
+  background: GRAPH_UI.control.primaryBg,
+  color: GRAPH_UI.control.primaryText,
+  border: `1px solid ${GRAPH_UI.control.primaryBorder}`,
   borderRadius: 12,
   padding: "9px 12px",
   cursor: "pointer",
@@ -621,9 +621,9 @@ const actionButtonStyle: CSSProperties = {
 
 const secondaryActionButtonStyle: CSSProperties = {
   ...actionButtonStyle,
-  background: GRAPH_THEME.ui.control.defaultBg,
-  border: `1px solid ${GRAPH_THEME.ui.control.defaultBorder}`,
-  color: GRAPH_THEME.ui.control.defaultText,
+  background: GRAPH_UI.control.defaultBg,
+  border: `1px solid ${GRAPH_UI.control.defaultBorder}`,
+  color: GRAPH_UI.control.defaultText,
   fontWeight: 600,
 };
 
@@ -631,7 +631,7 @@ const predictionCardStyle: CSSProperties = {
   textAlign: "left",
   padding: "10px 12px",
   background: "rgba(255, 255, 255, 0.035)",
-  border: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}`,
+  border: `1px solid ${GRAPH_UI.surface.panelBorder}`,
   borderRadius: 10,
   cursor: "pointer",
   width: "100%",
@@ -641,22 +641,22 @@ const propertyCardStyle: CSSProperties = {
   background: "rgba(255, 255, 255, 0.028)",
   padding: "10px 12px",
   borderRadius: 10,
-  border: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}`,
+  border: `1px solid ${GRAPH_UI.surface.panelBorder}`,
 };
 
 const emptyTextStyle: CSSProperties = {
-  color: GRAPH_THEME.ui.text.muted,
+  color: GRAPH_UI.text.muted,
   fontSize: 12,
   lineHeight: 1.5,
 };
 
 const subtleChipStyle: CSSProperties = {
   background: "rgba(255, 255, 255, 0.04)",
-  color: GRAPH_THEME.ui.text.body,
+  color: GRAPH_UI.text.body,
   padding: "4px 8px",
   borderRadius: 999,
   fontSize: 11,
-  border: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}`,
+  border: `1px solid ${GRAPH_UI.surface.panelBorder}`,
 };
 
 const sectionStyle: CSSProperties = {
@@ -664,13 +664,13 @@ const sectionStyle: CSSProperties = {
   flexDirection: "column",
   gap: 10,
   padding: 14,
-  background: GRAPH_THEME.ui.surface.cardSubtle,
-  border: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}`,
+  background: GRAPH_UI.surface.cardSubtle,
+  border: `1px solid ${GRAPH_UI.surface.panelBorder}`,
   borderRadius: 14,
 };
 
 const sectionTitleStyle: CSSProperties = {
-  color: GRAPH_THEME.ui.text.muted,
+  color: GRAPH_UI.text.muted,
   fontSize: 11,
   fontWeight: 700,
   textTransform: "uppercase",
@@ -692,8 +692,8 @@ const pathNodeChipStyle: CSSProperties = {
   padding: "5px 10px",
   borderRadius: 999,
   background: "rgba(98, 226, 205, 0.08)",
-  border: `1px solid ${GRAPH_THEME.ui.control.activeBorder}`,
-  color: GRAPH_THEME.ui.text.strong,
+  border: `1px solid ${GRAPH_UI.control.activeBorder}`,
+  color: GRAPH_UI.text.strong,
   fontSize: 12,
   fontWeight: 600,
   maxWidth: 160,
@@ -706,8 +706,8 @@ const pathNodeIndexStyle: CSSProperties = {
   width: 16,
   height: 16,
   borderRadius: "50%",
-  background: GRAPH_THEME.ui.timeline.playheadSoft,
-  color: GRAPH_THEME.ui.timeline.playhead,
+  background: GRAPH_UI.timeline.playheadSoft,
+  color: GRAPH_UI.timeline.playhead,
   fontSize: 9,
   fontWeight: 800,
   flexShrink: 0,
@@ -723,7 +723,7 @@ const pathEdgeConnectorStyle: CSSProperties = {
 const pathEdgeLabelStyle: CSSProperties = {
   fontSize: 9,
   fontWeight: 700,
-  color: GRAPH_THEME.ui.text.subtle,
+  color: GRAPH_UI.text.subtle,
   letterSpacing: "0.04em",
   textTransform: "uppercase",
   maxWidth: 70,

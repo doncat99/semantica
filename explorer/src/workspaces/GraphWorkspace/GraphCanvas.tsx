@@ -1,5 +1,6 @@
 import { useEffect, useMemo, useRef, useCallback, forwardRef, useImperativeHandle, useState, type ReactNode } from "react";
 import Sigma from "sigma";
+import { PRESENTATION_CHANGED } from '../../embeddedPresentation';
 import FA2Layout from "graphology-layout-forceatlas2/worker";
 import { graph, type EdgeAttributes, type NodeAttributes } from "../../store/graphStore";
 import type { GraphBehavior, GraphBehaviorContext, GraphBehaviorActionRequest } from "./behaviors/types";
@@ -2205,6 +2206,15 @@ export const GraphCanvas = forwardRef<GraphCanvasHandle, GraphCanvasProps>(
       previousInteractionStateRef.current = interactionState;
       previousDistanceVisualStateRef.current = distanceVisualState;
     }, [displayGraph, distanceVisualState, interactionState, reducerSceneStateRef]);
+
+    useEffect(() => {
+      const refresh = () => {
+        const sigma = sigmaRef.current;
+        if (sigma) applySceneState(sigma, reducerSceneStateRef, reducerWarningStateRef);
+      };
+      window.addEventListener(PRESENTATION_CHANGED, refresh);
+      return () => window.removeEventListener(PRESENTATION_CHANGED, refresh);
+    }, []);
 
     const drawStructureLayerFrame = useCallback(() => {
       const sigma = sigmaRef.current;

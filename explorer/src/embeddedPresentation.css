@@ -1,0 +1,67 @@
+html[data-host-presentation] :is(body, #root, .app-shell) {
+  background: var(--app-bg);
+  color: var(--text-main);
+  font-family: var(--host-font);
+}
+html[data-host-presentation] :is(button, input, select, textarea) {
+  font-family: var(--host-font);
+  color: var(--text-main);
+  letter-spacing: 0;
+}
+html[data-host-presentation] :is(.app-rail, .workspace-header, .workspace-header--compact) {
+  background: var(--panel-bg);
+  backdrop-filter: none;
+}
+html[data-host-presentation] :is(.brand-pill, .nav-button, .workspace-kicker, .workspace-tab, .ws-panel, .ws-card) {
+  border-radius: 8px;
+  letter-spacing: 0;
+  box-shadow: none;
+}
+html[data-host-presentation] :is(.brand-pill, .nav-button[data-active='true'], .workspace-tab[data-active='true'], .ws-btn--primary) {
+  background: var(--ws-accent-soft);
+  border-color: var(--ws-accent);
+  color: var(--text-main);
+}
+html[data-host-presentation] :is(.nav-button:hover, .workspace-tab:hover, .ws-btn--ghost:hover) {
+  background: var(--ws-surface-hover);
+  border-color: var(--ws-border-strong);
+}
+html[data-host-presentation] :is(.workspace-kicker, .ws-panel--inset, .ws-btn--ghost) {
+  background: var(--ws-surface);
+  border-color: var(--ws-border);
+  color: var(--text-muted);
+}
+html[data-host-presentation] .workspace-kicker::before {
+  background: var(--ws-accent);
+  box-shadow: none;
+}
+html[data-host-presentation] :is(.nav-label, .workspace-title, .ws-title, .ws-label, .ws-eyebrow) {
+  font-family: var(--host-font);
+  letter-spacing: 0;
+}
+html[data-host-presentation] [aria-label='Native graph scope'] :is(button, select, input) {
+  min-height: 28px;
+  padding: 3px 8px;
+  background: var(--panel-bg);
+  border: 1px solid var(--ws-border);
+  border-radius: 6px;
+}
+html[data-host-presentation] :is(button, input, select, textarea):disabled { opacity: .5; }
+html[data-host-presentation] :focus-visible { outline: 2px solid var(--ws-accent); outline-offset: 2px; }
+html[data-host-presentation] ::selection { color: var(--text-main); background: var(--ws-accent-soft); }
+html[data-host-presentation] ::-webkit-scrollbar-thumb { background: var(--ws-border-strong); }
+html[data-host-presentation] :is(.explore-search-command, .explore-search-suggestions, .explore-mode-control, .explore-tool-cluster, .explore-tool-button, .explore-mode-segment) {
+  border-radius: 6px;
+  box-shadow: none;
+}
+html[data-host-presentation] :is(.explore-tool-cluster, .explore-mode-control) {
+  background: var(--ws-surface);
+  border-color: var(--ws-border);
+}
+html[data-host-presentation] :is(.explore-tool-cluster-label, .explore-color-legend-title) { letter-spacing: 0; }
+html[data-host-presentation] .explore-search-command input { background: transparent; border: 0; }
+html[data-host-presentation] .workspace-tab:not([data-active='true']) {
+  background: var(--ws-surface);
+  border-color: var(--ws-border);
+  color: var(--text-muted);
+}

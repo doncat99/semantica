@@ -22,7 +22,7 @@ import {
   RefreshCw,
   X,
 } from "lucide-react";
-import { GRAPH_THEME } from "./graphTheme";
+import { GRAPH_UI } from "./graphTheme";
 import type { MarkdownApplyResult } from "./markdownResourceClient";
 import type { MarkdownResourceRef } from "./markdownEditorState";
 import { isSafeUrl } from "./markdownUrlSafety";
@@ -417,7 +417,7 @@ const MARKDOWN_COMPONENTS: Components = {
   // eslint-disable-next-line @typescript-eslint/no-unused-vars
   a: ({ href, children, title, node: _node, ...rest }) => {
     if (!isSafeUrl(href)) {
-      return <span style={{ color: GRAPH_THEME.ui.text.muted, textDecoration: "line-through" }}>{children}</span>;
+      return <span style={{ color: GRAPH_UI.text.muted, textDecoration: "line-through" }}>{children}</span>;
     }
     // isSafeUrl returning true guarantees href is a non-empty string.
     const safeHref = href ?? "";
@@ -454,17 +454,17 @@ const MARKDOWN_COMPONENTS: Components = {
   ol: ({ children }) => <ol style={{ margin: "0 0 8px 0", paddingLeft: 18 }}>{children}</ol>,
   li: ({ children }) => <li style={{ marginBottom: 3 }}>{children}</li>,
   blockquote: ({ children }) => <blockquote style={blockquoteStyle}>{children}</blockquote>,
-  hr: () => <hr style={{ border: "none", borderTop: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}`, margin: "10px 0" }} />,
+  hr: () => <hr style={{ border: "none", borderTop: `1px solid ${GRAPH_UI.surface.panelBorder}`, margin: "10px 0" }} />,
   table: ({ children }) => (
-    <div style={{ width: "100%", overflowX: "auto", margin: "8px 0", borderRadius: 6, border: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}` }}>
+    <div style={{ width: "100%", overflowX: "auto", margin: "8px 0", borderRadius: 6, border: `1px solid ${GRAPH_UI.surface.panelBorder}` }}>
       <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>{children}</table>
     </div>
   ),
   thead: ({ children }) => <thead style={{ background: "rgba(255, 255, 255, 0.04)" }}>{children}</thead>,
   tbody: ({ children }) => <tbody>{children}</tbody>,
-  tr: ({ children }) => <tr style={{ borderBottom: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}` }}>{children}</tr>,
-  th: ({ children }) => <th style={{ padding: "6px 8px", textAlign: "left", fontWeight: 700, color: GRAPH_THEME.ui.text.strong, borderRight: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}` }}>{children}</th>,
-  td: ({ children }) => <td style={{ padding: "6px 8px", color: GRAPH_THEME.ui.text.body, borderRight: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}` }}>{children}</td>,
+  tr: ({ children }) => <tr style={{ borderBottom: `1px solid ${GRAPH_UI.surface.panelBorder}` }}>{children}</tr>,
+  th: ({ children }) => <th style={{ padding: "6px 8px", textAlign: "left", fontWeight: 700, color: GRAPH_UI.text.strong, borderRight: `1px solid ${GRAPH_UI.surface.panelBorder}` }}>{children}</th>,
+  td: ({ children }) => <td style={{ padding: "6px 8px", color: GRAPH_UI.text.body, borderRight: `1px solid ${GRAPH_UI.surface.panelBorder}` }}>{children}</td>,
   pre: ({ children }) => <pre style={preBlockStyle}>{children}</pre>,
   // C-1: discard `node` here too — code elements are custom components
   // and would otherwise receive node="[object Object]" in the DOM.
@@ -484,7 +484,7 @@ const viewerContainerStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
   background: "rgba(255, 255, 255, 0.025)",
-  border: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}`,
+  border: `1px solid ${GRAPH_UI.surface.panelBorder}`,
   borderRadius: 12,
   overflow: "hidden",
 };
@@ -497,7 +497,7 @@ const viewerHeaderStyle: CSSProperties = {
   flexWrap: "wrap",
   padding: "6px 10px",
   background: "rgba(0, 0, 0, 0.2)",
-  borderBottom: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}`,
+  borderBottom: `1px solid ${GRAPH_UI.surface.panelBorder}`,
 };
 
 const tabBtnStyle: CSSProperties = {
@@ -507,7 +507,7 @@ const tabBtnStyle: CSSProperties = {
   borderRadius: 6,
   border: "1px solid transparent",
   background: "transparent",
-  color: GRAPH_THEME.ui.text.muted,
+  color: GRAPH_UI.text.muted,
   fontSize: 12,
   fontWeight: 600,
   cursor: "pointer",
@@ -515,9 +515,9 @@ const tabBtnStyle: CSSProperties = {
 };
 
 const activeTabBtnStyle: CSSProperties = {
-  background: GRAPH_THEME.ui.timeline.playheadSoft,
-  border: `1px solid ${GRAPH_THEME.ui.control.activeBorder}`,
-  color: GRAPH_THEME.ui.timeline.playhead,
+  background: GRAPH_UI.timeline.playheadSoft,
+  border: `1px solid ${GRAPH_UI.control.activeBorder}`,
+  color: GRAPH_UI.timeline.playhead,
 };
 
 const copyBtnStyle: CSSProperties = {
@@ -525,18 +525,18 @@ const copyBtnStyle: CSSProperties = {
   alignItems: "center",
   padding: "3px 8px",
   borderRadius: 6,
-  border: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}`,
+  border: `1px solid ${GRAPH_UI.surface.panelBorder}`,
   background: "rgba(255, 255, 255, 0.04)",
-  color: GRAPH_THEME.ui.text.subtle,
+  color: GRAPH_UI.text.subtle,
   fontSize: 11,
   cursor: "pointer",
 };
 
 const saveBtnStyle: CSSProperties = {
   ...copyBtnStyle,
-  background: GRAPH_THEME.ui.control.primaryBg,
-  border: `1px solid ${GRAPH_THEME.ui.control.primaryBorder}`,
-  color: GRAPH_THEME.ui.control.primaryText,
+  background: GRAPH_UI.control.primaryBg,
+  border: `1px solid ${GRAPH_UI.control.primaryBorder}`,
+  color: GRAPH_UI.control.primaryText,
   fontWeight: 700,
 };
 
@@ -574,16 +574,16 @@ const editorStyle: CSSProperties = {
   resize: "vertical",
   padding: 10,
   borderRadius: 8,
-  border: `1px solid ${GRAPH_THEME.ui.control.activeBorder}`,
+  border: `1px solid ${GRAPH_UI.control.activeBorder}`,
   background: "rgba(0, 0, 0, 0.3)",
-  color: GRAPH_THEME.ui.text.strong,
+  color: GRAPH_UI.text.strong,
   fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
   fontSize: 12,
   lineHeight: 1.6,
 };
 
 const emptyTextStyle: CSSProperties = {
-  color: GRAPH_THEME.ui.text.muted,
+  color: GRAPH_UI.text.muted,
   fontSize: 12,
   lineHeight: 1.5,
   fontStyle: "italic",
@@ -602,14 +602,14 @@ const sourceCodeStyle: CSSProperties = {
   fontFamily: "'JetBrains Mono', 'Fira Code', monospace",
   fontSize: 12,
   lineHeight: 1.6,
-  color: GRAPH_THEME.ui.text.strong,
+  color: GRAPH_UI.text.strong,
   whiteSpace: "pre-wrap",
   wordBreak: "break-word",
   userSelect: "text",
 };
 
 const previewStyle: CSSProperties = {
-  color: GRAPH_THEME.ui.text.body,
+  color: GRAPH_UI.text.body,
   fontSize: 13,
   lineHeight: 1.6,
   wordBreak: "break-word",
@@ -618,17 +618,17 @@ const previewStyle: CSSProperties = {
 const h1Style: CSSProperties = {
   fontSize: 16,
   fontWeight: 700,
-  color: GRAPH_THEME.ui.text.strong,
+  color: GRAPH_UI.text.strong,
   marginTop: 8,
   marginBottom: 6,
   paddingBottom: 3,
-  borderBottom: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}`,
+  borderBottom: `1px solid ${GRAPH_UI.surface.panelBorder}`,
 };
 
 const h2Style: CSSProperties = {
   fontSize: 14,
   fontWeight: 700,
-  color: GRAPH_THEME.ui.text.strong,
+  color: GRAPH_UI.text.strong,
   marginTop: 8,
   marginBottom: 4,
 };
@@ -636,7 +636,7 @@ const h2Style: CSSProperties = {
 const h3Style: CSSProperties = {
   fontSize: 13,
   fontWeight: 600,
-  color: GRAPH_THEME.ui.text.strong,
+  color: GRAPH_UI.text.strong,
   marginTop: 6,
   marginBottom: 4,
 };
@@ -644,7 +644,7 @@ const h3Style: CSSProperties = {
 const h4Style: CSSProperties = {
   fontSize: 12,
   fontWeight: 600,
-  color: GRAPH_THEME.ui.text.strong,
+  color: GRAPH_UI.text.strong,
   marginTop: 4,
   marginBottom: 2,
 };
@@ -652,10 +652,10 @@ const h4Style: CSSProperties = {
 const blockquoteStyle: CSSProperties = {
   margin: "8px 0",
   padding: "6px 12px",
-  borderLeft: `3px solid ${GRAPH_THEME.ui.timeline.playhead}`,
+  borderLeft: `3px solid ${GRAPH_UI.timeline.playhead}`,
   background: "rgba(98, 226, 205, 0.05)",
   borderRadius: "0 6px 6px 0",
-  color: GRAPH_THEME.ui.text.body,
+  color: GRAPH_UI.text.body,
   fontStyle: "italic",
 };
 
@@ -671,9 +671,9 @@ const imageBadgeStyle: CSSProperties = {
   alignItems: "center",
   padding: "3px 7px",
   background: "rgba(255, 255, 255, 0.04)",
-  border: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}`,
+  border: `1px solid ${GRAPH_UI.surface.panelBorder}`,
   borderRadius: 6,
-  color: GRAPH_THEME.ui.text.muted,
+  color: GRAPH_UI.text.muted,
   fontSize: 11,
   margin: "3px 0",
 };

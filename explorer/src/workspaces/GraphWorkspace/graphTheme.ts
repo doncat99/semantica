@@ -969,6 +969,11 @@ export const GRAPH_THEME: GraphTheme = {
 
 const ZOOM_TIER_ORDER: GraphZoomTier[] = ["overview", "structure", "inspection"];
 
+// DOM styles retain live CSS references; canvas consumers require literal colors.
+export const GRAPH_UI = Object.fromEntries(Object.entries(GRAPH_THEME.ui).map(([group, values]) => [group,
+  Object.fromEntries(Object.entries(values).map(([name, value]) => [name, `var(--graph-${group}-${name}, ${value})`])),
+])) as GraphTheme['ui'];
+
 export function hashString(value: string): number {
   let hash = 0;
   for (let index = 0; index < value.length; index += 1) {

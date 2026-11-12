@@ -28,7 +28,7 @@ import { useLoadGraph, useReloadGraph } from "./useLoadGraph";
 import { EMPTY_GRAPH_FILTERS, type GraphFilters } from './graphFilters';
 import { GraphLoadingOverlay } from "./GraphLoadingOverlay";
 import { createGraphLoadProgress, getGraphLoadTitle } from "./graphLoading";
-import { GRAPH_THEME, withAlpha } from "./graphTheme";
+import { GRAPH_THEME, GRAPH_UI, withAlpha } from "./graphTheme";
 import { buildGraphColorLegend, type GraphColorLegendItem } from "./graphColorLegend";
 import { focusedUnavailableReasonText, groupedViewReasonText } from "./graphViewCopy";
 import { localGraphRequiresDraftConfirm } from "./localGraphTransition";
@@ -472,17 +472,17 @@ function SemanticColorLegend({ items }: { items: GraphColorLegendItem[] }) {
 const HUD_CSS = `
   .palantir-bg {
     background:
-      ${GRAPH_THEME.ui.scene.radialGlow},
-      ${GRAPH_THEME.ui.scene.background};
+      ${GRAPH_UI.scene.radialGlow},
+      ${GRAPH_UI.scene.background};
   }
   .palantir-grid {
     position: absolute;
     inset: 0;
     background-image:
-      linear-gradient(${GRAPH_THEME.ui.scene.grid} 1px, transparent 1px),
-      linear-gradient(90deg, ${GRAPH_THEME.ui.scene.grid} 1px, transparent 1px),
-      linear-gradient(${GRAPH_THEME.ui.scene.gridStrong} 1px, transparent 1px),
-      linear-gradient(90deg, ${GRAPH_THEME.ui.scene.gridStrong} 1px, transparent 1px);
+      linear-gradient(${GRAPH_UI.scene.grid} 1px, transparent 1px),
+      linear-gradient(90deg, ${GRAPH_UI.scene.grid} 1px, transparent 1px),
+      linear-gradient(${GRAPH_UI.scene.gridStrong} 1px, transparent 1px),
+      linear-gradient(90deg, ${GRAPH_UI.scene.gridStrong} 1px, transparent 1px);
     background-size: 48px 48px, 48px 48px, 240px 240px, 240px 240px;
     pointer-events: none;
     z-index: 1;
@@ -490,28 +490,28 @@ const HUD_CSS = `
   .palantir-vignette {
     position: absolute;
     inset: 0;
-    background: ${GRAPH_THEME.ui.scene.vignette};
+    background: ${GRAPH_UI.scene.vignette};
     pointer-events: none;
     z-index: 2;
   }
   .glass-header {
-    background: ${GRAPH_THEME.ui.surface.cardSubtle};
-    border-bottom: 1px solid ${GRAPH_THEME.ui.surface.panelBorder};
+    background: ${GRAPH_UI.surface.cardSubtle};
+    border-bottom: 1px solid ${GRAPH_UI.surface.panelBorder};
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
   }
   .glass-hud {
-    background: ${GRAPH_THEME.ui.surface.panel};
+    background: ${GRAPH_UI.surface.panel};
     backdrop-filter: blur(14px) saturate(1.08);
     -webkit-backdrop-filter: blur(14px) saturate(1.08);
-    border-left: 1px solid ${GRAPH_THEME.ui.surface.panelBorder};
-    box-shadow: ${GRAPH_THEME.ui.surface.shadow};
+    border-left: 1px solid ${GRAPH_UI.surface.panelBorder};
+    box-shadow: ${GRAPH_UI.surface.shadow};
   }
   .hud-scrollbar::-webkit-scrollbar { width: 6px; }
   .hud-scrollbar::-webkit-scrollbar-track { background: transparent; }
   .hud-scrollbar::-webkit-scrollbar-thumb { background: rgba(215, 209, 196, 0.22); border-radius: 6px; }
   .node-panel-collapse {
-    border: 1px solid ${GRAPH_THEME.ui.surface.panelBorder};
+    border: 1px solid ${GRAPH_UI.surface.panelBorder};
     border-radius: 12px;
     background: rgba(255, 255, 255, 0.026);
     overflow: hidden;
@@ -527,7 +527,7 @@ const HUD_CSS = `
     justify-content: space-between;
     gap: 12px;
     padding: 12px 14px;
-    color: ${GRAPH_THEME.ui.text.body};
+    color: ${GRAPH_UI.text.body};
     font-size: 12px;
     font-weight: 700;
     letter-spacing: 0.04em;
@@ -538,7 +538,7 @@ const HUD_CSS = `
   }
   .node-panel-summary::after {
     content: "+";
-    color: ${GRAPH_THEME.ui.timeline.playhead};
+    color: ${GRAPH_UI.timeline.playhead};
     font-size: 16px;
     line-height: 1;
   }
@@ -561,9 +561,9 @@ const HUD_CSS = `
     width: min(460px, calc(100% - 48px));
     border-radius: 20px;
     padding: 22px 22px 18px;
-    background: ${GRAPH_THEME.ui.surface.cardStrong};
-    border: 1px solid ${GRAPH_THEME.ui.surface.panelBorder};
-    box-shadow: ${GRAPH_THEME.ui.surface.shadow};
+    background: ${GRAPH_UI.surface.cardStrong};
+    border: 1px solid ${GRAPH_UI.surface.panelBorder};
+    box-shadow: ${GRAPH_UI.surface.shadow};
     backdrop-filter: blur(18px);
     -webkit-backdrop-filter: blur(18px);
   }
@@ -576,7 +576,7 @@ const HUD_CSS = `
     width: 10px;
     height: 10px;
     border-radius: 999px;
-    background: linear-gradient(135deg, ${GRAPH_THEME.ui.timeline.playhead}, ${GRAPH_THEME.palette.accent.selected});
+    background: linear-gradient(135deg, ${GRAPH_UI.timeline.playhead}, ${GRAPH_THEME.palette.accent.selected});
     box-shadow: 0 0 18px rgba(98, 226, 205, 0.28);
     animation: sem-loader-pulse 1.2s ease-in-out infinite;
   }
@@ -602,7 +602,7 @@ const HUD_CSS = `
     border-radius: 999px;
     overflow: hidden;
     background: rgba(255, 255, 255, 0.052);
-    border: 1px solid ${GRAPH_THEME.ui.surface.panelBorder};
+    border: 1px solid ${GRAPH_UI.surface.panelBorder};
   }
   .graph-loading-bar > span {
     display: block;
@@ -659,7 +659,7 @@ const HUD_CSS = `
     flex: 1;
     overflow: hidden;
     border-radius: 20px 20px 0 0;
-    background: ${GRAPH_THEME.ui.surface.stage};
+    background: ${GRAPH_UI.surface.stage};
   }
   .explore-scene-stage {
     position: relative;
@@ -670,8 +670,8 @@ const HUD_CSS = `
   .explore-scene-footer {
     position: relative;
     z-index: 3;
-    border-top: 1px solid ${GRAPH_THEME.ui.timeline.border};
-    background: ${GRAPH_THEME.ui.timeline.background};
+    border-top: 1px solid ${GRAPH_UI.timeline.border};
+    background: ${GRAPH_UI.timeline.background};
   }
   .explore-plugin-dock {
     position: relative;
@@ -684,9 +684,9 @@ const HUD_CSS = `
     flex-wrap: wrap;
   }
   .explore-plugin-dock-tab {
-    border: 1px solid ${GRAPH_THEME.ui.control.defaultBorder};
-    background: ${GRAPH_THEME.ui.control.defaultBg};
-    color: ${GRAPH_THEME.ui.control.defaultText};
+    border: 1px solid ${GRAPH_UI.control.defaultBorder};
+    background: ${GRAPH_UI.control.defaultBg};
+    color: ${GRAPH_UI.control.defaultText};
     border-radius: 999px;
     padding: 6px 10px;
     font-size: 11px;
@@ -694,9 +694,9 @@ const HUD_CSS = `
     cursor: pointer;
   }
   .explore-plugin-dock-tab[data-active="true"] {
-    color: ${GRAPH_THEME.ui.control.activeText};
+    color: ${GRAPH_UI.control.activeText};
     background: rgba(74, 181, 166, 0.18);
-    border-color: ${GRAPH_THEME.ui.control.activeBorder};
+    border-color: ${GRAPH_UI.control.activeBorder};
   }
   .explore-toolbar {
     display: flex;
@@ -725,11 +725,11 @@ const HUD_CSS = `
     gap: 9px;
     padding: 4px 5px 4px 13px;
     border-radius: 16px;
-    border: 1px solid ${GRAPH_THEME.ui.control.inputBorder};
+    border: 1px solid ${GRAPH_UI.control.inputBorder};
     background:
       linear-gradient(135deg, rgba(255,255,255,0.06), rgba(255,255,255,0.018)),
-      ${GRAPH_THEME.ui.control.inputBg};
-    color: ${GRAPH_THEME.ui.text.muted};
+      ${GRAPH_UI.control.inputBg};
+    color: ${GRAPH_UI.text.muted};
     box-shadow: inset 0 1px 0 rgba(255,255,255,0.045), 0 14px 30px rgba(0,0,0,0.16);
   }
   .explore-search-suggestions {
@@ -744,8 +744,8 @@ const HUD_CSS = `
     max-height: 288px;
     overflow-y: auto;
     border-radius: 14px;
-    border: 1px solid ${GRAPH_THEME.ui.control.inputBorder};
-    background: ${GRAPH_THEME.ui.surface.cardStrong};
+    border: 1px solid ${GRAPH_UI.control.inputBorder};
+    background: ${GRAPH_UI.surface.cardStrong};
     box-shadow: 0 18px 40px rgba(0,0,0,0.32), inset 0 1px 0 rgba(255,255,255,0.04);
   }
   .explore-search-suggestions li {
@@ -756,10 +756,10 @@ const HUD_CSS = `
     padding: 8px 10px;
     border-radius: 10px;
     cursor: pointer;
-    color: ${GRAPH_THEME.ui.text.body};
+    color: ${GRAPH_UI.text.body};
   }
   .explore-search-suggestions li[data-highlighted="true"] {
-    background: ${GRAPH_THEME.ui.control.hoverBg};
+    background: ${GRAPH_UI.control.hoverBg};
   }
   .explore-search-suggestion-label {
     min-width: 0;
@@ -772,33 +772,33 @@ const HUD_CSS = `
   .explore-search-suggestion-type {
     flex-shrink: 0;
     font-size: 11px;
-    color: ${GRAPH_THEME.ui.text.subtle};
+    color: ${GRAPH_UI.text.subtle};
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
   .explore-search-command:focus-within {
-    border-color: ${GRAPH_THEME.ui.control.activeBorder};
-    box-shadow: inset 0 1px 0 rgba(255,255,255,0.06), 0 0 0 1px ${GRAPH_THEME.ui.control.focusRing}, 0 16px 32px rgba(0,0,0,0.18);
+    border-color: ${GRAPH_UI.control.activeBorder};
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.06), 0 0 0 1px ${GRAPH_UI.control.focusRing}, 0 16px 32px rgba(0,0,0,0.18);
   }
   .explore-search-command input {
     width: 100%;
     min-width: 0;
     border: 0;
     outline: 0;
-    color: ${GRAPH_THEME.ui.text.strong};
+    color: ${GRAPH_UI.text.strong};
     background: transparent;
     font-size: 13px;
   }
   .explore-search-command input::placeholder {
-    color: ${GRAPH_THEME.ui.text.subtle};
+    color: ${GRAPH_UI.text.subtle};
   }
   .explore-search-command button {
     height: 33px;
-    border: 1px solid ${GRAPH_THEME.ui.control.primaryBorder};
+    border: 1px solid ${GRAPH_UI.control.primaryBorder};
     border-radius: 12px;
     padding: 0 13px;
-    background: ${GRAPH_THEME.ui.control.primaryBg};
-    color: ${GRAPH_THEME.ui.control.primaryText};
+    background: ${GRAPH_UI.control.primaryBg};
+    color: ${GRAPH_UI.control.primaryText};
     font-size: 12px;
     font-weight: 800;
     cursor: pointer;
@@ -814,7 +814,7 @@ const HUD_CSS = `
     align-items: center;
     padding: 4px;
     border-radius: 16px;
-    border: 1px solid ${GRAPH_THEME.ui.control.defaultBorder};
+    border: 1px solid ${GRAPH_UI.control.defaultBorder};
     background: rgba(255, 255, 255, 0.026);
     box-shadow: inset 0 1px 0 rgba(255,255,255,0.035);
   }
@@ -842,7 +842,7 @@ const HUD_CSS = `
   }
   .explore-tool-cluster-label {
     padding: 0 4px 0 7px;
-    color: ${GRAPH_THEME.ui.text.subtle};
+    color: ${GRAPH_UI.text.subtle};
     font-size: 10px;
     font-weight: 800;
     letter-spacing: 0.08em;
@@ -861,11 +861,11 @@ const HUD_CSS = `
     align-items: center;
     justify-content: center;
     gap: 7px;
-    border: 1px solid ${GRAPH_THEME.ui.control.defaultBorder};
+    border: 1px solid ${GRAPH_UI.control.defaultBorder};
     border-radius: 12px;
     padding: 7px 10px;
-    background: ${GRAPH_THEME.ui.control.defaultBg};
-    color: ${GRAPH_THEME.ui.control.defaultText};
+    background: ${GRAPH_UI.control.defaultBg};
+    color: ${GRAPH_UI.control.defaultText};
     font-size: 12px;
     font-weight: 700;
     line-height: 1;
@@ -875,26 +875,26 @@ const HUD_CSS = `
     transition: background 140ms ease, border-color 140ms ease, color 140ms ease, transform 140ms ease;
   }
   .explore-tool-button:hover:not(:disabled) {
-    background: ${GRAPH_THEME.ui.control.hoverBg};
+    background: ${GRAPH_UI.control.hoverBg};
     border-color: rgba(211, 205, 190, 0.18);
     transform: translateY(-1px);
   }
   .explore-tool-button:disabled {
     cursor: not-allowed;
-    color: ${GRAPH_THEME.ui.control.disabledText};
+    color: ${GRAPH_UI.control.disabledText};
     opacity: 0.48;
     transform: none;
   }
   .explore-tool-button[data-active="true"] {
-    color: ${GRAPH_THEME.ui.control.activeText};
-    background: ${GRAPH_THEME.ui.control.activeBg};
-    border-color: ${GRAPH_THEME.ui.control.activeBorder};
-    box-shadow: 0 0 0 1px ${GRAPH_THEME.ui.control.focusRing}, inset 0 1px 0 rgba(255,255,255,0.06);
+    color: ${GRAPH_UI.control.activeText};
+    background: ${GRAPH_UI.control.activeBg};
+    border-color: ${GRAPH_UI.control.activeBorder};
+    box-shadow: 0 0 0 1px ${GRAPH_UI.control.focusRing}, inset 0 1px 0 rgba(255,255,255,0.06);
   }
   .explore-tool-button-primary {
-    color: ${GRAPH_THEME.ui.control.primaryText};
-    background: ${GRAPH_THEME.ui.control.primaryBg};
-    border-color: ${GRAPH_THEME.ui.control.primaryBorder};
+    color: ${GRAPH_UI.control.primaryText};
+    background: ${GRAPH_UI.control.primaryBg};
+    border-color: ${GRAPH_UI.control.primaryBorder};
   }
   .explore-tool-button[data-compact="true"] {
     min-width: 34px;
@@ -908,7 +908,7 @@ const HUD_CSS = `
     align-items: baseline;
     gap: 12px;
     padding: 2px 1px 0;
-    color: ${GRAPH_THEME.ui.text.subtle};
+    color: ${GRAPH_UI.text.subtle};
     font-size: 11px;
     font-weight: 600;
   }
@@ -917,7 +917,7 @@ const HUD_CSS = `
     flex-wrap: wrap;
     align-items: end;
     gap: 10px;
-    color: ${GRAPH_THEME.ui.text.subtle};
+    color: ${GRAPH_UI.text.subtle};
     font-size: 12px;
   }
   .explore-graph-filters label {
@@ -933,18 +933,18 @@ const HUD_CSS = `
     min-height: 34px;
     padding: 6px 10px;
     border-radius: 8px;
-    border: 1px solid ${GRAPH_THEME.ui.control.activeBorder};
-    background: ${GRAPH_THEME.ui.control.activeBg};
-    color: ${GRAPH_THEME.ui.text.strong};
+    border: 1px solid ${GRAPH_UI.control.activeBorder};
+    background: ${GRAPH_UI.control.activeBg};
+    color: ${GRAPH_UI.text.strong};
     font: inherit;
   }
-  .explore-graph-filters input::placeholder { color: ${GRAPH_THEME.ui.text.muted}; }
-  .explore-graph-filters :focus-visible { outline: 2px solid ${GRAPH_THEME.ui.control.focusRing}; outline-offset: 2px; }
+  .explore-graph-filters input::placeholder { color: ${GRAPH_UI.text.muted}; }
+  .explore-graph-filters :focus-visible { outline: 2px solid ${GRAPH_UI.control.focusRing}; outline-offset: 2px; }
   .explore-graph-filters :disabled { opacity: 0.5; }
   .explore-graph-filters [role="status"] { flex-basis: 100%; overflow-wrap: anywhere; }
   .explore-color-legend-label {
     flex-shrink: 0;
-    color: ${GRAPH_THEME.ui.text.muted};
+    color: ${GRAPH_UI.text.muted};
   }
   .explore-color-legend-items {
     display: flex;
@@ -3158,9 +3158,6 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
                   {(showLoadingOverlay || showSettlingStatus) && loadingProgress ? (
                     <MetricChip>{getGraphLoadTitle(loadingProgress.phase)}</MetricChip>
                   ) : null}
-                  {summary ? (
-                    <MetricChip>{summary.nodeCount.toLocaleString()} nodes · {summary.edgeCount.toLocaleString()} edges</MetricChip>
-                  ) : null}
                   {activeNodeCount !== null ? (
                     <MetricChip tone="success">{activeNodeCount.toLocaleString()} active</MetricChip>
                   ) : null}
@@ -3216,18 +3213,18 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
               </div>
 
               {egoModeEnabled && (
-                <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12, color: "#a0b4cc" }}>
-                  <span style={{ fontWeight: 600, color: "#79c0ff" }}>Ego depth:</span>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12, color: GRAPH_UI.text.muted }}>
+                  <span style={{ fontWeight: 600, color: GRAPH_UI.text.strong }}>Ego depth:</span>
                   <input
                     type="range"
                     min={1}
                     max={8}
                     value={egoMaxHops}
                     onChange={(e) => setEgoMaxHops(Number(e.target.value))}
-                    style={{ width: 90, accentColor: "#79c0ff" }}
+                    style={{ width: 90, accentColor: GRAPH_UI.control.activeBorder }}
                     title={`Ego depth: ${egoMaxHops} hops`}
                   />
-                  <span style={{ fontFamily: "monospace", color: "#e6f2ff" }}>{egoMaxHops} hop{egoMaxHops !== 1 ? "s" : ""}</span>
+                  <span style={{ fontFamily: "monospace", color: GRAPH_UI.text.strong }}>{egoMaxHops} hop{egoMaxHops !== 1 ? "s" : ""}</span>
                 </div>
               )}
 
@@ -3254,10 +3251,10 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
                       <span>{distanceReachableCount.toLocaleString()} nodes within {distanceVisualState.maxHops} hops</span>
                     )}
                     {distanceVisualState.status === "unavailable" || distanceVisualState.status === "error" ? (
-                      <span style={{ color: GRAPH_THEME.ui.control.dangerText }}>{distanceVisualState.error}</span>
+                      <span style={{ color: GRAPH_UI.control.dangerText }}>{distanceVisualState.error}</span>
                     ) : null}
                     {heatmapRenderedSummary ? (
-                      <span style={{ color: GRAPH_THEME.ui.text.muted }}>{heatmapRenderedSummary}</span>
+                      <span style={{ color: GRAPH_UI.text.muted }}>{heatmapRenderedSummary}</span>
                     ) : null}
                   </div>
                   <div style={distanceLegendStyle}>
@@ -3271,12 +3268,12 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
                 </div>
               ) : null}
 
-              {searchError ? <div style={{ color: "#ff7b72", fontSize: 12 }}>{searchError}</div> : null}
+              {searchError ? <div style={{ color: GRAPH_UI.control.dangerText, fontSize: 12 }}>{searchError}</div> : null}
 
               {searchResults.length ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-                    <span style={{ color: "#8b949e", fontSize: 12 }}>
+                    <span style={{ color: GRAPH_UI.text.muted, fontSize: 12 }}>
                       {searchResults.length} result{searchResults.length === 1 ? "" : "s"}
                     </span>
                     <button
@@ -3294,10 +3291,10 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
                       <button key={result.node.id} style={predictionCardStyle} onClick={() => focusNode(result.node.id)}>
                         <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
                           <div style={{ minWidth: 0 }}>
-                            <div style={{ color: "#fff", fontWeight: 600 }}>{result.node.content || result.node.id}</div>
-                            <div style={{ color: "#8b949e", fontSize: 12 }}>{result.node.type}</div>
+                            <div style={{ color: GRAPH_UI.text.strong, fontWeight: 600 }}>{result.node.content || result.node.id}</div>
+                            <div style={{ color: GRAPH_UI.text.muted, fontSize: 12 }}>{result.node.type}</div>
                           </div>
-                          <div style={{ color: "#58a6ff", fontSize: 12, whiteSpace: "nowrap" }}>
+                          <div style={{ color: GRAPH_UI.text.body, fontSize: 12, whiteSpace: "nowrap" }}>
                             {Math.round(result.score)}
                           </div>
                         </div>
@@ -3311,10 +3308,10 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
                 <div style={selectedEdgeCardStyle}>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
                     <div style={{ minWidth: 0 }}>
-                      <div style={{ color: "rgba(127, 208, 255, 0.76)", fontSize: 11, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase" }}>
+                      <div style={{ color: GRAPH_UI.text.muted, fontSize: 11, fontWeight: 700, letterSpacing: 0, textTransform: "uppercase" }}>
                         Relationship
                       </div>
-                      <div style={{ color: "#f4f8ff", fontSize: 15, fontWeight: 700, marginTop: 6 }}>
+                      <div style={{ color: GRAPH_UI.text.strong, fontSize: 15, fontWeight: 700, marginTop: 6 }}>
                         {selectedEdgeState.edgeType}
                       </div>
                     </div>
@@ -3330,7 +3327,7 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
                     <button style={selectedEdgeNodeChipStyle} onClick={() => focusNode(selectedEdgeState.sourceId)}>
                       {selectedEdgeState.sourceLabel}
                     </button>
-                    <span style={{ color: "#7fa7ce", fontSize: 12 }}>→</span>
+                    <span style={{ color: GRAPH_UI.text.muted, fontSize: 12 }}>→</span>
                     <button style={selectedEdgeNodeChipStyle} onClick={() => focusNode(selectedEdgeState.targetId)}>
                       {selectedEdgeState.targetLabel}
                     </button>
@@ -3361,10 +3358,10 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
                     <div style={selectedEdgePropertyGridStyle}>
                       {Object.entries(selectedEdgeState.properties).slice(0, 4).map(([key, value]) => (
                         <div key={key} style={selectedEdgePropertyCardStyle}>
-                          <div style={{ color: "rgba(127, 208, 255, 0.68)", fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase" }}>
+                          <div style={{ color: GRAPH_UI.text.muted, fontSize: 10, letterSpacing: 0, textTransform: "uppercase" }}>
                             {key}
                           </div>
-                          <div style={{ color: "#dce7f4", fontSize: 12, marginTop: 4, wordBreak: "break-word" }}>
+                          <div style={{ color: GRAPH_UI.text.body, fontSize: 12, marginTop: 4, wordBreak: "break-word" }}>
                             {typeof value === "object" ? JSON.stringify(value) : String(value)}
                           </div>
                         </div>
@@ -3486,9 +3483,9 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
 }
 
 const actionButtonStyle: React.CSSProperties = {
-  background: GRAPH_THEME.ui.control.primaryBg,
-  color: GRAPH_THEME.ui.control.primaryText,
-  border: `1px solid ${GRAPH_THEME.ui.control.primaryBorder}`,
+  background: GRAPH_UI.control.primaryBg,
+  color: GRAPH_UI.control.primaryText,
+  border: `1px solid ${GRAPH_UI.control.primaryBorder}`,
   borderRadius: 12,
   padding: "9px 12px",
   cursor: "pointer",
@@ -3502,9 +3499,9 @@ const actionButtonStyle: React.CSSProperties = {
 
 const secondaryActionButtonStyle: React.CSSProperties = {
   ...actionButtonStyle,
-  background: GRAPH_THEME.ui.control.defaultBg,
-  border: `1px solid ${GRAPH_THEME.ui.control.defaultBorder}`,
-  color: GRAPH_THEME.ui.control.defaultText,
+  background: GRAPH_UI.control.defaultBg,
+  border: `1px solid ${GRAPH_UI.control.defaultBorder}`,
+  color: GRAPH_UI.control.defaultText,
   fontWeight: 600,
 };
 
@@ -3512,7 +3509,7 @@ const predictionCardStyle: React.CSSProperties = {
   textAlign: "left",
   padding: 12,
   background: "rgba(255, 255, 255, 0.035)",
-  border: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}`,
+  border: `1px solid ${GRAPH_UI.surface.panelBorder}`,
   borderRadius: 10,
   cursor: "pointer",
 };
@@ -3523,7 +3520,7 @@ const selectedEdgeCardStyle: React.CSSProperties = {
   gap: 12,
   padding: 14,
   background: "linear-gradient(135deg, rgba(98, 226, 205, 0.1), rgba(233, 196, 122, 0.045))",
-  border: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}`,
+  border: `1px solid ${GRAPH_UI.surface.panelBorder}`,
   borderRadius: 14,
   boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03)",
 };
@@ -3540,7 +3537,7 @@ const distanceStatusStripStyle: React.CSSProperties = {
   alignItems: "center",
   gap: 12,
   flexWrap: "wrap",
-  border: `1px solid ${GRAPH_THEME.ui.control.activeBorder}`,
+  border: `1px solid ${GRAPH_UI.control.activeBorder}`,
   background: "linear-gradient(135deg, rgba(98, 226, 205, 0.09), rgba(227, 179, 65, 0.045))",
   borderRadius: 16,
   padding: "9px 12px",
@@ -3551,7 +3548,7 @@ const distanceStatusTitleStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   gap: 7,
-  color: GRAPH_THEME.ui.text.strong,
+  color: GRAPH_UI.text.strong,
   fontSize: 12,
   fontWeight: 800,
   letterSpacing: "0.04em",
@@ -3561,7 +3558,7 @@ const distanceStatusTitleStyle: React.CSSProperties = {
 const distanceModeBadgeStyle: React.CSSProperties = {
   padding: "2px 7px",
   borderRadius: 999,
-  border: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}`,
+  border: `1px solid ${GRAPH_UI.surface.panelBorder}`,
   color: GRAPH_THEME.palette.accent.path,
   background: "rgba(215, 144, 86, 0.1)",
   fontSize: 10,
@@ -3572,7 +3569,7 @@ const distanceStatusMetaStyle: React.CSSProperties = {
   alignItems: "center",
   gap: 10,
   flexWrap: "wrap",
-  color: GRAPH_THEME.ui.text.body,
+  color: GRAPH_UI.text.body,
   fontSize: 12,
 };
 
@@ -3581,7 +3578,7 @@ const distanceLegendStyle: React.CSSProperties = {
   alignItems: "center",
   gap: 8,
   marginLeft: "auto",
-  color: GRAPH_THEME.ui.text.muted,
+  color: GRAPH_UI.text.muted,
   fontSize: 11,
 };
 
@@ -3607,18 +3604,18 @@ const selectedEdgePropertyCardStyle: React.CSSProperties = {
   borderRadius: 10,
   padding: 10,
   background: "rgba(255, 255, 255, 0.03)",
-  border: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}`,
+  border: `1px solid ${GRAPH_UI.surface.panelBorder}`,
 };
 
 const pluginDockContentStyle: React.CSSProperties = {
   borderRadius: 16,
-  border: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}`,
+  border: `1px solid ${GRAPH_UI.surface.panelBorder}`,
   background: "rgba(255, 255, 255, 0.02)",
   padding: 14,
 };
 
 const pluginLoadingStyle: React.CSSProperties = {
-  color: GRAPH_THEME.ui.text.muted,
+  color: GRAPH_UI.text.muted,
   fontSize: 12,
   padding: 10,
 };
@@ -3633,7 +3630,7 @@ const searchResultsStripStyle: React.CSSProperties = {
 
 const inspectorFallbackStyle: React.CSSProperties = {
   padding: 24,
-  color: GRAPH_THEME.ui.text.muted,
+  color: GRAPH_UI.text.muted,
   fontSize: 12,
 };
 
@@ -3642,8 +3639,8 @@ const timelineFallbackStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   padding: "0 18px",
-  color: GRAPH_THEME.ui.text.muted,
+  color: GRAPH_UI.text.muted,
   fontSize: 12,
-  borderTop: `1px solid ${GRAPH_THEME.ui.timeline.border}`,
-  background: GRAPH_THEME.ui.timeline.background,
+  borderTop: `1px solid ${GRAPH_UI.timeline.border}`,
+  background: GRAPH_UI.timeline.background,
 };

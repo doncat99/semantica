@@ -1,7 +1,13 @@
 import { createRoot } from 'react-dom/client'
 import './index.css'
 import App from './App.tsx'
+import { initializeEmbeddedPresentation } from './embeddedPresentation'
+import './embeddedPresentation.css'
 
-createRoot(document.getElementById('root')!).render(
-  <App />,
-)
+const root = createRoot(document.getElementById('root')!)
+try {
+  initializeEmbeddedPresentation()
+  root.render(<App />)
+} catch {
+  root.render(<main role="alert">Explorer presentation could not be initialized. Reload from the host application.</main>)
+}
