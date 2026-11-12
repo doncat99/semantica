@@ -105,7 +105,7 @@ class NativeScope:
             graph = ContextGraph(advanced_analytics=False)
             identities = set()
             for batch in pages(native, 'nodes'):
-                graph.add_nodes([dict(id=node['id'], type='Concept', content=node['name'],
+                graph.add_nodes([dict(id=node['id'], type=node['entityType'], content=node['name'],
                     properties=node) for node in batch])
                 identities.update(node['id'] for node in batch)
             fields = ['id','source','target','predicate','status']

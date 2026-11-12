@@ -23,7 +23,7 @@ def test_native_scope_complete_filter_and_existing_native_graph(monkeypatch):
     session,selected=owner.select(dict(sourceId='source'))
     assert session.read_only and session._source_path is None
     assert session.get_node('urn:canonical:one')['content']=='Acme'
-    assert session.get_node('urn:canonical:one')['type']=='Concept'
+    assert session.get_node('urn:canonical:one')['type']=='ORG'
     assert session.get_node('urn:canonical:one')['properties']['entityType']=='ORG'
     assert 'next_cursor' not in selected
     assert selected['selection']==dict(sourceId='source')
@@ -154,7 +154,7 @@ def test_project_startup_failure_is_not_an_empty_success(monkeypatch):
     assert owner.selection is None
 
 
-def test_completed_topic_scope_uses_same_concepts_and_fact_edges(monkeypatch):
+def test_completed_topic_scope_preserves_native_types_and_fact_edges(monkeypatch):
     owner = scope()
     calls = []
     def page(selection):
@@ -167,7 +167,33 @@ def test_completed_topic_scope_uses_same_concepts_and_fact_edges(monkeypatch):
     session, selected = owner.select(dict(topicId='topic:completed'))
     assert calls[0]['topicId'] == 'topic:completed'
     assert selected['nodeCount'] == 2 and selected['linkCount'] == 1
-    assert session.get_node('urn:a')['type'] == 'Concept'
+    assert session.get_node('urn:a')['type'] == 'ORG'
     edges, total = session.get_edges()
     assert total == 1
     assert edges[0]['properties']['status'] == 'disputed'
+
+
+@pytest.mark.parametrize('selection', [
+    {}, {'sourceId': 'source'}, {'topicId': 'topic'},
+    {'communityId': 'community'}, {'nodeIds': ['urn:org', 'urn:person', 'urn:concept']},
+])
+def test_native_types_survive_selection_and_api_filtering(monkeypatch, selection):
+    from fastapi.testclient import TestClient
+    from semantica.explorer.app import create_app
+    monkeypatch.setenv('SEMANTICA_ALLOW_ANONYMOUS', 'true')
+    owner = scope()
+    nodes = [dict(id=identity, name=identity, entityType=kind) for identity, kind in
+        [('urn:org', 'ORG'), ('urn:person', 'PERSON'), ('urn:concept', 'Concept')]]
+    monkeypatch.setattr(owner, 'page', lambda query: dict(
+        nodes=nodes if query['kind'] == 'nodes' else [], links=[], next_cursor=None))
+    with TestClient(create_app(native_scope=owner)) as client:
+        selected = client.post('/api/native-scope/select', json=selection)
+        assert selected.status_code == 200, selected.text
+        result = client.get('/api/graph/nodes').json()['nodes']
+        assert {item['type'] for item in result} == {'ORG', 'PERSON', 'Concept'}
+        for native in nodes:
+            filtered = client.get('/api/graph/nodes', params={'type': native['entityType']})
+            assert filtered.status_code == 200, filtered.text
+            assert [item['id'] for item in filtered.json()['nodes']] == [native['id']]
+            properties = filtered.json()['nodes'][0]['properties']
+            assert {key: properties[key] for key in native} == native
