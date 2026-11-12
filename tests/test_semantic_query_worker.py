@@ -123,6 +123,29 @@ def test_scene_rpc_delegates_exact_scope_and_selection(monkeypatch, fields):
     assert len(calls) == 1
 
 
+def test_fact_members_rpc_preserves_budget_and_fences_publication(monkeypatch):
+    from semantica import semantic_query_worker as worker
+    from pydantic import ValidationError
+    calls, borrows = [], []
+    class Owner:
+        def read_publication_fact_members(self, project, generation, identity, **kwargs):
+            calls.append((project, generation, identity, kwargs))
+            return dict(id=identity, members=['urn:member:1'], member_count=1, next_cursor=None)
+    def borrow(reference, project):
+        borrows.append(project)
+        return Owner()
+    monkeypatch.setattr(worker._native_store, 'borrow', borrow)
+    raw = dict(id='members', method='fact_members', protocol='semantica.semantic-query.v1', params=dict(
+        projectId='project-p', semanticStore=dict(path='/tmp/native-facts', project='project-p', generation='g'),
+        identity='urn:fact:1', after='urn:member:0', limit=17, maxBytes=8192))
+    assert worker.handle_request(raw)['result']['members'] == ['urn:member:1']
+    assert calls == [('project-p', 'g', 'urn:fact:1', dict(after='urn:member:0', limit=17, max_bytes=8192))]
+    assert borrows == ['project-p', 'project-p']
+    raw['params']['projectId'] = 'other'
+    with pytest.raises(ValidationError, match='project'):
+        worker.handle_request(raw)
+
+
 def test_classification_rpc_preserves_dimension_and_budget_and_fences_borrow(monkeypatch):
     from semantica import semantic_query_worker as worker
     calls, borrows = [], []

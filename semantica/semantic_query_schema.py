@@ -219,12 +219,27 @@ class SemanticQueryResult(StrictModel):
 class QueryWorkerRequest(StrictModel):
     protocol: Literal[QUERY_PROTOCOL] = QUERY_PROTOCOL
     id: str
-    method: Literal["query", "schema", "records", "section", "scene", "classification", "classification_batch", "bindings", "evidence", "reader", "acquire_store", "release_store", "open_stream", "next_stream", "close_stream"]
+    method: Literal["query", "schema", "records", "section", "scene", "fact_members", "classification", "classification_batch", "bindings", "evidence", "reader", "acquire_store", "release_store", "open_stream", "next_stream", "close_stream"]
     params: Dict[str, object] = Field(default_factory=dict)
 
 
 class NativeStoreControlRequest(StrictModel):
     semantic_store: NativeStoreRef = Field(alias='semanticStore')
+
+
+class NativeFactMembersRequest(StrictModel):
+    project_id: str = Field(alias='projectId', min_length=1, max_length=4096)
+    semantic_store: NativeStoreRef = Field(alias='semanticStore')
+    identity: str = Field(min_length=1, max_length=8192)
+    after: Optional[str] = Field(default=None, min_length=1, max_length=8192)
+    limit: int = Field(default=128, ge=1, le=128, strict=True)
+    max_bytes: int = Field(default=262144, alias='maxBytes', ge=1, le=262144, strict=True)
+
+    @model_validator(mode='after')
+    def validate_project(self):
+        if self.project_id != self.semantic_store.project:
+            raise ValueError('native fact project differs from request project')
+        return self
 
 
 class NativeStoreReleaseRequest(StrictModel):

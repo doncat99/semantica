@@ -22,6 +22,7 @@ from .semantic_query_schema import (
     NativeBindingRequest,
     NativeEvidenceRequest,
     NativeSceneRequest,
+    NativeFactMembersRequest,
     NativeClassificationRequest,
     NativeClassificationBatchRequest,
 )
@@ -91,6 +92,17 @@ def handle_request(raw: Dict[str, Any]) -> Dict[str, Any]:
         from .semantic_query import read_canonical_records
         result = read_canonical_records(records_request, _native_store)
         return _response(request.id, True, result=result)
+    if request.method == 'fact_members':
+        from .semantic_worker_context import check_query_cancellation
+        selected = NativeFactMembersRequest.model_validate(request.params)
+        check_query_cancellation()
+        owner = _native_store.borrow(selected.semantic_store, selected.project_id)
+        result = owner.read_publication_fact_members(selected.project_id, selected.semantic_store.generation,
+            selected.identity, after=selected.after, limit=selected.limit, max_bytes=selected.max_bytes)
+        check_query_cancellation()
+        _native_store.borrow(selected.semantic_store, selected.project_id)
+        return _response(request.id, True, result=dict(project=selected.project_id,
+            generation=selected.semantic_store.generation, **result))
     if request.method == 'section':
         selected = NativeSceneRequest.model_validate(request.params)
         owner = _native_store.borrow(selected.semantic_store, selected.project_id)
