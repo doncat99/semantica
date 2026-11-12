@@ -1467,6 +1467,7 @@ function WorkspaceShell({
   compact = false,
   kicker = 'Workspace',
   children,
+  hideHeader = false,
 }: {
   title: string;
   subtitle?: string;
@@ -1474,10 +1475,11 @@ function WorkspaceShell({
   compact?: boolean;
   kicker?: string;
   children: ReactNode;
+  hideHeader?: boolean;
 }) {
   return (
     <section className="workspace-shell">
-      <header className={`workspace-header${compact ? " workspace-header--compact" : ""}`}>
+      {!hideHeader && <header className={`workspace-header${compact ? " workspace-header--compact" : ""}`}>
         <div className="workspace-header-main">
           <div className="workspace-kicker">{kicker}</div>
           <div className="workspace-title-block">
@@ -1486,7 +1488,7 @@ function WorkspaceShell({
           </div>
         </div>
         {tabs ? <div className="workspace-tabs">{tabs}</div> : null}
-      </header>
+      </header>}
       <div className="workspace-body">{children}</div>
     </section>
   );
@@ -1781,7 +1783,10 @@ function WelcomeScreen({
 }
 
 export default function App() {
+  const embedded = document.documentElement.dataset.hostPresentation === 'true';
   const [nativeScopeRevision, setNativeScopeRevision] = useState(0);
+  const [graphDraftRevision, setGraphDraftRevision] = useState(0);
+  const [graphVisited, setGraphVisited] = useState(false);
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceId>(readInitialWorkspace);
   const [exploreView, setExploreView] = useState<ExploreView>('graph');
   const [analyzeView, setAnalyzeView] = useState<AnalyzeView>('reasoning');
@@ -1790,6 +1795,11 @@ export default function App() {
   const [graphFocusRequest, setGraphFocusRequest] = useState<{ nodeId: string; token: number } | null>(null);
   const [exploreDraftDirty, setExploreDraftDirty] = useState(false);
   const [agentMemoryAvailable, setAgentMemoryAvailable] = useState(false);
+  const graphActive = activeWorkspace === 'explore' && exploreView === 'graph';
+
+  useEffect(() => {
+    if (graphActive) setGraphVisited(true);
+  }, [graphActive]);
 
   useEffect(() => {
     let active = true;
@@ -1809,6 +1819,7 @@ export default function App() {
   const switchExploreView = (nextView: ExploreView) => {
     if (nextView === exploreView) return;
     if (!confirmDiscardExploreDraft()) return;
+    if (exploreDraftDirty && exploreView === 'graph') setGraphDraftRevision(value => value + 1);
     setExploreDraftDirty(false);
     setExploreView(nextView);
   };
@@ -1816,10 +1827,20 @@ export default function App() {
   const switchWorkspace = (nextWorkspace: WorkspaceId) => {
     if (nextWorkspace === activeWorkspace) return;
     if (activeWorkspace === "explore" && !confirmDiscardExploreDraft()) return;
+    if (activeWorkspace === 'explore' && exploreView === 'graph' && exploreDraftDirty) setGraphDraftRevision(value => value + 1);
     setExploreDraftDirty(false);
     setActiveWorkspace(nextWorkspace);
   };
 
+  const selectEmbeddedWorkspace = (value: string) => {
+    if (['graph', 'vocabulary', 'memories'].includes(value)) {
+      if (activeWorkspace === 'explore') switchExploreView(value as ExploreView);
+      else {
+        switchWorkspace('explore');
+        setExploreView(value as ExploreView);
+      }
+    } else switchWorkspace(value as WorkspaceId);
+  };
 
   const renderWorkspace = () => {
     if (activeWorkspace === 'welcome') {
@@ -1848,8 +1869,10 @@ export default function App() {
     }
 
     if (activeWorkspace === 'explore') {
+      if (embedded && exploreView === 'graph') return null;
       return (
         <WorkspaceShell
+          hideHeader={embedded}
           title="Explore"
           subtitle={exploreView === 'graph' ? undefined : exploreView === 'memories' ? "Browse and edit canonical AgentMemory documents." : "Browse the graph and switch views without leaving the workspace."}
           kicker={exploreView === 'graph' ? 'Graph Studio' : exploreView === 'memories' ? 'Memory Browser' : 'Vocabulary Browser'}
@@ -2014,7 +2037,7 @@ export default function App() {
     <QueryClientProvider client={queryClient}>
       <style>{shellStyles}</style>
       <div className="app-shell">
-        <aside className="app-rail">
+        {!embedded && <aside className="app-rail">
           <button className="brand-pill" title="Semantica Knowledge Explorer" onClick={() => switchWorkspace('welcome')} style={{ cursor: 'pointer', border: '1px solid rgba(127,208,255,0.18)' }}>SKE</button>
           {navItems.map(({ id, label, hint, icon: Icon }) => (
             <button
@@ -2028,10 +2051,31 @@ export default function App() {
               <span className="nav-label">{label}</span>
             </button>
           ))}
-        </aside>
+        </aside>}
         <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0, minHeight: 0 }}>
+          {embedded && <nav className="embedded-workspace-navigation" aria-label="Knowledge workspaces">
+            <h1 className="embedded-workspace-title">Knowledge Map</h1>
+            {!graphActive && <button type="button" className="ws-btn ws-btn--ghost" onClick={() => selectEmbeddedWorkspace('graph')} title="Return to graph" aria-label="Return to graph"><Network size={16} /></button>}
+            <select aria-label="Workspace" value={activeWorkspace === 'explore' ? exploreView : activeWorkspace} onChange={event => selectEmbeddedWorkspace(event.target.value)}>
+              <option value="graph">Graph</option>
+              <option value="vocabulary">Vocabulary</option>
+              {agentMemoryAvailable && <option value="memories">Memories</option>}
+              {navItems.filter(item => item.id !== 'explore').map(item => <option key={item.id} value={item.id}>{item.label}</option>)}
+            </select>
+          </nav>}
           <NativeScopeControls onReady={() => { if (!hasOntologyUrlState()) setActiveWorkspace('explore'); }} onChange={() => setNativeScopeRevision(value => value + 1)} />
-          <div key={nativeScopeRevision} style={{ display: 'flex', flex: 1, minHeight: 0 }}>{renderWorkspace()}</div>
+          <div key={nativeScopeRevision} style={{ display: 'flex', flex: 1, minHeight: 0, position: 'relative' }}>
+            {embedded && (graphVisited || graphActive) && <div aria-hidden={!graphActive} inert={!graphActive} style={{ display: 'flex', position: 'absolute', inset: 0, visibility: graphActive ? 'visible' : 'hidden' }}>
+              <WorkspaceShell title="Explore" hideHeader={embedded}>
+                <ErrorBoundary key={graphDraftRevision}>
+                  <Suspense fallback={<WorkspaceFallback />}>
+                    <GraphWorkspace externalFocusNodeId={graphFocusRequest?.nodeId} externalFocusToken={graphFocusRequest?.token} onDirtyChange={dirty => { if (graphActive) setExploreDraftDirty(dirty); }} />
+                  </Suspense>
+                </ErrorBoundary>
+              </WorkspaceShell>
+            </div>}
+            {renderWorkspace()}
+          </div>
         </div>
       </div>
     </QueryClientProvider>
