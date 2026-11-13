@@ -50,15 +50,90 @@ html[data-host-presentation] :is(button, input, select, textarea):disabled { opa
 html[data-host-presentation] :focus-visible { outline: 2px solid var(--ws-accent); outline-offset: 2px; }
 html[data-host-presentation] ::selection { color: var(--text-main); background: var(--ws-accent-soft); }
 html[data-host-presentation] ::-webkit-scrollbar-thumb { background: var(--ws-border-strong); }
-html[data-host-presentation] :is(.explore-search-command, .explore-search-suggestions, .explore-mode-control, .explore-tool-cluster, .explore-tool-button, .explore-mode-segment) {
+html[data-host-presentation] :is(.explore-search-command, .explore-search-suggestions, .explore-mode-control, .explore-tool-cluster, .explore-tool-button, .explore-mode-segment, .explore-inspector-card) {
   border-radius: 6px;
   box-shadow: none;
+  background-image: none;
 }
-html[data-host-presentation] :is(.explore-tool-cluster, .explore-mode-control) {
+html[data-host-presentation] :is(.explore-tool-cluster, .explore-mode-control, .explore-search-suggestions, .explore-inspector-card) {
   background: var(--ws-surface);
   border-color: var(--ws-border);
 }
-html[data-host-presentation] :is(.explore-tool-cluster-label, .explore-color-legend-title) { letter-spacing: 0; }
+html[data-host-presentation] .explore-search-command {
+  background: var(--panel-bg);
+  border-color: var(--ws-border);
+}
+html[data-host-presentation] .explore-search-command:focus-within {
+  border-color: var(--ws-accent);
+  outline: 0;
+  box-shadow: none;
+}
+html[data-host-presentation] .explore-search-command input:focus-visible { outline: 0; }
+html[data-host-presentation] .explore-search-command :is(input, button) {
+  border-radius: 4px;
+  box-shadow: none;
+}
+html[data-host-presentation] .explore-search-command button,
+html[data-host-presentation] .explore-tool-button-primary {
+  background: var(--ws-accent-soft);
+  border-color: var(--ws-accent);
+  color: var(--text-main);
+}
+html[data-host-presentation] .explore-mode-segment,
+html[data-host-presentation] .explore-tool-button {
+  border-color: var(--ws-border);
+  background: var(--panel-bg);
+  color: var(--text-main);
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+html[data-host-presentation] .explore-tool-button:hover:not(:disabled) {
+  background: var(--ws-surface-hover);
+  border-color: var(--ws-border-strong);
+  transform: none;
+}
+html[data-host-presentation] :is(.explore-mode-segment, .explore-tool-button)[data-active="true"] {
+  background: var(--ws-accent-soft);
+  border-color: var(--ws-accent);
+  color: var(--text-main);
+  box-shadow: none;
+}
+html[data-host-presentation] .explore-graph-filters :is(select, input, button) {
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid var(--ws-border);
+  border-radius: 6px;
+  background: var(--panel-bg);
+  color: var(--text-main);
+  box-shadow: none;
+}
+html[data-host-presentation] .explore-graph-filters .explore-filter-toggle {
+  min-height: 28px;
+  padding: 3px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+}
+html[data-host-presentation] .explore-graph-filters .explore-filter-toggle:hover {
+  color: var(--text-strong);
+}
+html[data-host-presentation] .explore-graph-filters :is(select, input):focus-visible {
+  border-color: var(--ws-accent);
+  outline: 2px solid var(--ws-accent-soft);
+  outline-offset: 1px;
+}
+html[data-host-presentation] .explore-search-suggestions li { border-radius: 4px; }
+html[data-host-presentation] .explore-inspector-card {
+  background: var(--ws-surface);
+  border-color: var(--ws-border);
+}
+html[data-host-presentation] .explore-tool-cluster-label {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+html[data-host-presentation] .explore-color-legend-title { letter-spacing: 0; }
 html[data-host-presentation] .explore-search-command input { background: transparent; border: 0; }
 html[data-host-presentation] .workspace-tab:not([data-active='true']) {
   background: var(--ws-surface);
