@@ -27,7 +27,11 @@ test('opens completed themes without treating topology communities as themes', a
     const view = render(<QueryClientProvider client={new QueryClient()}>
       <NativeScopeControls onReady={() => { ready++; }} onChange={() => { changes++; }} />
     </QueryClientProvider>);
-    await waitFor(() => assert.ok(view.getByLabelText('Scope kind')));
+    await waitFor(() => assert.ok(view.getByRole('status').textContent?.includes('2 nodes')));
+    const scopeFilters = view.getByText('Scope filters', { selector: 'summary' }).closest('details')!;
+    assert.equal(scopeFilters.open, false);
+    fireEvent.click(view.getByText('Scope filters', { selector: 'summary' }));
+    assert.ok(view.getByLabelText('Scope kind'));
     assert.equal((view.getByLabelText('Select native scope') as HTMLSelectElement).value, '');
     assert.ok(view.getByRole('status').textContent?.includes('2 nodes'));
     assert.equal(requests.filter(r => r.url.endsWith('/select')).length, 0);
@@ -65,6 +69,7 @@ test('shows complete graph totals without graph pagination and preserves the gra
       <NativeScopeControls onChange={() => {}} />
     </QueryClientProvider>);
     await waitFor(() => assert.ok(view.getByRole('status').textContent?.includes('130 nodes, 260 links')));
+    fireEvent.click(view.getByText('Scope filters', { selector: 'summary' }));
     assert.equal(view.queryAllByRole('button', { name: /(?:Next|Previous) (?:node|link) page/ }).length, 0);
     assert.equal(selections.length, 0);
     fireEvent.change(view.getByLabelText('Select native scope'), { target: { value: 'source' } });

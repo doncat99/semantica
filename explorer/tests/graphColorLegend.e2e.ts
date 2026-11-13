@@ -120,6 +120,10 @@ test("visible legend follows loaded data, reloads, focused views, and distance m
   assert.ok(page);
   await page.getByRole("button", { name: "Open Semantica Explorer" }).click();
   const legend = page.getByRole("group", { name: "Node colors" });
+  await legend.getByRole("button", { name: /Node colors/ }).waitFor();
+  assert.equal(await legend.getByRole("button", { name: /Node colors/ }).getAttribute('aria-expanded'), 'false');
+  assert.equal(await legend.locator('.explore-color-legend-item').count(), 0);
+  await legend.getByRole("button", { name: /Node colors/ }).click();
   try {
     await legend.waitFor();
   } catch (error) {
@@ -131,7 +135,8 @@ test("visible legend follows loaded data, reloads, focused views, and distance m
   }
   await page.locator("canvas").first().waitFor({ state: "visible" });
   await assertLegendMatchesGraph(page);
-  await page.getByRole('status').filter({ hasText: '6 / 6 nodes · 6 / 6 relationships' }).waitFor();
+  await page.getByRole('button', { name: /^Filters/ }).click();
+  assert.equal(await page.getByRole('group', { name: 'Graph filters' }).getByRole('status').count(), 0);
   assert.equal(await page.locator('.explore-status-strip').getByText('6 nodes · 6 edges', { exact: true }).count(), 0);
   assert.equal(await page.locator('.palantir-bg').evaluate(el => getComputedStyle(el).backgroundColor), 'rgb(245, 246, 241)');
   await assertCanvasPixels(host, page);

@@ -67,19 +67,30 @@ export function NativeScopeControls({ onChange, onReady }: { onChange: () => voi
   return <section aria-label="Native graph scope" style={{ padding: '10px 16px', borderBottom: '1px solid var(--ws-border)',
     color: 'var(--ws-text)', background: 'var(--ws-bg)', fontSize: 12, display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center' }}>
     <button disabled={busy} onClick={() => void select({})}>Project graph</button>
-    <label>Filter by <select aria-label="Scope kind" value={kind} disabled={busy}
-      onChange={event => void browse(event.target.value as CatalogKind)}>
-      <option value="sources">Sources</option><option value="topics">Themes</option><option value="communities">Topology communities</option>
-    </select></label>
-    <select aria-label="Select native scope" value={chosen} onChange={event => setChosen(event.target.value)} disabled={busy} style={{ maxWidth: 280 }}>
-      <option value="">Optional scope filter</option>
-      {catalog.nodes.map(node => <option key={node.id} value={node.id}>{node.title ?? node.id}{node.memberCount !== undefined ? ` (${node.memberCount} members)` : ''}</option>)}
-    </select>
-    <button disabled={busy || !chosen} onClick={() => void select(kind === 'sources' ? { sourceId: chosen } : kind === 'topics' ? { topicId: chosen } : { communityId: chosen })}>Open scope</button>
-    <button disabled={busy || !catalog.next_cursor} onClick={() => void browse(kind,catalog.next_cursor!)}>More scopes</button>
-    <button disabled={busy} onClick={() => void browse(kind)}>First scopes</button>
-    <label>Node IDs <input aria-label="Explicit native node identities" value={ids} onChange={event => setIds(event.target.value)} placeholder="Comma-separated IDs" /></label>
-    <button disabled={busy || !ids.trim()} onClick={() => void select({ nodeIds: ids.split(',').map(id => id.trim()).filter(Boolean) })}>Open nodes</button>
+    <details style={{ flex: '1 1 160px', minWidth: 0 }}>
+      <summary style={{ cursor: 'pointer', minHeight: 30, display: 'flex', alignItems: 'center' }}>Scope filters</summary>
+      <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8, alignItems: 'center', padding: '8px 0' }}>
+        <label>Filter by <select aria-label="Scope kind" value={kind} disabled={busy}
+          onChange={event => void browse(event.target.value as CatalogKind)}>
+          <option value="sources">Sources</option><option value="topics">Themes</option><option value="communities">Topology communities</option>
+        </select></label>
+        <select aria-label="Select native scope" value={chosen} onChange={event => setChosen(event.target.value)} disabled={busy} style={{ maxWidth: 280 }}>
+          <option value="">Optional scope filter</option>
+          {catalog.nodes.map(node => <option key={node.id} value={node.id}>{node.title ?? node.id}{node.memberCount !== undefined ? ` (${node.memberCount} members)` : ''}</option>)}
+        </select>
+        <button disabled={busy || !chosen} onClick={() => void select(kind === 'sources' ? { sourceId: chosen } : kind === 'topics' ? { topicId: chosen } : { communityId: chosen })}>Open scope</button>
+        <button disabled={busy || !catalog.next_cursor} onClick={() => void browse(kind,catalog.next_cursor!)}>More scopes</button>
+        <button disabled={busy} onClick={() => void browse(kind)}>First scopes</button>
+        <label>Node IDs <input aria-label="Explicit native node identities" value={ids} onChange={event => setIds(event.target.value)} placeholder="Comma-separated IDs" /></label>
+        <button disabled={busy || !ids.trim()} onClick={() => void select({ nodeIds: ids.split(',').map(id => id.trim()).filter(Boolean) })}>Open nodes</button>
+        <details>
+          <summary>Knowledge object types</summary>
+          <p>Concept/Object nodes retain their business type. Relations appear as directed edges with the existing fact status; the same fact is not duplicated as another node.</p>
+          <p>Themes use completed semantic topics. Topology communities are not themes.</p>
+          <p>Evidence is inspected on demand. A relationship appears once, with its recorded fact status.</p>
+        </details>
+      </div>
+    </details>
     {active ? <span role="status">{active.nodeCount} nodes, {active.linkCount} links</span>
       : <span role="status">Project graph is unavailable.</span>}
     {busy && <button onClick={() => {
@@ -87,12 +98,6 @@ export function NativeScopeControls({ onChange, onReady }: { onChange: () => voi
       // for an installed scene, and do not allow another selection meanwhile.
       void fetch('/api/native-scope/cancel', { method: 'POST' });
     }}>Cancel selection</button>}
-    <details>
-      <summary>Knowledge object types</summary>
-      <p>Concept/Object nodes retain their business type. Relations appear as directed edges with the existing fact status; the same fact is not duplicated as another node.</p>
-      <p>Themes use completed semantic topics. Topology communities are not themes.</p>
-      <p>Evidence is inspected on demand. A relationship appears once, with its recorded fact status.</p>
-    </details>
     {error && <span role="alert">{error}</span>}
   </section>;
 }

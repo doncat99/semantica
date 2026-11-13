@@ -450,21 +450,28 @@ function SearchCommandBar({
   );
 }
 
-function SemanticColorLegend({ items }: { items: GraphColorLegendItem[] }) {
+function SemanticColorLegend({ items, expanded, onToggle }: {
+  items: GraphColorLegendItem[];
+  expanded: boolean;
+  onToggle: () => void;
+}) {
   if (!items.length) return null;
   return (
     <div className="explore-color-legend" role="group" aria-label="Node colors">
-      <span className="explore-color-legend-label" title="Base semantic colors; selection, zoom, and distance effects can change node appearance.">
-        Node colors
-      </span>
-      <ul className="explore-color-legend-items">
-        {items.map((item) => (
-          <li key={item.id} className="explore-color-legend-item" title={`${item.group}: ${item.count.toLocaleString()} nodes`}>
-            <span className="explore-color-legend-mark" style={{ backgroundColor: item.color }} aria-hidden="true" />
-            <span className="explore-color-legend-name">{item.group}</span>
-          </li>
-        ))}
-      </ul>
+      <button type="button" className="explore-color-legend-toggle" aria-expanded={expanded} onClick={onToggle}>
+        <span className="explore-color-legend-label" title="Base semantic colors; selection, zoom, and distance effects can change node appearance.">
+          Node colors
+        </span>
+        <span aria-hidden="true">{expanded ? "Hide" : `${items.length} groups`}</span>
+      </button>
+      {expanded ? <ul className="explore-color-legend-items">
+          {items.map((item) => (
+            <li key={item.id} className="explore-color-legend-item" title={`${item.group}: ${item.count.toLocaleString()} nodes`}>
+              <span className="explore-color-legend-mark" style={{ backgroundColor: item.color }} aria-hidden="true" />
+              <span className="explore-color-legend-name">{item.group}</span>
+            </li>
+          ))}
+        </ul> : null}
     </div>
   );
 }
@@ -905,12 +912,37 @@ const HUD_CSS = `
   }
   .explore-color-legend {
     display: flex;
-    align-items: baseline;
-    gap: 12px;
+    align-items: stretch;
+    flex-direction: column;
+    gap: 6px;
     padding: 2px 1px 0;
     color: ${GRAPH_UI.text.subtle};
     font-size: 11px;
     font-weight: 600;
+  }
+  .explore-color-legend-toggle,
+  .explore-filter-toggle {
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    border: 0;
+    background: transparent;
+    color: ${GRAPH_UI.text.muted};
+    cursor: pointer;
+    font: inherit;
+    text-align: left;
+  }
+  .explore-color-legend-toggle {
+    display: inline-flex;
+    width: fit-content;
+    padding: 2px 0;
+  }
+  .explore-color-legend-toggle:hover,
+  .explore-filter-toggle:hover { color: ${GRAPH_UI.text.strong}; }
+  .explore-filter-toggle {
+    display: flex;
+    min-height: 28px;
+    padding: 3px 0;
   }
   .explore-graph-filters {
     display: flex;
@@ -937,6 +969,13 @@ const HUD_CSS = `
     background: ${GRAPH_UI.control.activeBg};
     color: ${GRAPH_UI.text.strong};
     font: inherit;
+  }
+  .explore-graph-filters .explore-filter-toggle {
+    flex: 1 0 100%;
+    border: 0;
+    background: transparent;
+    color: ${GRAPH_UI.text.muted};
+    padding: 3px 0;
   }
   .explore-graph-filters input::placeholder { color: ${GRAPH_UI.text.muted}; }
   .explore-graph-filters :focus-visible { outline: 2px solid ${GRAPH_UI.control.focusRing}; outline-offset: 2px; }
@@ -1314,6 +1353,8 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
   const [pathTargetId, setPathTargetId] = useState("");
   const [pathResult, setPathResult] = useState<PathResponse | null>(null);
   const [activeNodeCount, setActiveNodeCount] = useState<number | null>(null);
+  const [colorLegendExpanded, setColorLegendExpanded] = useState(false);
+  const [filtersExpanded, setFiltersExpanded] = useState(false);
   const [temporalBounds, setTemporalBounds] = useState<TemporalBounds | null>(null);
   const [scrubberTime, setScrubberTime] = useState<Date | null>(null);
   // Deduplicates setScrubberTime calls by millisecond value so that React 18
@@ -2292,7 +2333,7 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
   ]);
 
   const showLoadingOverlay = !graphReady && (isLoading || isFetching || Boolean(loadingProgress) || isGraphLoadError);
-  const showSettlingStatus = graphReady && loadingProgress?.phase === "stabilizing_layout";
+  const hasActiveFilters = Boolean(filterText || Object.values(filters).some(Boolean));
   const hasGraphContent = Boolean(summary?.nodeCount);
   const activePath = pathResult?.path ?? EMPTY_PATH;
   const activePathEdgeIds = pathResult?.edge_ids ?? EMPTY_PATH;
@@ -3155,11 +3196,8 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               <div className="explore-toolbar">
                 <div className="explore-status-strip">
-                  {(showLoadingOverlay || showSettlingStatus) && loadingProgress ? (
+                  {showLoadingOverlay && loadingProgress ? (
                     <MetricChip>{getGraphLoadTitle(loadingProgress.phase)}</MetricChip>
-                  ) : null}
-                  {activeNodeCount !== null ? (
-                    <MetricChip tone="success">{activeNodeCount.toLocaleString()} active</MetricChip>
                   ) : null}
                   {focusedSummary ? <MetricChip tone="warm">{focusedSummary}</MetricChip> : null}
                 </div>
@@ -3186,8 +3224,12 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
                     ))}
                   </div>
                 </div>
-                {!showDistanceStatus ? <SemanticColorLegend items={colorLegendItems} /> : null}
+                {!showDistanceStatus ? <SemanticColorLegend items={colorLegendItems} expanded={colorLegendExpanded} onToggle={() => setColorLegendExpanded(value => !value)} /> : null}
                 <div className="explore-graph-filters" role="group" aria-label="Graph filters">
+                  <button type="button" className="explore-filter-toggle" aria-expanded={filtersExpanded} onClick={() => setFiltersExpanded(value => !value)}>
+                    Filters{hasActiveFilters ? " · active" : ""}
+                  </button>
+                  {filtersExpanded ? <>
                   <label>Node type{' '}
                     <select aria-label="Filter node type" value={filters.nodeType} disabled={isFetching || markdownDraftDirty}
                       onChange={event => updateFilters({ ...filters, nodeType: event.target.value })}>
@@ -3208,7 +3250,8 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
                   </label>
                   <button type="button" disabled={isFetching || markdownDraftDirty || (!filterText && !Object.values(filters).some(Boolean))}
                     onClick={() => { setFilterText(''); updateFilters(EMPTY_GRAPH_FILTERS); }}>Clear filters</button>
-                  {summary ? <span role="status">{summary.nodeCount.toLocaleString()} / {(summary.totalNodeCount ?? summary.nodeCount).toLocaleString()} nodes · {summary.edgeCount.toLocaleString()} / {(summary.totalEdgeCount ?? summary.edgeCount).toLocaleString()} relationships{summary.nodeCount === 0 ? ' · No matches. Clear or change filters.' : ''}</span> : null}
+                  {hasActiveFilters && summary ? <span role="status">{summary.nodeCount.toLocaleString()} / {(summary.totalNodeCount ?? summary.nodeCount).toLocaleString()} nodes · {summary.edgeCount.toLocaleString()} / {(summary.totalEdgeCount ?? summary.edgeCount).toLocaleString()} relationships{summary.nodeCount === 0 ? ' · No matches. Clear or change filters.' : ''}</span> : null}
+                  </> : null}
                 </div>
               </div>
 

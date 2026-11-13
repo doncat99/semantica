@@ -22,8 +22,6 @@ async function graphSize(page: Page, order: number, size: number) {
     const { graph } = await import(path);
     return graph.order === expectedOrder && graph.size === expectedSize;
   }, [order, size]);
-  await page.getByRole('group', { name: 'Graph filters' }).getByRole('status')
-    .filter({ hasText: `${order} / 80 nodes` }).waitFor();
 }
 
 test('large graph overview, intersecting scopes, empty results, repeated clear and reload', async t => {
@@ -59,6 +57,11 @@ test('large graph overview, intersecting scopes, empty results, repeated clear a
   await page.goto(base);
   await page.getByRole('button', { name: 'Open Semantica Explorer' }).click();
   await graphSize(page, 80, 80);
+  const filtersToggle = page.getByRole('button', { name: /^Filters/ });
+  assert.equal(await filtersToggle.getAttribute('aria-expanded'), 'false');
+  assert.equal(await page.getByRole('group', { name: 'Graph filters' }).getByRole('status').count(), 0);
+  assert.equal(await page.locator('.explore-status-strip').getByText(/active$/, { exact: false }).count(), 0);
+  await filtersToggle.click();
   await page.waitForFunction(() => document.querySelector('button[aria-pressed="true"]')?.textContent !== undefined);
   const fullView = page.getByRole('button', { name: 'Full Graph', exact: true });
   const groupedView = page.getByRole('button', { name: 'Grouped View', exact: true });
@@ -77,6 +80,7 @@ test('large graph overview, intersecting scopes, empty results, repeated clear a
   const clear = page.getByRole('button', { name: 'Clear filters' });
   await type.selectOption('Concept');
   await graphSize(page, 40, 40);
+  await page.getByRole('group', { name: 'Graph filters' }).getByRole('status').filter({ hasText: '40 / 80 nodes' }).waitFor();
   await relation.selectOption('STUDIES');
   await graphSize(page, 0, 0);
   await page.getByText('No matches. Clear or change filters.', { exact: false }).waitFor();
