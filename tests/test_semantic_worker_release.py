@@ -33,6 +33,82 @@ def test_worker_model_lock_admits_only_accurate_tableformer():
     assert all("/accurate/" in path for path in table_paths)
 
 
+def test_model_download_uses_bounded_ranges_and_resumes_verified_parts(tmp_path, monkeypatch):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import hashlib
+    import threading
+    import time
+    from urllib.error import HTTPError
+
+    model_script = SCRIPT.with_name("semantic_worker_models.py")
+    download_spec = importlib.util.spec_from_file_location("semantic_worker_models", model_script)
+    downloader = importlib.util.module_from_spec(download_spec)
+    download_spec.loader.exec_module(downloader)
+    monkeypatch.setattr(downloader, "CHUNK_BYTES", 1024)
+    payload = bytes(range(251)) * 164
+    active = 0
+    maximum_active = 0
+    lock = threading.Lock()
+    requests = []
+    failed_once = False
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            nonlocal active, maximum_active, failed_once
+            start, end = map(int, self.headers["Range"][6:].split("-"))
+            with lock:
+                active += 1
+                maximum_active = max(maximum_active, active)
+                requests.append((start, end))
+                should_fail = start == 1024 and not failed_once
+                if should_fail:
+                    failed_once = True
+            try:
+                time.sleep(0.01)
+                if should_fail:
+                    self.send_response(503)
+                    self.send_header("Content-Length", "0")
+                    self.end_headers()
+                    return
+                body = payload[start:end + 1]
+                self.send_response(206)
+                self.send_header("Content-Range", f"bytes {start}-{end}/{len(payload)}")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+            finally:
+                with lock:
+                    active -= 1
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    target = tmp_path / "model.safetensors"
+    target.write_bytes(b"interrupted old download")
+    try:
+        with pytest.raises(HTTPError):
+            downloader.download_file(f"http://127.0.0.1:{server.server_port}/model", target,
+                                     hashlib.sha256(payload).hexdigest())
+        first_ranges = set(requests)
+        requests.clear()
+        downloader.download_file(f"http://127.0.0.1:{server.server_port}/model", target,
+                                 hashlib.sha256(payload).hexdigest())
+        resumed_ranges = {item for item in requests if item[1] - item[0] > 0}
+        assert resumed_ranges == {(1024, 2047)}
+        assert maximum_active > 1
+        assert maximum_active <= downloader.MAX_CONNECTIONS == 32
+        assert len(first_ranges) > 32
+        assert target.read_bytes() == payload
+        assert not target.with_name(target.name + ".parts").exists()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
 def test_offline_acceptance_sets_model_environment_before_dependency_imports(tmp_path, monkeypatch):
     import ast
     import os
