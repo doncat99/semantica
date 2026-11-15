@@ -7,7 +7,7 @@ import logging
 import re
 from typing import Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import ValidationError
 
 from ..dependencies import get_session
@@ -333,19 +333,55 @@ async def detect_duplicates(
         raise HTTPException(status_code=422, detail=f"Dedup scan failed: {exc}")
 
 
+_REASONING_FACTS_PAGE_SIZE = 100
+
+
 @router.get("/api/reason/facts")
-async def graph_reasoning_facts(session: GraphSession = Depends(get_session)):
+async def graph_reasoning_facts(
+    edge_type: Optional[str] = None,
+    offset: int = Query(default=0, ge=0),
+    limit: int = Query(default=_REASONING_FACTS_PAGE_SIZE, ge=1, le=_REASONING_FACTS_PAGE_SIZE),
+    session: GraphSession = Depends(get_session),
+):
     def collect():
-        facts = []
+        graph = session.graph
+        with session._lock:
+            edge_types = [
+                {"type": str(name), "count": len(edges)}
+                for name, edges in graph.edge_type_index.items()
+            ]
+            total = len(graph.edge_type_index.get(edge_type, [])) if edge_type else len(graph.edges)
+            raw_edges = graph.find_edges(edge_type=edge_type, skip=offset, limit=limit)
+
+        relations = []
         skipped = 0
-        for edge in session.iter_edges():
+        for raw_edge in raw_edges:
+            edge = session.normalize_edge(raw_edge)
             fact = f"{edge['type']}({edge['source']}, {edge['target']})"
-            parsed = _parse_fact(fact)
-            if parsed != (edge["type"], [edge["source"], edge["target"]]):
+            if _parse_fact(fact) != (edge["type"], [edge["source"], edge["target"]]):
                 skipped += 1
                 continue
-            facts.append(fact)
-        return {"facts": list(dict.fromkeys(facts)), "skipped_edges": skipped}
+            source = session.get_node(edge["source"])
+            target = session.get_node(edge["target"])
+            relations.append({
+                "id": edge["id"],
+                "source_id": edge["source"],
+                "source_label": source["content"] if source and source["content"] else f"Unnamed {source['type']}" if source else "Unknown source",
+                "target_id": edge["target"],
+                "target_label": target["content"] if target and target["content"] else f"Unnamed {target['type']}" if target else "Unknown target",
+                "type": edge["type"],
+                "fact": fact,
+            })
+        return {
+            "relations": relations,
+            "relationship_types": sorted(edge_types, key=lambda item: item["type"].casefold()),
+            "offset": offset,
+            "limit": limit,
+            "total": total,
+            "has_more": offset + limit < total,
+            "skipped_edges": skipped,
+        }
+
     return await asyncio.to_thread(collect)
 
 

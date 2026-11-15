@@ -56,7 +56,7 @@ def test_read_only_graph_ignores_shadow_file_and_rejects_persistent_mutation(tmp
     assert shadow.read_text() == '{"nodes": [], "edges": []}'
 
 
-def test_reasoning_facts_are_current_graph_ids():
+def test_reasoning_relationship_page_uses_current_graph_and_readable_labels():
     graph = ContextGraph(advanced_analytics=False)
     graph.add_node("a", "entity", content="Alpha")
     graph.add_node("b", "entity", content="Beta")
@@ -64,4 +64,18 @@ def test_reasoning_facts_are_current_graph_ids():
     with TestClient(create_app(session=GraphSession(graph))) as client:
         response = client.get("/api/reason/facts")
         assert response.status_code == 200
-        assert response.json()["facts"] == ["supports(a, b)"]
+        payload = response.json()
+        assert len(payload["relations"]) == 1
+        relation = payload["relations"][0]
+        assert relation["id"]
+        assert relation["source_id"] == "a"
+        assert relation["source_label"] == "Alpha"
+        assert relation["target_id"] == "b"
+        assert relation["target_label"] == "Beta"
+        assert relation["type"] == "supports"
+        assert relation["fact"] == "supports(a, b)"
+        assert payload["relationship_types"] == [{"type": "supports", "count": 1}]
+        assert payload["offset"] == 0
+        assert payload["limit"] == 100
+        assert payload["total"] == 1
+        assert payload["has_more"] is False

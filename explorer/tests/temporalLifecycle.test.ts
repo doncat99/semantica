@@ -51,6 +51,16 @@ test("temporal bounds: true when successful summary has nodeCount of 0", () => {
   );
 });
 
+test("temporal requests stay disabled while the graph workspace is inactive", () => {
+  assert.equal(shouldFetchTemporalBounds(sampleSummary, false), false);
+  assert.equal(shouldFetchTemporalSnapshot({
+    active: false,
+    debouncedTime: new Date("2024-01-01T00:00:00Z"),
+    isLoading: false,
+    summary: sampleSummary,
+  }), false);
+});
+
 // ── shouldFetchTemporalSnapshot ──────────────────────────────────────────────
 
 test("temporal snapshot: false when summary is undefined even if scrubber time is set and isLoading is false", () => {

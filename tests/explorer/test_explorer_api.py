@@ -160,6 +160,29 @@ class TestHealthInfo:
         assert payload["status"] == "active"
         assert payload["version"]
 
+
+class TestReasoningFacts:
+    def test_relationship_page_filters_type_and_projects_readable_labels(self, client):
+        response = client.get("/api/reason/facts?edge_type=used_in&offset=1&limit=1")
+
+        assert response.status_code == 200
+        payload = response.json()
+        assert payload["total"] == 3
+        assert payload["offset"] == 1
+        assert payload["limit"] == 1
+        assert payload["has_more"] is True
+        assert len(payload["relations"]) == 1
+        relation = payload["relations"][0]
+        assert relation["source_label"] == "JavaScript programming language"
+        assert relation["target_label"] == "Web Development"
+        assert relation["type"] == "used_in"
+        assert relation["fact"] == "used_in(javascript, web_dev)"
+        assert payload["relationship_types"]
+
+    def test_relationship_page_rejects_oversized_page(self, client):
+        response = client.get("/api/reason/facts?limit=101")
+        assert response.status_code == 422
+
     def test_env_settings_are_read_from_supported_names(self, monkeypatch):
         monkeypatch.setenv(
             "ALLOWED_ORIGINS",

@@ -12,14 +12,22 @@ const { ReasoningWorkspace } = await import("../src/workspaces/ReasoningWorkspac
 const { DecisionWorkspace } = await import("../src/workspaces/DecisionWorkspace/DecisionWorkspace.tsx");
 test.afterEach(cleanup);
 
-test("reasoning starts from loaded graph facts and resets to them", async () => {
-  globalThis.fetch = async () => Response.json({ facts: ["supports(source, claim)"], skipped_edges: 0 });
+test("reasoning displays readable relationships and sends selected stable facts", async () => {
+  const relation = { id: "edge-opaque-1", source_id: "node-opaque-1", source_label: "Source concept", target_id: "node-opaque-2", target_label: "Claim concept", type: "supports", fact: "supports(node-opaque-1, node-opaque-2)" };
+  let submitted: Record<string, unknown> | undefined;
+  globalThis.fetch = async (url, options) => {
+    if (String(url).startsWith("/api/reason/facts")) return Response.json({ relations: [relation], relationship_types: [{ type: "supports", count: 1 }], offset: 0, limit: 100, total: 1, has_more: false, skipped_edges: 0 });
+    submitted = JSON.parse(String(options?.body));
+    return Response.json({ inferred_facts: [], rules_fired: 1, added_edges: 0, mutated: false });
+  };
   const view = render(<QueryClientProvider client={new QueryClient()}><ReasoningWorkspace /></QueryClientProvider>);
-  await waitFor(() => assert.equal((view.getByLabelText("Current graph facts") as HTMLTextAreaElement).value, "supports(source, claim)"));
-  fireEvent.click(view.getByRole("button", { name: "Drug Candidate" }));
-  fireEvent.click(view.getByRole("button", { name: /Reset/ }));
-  assert.equal((view.getByLabelText("Current graph facts") as HTMLTextAreaElement).value, "supports(source, claim)");
-  assert.equal((view.getByLabelText("Rules") as HTMLTextAreaElement).value, "");
+  await view.findByText("Source concept");
+  assert.equal(view.queryByText(/node-opaque/), null);
+  fireEvent.click(view.getByRole("checkbox", { name: "Select Source concept supports Claim concept" }));
+  fireEvent.change(view.getByLabelText("Rules"), { target: { value: "IF supports(X, Y) THEN related(X, Y)" } });
+  fireEvent.click(view.getByRole("button", { name: "Run Reasoning" }));
+  await waitFor(() => assert.deepEqual(submitted?.facts, ["supports(node-opaque-1, node-opaque-2)"]));
+  assert.equal(submitted?.rules instanceof Array, true);
 });
 
 test("decisions can be recorded through the native endpoint", async () => {

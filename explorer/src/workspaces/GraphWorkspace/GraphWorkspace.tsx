@@ -1302,12 +1302,13 @@ function collectPluginOverlays(
 }
 
 interface GraphWorkspaceProps {
+  active?: boolean;
   externalFocusNodeId?: string;
   externalFocusToken?: number;
   onDirtyChange?: (dirty: boolean) => void;
 }
 
-export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirtyChange }: GraphWorkspaceProps = {}) {
+export function GraphWorkspace({ active = true, externalFocusNodeId, externalFocusToken, onDirtyChange }: GraphWorkspaceProps = {}) {
   const [selectedNodeId, setSelectedNodeId] = useState("");
   const [focusedNodeId, setFocusedNodeId] = useState("");
   const [lastGroupedSelectedNodeId, setLastGroupedSelectedNodeId] = useState("");
@@ -1508,8 +1509,9 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
     applyGraphReadySummary(summary);
   }, [applyGraphReadySummary, graphReady, summary]);
 
-  const canFetchTemporalBounds = shouldFetchTemporalBounds(summary);
+  const canFetchTemporalBounds = shouldFetchTemporalBounds(summary, active);
   const canFetchTemporalSnapshot = shouldFetchTemporalSnapshot({
+    active,
     debouncedTime,
     isLoading,
     summary,
@@ -1521,9 +1523,10 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
     }
 
     let cancelled = false;
+    const controller = new AbortController();
     const loadBounds = async () => {
       try {
-        const response = await fetch("/api/temporal/bounds");
+        const response = await fetch("/api/temporal/bounds", { signal: controller.signal });
         if (!response.ok || cancelled) return;
         const data: TemporalBounds = await response.json();
         if (!cancelled) {
@@ -1538,6 +1541,7 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
     loadBounds();
     return () => {
       cancelled = true;
+      controller.abort();
     };
   }, [
     canFetchTemporalBounds,
@@ -1579,6 +1583,7 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
     }
 
     let cancelled = false;
+    const controller = new AbortController();
 
     const applyData = (data: TemporalSnapshotResponse) => {
       const nextActiveIds = new Set(data.active_node_ids);
@@ -1619,7 +1624,7 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
     const applySnapshot = async () => {
       try {
         const at = debouncedTime.toISOString();
-        const response = await fetch(`/api/temporal/snapshot?at=${encodeURIComponent(at)}`);
+        const response = await fetch(`/api/temporal/snapshot?at=${encodeURIComponent(at)}`, { signal: controller.signal });
         if (!response.ok) {
           // A failed request must be retryable if the scrubber returns.
           if (!cancelled) temporalSnapshotGuards.finish(atMs, seq);
@@ -1641,6 +1646,7 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
     applySnapshot();
     return () => {
       cancelled = true;
+      controller.abort();
       // A cancelled request must be retryable when its position is revisited.
       temporalSnapshotGuards.finish(atMs, seq);
     };
@@ -3477,7 +3483,7 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
                 </div>
               ) : null}
 
-              <div className="explore-scene-footer">
+              {active ? <div className="explore-scene-footer">
                 <Suspense fallback={<div style={timelineFallbackStyle}>Loading timeline…</div>}>
                   <LazyTimelinePanel
                     onTimeChange={onTimeChange}
@@ -3485,7 +3491,7 @@ export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirt
                     maxDate={temporalBounds?.max ?? undefined}
                   />
                 </Suspense>
-              </div>
+              </div> : null}
             </SurfaceCard>
           </div>
 

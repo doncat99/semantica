@@ -2069,7 +2069,7 @@ export default function App() {
               <WorkspaceShell title="Explore" hideHeader={embedded}>
                 <ErrorBoundary key={graphDraftRevision}>
                   <Suspense fallback={<WorkspaceFallback />}>
-                    <GraphWorkspace externalFocusNodeId={graphFocusRequest?.nodeId} externalFocusToken={graphFocusRequest?.token} onDirtyChange={dirty => { if (graphActive) setExploreDraftDirty(dirty); }} />
+                    <GraphWorkspace active={graphActive} externalFocusNodeId={graphFocusRequest?.nodeId} externalFocusToken={graphFocusRequest?.token} onDirtyChange={dirty => { if (graphActive) setExploreDraftDirty(dirty); }} />
                   </Suspense>
                 </ErrorBoundary>
               </WorkspaceShell>
