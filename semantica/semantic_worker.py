@@ -15,6 +15,7 @@ from .semantic_artifact_errors import SemanticArtifactError, model_output_cause
 from .semantic_source_artifact import bind_parsed_source_artifact, parse_source_artifact
 from .semantic_artifact_schema import (
     ParseSourceRequest,
+    SemanticPublicationActivationRequest,
     SemanticArtifactBuildRequest,
     WorkerRequest,
     WorkerResponse,
@@ -307,6 +308,9 @@ def _dispatch(request: WorkerRequest, progress: Optional[Callable[[Dict[str, Any
         return _response(request.id, True, result=parse_source_artifact(ParseSourceRequest.model_validate(request.params), progress=progress))
     if request.method == "bind_parsed_source":
         return _response(request.id, True, result=bind_parsed_source_artifact(BindParsedSourceRequest.model_validate(request.params)))
+    if request.method == "activate_publication":
+        return _response(request.id, True, result=_activate_publication(
+            SemanticPublicationActivationRequest.model_validate(request.params)))
     if request.method == "explain_evidence":
         return _response(request.id, True, result=_explain_evidence(request.params, progress))
     if request.method != METHOD:
@@ -318,12 +322,62 @@ def _dispatch(request: WorkerRequest, progress: Optional[Callable[[Dict[str, Any
     store = built["semantic_store"]
     return _response(request.id, True, result={
         "publication": built["publication"],
+        "completionInput": built["completion_input"],
         "nativeIndexes": built["native_indexes"],
         "semanticStore": {"path": store["path"], "project": store["projectId"],
                           "generation": store["generationId"]},
         "relayReceipts": _relay_receipts(built["model_receipts"]),
         "relayReceiptManifest": _relay_receipt_manifest(built["model_receipts"]),
     })
+
+
+def _activate_publication(request):
+    from .explorer.search_index import GraphSearchIndex
+    from .triplet_store.oxigraph_store import OxigraphStore
+    from .vector_store.sqlite_vec_store import SQLiteVecStore
+    from .semantic_query_schema import NativeIndexes
+
+    indexes = NativeIndexes.model_validate(request.native_indexes).model_dump(
+        by_alias=True, exclude_none=True)
+    if indexes["semantic"] is None:
+        raise SemanticArtifactError("Native publication requires a semantic index")
+    keyword = indexes["keyword"]
+    semantic = indexes["semantic"]
+    try:
+        keyword_identity = tuple(map(int, keyword["installation"]["identity"].split(":")))
+        if len(keyword_identity) != 5:
+            raise ValueError("invalid keyword installation identity")
+        lexical = GraphSearchIndex.open_native_positions(keyword["path"],
+            project=request.project_id, generation=request.generation,
+            receipt=keyword["receipt"], installation_identity=keyword_identity)
+        lexical.close_native_positions()
+        space = semantic["space"]
+        vectors = SQLiteVecStore.open_embedding_space(semantic["path"],
+            dict(binding=space["space_id"], model=space["modelId"], recipe=space["recipe"]),
+            space["dimensions"], read_only=True)
+        if vectors is None:
+            raise ValueError("native vector owner is missing")
+        try:
+            vectors.require_native_publication(request.project_id, request.generation, semantic["receipt"])
+        finally:
+            vectors.close()
+        store = OxigraphStore(request.native_store_path)
+        try:
+            status = store.publication_status(request.project_id)
+            if (not status or status["generation"] != request.generation
+                    or status["state"] != "pending"):
+                raise ValueError("publication is not the requested pending generation")
+            from .triplet_store.publication_records import PublicationRecords
+            PublicationRecords(store, request.project_id)._check_index_addresses(
+                indexes, {kind: descriptor["receipt"] for kind, descriptor in indexes.items()})
+            store.activate_publication(request.project_id, request.generation,
+                indexes={kind: descriptor["receipt"] for kind, descriptor in indexes.items()},
+                completed_input=request.completion_input, index_addresses=indexes)
+            return {"publication": store.publication_status(request.project_id)}
+        finally:
+            store.close()
+    except (KeyError, TypeError, ValueError, OSError) as exc:
+        raise SemanticArtifactError("Native publication activation validation failed") from exc
 
 
 def serve(stdin: TextIO = sys.stdin, stdout: TextIO = sys.stdout) -> int:

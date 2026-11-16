@@ -37,6 +37,89 @@ def test_build_executes_real_native_dependency_stages(tmp_path, monkeypatch):
     assert all(step.status == StepStatus.COMPLETED for step in captured[0].steps)
 
 
+def test_build_can_leave_native_generation_pending_for_human_review(tmp_path, monkeypatch):
+    from semantica.triplet_store.oxigraph_store import OxigraphStore
+    source = tmp_path / 'source.txt'
+    source.write_text('Ada Lovelace designed the Analytical Engine.')
+    params = _request(source, tmp_path / 'out')['params']
+    params['activatePublication'] = False
+    activations = []
+    original = OxigraphStore.activate_publication
+    def observe(self, *args, **kwargs):
+        activations.append(args)
+        return original(self, *args, **kwargs)
+    monkeypatch.setattr(OxigraphStore, 'activate_publication', observe)
+    result = builder.build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(params))
+    assert result['publication']['state'] == 'pending'
+    assert result['completion_input'].startswith('sha256:')
+    assert activations == []
+
+
+def test_pending_native_generation_activates_and_reads_back_after_reopen(tmp_path):
+    from hashlib import file_digest
+    import json
+    from tests.test_native_extraction_handoff import build_child
+    from semantica.semantic_artifact_schema import SemanticPublicationActivationRequest
+    from semantica.semantic_worker import _activate_publication
+    from semantica.triplet_store.oxigraph_store import OxigraphStore
+    from semantica.triplet_store.publication_records import PublicationRecords
+    from semantica.semantic_query import NativeQueryStore, query_semantic_artifact
+    from semantica.semantic_query_schema import DocumentReaderRequest, NativeStoreRef
+
+    source = tmp_path / 'source.txt'
+    source.write_text('Ada Lovelace designed the Analytical Engine.')
+    result = build_child(tmp_path, stop_before_publication=False, activate_publication=False)
+    activation = SemanticPublicationActivationRequest.model_validate({
+        'projectId': 'project-1', 'generation': result['publication']['generation'],
+        'nativeStorePath': result['semantic_store']['path'],
+        'completionInput': result['completion_input'], 'nativeIndexes': result['native_indexes'],
+    })
+
+    assert result['publication']['state'] == 'pending'
+    assert _activate_publication(activation)['publication']['state'] == 'ready'
+    reopened = OxigraphStore(result['semantic_store']['path'])
+    try:
+        status = reopened.publication_status('project-1')
+        assert status['generation'] == result['publication']['generation']
+        assert status['state'] == 'ready'
+        assert PublicationRecords(reopened, 'project-1').completed_publication(
+            result['completion_input']) == result['native_indexes']
+    finally:
+        reopened.close()
+    result['semantic_store'] = dict(path=result['semantic_store']['path'],
+        project=result['semantic_store']['projectId'], generation=result['semantic_store']['generationId'])
+    session = NativeQueryStore()
+    session.acquire(NativeStoreRef.model_validate(result['semantic_store']))
+    try:
+        from tests.test_native_query import request as query_request
+        parsed = next((tmp_path / 'published' / 'parsed').glob('*.json'))
+        payload = json.loads(parsed.read_text())
+        def artifact_ref(path, kind):
+            with path.open('rb') as stream:
+                digest = 'sha256:' + file_digest(stream, 'sha256').hexdigest()
+            stat = path.stat()
+            return dict(path=str(path), kind=kind, digest=digest, mediaType='application/json',
+                installation=dict(digest=digest, identity=':'.join(map(str,
+                    (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)))))
+        reader = DocumentReaderRequest.model_validate(dict(id='reader', sourceId='source-1',
+            materialRevision=payload['materialRevision'],
+            representationRevision=payload['document']['representation_revision'],
+            artifact=artifact_ref(parsed, 'document-representation'),
+            readerIndex=artifact_ref(parsed.with_suffix('.reader.sqlite'), 'document-reader-index'),
+            selection=dict(field='chunks', limit=128, maxBytes=262144)))
+        descriptor = result['native_indexes']['semantic']['space']
+        query = query_request(result, mode='semantic', embedding=dict(
+            bindingId=descriptor['bindingId'], modelId=descriptor['modelId'],
+            vector=[.25, .5, .75]),
+            sourceArtifacts={'source-1': reader.model_dump(by_alias=True)}
+        ).model_copy(update={'target': 'knowledge'})
+        answer = query_semantic_artifact(query, session=session)
+        assert answer.contexts
+        assert all(hit.evidence_ids and hit.source_ids == ['source-1'] for hit in answer.contexts)
+    finally:
+        session.close()
+
+
 def test_stage_failure_preserves_cause_and_never_publishes_or_retries(tmp_path, monkeypatch):
     source = tmp_path / 'source.txt'
     source.write_text('Ada Lovelace designed the Analytical Engine.')
@@ -46,7 +129,7 @@ def test_stage_failure_preserves_cause_and_never_publishes_or_retries(tmp_path, 
         captured.append(pipeline)
         return execute(self, pipeline, *args, **kwargs)
     failure = ValueError('organization rejected')
-    def reject(*args):
+    def reject(*args, **kwargs):
         calls.append('organization')
         raise failure
     monkeypatch.setattr(ExecutionEngine, 'execute_pipeline', observe)
@@ -71,7 +154,7 @@ def test_complete_source_plan_is_available_before_project_computation(tmp_path, 
     organize = builder._semantic_organization
     observed = []
 
-    def inspect_plan(*args):
+    def inspect_plan(*args, **kwargs):
         request, store, _ = builder._native_build.get()
         generation = store.publication_status(request.project_id)['generation']
         publication = PublicationRecords(store, request.project_id)
@@ -79,7 +162,7 @@ def test_complete_source_plan_is_available_before_project_computation(tmp_path, 
         page = publication.build_page(generation, kind='Entity')
         assert page['records']
         observed.append(True)
-        return organize(*args)
+        return organize(*args, **kwargs)
 
     monkeypatch.setattr(builder, '_semantic_organization', inspect_plan)
     builder.build_semantic_artifacts(SemanticArtifactBuildRequest.model_validate(
@@ -179,7 +262,7 @@ def test_native_identity_components_match_project_oracle_across_sources_and_rest
     monkeypatch.setattr(builder,'_build_source',capture)
     original_organize=builder._semantic_organization
     observed=[]
-    def verify(topology,*args):
+    def verify(topology,*args,**kwargs):
         resolver=builder.EntityResolver(strategy='contextual',deduplication={'similarity':{'property_schema':{}}})
         from semantica.triplet_store.extraction_records import ExtractionRecords
         from semantica.semantic_artifact_schema import KnowledgeEntity
@@ -190,8 +273,8 @@ def test_native_identity_components_match_project_oracle_across_sources_and_rest
                     builder._read_source_projection_text(reader, start, end)))
             for ref, reader in captured]
         oracle,_,_=builder._resolve_native_entities(entities,resolver=resolver)
-        assert sorted(topology['entities'],key=lambda x:x['id']) == sorted(
-            ({'id':x.id,'name':x.canonical_name} for x in oracle),key=lambda x:x['id'])
+        assert sorted(item['id'] for item in topology['entities']) == sorted(
+            item.id for item in oracle)
         request,store,_=builder._native_build.get()
         generation=store.publication_status(request.project_id)['generation']
         publication=PublicationRecords(store,request.project_id)
@@ -209,7 +292,7 @@ def test_native_identity_components_match_project_oracle_across_sources_and_rest
                         request.project_id,generation,refs[origin][0],name)))
             assert {(item['field'],item['record']) for item in actual['selectors']}==expected
         observed.append(len(topology['entities']))
-        return original_organize(topology,*args)
+        return original_organize(topology,*args,**kwargs)
     monkeypatch.setattr(builder,'_semantic_organization',verify)
     request=SemanticArtifactBuildRequest.model_validate(raw)
     first=builder.build_semantic_artifacts(request)

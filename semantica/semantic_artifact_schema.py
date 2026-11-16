@@ -545,6 +545,7 @@ class SemanticArtifactBuildRequest(DigestModel):
     document_processing: DocumentProcessingProfile = Field(default_factory=DocumentProcessingProfile, alias="documentProcessing")
     # Caller-verified identity properties supply vetoes, not mandatory merge keys.
     identity_property_schema: Dict[str, Dict[str, Any]] = Field(default_factory=dict, alias="identityPropertySchema")
+    activate_publication: bool = Field(default=True, alias="activatePublication")
 
     @model_validator(mode="after")
     def validate_inputs(self) -> "SemanticArtifactBuildRequest":
@@ -578,6 +579,27 @@ class SemanticArtifactBuildRequest(DigestModel):
             raise ValueError("embedding relay capability is invalid")
         if self.relays["model"].capability != "knowledge.publication.generate":
             raise ValueError("model relay capability is invalid")
+        return self
+
+
+class SemanticPublicationActivationRequest(StrictModel):
+    project_id: str = Field(alias="projectId", min_length=1, max_length=4096)
+    generation: str = Field(min_length=1, max_length=4096)
+    native_store_path: str = Field(alias="nativeStorePath", min_length=1, max_length=4096)
+    completion_input: str = Field(alias="completionInput", pattern=SHA256_RE.pattern)
+    native_indexes: Dict[str, Any] = Field(alias="nativeIndexes")
+
+    @field_validator("native_store_path", mode="after")
+    @classmethod
+    def validate_native_store_path(cls, value: str) -> str:
+        if not isabs(value):
+            raise ValueError("nativeStorePath must be absolute")
+        return value
+
+    @model_validator(mode="after")
+    def validate_indexes(self):
+        if set(self.native_indexes) != {"keyword", "semantic"}:
+            raise ValueError("activation requires keyword and semantic native indexes")
         return self
 
 
@@ -625,7 +647,7 @@ class WorkerRequest(StrictModel):
     model_config = ConfigDict(extra="forbid", populate_by_name=True, hide_input_in_errors=True)
     protocol: Literal[WORKER_PROTOCOL] = WORKER_PROTOCOL
     id: str
-    method: Literal["parse_source", "bind_parsed_source", "build_semantic_artifacts", "validate_extraction_spec", "schema", "explain_evidence"]
+    method: Literal["parse_source", "bind_parsed_source", "build_semantic_artifacts", "activate_publication", "validate_extraction_spec", "schema", "explain_evidence"]
     params: Dict[str, Any] = Field(default_factory=dict)
     authorization: Optional[Dict[str, str]] = Field(default=None, repr=False, exclude=True)
     document_processing_authorization: Optional[str] = Field(default=None, alias="documentProcessingAuthorization", repr=False, exclude=True)
