@@ -296,9 +296,11 @@ def _document_hit(request,row,metrics,match_index):
     locator = DocumentLocator(representation_id=reader.representation_revision,nativeRef=first['nativeRef'],
         origin='native',quote=page['items'][0]['text'],start_char=first['start'],end_char=first['end'],quality='precise',
         **{key:location[key] for key in ('page','bbox','table_id','cell','slide','section_path') if location.get(key) is not None})
-    identity = json.dumps([reader.representation_revision,selected],separators=(',',':'))
+    reference = dict(materialRevision=reader.material_revision, representationRevision=reader.representation_revision,
+        ranges=[{key:item[key] for key in ('nativeRef','start','end','joinBefore','joinAfter') if key in item} for item in ranges])
+    identity = json.dumps([source,reference],separators=(',',':'),ensure_ascii=False)
     return QueryHit(id='text:'+sha256(identity.encode()).hexdigest(),kind='source_text',title=source,text=text,
-        score=row.get('score',1.),source_ids=[source],locator=locator,
+        score=row.get('score',1.),source_ids=[source],locator=locator,documentReference=reference,
         match_index=match_index if request.mode=='keyword' else None,position=row.get('position'))
 
 

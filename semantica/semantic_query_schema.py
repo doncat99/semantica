@@ -177,6 +177,36 @@ class SemanticQueryRequest(StrictModel):
         return value.strip() if value is not None else value
 
 
+class DocumentReaderRange(StrictModel):
+    native_ref: str = Field(alias='nativeRef', min_length=1, max_length=4096, pattern=r'^#/document/')
+    start: int = Field(ge=0)
+    end: int = Field(ge=1)
+
+    @model_validator(mode='after')
+    def validate_extent(self):
+        if not self.start < self.end <= self.start + 64 * 1024:
+            raise ValueError('native reader range must contain 1..65536 codepoints')
+        return self
+
+
+class QueryDocumentRange(DocumentReaderRange):
+    join_before: Optional[str] = Field(default=None, alias='joinBefore', max_length=8)
+    join_after: Optional[str] = Field(default=None, alias='joinAfter', max_length=8)
+
+    @field_validator('join_before', 'join_after')
+    @classmethod
+    def validate_join(cls, value):
+        if value is not None and (value.strip() or len(value.encode()) > 8):
+            raise ValueError('document boundary joins must be bounded whitespace')
+        return value
+
+
+class QueryDocumentReference(StrictModel):
+    material_revision: str = Field(alias='materialRevision', min_length=1, max_length=8192)
+    representation_revision: str = Field(alias='representationRevision', min_length=1, max_length=8192)
+    ranges: List[QueryDocumentRange] = Field(min_length=1, max_length=128)
+
+
 class QueryHit(StrictModel):
     id: str
     kind: Literal["entity", "assertion", "relation", "conflict", "topic", "report", "evidence", "source_text"]
@@ -189,6 +219,7 @@ class QueryHit(StrictModel):
     evidence_next_cursor: Optional[Tuple[str,str]] = Field(default=None,alias='evidenceNextCursor')
     source_ids: List[str] = Field(default_factory=list, alias="sourceIds")
     locator: Optional["DocumentLocator"] = None
+    document_reference: Optional[QueryDocumentReference] = Field(default=None, alias="documentReference")
     match_index: Optional[int] = Field(default=None, alias="matchIndex", ge=0)
     position: Optional[Tuple[str, str, int, int]] = None
 
@@ -395,18 +426,6 @@ class CanonicalRecordRequest(StrictModel):
     def validate_store(self):
         if self.project_id != self.semantic_store.project:
             raise ValueError('native store project differs from request project')
-        return self
-
-
-class DocumentReaderRange(StrictModel):
-    native_ref: str = Field(alias='nativeRef', min_length=1, max_length=4096, pattern=r'^#/document/')
-    start: int = Field(ge=0)
-    end: int = Field(ge=1)
-
-    @model_validator(mode='after')
-    def validate_extent(self):
-        if not self.start < self.end <= self.start + 64 * 1024:
-            raise ValueError('native reader range must contain 1..65536 codepoints')
         return self
 
 
