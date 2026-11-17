@@ -3671,7 +3671,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                 _publish_native_topics(request, publication, generation, source_builds, topics, progress=topic_completed)
             metadata['substep'] = 'index_publication'
             native_indexes = _publish_native_indexes(request, generation, source_builds)
-            if native_indexes.get('semantic') is not None:
+            if request.activate_publication and native_indexes.get('semantic') is not None:
                 metadata['substep'] = 'activation'
                 store.activate_publication(request.project_id, generation,
                     indexes={name: descriptor['receipt'] for name, descriptor in native_indexes.items()},
@@ -3680,6 +3680,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
                     "semantic_store": {"path": str(Path(request.native_store_dir).resolve()),
                                        "projectId": request.project_id, "generationId": generation},
                     "native_indexes": native_indexes,
+                    "completion_input": completion_key,
                     "model_receipts": list({receipt.id: receipt for receipt in model_receipts}.values())}
     pipeline_builder = PipelineBuilder()
     previous = None

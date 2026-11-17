@@ -15,12 +15,13 @@ def test_build_worker_returns_pending_native_publication_without_materialization
     monkeypatch.setattr(semantic_publication_builder, 'build_semantic_artifacts',
         lambda request, progress: {'publication': publication,
             'semantic_store': {'path': '/native/store', 'projectId': 'project-1',
-                'generationId': 'generation-1'}, 'model_receipts': [],
+                'generationId': 'generation-1'}, 'completion_input': 'sha256:' + 'a' * 64, 'model_receipts': [],
             'native_indexes': {'keyword': {'store_id': 'keyword'}, 'semantic': {'store_id': 'vector'}}})
     response = semantic_worker._dispatch(WorkerRequest.model_validate({
         'id': 'build', 'protocol': semantic_worker.PROTOCOL,
         'method': 'build_semantic_artifacts', 'params': {}}), None)
     assert response['result'] == {'publication': publication,
+        'completionInput': 'sha256:' + 'a' * 64,
         'nativeIndexes': {'keyword': {'store_id': 'keyword'}, 'semantic': {'store_id': 'vector'}},
         'semanticStore': {'path': '/native/store', 'project': 'project-1',
             'generation': 'generation-1'}, 'relayReceipts': {'embedding': [], 'model': []},
@@ -37,3 +38,19 @@ def test_schema_does_not_offer_retired_aggregate_validation():
     with pytest.raises(ValidationError):
         WorkerRequest.model_validate({'id': 'old', 'protocol': semantic_worker.PROTOCOL,
             'method': 'generate_reading_reports', 'params': {}})
+
+
+def test_activation_protocol_is_explicit_and_validated(monkeypatch):
+    from semantica import semantic_artifact_schema
+    activation = {'projectId': 'project-1', 'generation': 'generation-1',
+        'nativeStorePath': '/native/store', 'completionInput': 'sha256:' + 'a' * 64,
+        'nativeIndexes': {'keyword': {}, 'semantic': {}}}
+    monkeypatch.setattr(semantic_worker, '_activate_publication', lambda value: {
+        'publication': {'project': value.project_id, 'generation': value.generation, 'state': 'ready'}})
+    response = semantic_worker._dispatch(WorkerRequest.model_validate({
+        'id': 'activate', 'protocol': semantic_worker.PROTOCOL,
+        'method': 'activate_publication', 'params': activation}), None)
+    assert response['result']['publication']['state'] == 'ready'
+    with pytest.raises(ValidationError):
+        semantic_artifact_schema.SemanticPublicationActivationRequest.model_validate(
+            {**activation, 'nativeIndexes': {'keyword': {}}})

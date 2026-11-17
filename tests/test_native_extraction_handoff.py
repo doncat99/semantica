@@ -201,7 +201,7 @@ def test_production_damaged_adopted_result_never_rebuys_paid_work(tmp_path, muta
     assert 'missing' in resumed.stderr.lower()
 
 
-def build_child(root, stop_before_publication=True):
+def build_child(root, stop_before_publication=True, activate_publication=True):
     """Actual build stages; only the remote transport is a no-network fixture."""
     import urllib.request
     from semantica.semantic_publication_builder import build_semantic_artifacts
@@ -214,6 +214,7 @@ def build_child(root, stop_before_publication=True):
         source.write_text('Ada Lovelace designed the Analytical Engine.')
     os.environ['OPENAI_API_KEY'] = 'fixture-only'
     request = _request(source, root/'published', recipe='model')['params']
+    request['activatePublication'] = activate_publication
     request['relays']['embedding']['bindingId'] = 'binding:fixture-embedding'
     request['recipe']['classificationProfile'] = _classification_profile()
     product = root/'host-product.json'

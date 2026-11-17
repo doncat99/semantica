@@ -28,7 +28,7 @@ def test_worker_references_parsed_source_without_another_document(tmp_path):
     identity = path.stat()
     digest = 'sha256:' + sha256(path.read_bytes()).hexdigest()
     result = handle_request(request)["result"]
-    assert set(result) == {'publication', 'semanticStore', 'relayReceipts', 'relayReceiptManifest', 'nativeIndexes'}
+    assert set(result) == {'publication', 'completionInput', 'semanticStore', 'relayReceipts', 'relayReceiptManifest', 'nativeIndexes'}
     assert result['publication']['source_count'] == 1
     assert result['publication']['canonical_count'] > 0
     assert path.stat() == identity

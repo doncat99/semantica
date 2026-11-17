@@ -2133,6 +2133,7 @@ class PublicationRecords:
         if kind in {'incident','topology'}:
             return self._relation_page(generation, selection, traversal)
         permitted = {'kind','after','limit','maxBytes','fields'} | ({'nodeIds','recordIds','sourceIds','communityId','topicId'} if kind == 'nodes' else {'visibleIds'})
+        maximum = 1024 if projection is not None else MAX_ROWS
         limit, max_bytes = selection.get('limit', MAX_ROWS), selection.get('maxBytes', MAX_BYTES)
         # Even an ID-only row occupies bytes; bound query materialization by the transport ceiling.
         if (kind not in {'nodes','links'} or set(selection) - permitted
