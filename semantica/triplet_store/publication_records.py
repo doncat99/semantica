@@ -755,9 +755,9 @@ class PublicationRecords:
         self.mutate(generation, [self.triple(self.head, "canonicalCount", self.ox.Literal(count))])
 
     @staticmethod
-    def batch(values):
-        if not isinstance(values, list) or not 1 <= len(values) <= MAX_ROWS:
-            raise ProcessingError("Publication batch must contain 1..128 records")
+    def batch(values, maximum=MAX_ROWS):
+        if not isinstance(values, list) or not 1 <= len(values) <= maximum:
+            raise ProcessingError(f"Publication batch must contain 1..{maximum} records")
 
     def verify_operation(self, identity, source):
         return self.verify_operations([identity], source)[0]
@@ -2109,9 +2109,10 @@ class PublicationRecords:
         if kind in {'incident','topology'}:
             return self._relation_page(generation, selection, traversal)
         permitted = {'kind','after','limit','maxBytes','fields'} | ({'nodeIds','recordIds','sourceIds','communityId','topicId'} if kind == 'nodes' else {'visibleIds'})
+        maximum = 1024 if projection is not None else MAX_ROWS
         limit, max_bytes = selection.get('limit', MAX_ROWS), selection.get('maxBytes', MAX_BYTES)
         if (kind not in {'nodes','links'} or set(selection) - permitted
-                or type(limit) is not int or not 1 <= limit <= MAX_ROWS
+                or type(limit) is not int or not 1 <= limit <= maximum
                 or type(max_bytes) is not int or not 1 <= max_bytes <= MAX_BYTES):
             raise ProcessingError('Invalid native scene budget or fields')
         after = selection.get('after')
@@ -2125,7 +2126,7 @@ class PublicationRecords:
         if kind == 'nodes':
             exact = selection.get('nodeIds')
             if exact is not None:
-                self.batch(exact)
+                self.batch(exact, maximum)
                 if after is not None or len(set(exact)) != len(exact):
                     raise ProcessingError('Invalid exact native scene selection')
             source_ids = selection.get('sourceIds')
@@ -2150,7 +2151,7 @@ class PublicationRecords:
             records_filter = ''
             if selection.get('recordIds') is not None:
                 records = selection['recordIds']
-                self.batch(records)
+                self.batch(records, maximum)
                 if len(set(records)) != len(records) or exact is not None:
                     raise ProcessingError('Invalid native member selection')
                 records_filter = f'''VALUES ?selectedRecord {{ {' '.join(str(self.iri(r)) for r in records)} }}
@@ -2162,13 +2163,13 @@ class PublicationRecords:
                 }} ORDER BY ?id LIMIT {limit + 1}'''
         else:
             visible = selection.get('visibleIds')
-            self.batch(visible)
+            self.batch(visible, maximum)
             if len(set(visible)) != len(visible):
                 raise ProcessingError('Duplicate visible scene identities')
             nodes = ' '.join(str(self.iri(n)) for n in visible)
             admitted = list(self.owner.store.query(f'''SELECT ?id WHERE {{
                 VALUES ?id {{ {nodes} }} GRAPH {identity_graph} {{ {identity_head} <{P}canonical> ?id }}
-            }} LIMIT {MAX_ROWS + 1}'''))
+            }} LIMIT {maximum + 1}'''))
             if len(admitted) != len(visible):
                 raise ProcessingError('Visible scene identities are outside the current publication')
             query = f'''SELECT DISTINCT ?id ?source ?target WHERE {{
