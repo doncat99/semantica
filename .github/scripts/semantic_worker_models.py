@@ -21,15 +21,28 @@ def digest_file(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def range_total(url: str) -> int:
+def range_total(url: str, target: Path, expected_sha256: str) -> int | None:
     request = urllib.request.Request(url, headers={"Range": "bytes=0-0"})
     with urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT) as response:
         match = CONTENT_RANGE.fullmatch(response.headers.get("Content-Range", ""))
-        if response.status != 206 or not match or (match.group(1), match.group(2)) != ("0", "0"):
-            raise ValueError(f"model server does not honor byte ranges: {url}")
-        if len(response.read()) != 1:
-            raise ValueError(f"invalid byte-range probe response: {url}")
-        return int(match.group(3))
+        if (response.status in (200, 206) and match
+                and (match.group(1), match.group(2)) == ("0", "0")):
+            if len(response.read()) != 1:
+                raise ValueError(f"invalid byte-range probe response: {url}")
+            return int(match.group(3))
+        if response.status == 200:
+            partial = target.with_name(target.name + ".partial")
+            try:
+                with partial.open("wb") as stream:
+                    shutil.copyfileobj(response, stream)
+                if digest_file(partial) != expected_sha256:
+                    raise ValueError(f"model digest mismatch: {target.name}")
+                os.replace(partial, target)
+                return None
+            except BaseException:
+                partial.unlink(missing_ok=True)
+                raise
+        raise ValueError(f"model server does not honor byte ranges: {url}")
 
 
 def download_range(url: str, start: int, end: int, total: int, part: Path) -> None:
@@ -38,7 +51,7 @@ def download_range(url: str, start: int, end: int, total: int, part: Path) -> No
     try:
         with urllib.request.urlopen(request, timeout=DOWNLOAD_TIMEOUT) as response:
             match = CONTENT_RANGE.fullmatch(response.headers.get("Content-Range", ""))
-            if (response.status != 206 or not match
+            if (response.status not in (200, 206) or not match
                     or tuple(map(int, match.groups())) != (start, end, total)):
                 raise ValueError(f"invalid model range response {start}-{end}/{total}: {url}")
             with partial.open("wb") as stream:
@@ -62,7 +75,11 @@ def download_file(url: str, target: Path, expected_sha256: str) -> None:
             return
         target.unlink()
 
-    total = range_total(url)
+    total = range_total(url, target, expected_sha256)
+    if total is None:
+        shutil.rmtree(parts, ignore_errors=True)
+        assembled.unlink(missing_ok=True)
+        return
     if total <= 0:
         raise ValueError(f"empty model response: {url}")
     parts.mkdir(parents=True, exist_ok=True)
