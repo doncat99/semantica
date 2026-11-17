@@ -1194,6 +1194,33 @@ def test_canonical_checkpoint_failure_never_seals_partial_output(tmp_path, failu
         store.close()
 
 
+def test_projected_scene_accepts_1024_nodes_and_512_links_budget(tmp_path):
+    from semantica.triplet_store.publication_records import PublicationRecords, P
+    store, _, receipt, identity = fixture(tmp_path)
+    try:
+        generation = stage(store, receipt, identity)
+        store.activate_publication('p', generation, indexes=indexes())
+        owner = PublicationRecords(store, 'p')
+        ids = [f'urn:canonical:{i:04}' for i in range(1024)]
+        for value in ids:
+            store.store.add(owner.ox.Quad(owner.stage_head('identity'), owner.iri(P+'canonical'),
+                owner.iri(value), owner.stage_graph('identity')))
+        page = store.read_publication_scene('p', generation,
+            dict(kind='nodes', nodeIds=ids, fields=['id'], limit=1024))
+        assert [item['id'] for item in page['nodes']] == ids
+        assert page['next_cursor'] is None
+        links = store.read_publication_scene('p', generation,
+            dict(kind='links', visibleIds=ids, fields=['id','source','target','predicate','status'], limit=512))
+        assert links['links'] == []
+        for selection in (dict(kind='nodes', fields=['id'], limit=1025),
+                dict(kind='nodes', nodeIds=ids, limit=128),
+                dict(kind='topology', fields=['id','source','target','predicate'], limit=129)):
+            with pytest.raises(ProcessingError):
+                store.read_publication_scene('p', generation, selection)
+    finally:
+        store.close()
+
+
 def test_scene_explicit_fields_avoids_unrequested_hydration(tmp_path, monkeypatch):
     import json, time
     from semantica.triplet_store.publication_records import PublicationRecords
