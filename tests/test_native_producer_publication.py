@@ -81,7 +81,7 @@ def test_actual_model_build_publishes_ready_native_references_without_aggregate(
         assert topics['nodes'] and topics['nodes'][0]['organization']['basis'] == 'grounded-overview-section'
         assert topics['nodes'][0]['evidenceCount'] > 0
         topic_nodes = store.read_publication_scene('project-1', result['publication']['generation'],
-            dict(kind='nodes', topicId=topics['nodes'][0]['id']))
+            dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes', topicId=topics['nodes'][0]['id']))
         assert topic_nodes['nodes']
         assert not any(quad.object.value in {'Ada Lovelace', 'Analytical Engine'} for quad in publication)
         operations = [quad.object.value for quad in publication if quad.predicate.value.endswith(':operation')]

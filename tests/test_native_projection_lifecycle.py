@@ -13,9 +13,9 @@ def publication_semantics(result):
     store = OxigraphStore(result['semantic_store']['path'])
     try:
         generation = result['publication']['generation']
-        nodes = store.read_publication_scene('project-1', generation, dict(kind='nodes'))
+        nodes = store.read_publication_scene('project-1', generation, dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes'))
         links = store.read_publication_scene('project-1', generation,
-            dict(kind='links', visibleIds=[item['id'] for item in nodes['nodes']]))
+            dict(fields=['id', 'source', 'target', 'predicate', 'fields', 'sourceIds', 'evidenceIds'], kind='links', visibleIds=[item['id'] for item in nodes['nodes']]))
         # The tiny fixture's complete accepted native graph is the integrity
         # oracle; no semantic bodies are retained by lifecycle probes themselves.
         accepted = sorted(str(quad) for quad in store.store

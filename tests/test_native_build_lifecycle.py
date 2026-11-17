@@ -38,7 +38,7 @@ def test_build_releases_native_writer_and_context(tmp_path, monkeypatch, failure
         reader.close()
 
 
-def test_rebuild_invalidates_ready_generation_before_reading_source(tmp_path, monkeypatch):
+def test_rebuild_keeps_active_generation_and_fences_pending_generation(tmp_path, monkeypatch):
     from tests.test_native_extraction_handoff import build_child
     from semantica.semantic_artifact_schema import SemanticArtifactBuildRequest
     from tests.test_semantic_artifact import _request
@@ -54,8 +54,9 @@ def test_rebuild_invalidates_ready_generation_before_reading_source(tmp_path, mo
         observed.append(status)
         assert status['state'] == 'pending'
         assert status['generation'] != old_generation
+        assert store.read_publication_scene('project-1', old_generation, {'fields': ['id'], 'kind': 'nodes'})['generation'] == old_generation
         with pytest.raises(ProcessingError, match='not ready'):
-            store.read_publication_scene('project-1', old_generation, {'kind': 'nodes'})
+            store.read_publication_scene('project-1', status['generation'], {'fields': ['id'], 'kind': 'nodes'})
         raise RuntimeError('source read failed')
 
     monkeypatch.setattr(builder, '_load_parsed_source', fail_read)
@@ -66,9 +67,11 @@ def test_rebuild_invalidates_ready_generation_before_reading_source(tmp_path, mo
     assert len(observed) == 1
     store = OxigraphStore(request.native_store_dir)
     try:
-        assert store.publication_status('project-1')['state'] == 'pending'
+        status = store.publication_status('project-1')
+        assert status['state'] == 'pending'
+        assert store.read_publication_scene('project-1', old_generation, {'fields': ['id'], 'kind': 'nodes'})['generation'] == old_generation
         with pytest.raises(ProcessingError, match='not ready'):
-            store.read_publication_scene('project-1', old_generation, {'kind': 'nodes'})
+            store.read_publication_scene('project-1', status['generation'], {'fields': ['id'], 'kind': 'nodes'})
     finally:
         store.close()
 
@@ -84,9 +87,9 @@ def test_ready_build_publishes_canonical_fact_with_native_support(tmp_path):
     store = OxigraphStore(request.native_store_dir)
     try:
         generation = built['publication']['generation']
-        nodes = store.read_publication_scene('project-1', generation, {'kind': 'nodes'})['nodes']
+        nodes = store.read_publication_scene('project-1', generation, {'fields': ['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], 'kind': 'nodes'})['nodes']
         scene = store.read_publication_scene('project-1', generation,
-            {'kind': 'links', 'visibleIds': [node['id'] for node in nodes]})
+            {'fields': ['id', 'source', 'target', 'predicate', 'fields', 'sourceIds', 'evidenceIds'], 'kind': 'links', 'visibleIds': [node['id'] for node in nodes]})
         assert len(scene['links']) == 1
         fact = scene['links'][0]
         assert fact['id'].startswith('relation:')

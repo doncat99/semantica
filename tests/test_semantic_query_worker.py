@@ -104,7 +104,7 @@ def test_scene_rpc_delegates_exact_scope_and_selection(monkeypatch, fields):
     from semantica import semantic_query_worker as worker
     from pydantic import ValidationError
     import pytest
-    selected = dict(kind='nodes', limit=17, maxBytes=8192)
+    selected = dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes', limit=17, maxBytes=8192)
     if fields is not None:
         selected['fields'] = fields
     calls = []

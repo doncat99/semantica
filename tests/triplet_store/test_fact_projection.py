@@ -13,8 +13,8 @@ def test_native_fact_projection_survives_restart_and_matches_builder(tmp_path):
     store = OxigraphStore(request.native_store_dir)
     try:
         generation = built['publication']['generation']
-        scene = store.read_publication_scene(request.project_id, generation, {'kind':'nodes'})
-        links = store.read_publication_scene(request.project_id,generation,{'kind':'links','visibleIds':[item['id'] for item in scene['nodes']]})
+        scene = store.read_publication_scene(request.project_id, generation, {'fields': ['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], 'kind':'nodes'})
+        links = store.read_publication_scene(request.project_id,generation,{'fields': ['id', 'source', 'target', 'predicate', 'fields', 'sourceIds', 'evidenceIds'], 'kind':'links','visibleIds':[item['id'] for item in scene['nodes']]})
         assert links['links']
         for link in links['links']:
             members = store.read_publication_fact_members(request.project_id,generation,link['id'])

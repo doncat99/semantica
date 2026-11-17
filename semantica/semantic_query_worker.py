@@ -26,7 +26,7 @@ from .semantic_query_schema import (
     NativeClassificationRequest,
     NativeClassificationBatchRequest,
 )
-from .semantic_worker_context import query_cancellation
+from .semantic_worker_context import query_cancellation, query_phase
 from .utils.exceptions import ProcessingError
 
 MAX_FRAME_BYTES = 8 * 1024 * 1024
@@ -80,7 +80,8 @@ def handle_request(raw: Dict[str, Any]) -> Dict[str, Any]:
     if request.method in {'acquire_store', 'release_store'}:
         model = NativeStoreControlRequest if request.method == 'acquire_store' else NativeStoreReleaseRequest
         reference = model.model_validate(request.params).semantic_store
-        result = (_native_store.acquire if request.method == 'acquire_store' else _native_store.release)(reference)
+        with query_phase('openStore' if request.method == 'acquire_store' else 'releaseStore'):
+            result = (_native_store.acquire if request.method == 'acquire_store' else _native_store.release)(reference)
         return _response(request.id, True, result=result)
     if request.method == "records":
         records_request = CanonicalRecordRequest.model_validate({
@@ -152,7 +153,8 @@ def handle_request(raw: Dict[str, Any]) -> Dict[str, Any]:
         return _response(request.id, True, result=_native_store.stream(request.method, schema.model_validate(request.params)))
     if request.method == 'scene':
         selected = NativeSceneRequest.model_validate(request.params)
-        owner = _native_store.borrow(selected.semantic_store, selected.project_id)
+        with query_phase('openStore'):
+            owner = _native_store.borrow(selected.semantic_store, selected.project_id)
         result = owner.read_publication_scene(selected.project_id,
             selected.semantic_store.generation, selected.selection)
         _native_store.borrow(selected.semantic_store, selected.project_id)
@@ -259,6 +261,9 @@ def _serve(stdin, stdout, executor) -> int:
 
 
 def _serve_line(line, stdout):
+    from .semantic_worker_context import query_diagnostics, query_phase
+    metrics = {}
+    token = query_diagnostics.set(metrics)
     request_id: Optional[str] = None
     try:
         raw = json.loads(line)
@@ -266,10 +271,19 @@ def _serve_line(line, stdout):
             candidate_id = raw.get("id")
             if isinstance(candidate_id, str) and len(candidate_id.encode('utf-8')) <= 256:
                 request_id = candidate_id
-        response = handle_request(raw)
+        with query_phase('execution'):
+            response = handle_request(raw)
     except (json.JSONDecodeError, ValidationError, ValueError, TypeError, QueryError, ProcessingError, OSError) as exc:
         response = _response(request_id, False, error=exc)
+    finally:
+        query_diagnostics.reset(token)
+    response.setdefault('metrics', {}).update(metrics)
     try:
+        from time import perf_counter
+        encoding = perf_counter()
+        frame = _encode_frame(response)
+        response['metrics']['serializationMs'] = round((perf_counter() - encoding) * 1000, 3)
+        response['metrics']['responseBytes'] = len(frame.encode())
         frame = _encode_frame(response)
     except (ValueError, TypeError) as exc:
         frame = _encode_frame(_response(request_id, False, error=exc))

@@ -1,6 +1,9 @@
 """Request-local authorization for serial workers and their native task contexts."""
 from contextvars import ContextVar
 from threading import Event
+from contextlib import contextmanager
+from functools import wraps
+from time import perf_counter
 import os
 
 worker_authorization: ContextVar[dict[str, str] | None] = ContextVar("worker_authorization", default=None)
@@ -27,3 +30,34 @@ def worker_token(name: str) -> str | None:
 
 def document_processing_token() -> str | None:
     return document_processing_authorization.get()
+
+
+query_diagnostics: ContextVar[dict | None] = ContextVar('query_diagnostics', default=None)
+
+
+@contextmanager
+def query_phase(name):
+    started = perf_counter()
+    try:
+        yield
+    finally:
+        metrics = query_diagnostics.get()
+        if metrics is not None:
+            key = name + 'Ms'
+            metrics[key] = round(metrics.get(key, 0) + (perf_counter() - started) * 1000, 3)
+
+
+def measured_query_phase(name):
+    def decorate(method):
+        @wraps(method)
+        def call(*args, **kwargs):
+            with query_phase(name):
+                return method(*args, **kwargs)
+        return call
+    return decorate
+
+
+def count_query_work(name, count=1):
+    metrics = query_diagnostics.get()
+    if metrics is not None:
+        metrics[name] = metrics.get(name, 0) + count

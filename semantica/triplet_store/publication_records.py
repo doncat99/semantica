@@ -13,7 +13,7 @@ from heapq import nsmallest
 from itertools import chain, islice
 
 from ..utils.exceptions import ProcessingError
-from ..semantic_worker_context import check_query_cancellation
+from ..semantic_worker_context import check_query_cancellation, measured_query_phase, query_phase, count_query_work
 from ..semantic_extract.types import normalize_fact_predicate
 from .extraction_records import BINDING, ExtractionRecords, F, RDF_TYPE, operation_identity
 
@@ -1078,6 +1078,7 @@ class PublicationRecords:
         return item
 
     @_stage('fact')
+    @measured_query_phase('relationHydration')
     def _fact_scene_link(self, generation, row):
         identity = row["id"].value
         node = self.iri(identity)
@@ -1085,16 +1086,18 @@ class PublicationRecords:
         record = self.read(generation, [representative], max_bytes=MAX_BYTES)[0]
         # Provenance is a bounded display projection. Large fact support is
         # retained in RDF and must be requested through a bounded member page.
-        query = f"""SELECT DISTINCT ?source ?evidence WHERE {{
-            {self.fact_pattern(node, f'{node} <{P}member> ?record')}
-            GRAPH {self.publication_graph} {{ {self.publication_head} <{P}source> ?membership .
-                ?membership <{P}source> ?source ; <{P}operation> ?operation }}
-            GRAPH {self.facts} {{ ?operation <{F}ownedRecord> ?record .
-                OPTIONAL {{ ?record <{F}evidence> ?evidence }} }}
-        }} LIMIT {MAX_ROWS+1}"""
-        rows = list(self.owner.store.query(query))
-        if len(rows) > MAX_ROWS:
-            raise ProcessingError("Canonical fact provenance exceeds bounded scene selection")
+        members = []
+        retained = 0
+        for quad in self.owner.store.quads_for_pattern(node, self.iri(P+'member'), None, self.record_graph(node)):
+            check_query_cancellation()
+            retained += len(quad.object.value.encode()) + 4
+            if retained > MAX_BYTES:
+                raise ProcessingError('Canonical fact members exceed bounded scene selection')
+            if len(members) >= MAX_ROWS:
+                raise ProcessingError('Canonical fact support exceeds scene work budget; use fact_members pages')
+            count_query_work('supportMembers')
+            members.append(quad.object.value)
+        sources, evidence = self._scene_references(members)
         predicates = record["fields"].get(F+"predicateName", [])
         if len(predicates) != 1:
             raise ProcessingError("Native relation predicate missing or duplicated")
@@ -1102,8 +1105,7 @@ class PublicationRecords:
         fields[F+"status"] = [dict(type="iri", value=F+self.one(node, "status"))]
         return dict(id=identity, source=row["source"].value, target=row["target"].value,
             predicate=normalize_fact_predicate(predicates[0]["value"]), fields=fields,
-            sourceIds=sorted({r["source"].value for r in rows}),
-            evidenceIds=sorted({r["evidence"].value for r in rows if r["evidence"] is not None}))
+            sourceIds=sources, evidenceIds=evidence)
 
     @_locked
     @_stage(None)
@@ -1755,11 +1757,22 @@ class PublicationRecords:
             result[F+'attribute'] = retained
         return result
 
+    @measured_query_phase('provenance')
     def _scene_references(self, identities, source_ids=None):
         """Only provenance addresses, scoped through current admitted operations."""
         sources, evidence, retained_bytes = set(), set(), 0
         selected = set(source_ids) if source_ids else None
-        lookup = self.owner.store.quads_for_pattern
+        visited = 0
+        def lookup(*pattern):
+            nonlocal visited
+            count_query_work('provenanceLookups')
+            for quad in self.owner.store.quads_for_pattern(*pattern):
+                check_query_cancellation()
+                visited += 1
+                count_query_work('provenanceRows')
+                if visited > MAX_ROWS * MAX_ROWS:
+                    raise ProcessingError('Native scene provenance exceeds work budget; narrow selection')
+                yield quad
         def retain(value, target):
             nonlocal retained_bytes
             check_query_cancellation()
@@ -1939,9 +1952,19 @@ class PublicationRecords:
     def _scene_projection(self, selection):
         fields = selection.get('fields')
         if 'fields' not in selection:
+            if selection.get('kind') in {'nodes', 'links', 'incident', 'topology'}:
+                raise ProcessingError('Native scene requires explicit consumer fields')
             return None
-        allowed = ([['id'], ['id','name','sourceIds'], ['id','name','entityType'], ['id','name','entityType','sourceIds']] if selection.get('kind') == 'nodes'
-                   else [['id','source','target','predicate'], ['id','source','target','predicate','status']] if selection.get('kind') in {'links','incident','topology'} else [])
+        kind = selection.get('kind')
+        if kind == 'nodes':
+            allowed = [['id','type','recordId','fields','sourceIds','evidenceIds','members','selectors'], ['id'], ['id','name','sourceIds'], ['id','name','entityType'], ['id','name','entityType','sourceIds']]
+        elif kind in {'links', 'incident', 'topology'}:
+            allowed = [['id','source','target','predicate'], ['id','source','target','predicate','status']]
+            if kind != 'topology':
+                detail = ['id','source','target','predicate','fields','sourceIds','evidenceIds']
+                allowed.append(detail + ['nodes'] if kind == 'incident' else detail)
+        else:
+            allowed = []
         if fields not in allowed:
             raise ProcessingError('Invalid native scene field projection')
         return fields
@@ -2085,6 +2108,7 @@ class PublicationRecords:
 
     @_locked
     @_stage(None)
+    @measured_query_phase('scene')
     def scene(self, generation, selection, traversal=None):
         """Page the current native canonical references, never assemble a graph.
 
@@ -2180,16 +2204,22 @@ class PublicationRecords:
             if len(set(visible)) != len(visible):
                 raise ProcessingError('Duplicate visible scene identities')
             nodes = ' '.join(str(self.iri(n)) for n in visible)
-            admitted = list(self.owner.store.query(f'''SELECT ?id WHERE {{
-                VALUES ?id {{ {nodes} }} GRAPH {identity_graph} {{ {identity_head} <{P}canonical> ?id }}
-            }} LIMIT {len(visible) + 1}'''))
+            with query_phase('admission'):
+                count_query_work('admissionQueries')
+                admitted = list(self.owner.store.query(f'''SELECT ?id WHERE {{
+                    VALUES ?id {{ {nodes} }} GRAPH {identity_graph} {{ {identity_head} <{P}canonical> ?id }}
+                }} LIMIT {len(visible) + 1}'''))
+                count_query_work('admissionRows', len(admitted))
             if len(admitted) != len(visible):
                 raise ProcessingError('Visible scene identities are outside the current publication')
             query = f'''SELECT DISTINCT ?id ?source ?target WHERE {{
                 VALUES ?source {{ {nodes} }} VALUES ?target {{ {nodes} }}
                 {self.fact_pattern('?id', f'?id <{P}source> ?source ; <{P}target> ?target .')}
                 {cursor} }} ORDER BY ?id LIMIT {limit + 1}'''
-        rows = traversal.window(self.owner.store, query, limit) if traversal else list(self.owner.store.query(query))
+        with query_phase('selection'):
+            count_query_work('selectionQueries')
+            rows = traversal.window(self.owner.store, query, limit) if traversal else list(self.owner.store.query(query))
+            count_query_work('selectionRows', len(rows))
         if kind == 'nodes' and exact is not None and len(rows) != len(exact):
             raise ProcessingError('Exact scene identities are outside the current source scope or page limit')
         if kind == 'links' and len({row['id'].value for row in rows}) != len(rows):
@@ -2203,7 +2233,7 @@ class PublicationRecords:
                 raise ProcessingError('Native scene envelope exceeds byte budget')
             if kind == 'nodes':
                 node = self.iri(identity)
-                if projection is not None:
+                if 'fields' not in projection:
                     item = dict(id=identity)
                     if 'entityType' in projection:
                         item.update(name=self._canonical_scalar(node, 'name'), entityType=self._canonical_scalar(node, 'entityType'))
@@ -2231,7 +2261,7 @@ class PublicationRecords:
                         evidenceIds=evidence, members=members, selectors=selectors)
                     target = response['nodes']
             else:
-                item = self._projected_scene_link(row, status='status' in projection) if projection is not None else self._fact_scene_link(generation, row)
+                item = self._projected_scene_link(row, status='status' in projection) if 'fields' not in projection else self._fact_scene_link(generation, row)
                 target = response['links']
             target.append(item)
             response['next_cursor'] = identity
@@ -2309,6 +2339,7 @@ class PublicationRecords:
             self.retain_window(generation, scope, response['next_cursor'], rows, len(response['nodes']), stream, streaming=True)
         return response
 
+    @measured_query_phase('relationPage')
     def _relation_page(self, generation, selection, traversal=None):
         """Read topology once, or seek one incident neighborhood; hydrate only selected fields."""
         from ..semantic_worker_context import check_query_cancellation
@@ -2336,26 +2367,29 @@ class PublicationRecords:
             {self.fact_pattern('?id', f'?id <{P}source> ?source ; <{P}target> ?target .')}
             {endpoint_filter} {cursor} }} ORDER BY ?id'''
         scope = ('scene-topology', self.project, generation)
-        if traversal:
-            rows = traversal.window(self.owner.store, query, limit)
-        elif topology:
-            rows, stream = self.query_window(generation, scope, after, query, limit, streaming=True)
-        else:
-            rows = list(self.owner.store.query(query + f' LIMIT {limit + 1}'))
+        with query_phase('selection'):
+            count_query_work('selectionQueries')
+            if traversal:
+                rows = traversal.window(self.owner.store, query, limit)
+            elif topology:
+                rows, stream = self.query_window(generation, scope, after, query, limit, streaming=True)
+            else:
+                rows = list(self.owner.store.query(query + f' LIMIT {limit + 1}'))
+            count_query_work('selectionRows', len(rows))
         if len({row['id'].value for row in rows}) != len(rows):
             raise ProcessingError('Native incident endpoints require unique canonical membership')
         response = dict(project=self.project, generation=generation, nodes=[], links=[], next_cursor=None)
         identities = {focus.value} if focus is not None else set()
         if projection is not None:
             response['fields'] = projection
-        else:
-            response['nodes'] = self.scene(generation, dict(kind='nodes', nodeIds=[focus.value], limit=1, maxBytes=MAX_BYTES))['nodes']
+        if 'nodes' in projection:
+            response['nodes'] = self.scene(generation, dict(kind='nodes', fields=['id','type','recordId','fields','sourceIds','evidenceIds','members','selectors'], nodeIds=[focus.value], limit=1, maxBytes=MAX_BYTES))['nodes']
         if len(json.dumps(response, ensure_ascii=False).encode()) > budget:
             raise ProcessingError('Native incident focus exceeds byte budget')
         emitted = []
         for row in rows[:limit]:
             check_query_cancellation()
-            if projection is not None:
+            if 'fields' not in projection:
                 link = self._projected_scene_link(row, status='status' in projection)
                 missing = []
             else:
@@ -2365,7 +2399,7 @@ class PublicationRecords:
             # its budget before we decide the incident page boundary.
             added = []
             for identity in missing:
-                added.extend(self.scene(generation, dict(kind='nodes', nodeIds=[identity], limit=1, maxBytes=MAX_BYTES))['nodes'])
+                added.extend(self.scene(generation, dict(kind='nodes', fields=['id','type','recordId','fields','sourceIds','evidenceIds','members','selectors'], nodeIds=[identity], limit=1, maxBytes=MAX_BYTES))['nodes'])
             candidate = dict(response, nodes=response['nodes'] + added, links=response['links'] + [link], next_cursor=link['id'])
             if len(json.dumps(candidate, ensure_ascii=False).encode()) > budget:
                 if not emitted:

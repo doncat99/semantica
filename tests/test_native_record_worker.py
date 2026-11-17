@@ -77,7 +77,7 @@ def test_native_worker_exposes_topics_and_selected_members(publication):
     assert result['generation'] == ref['generation']
     assert result['nodes'][0]['id'] == 'topic:acme'
     assert result['nodes'][0]['organization']['basis'] == 'grounded-overview-section'
-    assert [n['id'] for n in scene(dict(kind='nodes', topicId='topic:acme'))['nodes']] == ['urn:canonical:acme']
+    assert [n['id'] for n in scene(dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes', topicId='topic:acme'))['nodes']] == ['urn:canonical:acme']
     assert scene(dict(kind='topics', after='topic:acme'))['nodes'] == []
     with pytest.raises(ProcessingError, match='byte budget'):
         scene(dict(kind='topics', maxBytes=8))

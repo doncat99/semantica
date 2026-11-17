@@ -115,7 +115,7 @@ def test_native_entity_attributes_profile_and_qualified_relation_roundtrip(tmp_p
     assert restored == [acme, engine]
     assert store.read_extraction(bound, 'relations', text=TEXT, native_ranges=RANGES, entities=restored) == [relation]
     links = store.read_publication_scene('p', generation,
-        dict(kind='links', visibleIds=['urn:canonical:0', 'urn:canonical:1']))['links']
+        dict(fields=['id', 'source', 'target', 'predicate', 'fields', 'sourceIds', 'evidenceIds'], kind='links', visibleIds=['urn:canonical:0', 'urn:canonical:1']))['links']
     assert len(links) == 1
     fields = links[0]['fields']
     assert fields[F+'polarity'] == [dict(type='iri', value=F+'negative')]

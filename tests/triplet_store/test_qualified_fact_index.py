@@ -412,7 +412,7 @@ def test_new_generation_references_unchanged_fact_partition_without_copying_memb
         fact=page_all(index,'relation')[0]
         store.activate_publication('p',generation,indexes=indexes())
         assert set(store.read_publication_fact_members('p',generation,fact.id)['members'])==set(refs)
-        scene=store.read_publication_scene('p',generation,dict(kind='links',
+        scene=store.read_publication_scene('p',generation,dict(fields=['id', 'source', 'target', 'predicate', 'fields', 'sourceIds', 'evidenceIds'], kind='links',
             visibleIds=['urn:canonical:0','urn:canonical:1']))
         assert len(scene['links'])==1
     finally:

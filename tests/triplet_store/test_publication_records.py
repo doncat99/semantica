@@ -191,8 +191,8 @@ def test_grounded_topics_validate_native_refs_and_survive_restart(tmp_path):
             report_id='report:one', input_digest='sha256:input', coverage='cited-knowledge-only'))]
     assert scene['next_cursor'] is None
     assert store.read_publication_scene('p', generation, dict(kind='topics', after='topic:one'))['nodes'] == []
-    assert store.read_publication_scene('p', generation, dict(kind='nodes', topicId='topic:one'))['nodes'][0]['id'] == 'urn:canonical:acme'
-    assert store.read_publication_scene('p', generation, dict(kind='nodes', topicId='topic:absent'))['nodes'] == []
+    assert store.read_publication_scene('p', generation, dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes', topicId='topic:one'))['nodes'][0]['id'] == 'urn:canonical:acme'
+    assert store.read_publication_scene('p', generation, dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes', topicId='topic:absent'))['nodes'] == []
     with pytest.raises(ProcessingError, match='byte budget'):
         store.read_publication_scene('p', generation, dict(kind='topics', maxBytes=10))
     store.withdraw_publication('p', expected_generation=generation)
@@ -288,9 +288,9 @@ def test_topic_catalog_and_memberships_page_past_128_without_loss(tmp_path):
     second = store.read_publication_scene('p', generation, dict(kind='topics', after=first['next_cursor']))
     assert len(first['nodes']) == 128 and len(second['nodes']) == 2
     assert second['next_cursor'] is None and second['nodes'][-1]['memberCount'] == 130
-    first = store.read_publication_scene('p', generation, dict(kind='nodes', topicId='topic:wide'))
+    first = store.read_publication_scene('p', generation, dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes', topicId='topic:wide'))
     second = store.read_publication_scene('p', generation,
-        dict(kind='nodes', topicId='topic:wide', after=first['next_cursor']))
+        dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes', topicId='topic:wide', after=first['next_cursor']))
     assert [n['id'] for n in first['nodes']+second['nodes']] == members
     assert second['next_cursor'] is None
     for fields in (['id'], ['id','name','sourceIds']):
@@ -339,9 +339,9 @@ def test_community_references_restart_and_canonical_membership_uniqueness(tmp_pa
     assert not any(q.predicate.value == P+'title' for q in store.store)
     scene=store.read_publication_scene('p',generation,dict(kind='communities'))
     assert scene['nodes']==[dict(id='community:one',kind='community',memberCount=1,titleState='unavailable_title')]
-    assert store.read_publication_scene('p',generation,dict(kind='nodes',communityId='community:one'))['nodes'][0]['id']=='urn:canonical:acme'
-    assert store.read_publication_scene('p',generation,dict(kind='nodes',communityId='community:absent'))['nodes']==[]
-    assert store.read_publication_scene('p',generation,dict(kind='nodes',recordIds=[identity]))['nodes'][0]['id']=='urn:canonical:acme'
+    assert store.read_publication_scene('p',generation,dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes',communityId='community:one'))['nodes'][0]['id']=='urn:canonical:acme'
+    assert store.read_publication_scene('p',generation,dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes',communityId='community:absent'))['nodes']==[]
+    assert store.read_publication_scene('p',generation,dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes',recordIds=[identity]))['nodes'][0]['id']=='urn:canonical:acme'
     section=store.read_native_section_records('p',generation,dict(sourceId='s',positions=[dict(nativeRef='#/document/text',start=1,end=3)]))
     assert section['records'][0]['id']==identity
     assert section['records'][0]['fields'][F+'name'][0]['value']=='Acme'
@@ -684,7 +684,7 @@ def test_native_scene_hydrates_selected_identity_profile(tmp_path):
             store.store.remove(quad)
         store.store.add(owner.ox.Quad(node, owner.iri(P+'selectorCount'), owner.ox.Literal(2), graph))
         store.activate_publication('p', generation, indexes=indexes())
-        result = store.read_publication_scene('p', generation, dict(kind='nodes', nodeIds=['urn:canonical:acme']))
+        result = store.read_publication_scene('p', generation, dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes', nodeIds=['urn:canonical:acme']))
         assert result['nodes'][0]['fields'][F+'identityProfile'][0]['type'] == 'iri'
         assert store.extraction_receipt(binding, 'entities') == receipt
     finally:
@@ -695,7 +695,7 @@ def test_native_scene_is_bounded_reference_projection_and_generation_fenced(tmp_
     store, _, receipt, identity = fixture(tmp_path)
     generation = stage(store, receipt, identity)
     store.activate_publication('p', generation, indexes=indexes())
-    page = store.read_publication_scene('p', generation, dict(kind='nodes', limit=1))
+    page = store.read_publication_scene('p', generation, dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes', limit=1))
     node = page['nodes'][0]
     assert node['id'] == 'urn:canonical:acme'
     assert node['recordId'] == identity
@@ -704,19 +704,19 @@ def test_native_scene_is_bounded_reference_projection_and_generation_fenced(tmp_
     assert node['members'] == [identity]
     assert node['selectors'] == [dict(field='name', record=identity)]
     assert page['next_cursor'] is None
-    assert store.read_publication_scene('p', generation, dict(kind='nodes', sourceIds=['other']))['nodes'] == []
-    assert store.read_publication_scene('p', generation, dict(kind='links', visibleIds=[node['id']]))['links'] == []
+    assert store.read_publication_scene('p', generation, dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes', sourceIds=['other']))['nodes'] == []
+    assert store.read_publication_scene('p', generation, dict(fields=['id', 'source', 'target', 'predicate', 'fields', 'sourceIds', 'evidenceIds'], kind='links', visibleIds=[node['id']]))['links'] == []
     with pytest.raises(ProcessingError, match='outside'):
-        store.read_publication_scene('p', generation, dict(kind='nodes', nodeIds=['urn:missing']))
+        store.read_publication_scene('p', generation, dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes', nodeIds=['urn:missing']))
     with pytest.raises(ProcessingError, match='byte'):
-        store.read_publication_scene('p', generation, dict(kind='nodes', maxBytes=32))
+        store.read_publication_scene('p', generation, dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes', maxBytes=32))
     with pytest.raises(ProcessingError, match='Duplicate'):
-        store.read_publication_scene('p', generation, dict(kind='links', visibleIds=['urn:n']*129))
+        store.read_publication_scene('p', generation, dict(fields=['id', 'source', 'target', 'predicate', 'fields', 'sourceIds', 'evidenceIds'], kind='links', visibleIds=['urn:n']*129))
     pending = store.begin_publication('p', expected_generation=generation, source_count=0, canonical_count=0)
-    assert store.read_publication_scene('p', generation, dict(kind='nodes'))['nodes']
+    assert store.read_publication_scene('p', generation, dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes'))['nodes']
     store.activate_publication('p', pending['generation'], indexes=indexes())
     with pytest.raises(ProcessingError, match='stale'):
-        store.read_publication_scene('p', generation, dict(kind='nodes'))
+        store.read_publication_scene('p', generation, dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes'))
 
 
 def test_visible_native_scene_links_preserve_relation_qualifiers(tmp_path, monkeypatch):
@@ -744,25 +744,25 @@ def test_visible_native_scene_links_preserve_relation_qualifiers(tmp_path, monke
     from tests.triplet_store.test_canonical_fact_publication import prepare_native_fact_decisions
     prepare_native_fact_decisions(store, generation, [relation_id])
     store.activate_publication('p', generation, indexes=indexes())
-    page = store.read_publication_scene('p', generation,dict(kind='links',visibleIds=['urn:canonical:0','urn:canonical:1']))
+    page = store.read_publication_scene('p', generation,dict(fields=['id', 'source', 'target', 'predicate', 'fields', 'sourceIds', 'evidenceIds'], kind='links',visibleIds=['urn:canonical:0','urn:canonical:1']))
     link = page['links'][0]
-    selected = store.read_publication_scene('p', generation, dict(kind='nodes',recordIds=[link['id']]))
+    selected = store.read_publication_scene('p', generation, dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes',recordIds=[link['id']]))
     assert {node['id'] for node in selected['nodes']} == {'urn:canonical:0','urn:canonical:1'}
     assert (link['source'],link['target'],link['predicate']) == ('urn:canonical:0','urn:canonical:1','owns')
     assert link['fields'][F+'polarity'][0] == dict(type='iri',value=F+'negative')
     assert link['fields'][F+'qualifiedValue'][0]['value'] == '10'
     assert link['evidenceIds'] and link['sourceIds'] == ['s']
-    assert store.read_publication_scene('p',generation,dict(kind='links',visibleIds=['urn:canonical:0']))['links'] == []
-    incident = store.read_publication_scene('p', generation, dict(kind='incident',nodeId='urn:canonical:0',limit=1))
+    assert store.read_publication_scene('p',generation,dict(fields=['id', 'source', 'target', 'predicate', 'fields', 'sourceIds', 'evidenceIds'], kind='links',visibleIds=['urn:canonical:0']))['links'] == []
+    incident = store.read_publication_scene('p', generation, dict(fields=['id', 'source', 'target', 'predicate', 'fields', 'sourceIds', 'evidenceIds', 'nodes'], kind='incident',nodeId='urn:canonical:0',limit=1))
     assert incident['links'] == page['links']
     assert {node['id'] for node in incident['nodes']} == {'urn:canonical:0','urn:canonical:1'}
     assert incident['next_cursor'] is None
-    assert store.read_publication_scene('p', generation, dict(kind='incident',nodeId='urn:canonical:1'))['links'] == page['links']
+    assert store.read_publication_scene('p', generation, dict(fields=['id', 'source', 'target', 'predicate', 'fields', 'sourceIds', 'evidenceIds', 'nodes'], kind='incident',nodeId='urn:canonical:1'))['links'] == page['links']
     with pytest.raises(ProcessingError, match='outside current'):
-        store.read_publication_scene('p', generation, dict(kind='incident',nodeId='urn:foreign'))
+        store.read_publication_scene('p', generation, dict(fields=['id', 'source', 'target', 'predicate', 'fields', 'sourceIds', 'evidenceIds', 'nodes'], kind='incident',nodeId='urn:foreign'))
     with pytest.raises(ProcessingError, match='byte budget'):
-        store.read_publication_scene('p', generation, dict(kind='incident',nodeId='urn:canonical:0',maxBytes=32))
-    continuation = store.read_publication_scene('p', generation, dict(kind='incident',nodeId='urn:canonical:0',after=link['id']))
+        store.read_publication_scene('p', generation, dict(fields=['id', 'source', 'target', 'predicate', 'fields', 'sourceIds', 'evidenceIds', 'nodes'], kind='incident',nodeId='urn:canonical:0',maxBytes=32))
+    continuation = store.read_publication_scene('p', generation, dict(fields=['id', 'source', 'target', 'predicate', 'fields', 'sourceIds', 'evidenceIds', 'nodes'], kind='incident',nodeId='urn:canonical:0',after=link['id']))
     assert continuation['links'] == []
     assert [node['id'] for node in continuation['nodes']] == ['urn:canonical:0']
     from semantica.triplet_store.publication_records import PublicationRecords
@@ -779,7 +779,7 @@ def test_visible_native_scene_links_preserve_relation_qualifiers(tmp_path, monke
     map_fields=['id','source','target','predicate','status']
     visible=store.read_publication_scene('p',generation,dict(kind='links',visibleIds=['urn:canonical:0','urn:canonical:1'],fields=map_fields))
     assert visible['links']==[dict(projected['links'][0],status='candidate')]
-    for selection in (dict(kind='topology'), dict(kind='incident', nodeId='urn:canonical:0')):
+    for selection in (dict(kind='topology'), dict(fields=['id', 'source', 'target', 'predicate', 'fields', 'sourceIds', 'evidenceIds', 'nodes'], kind='incident', nodeId='urn:canonical:0')):
         complete = store.read_publication_scene('p', generation, dict(selection, fields=map_fields))
         assert complete['links'] == visible['links'] and complete['nodes'] == []
     assert store.read_publication_scene('p',generation,dict(kind='links',visibleIds=['urn:canonical:0'],fields=map_fields))['links']==[]
@@ -815,7 +815,7 @@ def test_multi_source_membership_withdrawal_and_multi_contributor_selectors(tmp_
     store.stage_publication_canonical("p", generation, [dict(id="urn:canonical:shared", representative=identity, members=[identity, identity2], selectors=[dict(field="name", record=identity), dict(field="name", record=identity2)], member_count=len([identity, identity2]), selector_count=len([dict(field="name", record=identity), dict(field="name", record=identity2)]))])
     store.activate_publication("p", generation, indexes=indexes())
     assert len(store.read_canonical_membership("p", generation)["records"][0]["selectors"]) == 2
-    scoped = store.read_publication_scene('p', generation, dict(kind='nodes', sourceIds=['second']))['nodes'][0]
+    scoped = store.read_publication_scene('p', generation, dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes', sourceIds=['second']))['nodes'][0]
     assert scoped['recordId'] == identity2
     assert scoped['members'] == [identity2]
     assert scoped['sourceIds'] == ['second']
@@ -874,7 +874,7 @@ def test_scene_applies_selected_member_fields_without_persisting_another_body(tm
         calls.extend(ids)
         return read(owner, current, ids, **kwargs)
     monkeypatch.setattr(PublicationRecords, 'read', bounded_read)
-    node = store.read_publication_scene('p', generation, dict(kind='nodes'))['nodes'][0]
+    node = store.read_publication_scene('p', generation, dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes'))['nodes'][0]
     assert len(calls) == 4 and len(set(calls)) == 4
     monkeypatch.setattr(PublicationRecords, 'read', read)
     assert node['recordId'] == identity
@@ -893,12 +893,12 @@ def test_scene_applies_selected_member_fields_without_persisting_another_body(tm
         calls.extend(ids)
         return read(owner, current, ids, **kwargs)
     monkeypatch.setattr(PublicationRecords, 'read', scoped_read)
-    scoped = store.read_publication_scene('p', generation, dict(kind='nodes', sourceIds=['s']))['nodes'][0]
+    scoped = store.read_publication_scene('p', generation, dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes', sourceIds=['s']))['nodes'][0]
     assert scoped['fields'][F+'name'][0]['value'] == 'Acme'
     assert scoped['sourceIds'] == ['s'] and scoped['selectors'] == []
     assert calls == [identity] and selected_evidence not in scoped['evidenceIds']
     monkeypatch.setattr(PublicationRecords, 'read', read)
-    second_scope = store.read_publication_scene('p', generation, dict(kind='nodes', sourceIds=['second']))['nodes'][0]
+    second_scope = store.read_publication_scene('p', generation, dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes', sourceIds=['second']))['nodes'][0]
     assert second_scope['fields'][F+'name'][0]['value'] == text
     assert second_scope['sourceIds'] == ['second'] and selected_evidence in second_scope['evidenceIds']
     assert second_scope['members'] == [identity2] and second_scope['selectors'] == selectors
@@ -964,7 +964,7 @@ def test_more_than_128_sources_and_records_publish_in_bounded_batches(tmp_path):
     assert store.publication_status("p")["source_count"] == 129
     scene_ids, cursor = [], None
     while True:
-        selection = dict(kind='nodes', limit=128, maxBytes=8192)
+        selection = dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes', limit=128, maxBytes=8192)
         if cursor is not None:
             selection['after'] = cursor
         scene = store.read_publication_scene('p', generation, selection)
@@ -1055,7 +1055,7 @@ def test_canonical_fact_predicate_normalization_preserves_qualifier_identity(tmp
     assert len(decisions) == (2 if changed else 1)
     store.activate_publication('p', generation, indexes=indexes())
     links = store.read_publication_scene('p', generation,
-        dict(kind='links', visibleIds=['urn:canonical:0', 'urn:canonical:1']))['links']
+        dict(fields=['id', 'source', 'target', 'predicate', 'fields', 'sourceIds', 'evidenceIds'], kind='links', visibleIds=['urn:canonical:0', 'urn:canonical:1']))['links']
     assert len(links) == len(decisions)
     assert all(link['predicate'] == 'owns' for link in links)
     members = [set(store.read_publication_fact_members('p', generation, link['id'])['members']) for link in links]
@@ -1118,7 +1118,7 @@ def test_canonical_ready_reads_span_staging_pages_after_restart(tmp_path):
     assert page['records'] == [dict(id='urn:canonical:wide', representative=members[0],
         members=sorted(members), selectors=selectors)]
     for scope in ({}, dict(sourceIds=['s'])):
-        scene = store.read_publication_scene('p', generation, dict(kind='nodes', **scope))
+        scene = store.read_publication_scene('p', generation, dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes', **scope))
         item = scene['nodes'][0]
         assert item['members'] == sorted(members)
         assert item['selectors'] == selectors
@@ -1127,7 +1127,7 @@ def test_canonical_ready_reads_span_staging_pages_after_restart(tmp_path):
     with pytest.raises(ProcessingError, match='byte budget'):
         store.read_canonical_membership('p', generation, max_bytes=1024)
     with pytest.raises(ProcessingError, match='byte budget'):
-        store.read_publication_scene('p', generation, dict(kind='nodes', maxBytes=1024))
+        store.read_publication_scene('p', generation, dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes', maxBytes=1024))
     store.close()
 
 
@@ -1219,8 +1219,8 @@ def test_scene_uses_caller_row_budget_independent_of_filter_count(tmp_path, coun
             dict(kind='nodes', fields=['id'], limit=7, after=first['next_cursor']))
         assert following['nodes'][0]['id'] > first['nodes'][-1]['id']
         for selection in (dict(kind='nodes', fields=['id'], limit=262145),
-                dict(kind='links', visibleIds=['urn:'+'x'*262144], limit=7),
-                dict(kind='nodes', nodeIds=ids, limit=128),
+                dict(fields=['id', 'source', 'target', 'predicate', 'fields', 'sourceIds', 'evidenceIds'], kind='links', visibleIds=['urn:'+'x'*262144], limit=7),
+                dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes', nodeIds=ids, limit=128),
                 dict(kind='topology', fields=['id','source','target','predicate'], limit=129)):
             with pytest.raises(ProcessingError):
                 store.read_publication_scene('p', generation, selection)
@@ -1244,7 +1244,7 @@ def test_scene_explicit_fields_avoids_unrequested_hydration(tmp_path, monkeypatc
         return rows
     monkeypatch.setattr(PublicationRecords, '_read', measured)
     start=time.perf_counter()
-    full=store.read_publication_scene('p', generation, dict(kind='nodes'))
+    full=store.read_publication_scene('p', generation, dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes'))
     before=dict(seconds=time.perf_counter()-start, reads=list(calls)); calls.clear()
     def forbidden(*args, **kwargs):
         raise AssertionError('Projected scene hydrated unrequested references or fields')
@@ -1290,7 +1290,7 @@ def test_organization_member_projection_survives_full_reference_budget_failure(t
     def exhausted(*args, **kwargs):
         raise ProcessingError('Canonical read exceeds byte budget')
     monkeypatch.setattr(PublicationRecords,'_canonical_references',exhausted)
-    selection=dict(kind='nodes',communityId=community,limit=128,maxBytes=262144)
+    selection=dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes',communityId=community,limit=128,maxBytes=262144)
     with pytest.raises(ProcessingError,match='Canonical read exceeds byte budget'):
         store.read_publication_scene('p',generation,selection)
     projected=store.read_publication_scene('p',generation,dict(selection,fields=['id']))
@@ -1713,5 +1713,21 @@ def test_supporting_reference_requires_current_source_address_and_admitted_relat
                 _publish_native_topics(SimpleNamespace(project_id='p'), owner, generation, [built], [topic])
                 assert owner.one(owner.iri(topic.id), 'evidenceCount') == '1'
                 assert owner.values(owner.iri(topic.id), 'evidence')[0].value == receipt['operation_id']+':evidence:0'
+    finally:
+        store.close()
+
+@pytest.mark.parametrize('kind', ['nodes', 'links', 'incident'])
+def test_scene_requires_explicit_consumer_fields(tmp_path, kind):
+    store, _, receipt, identity = fixture(tmp_path)
+    try:
+        generation = stage(store, receipt, identity)
+        store.activate_publication('p', generation, indexes=indexes())
+        selection = dict(kind=kind)
+        if kind == 'links':
+            selection['visibleIds'] = ['urn:canonical:acme']
+        if kind == 'incident':
+            selection['nodeId'] = 'urn:canonical:acme'
+        with pytest.raises(ProcessingError, match='explicit.*fields'):
+            store.read_publication_scene('p', generation, selection)
     finally:
         store.close()

@@ -246,9 +246,28 @@ def verify_model_paths(root, destination):
                 assert theme["organization"]["basis"] == "grounded-overview-section"
                 assert theme["evidenceCount"] > 0 and theme["memberCount"] > 0, theme
                 members = session.call("scene", {**scene_params, "selection": {
-                    "kind": "nodes", "topicId": theme["id"], "limit": 128, "maxBytes": 262144}})
+                    "kind": "nodes", "fields": ["id", "name", "entityType", "sourceIds"], "topicId": theme["id"], "limit": 128, "maxBytes": 262144}})
                 assert members["nodes"] and members["next_cursor"] is None, members
                 assert len(members["nodes"]) == theme["memberCount"]
+                assert members['fields'] == ['id', 'name', 'entityType', 'sourceIds']
+                visible = [row['id'] for row in members['nodes']]
+                compact_fields = ['id', 'source', 'target', 'predicate', 'status']
+                compact = session.call('scene', {**scene_params, 'selection': {
+                    'kind': 'links', 'fields': compact_fields, 'visibleIds': visible, 'limit': 128}})
+                assert compact['fields'] == compact_fields
+                assert all(set(row) == set(compact_fields) for row in compact['links'])
+                detail_fields = ['id', 'source', 'target', 'predicate', 'fields', 'sourceIds', 'evidenceIds']
+                detail = session.call('scene', {**scene_params, 'selection': {
+                    'kind': 'links', 'fields': detail_fields, 'visibleIds': visible, 'limit': 128}})
+                assert detail['fields'] == detail_fields
+                assert [row['id'] for row in compact['links']] == [row['id'] for row in detail['links']]
+                assert all(set(row) == set(detail_fields) for row in detail['links'])
+                try:
+                    session.call('scene', {**scene_params, 'selection': {'kind': 'nodes', 'limit': 1}})
+                except AssertionError as error:
+                    assert 'explicit consumer fields' in str(error), error
+                else:
+                    raise AssertionError('Native artifact accepted implicit detail expansion')
                 header = session.call("classification", {"projectId": "native",
                     "semanticStore": built["semanticStore"], "selection": {"sourceId": "native-source"}})
                 assert header["dimensionIds"] == ["purpose"], header
@@ -332,7 +351,7 @@ def verify_model_paths(root, destination):
                 expected_members = set()
                 for parent in streamed["topics"] + streamed["communities"]:
                     expected = session.call("scene", {**scene_params, "selection": {"kind": "nodes",
-                        "topicId" if parent["kind"] == "topic" else "communityId": parent["id"], "limit": 128}})
+                        "fields": ["id"], "topicId" if parent["kind"] == "topic" else "communityId": parent["id"], "limit": 128}})
                     assert expected["next_cursor"] is None
                     expected_members.update((parent["id"], child["id"]) for child in expected["nodes"])
                 assert {(row["parent"], row["child"]) for row in streamed["members"]} == expected_members

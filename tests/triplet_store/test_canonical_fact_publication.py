@@ -90,7 +90,7 @@ def test_duplicate_native_observations_publish_one_canonical_fact_with_all_suppo
     store.activate_publication('p', generation, indexes=indexes())
     store.close()
     store = OxigraphStore(tmp_path / 'facts')
-    scene = store.read_publication_scene('p', generation, dict(kind='links', visibleIds=['urn:canonical:0', 'urn:canonical:1']))
+    scene = store.read_publication_scene('p', generation, dict(fields=['id', 'source', 'target', 'predicate', 'fields', 'sourceIds', 'evidenceIds'], kind='links', visibleIds=['urn:canonical:0', 'urn:canonical:1']))
     assert len(scene['links']) == 1
     assert set(scene['links'][0]['sourceIds']) == {'s1', 's2'}
     nodes = store.read_publication_scene('p', generation, dict(kind='nodes', fields=['id', 'name', 'entityType', 'sourceIds']))['nodes']
@@ -100,8 +100,8 @@ def test_duplicate_native_observations_publish_one_canonical_fact_with_all_suppo
     assert len(scoped) == 2
     assert all(node['sourceIds'] == ['s2'] for node in scoped)
     assert len(scene['links'][0]['evidenceIds']) == 2
-    assert store.read_publication_scene('p', generation, dict(kind='incident',nodeId='urn:canonical:0'))['links'] == scene['links']
-    assert {n['id'] for n in store.read_publication_scene('p', generation, dict(kind='nodes',recordIds=[plan['id']]))['nodes']} == {'urn:canonical:0','urn:canonical:1'}
+    assert store.read_publication_scene('p', generation, dict(fields=['id', 'source', 'target', 'predicate', 'fields', 'sourceIds', 'evidenceIds', 'nodes'], kind='incident',nodeId='urn:canonical:0'))['links'] == scene['links']
+    assert {n['id'] for n in store.read_publication_scene('p', generation, dict(fields=['id', 'type', 'recordId', 'fields', 'sourceIds', 'evidenceIds', 'members', 'selectors'], kind='nodes',recordIds=[plan['id']]))['nodes']} == {'urn:canonical:0','urn:canonical:1'}
     first = store.read_publication_fact_members('p', generation, plan['id'], limit=1)
     second = store.read_publication_fact_members('p', generation, plan['id'], limit=1, after=first['next_cursor'])
     assert first['member_count'] == second['member_count'] == 2
@@ -111,7 +111,7 @@ def test_duplicate_native_observations_publish_one_canonical_fact_with_all_suppo
         assert store.read_record_binding('p', generation, member)['source'] in {'s1','s2'}
     store.withdraw_publication('p', expected_generation=generation)
     with pytest.raises(ProcessingError, match='not ready'):
-        store.read_publication_scene('p', generation, dict(kind='links',visibleIds=['urn:canonical:0','urn:canonical:1']))
+        store.read_publication_scene('p', generation, dict(fields=['id', 'source', 'target', 'predicate', 'fields', 'sourceIds', 'evidenceIds'], kind='links',visibleIds=['urn:canonical:0','urn:canonical:1']))
     store.close()
 
 
@@ -348,3 +348,34 @@ def test_fact_cards_read_completed_decisions_without_support_hydration(tmp_path,
     with pytest.raises(ProcessingError):
         store.read_publication_scene('p', generation, dict(kind='facts', factIds=[fact['id']], after=fact['id']))
     store.close()
+
+
+@pytest.mark.parametrize('supports', [1, 7, 32])
+def test_compact_scene_never_expands_support_and_detail_preserves_evidence(tmp_path, monkeypatch, supports):
+    from semantica.triplet_store.publication_records import PublicationRecords
+    from semantica.semantic_worker_context import query_diagnostics
+    store, generation, refs, _ = stage_duplicate_observations(tmp_path, relations_per_source=supports)
+    prepare_native_fact_decisions(store, generation, refs)
+    store.activate_publication('p', generation, indexes=indexes())
+    selection = dict(kind='links', visibleIds=['urn:canonical:0', 'urn:canonical:1'])
+    metrics = {}
+    token = query_diagnostics.set(metrics)
+    try:
+        detail = store.read_publication_scene('p', generation, dict(selection, fields=['id','source','target','predicate','fields','sourceIds','evidenceIds']))
+        assert set(detail['links'][0]['sourceIds']) == {'s1', 's2'}
+        assert len(detail['links'][0]['evidenceIds']) == len(refs)
+        assert metrics['provenanceLookups'] > 0
+        metrics.clear()
+        def forbidden(*args, **kwargs):
+            raise AssertionError('compact display must not read provenance or hydrate details')
+        monkeypatch.setattr(PublicationRecords, '_scene_references', forbidden)
+        monkeypatch.setattr(PublicationRecords, '_fact_scene_link', forbidden)
+        fields = ['id','source','target','predicate','status']
+        compact = store.read_publication_scene('p', generation, dict(selection, fields=fields))
+        assert [{k: v for k, v in row.items() if k != 'status'} for row in compact['links']] == [
+            {k: row[k] for k in fields if k != 'status'} for row in detail['links']]
+        assert 'provenanceLookups' not in metrics
+        assert all(isinstance(value, (int, float)) for value in metrics.values())
+    finally:
+        query_diagnostics.reset(token)
+        store.close()
