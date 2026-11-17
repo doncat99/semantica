@@ -71,7 +71,7 @@ def test_model_download_uses_bounded_ranges_and_resumes_verified_parts(tmp_path,
                     self.end_headers()
                     return
                 body = payload[start:end + 1]
-                self.send_response(206)
+                self.send_response(200)
                 self.send_header("Content-Range", f"bytes {start}-{end}/{len(payload)}")
                 self.send_header("Content-Length", str(len(body)))
                 self.end_headers()
@@ -103,6 +103,51 @@ def test_model_download_uses_bounded_ranges_and_resumes_verified_parts(tmp_path,
         assert len(first_ranges) > 32
         assert target.read_bytes() == payload
         assert not target.with_name(target.name + ".parts").exists()
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def test_model_download_accepts_verified_full_response_when_ranges_are_unsupported(tmp_path):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    import hashlib
+    import threading
+
+    model_script = SCRIPT.with_name("semantic_worker_models.py")
+    download_spec = importlib.util.spec_from_file_location("semantic_worker_models_no_ranges", model_script)
+    downloader = importlib.util.module_from_spec(download_spec)
+    download_spec.loader.exec_module(downloader)
+    payload = b"font without byte-range support"
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            requests.append(self.headers.get("Range"))
+            self.send_response(200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    target = tmp_path / "font.ttf"
+    try:
+        downloader.download_file(f"http://127.0.0.1:{server.server_port}/font", target,
+                                 hashlib.sha256(payload).hexdigest())
+        assert requests == ["bytes=0-0"]
+        assert target.read_bytes() == payload
+        assert not target.with_name(target.name + ".partial").exists()
+        invalid_target = tmp_path / "invalid-font.ttf"
+        with pytest.raises(ValueError, match="model digest mismatch"):
+            downloader.download_file(f"http://127.0.0.1:{server.server_port}/font", invalid_target,
+                                     hashlib.sha256(b"different bytes").hexdigest())
+        assert not invalid_target.exists()
+        assert not invalid_target.with_name(invalid_target.name + ".partial").exists()
     finally:
         server.shutdown()
         server.server_close()
