@@ -61,6 +61,10 @@ def test_vector_document_hydration_preserves_serializer_boundary_joins(tmp_path)
         dict(canonicalBytes=0), 0)
     assert hit.text == '\nAcme\n\n'
     assert hit.locator.quote == 'Acme'
+    reference = hit.model_dump(by_alias=True,exclude_none=True)['documentReference']
+    assert reference == dict(materialRevision=reader.material_revision,
+        representationRevision=reader.representation_revision,
+        ranges=[dict(nativeRef='#/document/text', start=0, end=4, joinBefore='\n', joinAfter='\n\n')])
 
 
 def test_actual_native_keyword_two_phase_hydration_and_reopen(ready):
@@ -144,3 +148,21 @@ def test_retired_aggregate_snapshot_query_api_is_not_available():
     assert find_spec('semantica.context.snapshot_search') is None
     assert not hasattr(ContextRetriever, 'prepare_snapshot_search')
     assert not hasattr(ContextRetriever, 'search_snapshot')
+
+
+def test_document_hit_retains_every_scalar_range_and_identity(tmp_path):
+    from types import SimpleNamespace
+    from semantica.semantic_query import _document_hit
+    from semantica.semantic_document_reader import write_reader_artifact
+    from tests.test_native_document_reader import payload, request as reader_request
+    path = tmp_path/'reader.json'
+    reader = reader_request(path, write_reader_artifact(path, payload(dict(format='text', text='Acme emits less.'))))
+    request_value = SimpleNamespace(source_artifacts={reader.source_id: reader}, mode='semantic')
+    ranges = [dict(nativeRef='#/document/text', start=0, end=4),
+        dict(nativeRef='#/document/text', start=5, end=16, joinBefore=' ')]
+    hit = _document_hit(request_value, dict(sourceId=reader.source_id, ranges=ranges), dict(canonicalBytes=0), 0)
+    assert hit.text == 'Acme emits less.'
+    assert hit.model_dump(by_alias=True,exclude_none=True)['documentReference']['ranges'] == ranges
+    changed = _document_hit(request_value, dict(sourceId=reader.source_id,
+        ranges=[ranges[0], {**ranges[1], 'joinBefore':'\n'}]), dict(canonicalBytes=0), 0)
+    assert changed.id != hit.id
