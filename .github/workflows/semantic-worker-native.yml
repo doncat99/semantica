@@ -19,7 +19,7 @@ permissions:
   contents: read
 
 env:
-  UV_VERSION: '0.9.10'
+  UV_VERSION: '0.10.10'
   RELEASE_SCRIPT: .github/scripts/semantic_worker_release.py
 
 jobs:

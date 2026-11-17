@@ -918,10 +918,9 @@ class SQLiteVecStore:
                 raise ProcessingError('Native vector publication is missing or stale')
             if source_ids == []:
                 return []
-            deadline = time.monotonic()+3
             def check():
                 check_query_cancellation()
-                return int(time.monotonic()>deadline)
+                return 0
             conn.set_progress_handler(check,1000)
             try:
                 scope = '' if source_ids is None else ' AND source IN ('+','.join('?' for _ in source_ids)+')'
@@ -929,7 +928,8 @@ class SQLiteVecStore:
                     SELECT id,distance FROM {self.table_name} WHERE embedding MATCH ? AND k=? AND id IN (
                         SELECT vector_id FROM {table} WHERE project=? AND generation=?{scope}))
                     SELECT r.vector_id,v.distance,r.source,r.material,r.representation,r.ranges
-                    FROM matches v JOIN {table} r ON r.vector_id=v.id AND r.project=? AND r.generation=?
+                    FROM matches v CROSS JOIN {table} r INDEXED BY sqlite_autoindex_{table}_1
+                    ON r.project=? AND r.vector_id=v.id AND r.generation=?
                     ORDER BY v.distance,r.vector_id LIMIT ? OFFSET ?''', [sqlite_vec.serialize_float32(vector),top_k,
                     project,generation,*(source_ids or []),project,generation,min(page_limit,top_k-offset),offset]).fetchall()
                 check_query_cancellation()
@@ -977,12 +977,11 @@ class SQLiteVecStore:
                 raise ProcessingError('Native record index publication is missing or stale')
             conn.execute('PRAGMA temp_store=FILE')
             conn.execute('PRAGMA cache_size=-8192')
-            deadline = time.monotonic() + 3
             best = {}
             ordered = []
             try:
-                conn.set_progress_handler(lambda: int(time.monotonic() > deadline
-                    or (cancellation is not None and cancellation.is_set())), 10000)
+                # The caller owns the request deadline; its cancellation interrupts SQLite.
+                conn.set_progress_handler(lambda: int(cancellation is not None and cancellation.is_set()), 10000)
                 conn.execute('PRAGMA temp.cache_size=-512')
                 page_size = conn.execute('PRAGMA temp.page_size').fetchone()[0]
                 max_pages = _NATIVE_QUERY_TEMP_BYTES // page_size
@@ -1001,8 +1000,6 @@ class SQLiteVecStore:
                     conn.executemany('INSERT INTO knn_scope VALUES (?)', ((source,) for source in source_ids))
                 while True:
                     check_query_cancellation()
-                    if time.monotonic() > deadline:
-                        raise ProcessingError('group query exceeded its execution budget')
                     rows = conn.execute(f'''SELECT id,distance FROM {self.table_name}
                         WHERE embedding MATCH ? AND k=256 AND id IN (
                             SELECT DISTINCT g.vector_id FROM {links} g
@@ -1016,11 +1013,12 @@ class SQLiteVecStore:
                         break
                     conn.execute('DELETE FROM knn_batch')
                     conn.executemany('INSERT INTO knn_batch VALUES (?,?)', rows)
-                    # Aggregate the bounded batch's indexed links once; a
-                    # correlated distance lookup rescans the batch per group.
+                    # Pin the existing (project,vector_id) primary key: the scope
+                    # index otherwise scans the entire publication for each vector.
                     for group_id, position, distance in conn.execute(f'''WITH batch_groups AS MATERIALIZED (
                             SELECT g.record_id AS group_id, 0 AS position, MIN(b.distance) AS distance
                             FROM knn_batch b CROSS JOIN {links} g
+                            INDEXED BY sqlite_autoindex_{links}_1
                             WHERE g.vector_id=b.id AND g.project=? AND g.generation=?
                             AND (? OR g.source IN (SELECT id FROM knn_scope)) GROUP BY g.record_id)
                             SELECT group_id,position,distance FROM batch_groups
@@ -1051,13 +1049,9 @@ class SQLiteVecStore:
                 if len(json.dumps(result,ensure_ascii=False).encode())>262144:
                     raise ProcessingError('Native record query response exceeds byte budget')
                 check_query_cancellation()
-                if time.monotonic() > deadline:
-                    raise ProcessingError('group query exceeded its execution budget')
                 return result
             except sqlite3.Error as error:
                 check_query_cancellation()
-                if time.monotonic() > deadline:
-                    raise ProcessingError('group query exceeded its execution budget') from error
                 if (getattr(error, 'sqlite_errorcode', None) == sqlite3.SQLITE_FULL
                         or str(error) == 'database or disk is full'):
                     raise ProcessingError('Native record query scratch exceeds byte budget') from error

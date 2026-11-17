@@ -54,3 +54,33 @@ def test_activation_protocol_is_explicit_and_validated(monkeypatch):
     with pytest.raises(ValidationError):
         semantic_artifact_schema.SemanticPublicationActivationRequest.model_validate(
             {**activation, 'nativeIndexes': {'keyword': {}}})
+
+
+def test_activation_dispatches_exact_generation_to_native_owner(monkeypatch):
+    calls = []
+    monkeypatch.setattr(semantic_worker, '_activate_publication', lambda request: calls.append(request) or {
+        'publication': {'project': request.project_id, 'generation': request.generation, 'state': 'ready'}})
+    response = semantic_worker._dispatch(WorkerRequest.model_validate({
+        "id": "activate", "protocol": semantic_worker.PROTOCOL,
+        "method": "activate_publication", "params": {
+            "projectId": "project-1", "generation": "generation-1",
+            "nativeStorePath": "/native/store", "completionInput": "sha256:" + "a" * 64,
+            "nativeIndexes": {"keyword": {}, "semantic": {}}}}), None)
+    assert response["result"]["publication"]["state"] == "ready"
+    assert len(calls) == 1
+    assert (calls[0].project_id, calls[0].generation) == ("project-1", "generation-1")
+
+
+@pytest.mark.parametrize("params", [
+    {},
+    {"projectId": "p", "generation": "g", "nativeStorePath": "relative",
+     "nativeIndexes": {"keyword": {}, "semantic": {}}},
+    {"projectId": "p", "generation": "g", "nativeStorePath": "/store",
+     "nativeIndexes": {"keyword": {"receipt": {}}, "semantic": {}}},
+])
+def test_activation_rejects_incomplete_identity_or_receipts(monkeypatch, params):
+    with pytest.raises(ValueError):
+        semantic_worker._dispatch(WorkerRequest.model_validate({
+            "id": "activate", "protocol": semantic_worker.PROTOCOL,
+            "method": "activate_publication", "params": params}), None)
+

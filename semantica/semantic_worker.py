@@ -313,6 +313,28 @@ def _dispatch(request: WorkerRequest, progress: Optional[Callable[[Dict[str, Any
             SemanticPublicationActivationRequest.model_validate(request.params)))
     if request.method == "explain_evidence":
         return _response(request.id, True, result=_explain_evidence(request.params, progress))
+    if request.method == "activate_publication":
+        params = request.params
+        project, generation = params.get("projectId"), params.get("generation")
+        path, indexes = params.get("nativeStorePath"), params.get("nativeIndexes")
+        if (not isinstance(project, str) or not project.strip()
+                or not isinstance(generation, str) or not generation.strip()
+                or not isinstance(path, str) or not os.path.isabs(path)
+                or not isinstance(indexes, dict) or set(indexes) != {"keyword", "semantic"}):
+            raise ValueError("activation requires project, generation, native store and both indexes")
+        receipts = {name: item.get("receipt") for name, item in indexes.items()
+                    if isinstance(item, dict)}
+        if (set(receipts) != {"keyword", "semantic"}
+                or any(not isinstance(value, dict) or not value for value in receipts.values())):
+            raise ValueError("activation index receipts are invalid")
+        from .triplet_store.oxigraph_store import OxigraphStore
+        store = OxigraphStore(path)
+        try:
+            publication = store.activate_publication(project, generation, indexes=receipts,
+                                                       index_addresses=indexes)
+            return _response(request.id, True, result={"publication": publication})
+        finally:
+            store.close()
     if request.method != METHOD:
         raise ValueError(f"unsupported semantic worker method: {request.method}")
     build_request = SemanticArtifactBuildRequest.model_validate(request.params)

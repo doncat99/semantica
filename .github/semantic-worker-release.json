@@ -1,7 +1,7 @@
 {
   "tagPrefix": "ontoscience-semantic-worker-",
   "titlePrefix": "OntoScience semantic worker ",
-  "uvVersion": "0.9.10",
+  "uvVersion": "0.10.10",
   "pythonVersion": "3.12",
   "accelerationProfiles": {
     "cpu": {"extra": "semantic-worker", "torchBackend": "cpu", "targets": ["darwin-arm64", "linux-x64", "win-x64"]},

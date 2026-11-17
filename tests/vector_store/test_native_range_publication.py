@@ -273,7 +273,7 @@ def test_native_record_query_scratch_budget_is_enforced_and_reusable(tmp_path,mo
         owner.close()
 
 
-def test_native_record_query_enforces_three_seconds_after_native_knn(tmp_path,monkeypatch):
+def test_native_record_query_uses_caller_cancellation_not_an_independent_three_seconds(tmp_path,monkeypatch):
     from contextlib import contextmanager
     import semantica.vector_store.sqlite_vec_store as module
     owner,receipt=native_records_fixture(tmp_path/'deadline.sqlite',[([1.,0.,0.],'own',['urn:one'])])
@@ -295,8 +295,7 @@ def test_native_record_query_enforces_three_seconds_after_native_knn(tmp_path,mo
         with monkeypatch.context() as patch:
             patch.setattr(module.time,'monotonic',lambda:now[0])
             patch.setattr(owner,'_get_connection',slow_connection)
-            with pytest.raises(ProcessingError,match='execution budget'):
-                owner.search_native_records([1.,0.,0.],**args)
+            assert owner.search_native_records([1.,0.,0.],**args)[0]['id']=='urn:one'
         assert connection.execute("SELECT name FROM sqlite_temp_master WHERE name LIKE 'knn_%'").fetchall()==[]
         assert owner.search_native_records([1.,0.,0.],**args)[0]['id']=='urn:one'
     finally:
@@ -327,5 +326,65 @@ def test_native_record_cleanup_preserves_primary_error(tmp_path,monkeypatch,capl
         assert raised.value is original
         assert 'Native record scratch cleanup failed' in caplog.text
         assert owner.search_native_records([1.,0.,0.],project='project-1',generation='generation-1',receipt=receipt)[0]['id']=='urn:one'
+    finally:
+        owner.close()
+
+
+def test_native_record_batch_join_point_reads_vectors_with_large_scoped_fanout(tmp_path, monkeypatch):
+    from contextlib import contextmanager
+    owner, receipt = native_records_fixture(tmp_path/'batch-join.sqlite', [
+        ([1., 0., 0.], 'own', [f'urn:{n:04d}:{m:02d}' for m in range(16)]) for n in range(300)
+    ])
+    connection = owner._conn
+    operations = [0]
+    class CountedConnection:
+        def __getattr__(self, name):
+            return getattr(connection, name)
+        def execute(self, sql, *args):
+            if 'WITH batch_groups AS MATERIALIZED' not in sql:
+                return connection.execute(sql, *args)
+            def bounded_work():
+                operations[0] += 1000
+                return int(operations[0] > 2_000_000)
+            connection.set_progress_handler(bounded_work, 1000)
+            try:
+                return iter(connection.execute(sql, *args).fetchall())
+            finally:
+                connection.set_progress_handler(None, 0)
+    @contextmanager
+    def counted_connection():
+        yield CountedConnection()
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(owner, '_get_connection', counted_connection)
+            hits = owner.search_native_records([1.,0.,0.], project='project-1',
+                generation='generation-1', receipt=receipt, top_k=6, source_ids=['own'])
+        assert len(hits) == 6
+        assert operations[0] <= 2_000_000
+    finally:
+        owner.close()
+
+
+def test_native_range_query_uses_caller_cancellation_only(tmp_path, monkeypatch):
+    owner, receipt = native_records_fixture(tmp_path/'range-deadline.sqlite', [([1.,0.,0.], 'own', ['urn:one'])])
+    handler = []
+    from contextlib import contextmanager
+    connection = owner._conn
+    class ObservedConnection:
+        def __getattr__(self, name):
+            return getattr(connection, name)
+        def set_progress_handler(self, callback, steps):
+            if callback:
+                handler.append(callback)
+            connection.set_progress_handler(callback, steps)
+    @contextmanager
+    def observed_connection():
+        yield ObservedConnection()
+    monkeypatch.setattr(owner, '_get_connection', observed_connection)
+    try:
+        assert owner.search_native_ranges([1.,0.,0.], project='project-1', generation='generation-1', receipt=receipt, top_k=1)
+        import semantica.vector_store.sqlite_vec_store as module
+        monkeypatch.setattr(module.time, 'monotonic', lambda: float('inf'))
+        assert handler[0]() == 0
     finally:
         owner.close()

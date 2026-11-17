@@ -37,7 +37,7 @@ Record the workflow URL, source revision, Release tag, every asset name and GitH
 `docling` Python modules. This is intentional, not two parsing implementations.
 Both `parse-docling` and `semantic-worker` select the hash-pinned fork wheel.
 
-Use uv 0.9.10 (the CI pin). After changing dependencies, run `uv lock`, review the
+Use uv 0.10.10 (the CI pin). After changing dependencies, run `uv lock`, review the
 diff, and commit `uv.lock` together with `pyproject.toml`. CI's existing
 `uv lock --check` rejects stale resolution. Validate in a fresh environment:
 
