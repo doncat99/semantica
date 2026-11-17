@@ -27,7 +27,32 @@ checks 1024 exact IDs, the native link request, overflow and unchanged full-read
 and topology limits. `.venv/bin/python -m pytest -q
 tests/triplet_store/test_publication_records.py -k 'scene or projection'`:
 9 passed, 68 deselected. Artifact delivery remains open.
-Published native binaries require rebuilding before the new budget is available.
+Published native binaries require rebuilding before the new contract is available.
+
+## 2026-11-17 Caller Budget Correction
+
+The product display limit must not define a native query limit. The inspected
+owner at local revision `98bfa88aee6effb68da1b69f3f267f5d7b0caf54`
+still coupled projected rows and selection identities to 1024. Replace that
+rule in `PublicationRecords.scene` for node/link reads, including full reads:
+the caller supplies `limit`; ID arrays express their own filter cardinality.
+Defaults remain 128. Request and response each retain the 262144-byte ceiling;
+row materialization is also capped at that transport ceiling (every row needs
+bytes). Filters have no product-specific count cap. Exact node selection must
+fit the requested row limit. Source membership, duplicate rejection, generation
+fences, cancellation and cursors remain enforced. Other scene kinds and write
+batches retain their own contracts.
+
+Red evidence: the 1536-row regression failed at the former 1024 check.
+After repair, scene/projection selection passes 11 tests (68 deselected),
+including caller counts 257/1024/1536, a 1536-ID link filter with limit 7,
+cursor continuation and request byte rejection. Host adapter is updated to
+the same validation. No new persistence schema or migration is needed.
+The earlier 9-test result above documents the superseded count-cap change.
+The local native bundle was rebuilt and relocated acceptance passed. Publication
+still requires the normal external commit, immutable artifact pin and release
+qualification; this checkout remains a source checkout, never an OntoScience
+runtime input.
 
 ## Upstream Merge Assessment
 

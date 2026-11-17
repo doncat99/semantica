@@ -710,7 +710,7 @@ def test_native_scene_is_bounded_reference_projection_and_generation_fenced(tmp_
         store.read_publication_scene('p', generation, dict(kind='nodes', nodeIds=['urn:missing']))
     with pytest.raises(ProcessingError, match='byte'):
         store.read_publication_scene('p', generation, dict(kind='nodes', maxBytes=32))
-    with pytest.raises(ProcessingError, match='128'):
+    with pytest.raises(ProcessingError, match='Duplicate'):
         store.read_publication_scene('p', generation, dict(kind='links', visibleIds=['urn:n']*129))
     pending = store.begin_publication('p', expected_generation=generation, source_count=0, canonical_count=0)
     assert store.read_publication_scene('p', generation, dict(kind='nodes'))['nodes']
@@ -1194,25 +1194,32 @@ def test_canonical_checkpoint_failure_never_seals_partial_output(tmp_path, failu
         store.close()
 
 
-def test_projected_scene_accepts_1024_nodes_and_512_links_budget(tmp_path):
+@pytest.mark.parametrize('count', [257, 1024, 1536])
+def test_scene_uses_caller_row_budget_independent_of_filter_count(tmp_path, count):
     from semantica.triplet_store.publication_records import PublicationRecords, P
     store, _, receipt, identity = fixture(tmp_path)
     try:
         generation = stage(store, receipt, identity)
         store.activate_publication('p', generation, indexes=indexes())
         owner = PublicationRecords(store, 'p')
-        ids = [f'urn:canonical:{i:04}' for i in range(1024)]
+        ids = [f'urn:canonical:{i:04}' for i in range(count)]
         for value in ids:
             store.store.add(owner.ox.Quad(owner.stage_head('identity'), owner.iri(P+'canonical'),
                 owner.iri(value), owner.stage_graph('identity')))
         page = store.read_publication_scene('p', generation,
-            dict(kind='nodes', nodeIds=ids, fields=['id'], limit=1024))
+            dict(kind='nodes', nodeIds=ids, fields=['id'], limit=count))
         assert [item['id'] for item in page['nodes']] == ids
         assert page['next_cursor'] is None
         links = store.read_publication_scene('p', generation,
-            dict(kind='links', visibleIds=ids, fields=['id','source','target','predicate','status'], limit=512))
+            dict(kind='links', visibleIds=ids, fields=['id','source','target','predicate','status'], limit=7))
         assert links['links'] == []
-        for selection in (dict(kind='nodes', fields=['id'], limit=1025),
+        first = store.read_publication_scene('p', generation, dict(kind='nodes', fields=['id'], limit=7))
+        assert len(first['nodes']) == 7
+        following = store.read_publication_scene('p', generation,
+            dict(kind='nodes', fields=['id'], limit=7, after=first['next_cursor']))
+        assert following['nodes'][0]['id'] > first['nodes'][-1]['id']
+        for selection in (dict(kind='nodes', fields=['id'], limit=262145),
+                dict(kind='links', visibleIds=['urn:'+'x'*262144], limit=7),
                 dict(kind='nodes', nodeIds=ids, limit=128),
                 dict(kind='topology', fields=['id','source','target','predicate'], limit=129)):
             with pytest.raises(ProcessingError):
