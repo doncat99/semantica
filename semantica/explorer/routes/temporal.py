@@ -29,6 +29,7 @@ class TemporalSnapshotFastResponse(BaseModel):
     timestamp: str
     active_node_ids: List[str]
     active_node_count: int
+    active_edge_ids: List[str]
 
 
 class TemporalBoundsResponse(BaseModel):
@@ -72,11 +73,14 @@ async def temporal_snapshot(
         else datetime.now(timezone.utc).replace(tzinfo=None)
     )
     active_nodes = await asyncio.to_thread(session.get_active_nodes, at_time=at_time)
+    active_edges = await asyncio.to_thread(session.get_active_edges, at_time=at_time)
     active_ids = [node.get("id") for node in active_nodes if node.get("id")]
+    active_edge_ids = [edge.get("id") for edge in active_edges if edge.get("id")]
     return TemporalSnapshotFastResponse(
         timestamp=at_time.isoformat(),
         active_node_ids=active_ids,
         active_node_count=len(active_ids),
+        active_edge_ids=active_edge_ids,
     )
 
 

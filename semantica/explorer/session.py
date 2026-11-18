@@ -617,9 +617,15 @@ class GraphSession:
             nodes = self.graph.find_active_nodes(node_type=node_type, at_time=at_time)
         return [self.normalize_node(node) for node in nodes]
 
+    def get_active_edges(self, at_time: Optional[datetime] = None) -> List[Dict[str, Any]]:
+        when = at_time or datetime.now(timezone.utc)
+        with self._lock:
+            edges = list(self.graph.edges)
+            active = [edge.to_dict() for edge in edges if edge.is_active(when)]
+        return [self.normalize_edge(edge) for edge in active]
+
     def get_temporal_bounds(self) -> Dict[str, Optional[str]]:
-        min_valid_from: Optional[datetime] = None
-        max_valid_until: Optional[datetime] = None
+        dates: List[datetime] = []
 
         def _coerce_datetime(value: Any) -> Optional[datetime]:
             if value is None:
@@ -639,22 +645,19 @@ class GraphSession:
             return parsed
 
         with self._lock:
-            raw_nodes = list(self.graph.nodes.values())
+            temporal_items = [*self.graph.nodes.values(), *self.graph.edges]
 
-        for raw_node in raw_nodes:
-            if raw_node is None:
+        for item in temporal_items:
+            if item is None:
                 continue
-            node = self.normalize_node(self.graph.find_node(raw_node.node_id) or raw_node.to_dict())
-            valid_from = _coerce_datetime(node.get("valid_from"))
-            valid_until = _coerce_datetime(node.get("valid_until"))
-            if valid_from is not None and (min_valid_from is None or valid_from < min_valid_from):
-                min_valid_from = valid_from
-            if valid_until is not None and (max_valid_until is None or valid_until > max_valid_until):
-                max_valid_until = valid_until
+            for value in (getattr(item, "valid_from", None), getattr(item, "valid_until", None)):
+                parsed = _coerce_datetime(value)
+                if parsed is not None:
+                    dates.append(parsed)
 
         return {
-            "min": min_valid_from.isoformat() if min_valid_from is not None else None,
-            "max": max_valid_until.isoformat() if max_valid_until is not None else None,
+            "min": min(dates).isoformat() if dates else None,
+            "max": max(dates).isoformat() if dates else None,
         }
 
     def add_annotation(self, annotation: Dict[str, Any]) -> str:

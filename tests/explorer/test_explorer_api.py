@@ -379,6 +379,31 @@ class TestGraphEdges:
         assert len(seen_ids) == total
 
 
+def test_temporal_bounds_and_snapshot_include_effective_relationship_dates():
+    graph = ContextGraph(advanced_analytics=False)
+    graph.add_node("a", node_type="entity", content="A")
+    graph.add_node("b", node_type="entity", content="B")
+    graph.add_node(
+        "c", node_type="entity", content="C",
+        valid_from="2019-03-01T00:00:00Z", valid_until="2021-06-30T00:00:00Z",
+    )
+    graph.add_edge(
+        "a", "b", edge_type="reported", valid_from="2019-03-01T00:00:00Z",
+        valid_until="2021-06-30T00:00:00Z",
+    )
+
+    with TestClient(create_app(session=GraphSession(graph))) as test_client:
+        bounds = test_client.get("/api/temporal/bounds").json()
+        active = test_client.get("/api/temporal/snapshot", params={"at": "2020-01-01"}).json()
+        inactive = test_client.get("/api/temporal/snapshot", params={"at": "2022-01-01"}).json()
+
+    assert bounds == {"min": "2019-03-01T00:00:00", "max": "2021-06-30T00:00:00"}
+    assert "c" in active["active_node_ids"]
+    assert "c" not in inactive["active_node_ids"]
+    assert len(active["active_edge_ids"]) == 1
+    assert inactive["active_edge_ids"] == []
+
+
 class TestSearchAndStats:
     def test_search(self, client):
         response = client.post(

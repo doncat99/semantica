@@ -43,7 +43,7 @@ import {
 } from "./plugins";
 import { explorationEffectsShouldLoad, neighborhoodPanelShouldLoad, temporalOverlayShouldLoad } from "./pluginRegistryPredicates";
 import { shouldFetchTemporalBounds, shouldFetchTemporalSnapshot } from "./temporalLifecyclePredicates";
-import { createTemporalSnapshotGuards, type TemporalSnapshotResponse } from "./temporalSnapshotGuards";
+import { clearTemporalVisibility, createTemporalSnapshotGuards, type TemporalSnapshotResponse } from "./temporalSnapshotGuards";
 import { SMALL_GRAPH_MAX_NODES } from "./smallGraphLayout";
 import { buildRealtimeEdgeAttributes } from "./realtimeGraphAttributes";
 import type { LinkPrediction, PathResponse } from "./GraphInspectorPanel";
@@ -89,6 +89,7 @@ type TemporalBounds = {
   min?: string | null;
   max?: string | null;
 };
+type TemporalAvailability = "loading" | "ready" | "none" | "error";
 
 type ExploreLayoutState = {
   showInspector: boolean;
@@ -1357,6 +1358,7 @@ export function GraphWorkspace({ active = true, externalFocusNodeId, externalFoc
   const [colorLegendExpanded, setColorLegendExpanded] = useState(false);
   const [filtersExpanded, setFiltersExpanded] = useState(false);
   const [temporalBounds, setTemporalBounds] = useState<TemporalBounds | null>(null);
+  const [temporalAvailability, setTemporalAvailability] = useState<TemporalAvailability>("loading");
   const [scrubberTime, setScrubberTime] = useState<Date | null>(null);
   // Deduplicates setScrubberTime calls by millisecond value so that React 18
   // concurrent-mode re-renders with a new Date object for the same timestamp
@@ -1515,7 +1517,18 @@ export function GraphWorkspace({ active = true, externalFocusNodeId, externalFoc
     debouncedTime,
     isLoading,
     summary,
+    temporalBoundsStatus: temporalAvailability,
   });
+
+  useEffect(() => {
+    if (!active || !summary) {
+      setTemporalBounds(null);
+      setTemporalAvailability("loading");
+      setActiveNodeCount(null);
+      lastScrubberMsRef.current = null;
+      setScrubberTime(null);
+    }
+  }, [active, summary]);
 
   useEffect(() => {
     if (!canFetchTemporalBounds) {
@@ -1524,17 +1537,26 @@ export function GraphWorkspace({ active = true, externalFocusNodeId, externalFoc
 
     let cancelled = false;
     const controller = new AbortController();
+    setTemporalBounds(null);
+    setTemporalAvailability("loading");
+    setActiveNodeCount(null);
+    lastScrubberMsRef.current = null;
+    setScrubberTime(null);
     const loadBounds = async () => {
       try {
         const response = await fetch("/api/temporal/bounds", { signal: controller.signal });
-        if (!response.ok || cancelled) return;
+        if (!response.ok) throw new Error(`Temporal bounds request failed (${response.status})`);
+        if (cancelled) return;
         const data: TemporalBounds = await response.json();
         if (!cancelled) {
           setTemporalBounds(data);
+          setTemporalAvailability(data.min || data.max ? "ready" : "none");
         }
-      } catch {
+      } catch (error) {
         if (!cancelled) {
           setTemporalBounds(null);
+          setTemporalAvailability("error");
+          console.error("[Temporal] Bounds fetch failed", error);
         }
       }
     };
@@ -1545,6 +1567,7 @@ export function GraphWorkspace({ active = true, externalFocusNodeId, externalFoc
     };
   }, [
     canFetchTemporalBounds,
+    summary,
     summary?.nodeCount,
     summary?.edgeCount,
   ]);
@@ -1564,7 +1587,10 @@ export function GraphWorkspace({ active = true, externalFocusNodeId, externalFoc
   // snapshots cached against the previous graph are stale, so reset all state.
   useEffect(() => {
     temporalSnapshotGuards.reset();
-  }, [summary]);
+    prevActiveIdsRef.current.clear();
+    clearTemporalVisibility(graph);
+    sceneRef.current?.getRuntime()?.requestRender();
+  }, [active, summary, temporalSnapshotGuards]);
 
   useEffect(() => {
     if (!canFetchTemporalSnapshot) {
@@ -1587,6 +1613,7 @@ export function GraphWorkspace({ active = true, externalFocusNodeId, externalFoc
 
     const applyData = (data: TemporalSnapshotResponse) => {
       const nextActiveIds = new Set(data.active_node_ids);
+      const nextActiveEdgeIds = new Set(data.active_edge_ids);
       requestAnimationFrame(() => {
         if (cancelled) return;
         if (!temporalSnapshotGuards.shouldApply(atMs, seq)) {
@@ -1605,6 +1632,9 @@ export function GraphWorkspace({ active = true, externalFocusNodeId, externalFoc
           if (graph.hasNode(id)) {
             graph.setNodeAttribute(id, "hidden", false);
           }
+        });
+        graph.forEachEdge((edgeId) => {
+          graph.setEdgeAttribute(edgeId, "hidden", !nextActiveEdgeIds.has(edgeId));
         });
         prevActiveIdsRef.current = nextActiveIds;
         setActiveNodeCount(data.active_node_count);
@@ -1628,6 +1658,7 @@ export function GraphWorkspace({ active = true, externalFocusNodeId, externalFoc
         if (!response.ok) {
           // A failed request must be retryable if the scrubber returns.
           if (!cancelled) temporalSnapshotGuards.finish(atMs, seq);
+          if (!cancelled) setTemporalAvailability("error");
           return;
         }
         if (cancelled) return;
@@ -1638,6 +1669,7 @@ export function GraphWorkspace({ active = true, externalFocusNodeId, externalFoc
       } catch (fetchError) {
         temporalSnapshotGuards.finish(atMs, seq);
         if (!cancelled) {
+          setTemporalAvailability("error");
           console.error("[Temporal] Snapshot fetch failed", fetchError);
         }
       }
@@ -3489,6 +3521,7 @@ export function GraphWorkspace({ active = true, externalFocusNodeId, externalFoc
                     onTimeChange={onTimeChange}
                     minDate={temporalBounds?.min ?? undefined}
                     maxDate={temporalBounds?.max ?? undefined}
+                    availability={temporalAvailability}
                   />
                 </Suspense>
               </div> : null}

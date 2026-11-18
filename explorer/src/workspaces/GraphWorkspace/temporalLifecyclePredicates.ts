@@ -20,15 +20,18 @@ export function shouldFetchTemporalSnapshot({
   active = true,
   isLoading,
   summary,
+  temporalBoundsStatus,
 }: {
   debouncedTime: Date | null;
   active?: boolean;
   isLoading: boolean;
   summary: GraphLoadSummary | undefined;
+  temporalBoundsStatus: "loading" | "ready" | "none" | "error";
 }): boolean {
   return (
     active &&
     summary !== undefined &&
+    temporalBoundsStatus === "ready" &&
     debouncedTime !== null &&
     !isLoading
   );
