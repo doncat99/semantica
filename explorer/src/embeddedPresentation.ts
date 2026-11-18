@@ -42,7 +42,10 @@ export function applyPresentation(value: Presentation) {
     'text-muted': c['text-muted'], accent: c.accent, 'accent-strong': c['accent-strong'], 'ws-bg': c['bg-app'],
     'ws-surface': c['bg-panel'], 'ws-surface-hover': c['bg-subtle'], 'ws-border': c.border, 'ws-border-strong': c['border-strong'],
     'ws-text': c.text, 'ws-text-muted': c['text-muted'], 'ws-text-dim': c['text-soft'], 'ws-accent': c['accent-strong'],
-    'ws-accent-soft': c['accent-soft'], 'ws-radius': '8px', 'ws-radius-sm': '6px', 'ws-radius-lg': '8px', 'host-font': value.font };
+    'ws-accent-soft': c['accent-soft'], 'ws-green': 'color-mix(in srgb, #16834e 70%, var(--ws-text))',
+    'ws-amber': 'color-mix(in srgb, #a45d08 70%, var(--ws-text))',
+    'ws-red': c.red, 'ws-purple': 'color-mix(in srgb, #7546b2 70%, var(--ws-text))',
+    'ws-radius': '8px', 'ws-radius-sm': '6px', 'ws-radius-lg': '8px', 'host-font': value.font };
   for (const [name, token] of Object.entries(shell)) root.style.setProperty(`--${name}`, token);
   Object.assign(GRAPH_THEME.palette.background, { canvas: c['bg-app'], shell: c['bg-panel'], shellBorder: c.border,
     shellGlow: 'transparent', grid: 'transparent', vignette: 'transparent', nodeBorder: c['bg-panel'] });

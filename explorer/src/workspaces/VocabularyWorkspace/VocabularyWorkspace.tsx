@@ -16,11 +16,15 @@ const THEME_CSS = `
     display: flex;
     width: 100%;
     height: 100%;
-    background: #0d1117;
+    min-height: 0;
+    background: var(--ws-bg);
     overflow: hidden;
   }
+  .vocab-sidebar { width: 340px; flex: 0 0 340px; }
   .vocab-main {
     flex: 1;
+    min-width: 0;
+    min-height: 0;
     display: flex;
     flex-direction: column;
     position: relative;
@@ -28,16 +32,24 @@ const THEME_CSS = `
   }
   .vocab-main-content {
     flex: 1;
+    min-height: 0;
     overflow-y: auto;
   }
   .vocab-detail-glass {
-    background: linear-gradient(135deg, rgba(13,17,23,0.75), rgba(22,27,34,0.6));
-    backdrop-filter: blur(16px) saturate(1.2);
-    -webkit-backdrop-filter: blur(16px) saturate(1.2);
-    border: 1px solid rgba(88,166,255,0.15);
-    box-shadow: 0 8px 32px rgba(0,0,0,0.5), inset 1px 1px 0 rgba(255,255,255,0.04);
-    border-radius: 14px;
-    height: 100%;
+    background: var(--ws-surface);
+    border: 1px solid var(--ws-border);
+    min-height: 100%;
+    box-sizing: border-box;
+  }
+  @media (max-width: 800px) {
+    .vocab-sidebar { width: 42%; flex-basis: 42%; }
+    .vocab-main-content { padding: 16px !important; }
+  }
+  @media (max-width: 520px) {
+    .vocab-workspace { flex-direction: column; overflow-y: auto; }
+    .vocab-sidebar { width: 100%; flex: 0 0 360px; }
+    .vocab-main { flex: 0 0 auto; overflow: visible; }
+    .vocab-main-content { overflow: visible; }
   }
 `;
 
@@ -53,12 +65,6 @@ export function VocabularyWorkspace() {
 
       {/* Right: Concept detail panel */}
       <div className="vocab-main">
-        {/* Decorative background gradient */}
-        <div style={{
-          position: 'absolute', inset: 0, pointerEvents: 'none',
-          background: 'radial-gradient(ellipse at top right, rgba(210,168,255,0.04), transparent 60%)',
-        }} />
-
         <div className="vocab-main-content" style={{ padding: 32 }}>
           <div className="vocab-detail-glass">
             <PropertyPanel concept={selectedConcept} />

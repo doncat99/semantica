@@ -51,8 +51,8 @@ export const ImportDropzone: React.FC = () => {
       <div
         {...getRootProps()}
         style={{
-          border: `2px dashed ${isDragActive ? '#58a6ff' : 'rgba(88,166,255,0.25)'}`,
-          backgroundColor: isDragActive ? 'rgba(88,166,255,0.06)' : 'rgba(0,0,0,0.2)',
+          border: `2px dashed ${isDragActive ? 'var(--ws-accent)' : 'var(--ws-border)'}`,
+          backgroundColor: isDragActive ? 'var(--ws-border)' : 'var(--ws-surface)',
           borderRadius: 8,
           padding: '16px 12px',
           textAlign: 'center',
@@ -63,22 +63,22 @@ export const ImportDropzone: React.FC = () => {
         <input {...getInputProps()} />
 
         {importMutation.isPending ? (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', color: '#8b949e' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', color: 'var(--ws-text-muted)' }}>
             <Loader2 className="animate-spin" size={20} style={{ marginBottom: 6 }} />
             <span style={{ fontSize: 12 }}>Uploading {file?.name}…</span>
           </div>
         ) : importResult ? (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', color: '#3fb950' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', color: 'var(--ws-green)' }}>
             <CheckCircle2 size={20} style={{ marginBottom: 6 }} />
             <span style={{ fontSize: 12, fontWeight: 500 }}>Import Successful!</span>
-            <span style={{ fontSize: 11, marginTop: 2, color: '#56d364' }}>
+            <span style={{ fontSize: 11, marginTop: 2, color: 'var(--ws-green)' }}>
               +{importResult.nodes_added} concepts · +{importResult.edges_added} links
             </span>
           </div>
         ) : (
-          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', color: '#8b949e' }}>
-            <UploadCloud size={20} style={{ marginBottom: 6, color: isDragActive ? '#58a6ff' : '#484f58' }} />
-            <span style={{ fontSize: 12, fontWeight: 500, color: '#c9d1d9' }}>
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', color: 'var(--ws-text-muted)' }}>
+            <UploadCloud size={20} style={{ marginBottom: 6, color: isDragActive ? 'var(--ws-accent)' : 'var(--ws-text-dim)' }} />
+            <span style={{ fontSize: 12, fontWeight: 500, color: 'var(--ws-text)' }}>
               {isDragActive ? "Drop here…" : "Import Vocabulary"}
             </span>
             <span style={{ fontSize: 11, marginTop: 2 }}>.ttl or .rdf</span>
@@ -86,7 +86,7 @@ export const ImportDropzone: React.FC = () => {
         )}
       </div>
       {importMutation.isError && (
-        <p style={{ color: '#f85149', fontSize: 11, marginTop: 6, textAlign: 'center' }}>
+        <p style={{ color: 'var(--ws-red)', fontSize: 11, marginTop: 6, textAlign: 'center' }}>
           Upload failed. Check console.
         </p>
       )}

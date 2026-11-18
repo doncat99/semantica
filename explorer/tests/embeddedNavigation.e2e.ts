@@ -47,6 +47,10 @@ test('embedded native navigation retains graph filters, search and canvas across
     if (path === '/api/graph/edges') json = { edges, total: 1, next_cursor: null };
     if (path === '/api/temporal/bounds') json = { min: null, max: null };
     if (path === '/api/temporal/snapshot') json = { active_node_ids: ['a', 'b'], active_node_count: 2 };
+    if (path === '/api/vocabulary/schemes') json = [{ uri: 'urn:test', label: 'Test vocabulary' }];
+    if (path === '/api/vocabulary/hierarchy') json = Array.from({ length: 40 }, (_, i) => ({
+      uri: `urn:concept:${i}`, pref_label: `Concept ${i + 1}`, alt_labels: [], children: null,
+    }));
     await route.fulfill({ json });
   });
   await page.goto(base);
@@ -69,6 +73,7 @@ test('embedded native navigation retains graph filters, search and canvas across
   assert.deepEqual(await menu.locator('option').evaluateAll(options => options.map(option => option.getAttribute('value'))),
     ['graph', 'vocabulary', 'memories', 'analyze', 'decisions', 'enrich', 'manage', 'ontology-hub']);
   const filter = page.getByLabel('Filter node content');
+  await page.getByRole('button', { name: 'Filters', exact: true }).click();
   await filter.fill('Acoustic');
   await page.getByRole('textbox', { name: 'Search graph nodes' }).fill('Acoustic');
   await page.locator('canvas').first().evaluate(canvas => { canvas.dataset.retainedCanvas = 'yes'; });
@@ -85,6 +90,33 @@ test('embedded native navigation retains graph filters, search and canvas across
   await assertCompactNavigation();
   await menu.selectOption('vocabulary');
   assert.equal(await menu.inputValue(), 'vocabulary');
+  await page.getByText('Concept 1', { exact: true }).waitFor();
+  for (const [surface, text] of [['rgb(244, 247, 245)', 'rgb(24, 40, 30)'], ['rgb(24, 27, 30)', 'rgb(235, 238, 240)']]) {
+    await page.evaluate(({ surface, text }) => {
+      for (const name of ['app-bg', 'panel-bg', 'ws-bg', 'ws-surface', 'ws-surface-hover']) document.documentElement.style.setProperty(`--${name}`, surface);
+      for (const name of ['text-main', 'text-muted', 'ws-text', 'ws-text-muted', 'ws-text-dim']) document.documentElement.style.setProperty(`--${name}`, text);
+    }, { surface, text });
+    assert.equal(await page.locator('.vocab-workspace').evaluate(el => getComputedStyle(el).backgroundColor), surface);
+    assert.equal(await page.getByText('Concept 1', { exact: true }).evaluate(el => getComputedStyle(el).color), text);
+    assert.equal(await page.locator('.vocab-detail-glass').evaluate(el => getComputedStyle(el).backgroundImage), 'none');
+    await page.screenshot({ path: `test-results/vocabulary-${surface.startsWith('rgb(244') ? 'light' : 'dark'}.png` });
+  }
+  for (const viewport of [{ width: 1200, height: 620 }, { width: 760, height: 480 }]) {
+    await page.setViewportSize(viewport);
+    const tree = page.getByRole('tree');
+    await page.waitForFunction(() => {
+      const tree = document.querySelector('[role="tree"]');
+      return tree && tree.getBoundingClientRect().height <= tree.parentElement!.getBoundingClientRect().height + 1;
+    }, null, { timeout: 3000 });
+    await tree.hover();
+    await page.mouse.wheel(0, 3000);
+    await page.getByText('Concept 40', { exact: true }).waitFor({ state: 'visible' });
+    const last = await page.getByText('Concept 40', { exact: true }).boundingBox();
+    const bounds = await tree.boundingBox();
+    assert.ok(last && bounds && last.y >= bounds.y && last.y + last.height <= bounds.y + bounds.height + 1,
+      'the last concept is reachable inside the visible tree after resizing');
+    await tree.evaluate(el => { el.querySelector('div')!.scrollTop = 0; });
+  }
   await page.getByRole('button', { name: 'Return to graph', exact: true }).focus();
   await page.keyboard.press('Enter');
   await page.waitForFunction(() => document.querySelector<HTMLSelectElement>('[aria-label="Workspace"]')?.value === 'graph');

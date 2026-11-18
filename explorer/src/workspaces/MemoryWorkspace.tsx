@@ -345,7 +345,7 @@ const iconButtonStyle: CSSProperties = {
   height: 30,
   borderRadius: 8,
   border: `1px solid ${GRAPH_UI.surface.panelBorder}`,
-  background: "rgba(255, 255, 255, 0.04)",
+  background: "var(--ws-surface-hover)",
   color: GRAPH_UI.text.body,
   cursor: "pointer",
 };
@@ -457,8 +457,8 @@ const alertStyle: CSSProperties = {
   marginBottom: 12,
   padding: "10px 12px",
   borderRadius: 8,
-  border: "1px solid rgba(248, 81, 73, 0.28)",
-  background: "rgba(248, 81, 73, 0.1)",
-  color: "#ffb4ad",
+  border: "1px solid var(--ws-red)",
+  background: "var(--ws-red-soft)",
+  color: "var(--ws-red)",
   fontSize: 12,
 };
