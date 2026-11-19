@@ -1304,12 +1304,27 @@ function collectPluginOverlays(
 
 interface GraphWorkspaceProps {
   active?: boolean;
+  embedded?: boolean;
   externalFocusNodeId?: string;
   externalFocusToken?: number;
   onDirtyChange?: (dirty: boolean) => void;
 }
 
-export function GraphWorkspace({ active = true, externalFocusNodeId, externalFocusToken, onDirtyChange }: GraphWorkspaceProps = {}) {
+export function GraphWorkspace({ active = true, embedded = false, externalFocusNodeId, externalFocusToken, onDirtyChange }: GraphWorkspaceProps = {}) {
+  const embeddedIdentity = useMemo(() => {
+    if (!embedded || window.parent === window) return null;
+    const params = new URLSearchParams(window.location.search);
+    const origin = params.get('hostOrigin');
+    const projectId = params.get('projectId');
+    const generation = params.get('generation');
+    if (!origin || !projectId || !generation || origin === 'null') return null;
+    try { if (new URL(origin).origin !== origin) return null; } catch { return null; }
+    return { origin, projectId, generation };
+  }, [embedded]);
+  const postHost = useCallback((type: string, payload: Record<string, unknown>) => {
+    if (!embeddedIdentity) return;
+    window.parent.postMessage({ type, projectId: embeddedIdentity.projectId, generation: embeddedIdentity.generation, ...payload }, embeddedIdentity.origin);
+  }, [embeddedIdentity]);
   const [selectedNodeId, setSelectedNodeId] = useState("");
   const [focusedNodeId, setFocusedNodeId] = useState("");
   const [lastGroupedSelectedNodeId, setLastGroupedSelectedNodeId] = useState("");
@@ -1349,6 +1364,7 @@ export function GraphWorkspace({ active = true, externalFocusNodeId, externalFoc
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searchError, setSearchError] = useState("");
+  const hostSearchControllerRef = useRef<AbortController | null>(null);
   const [predictionType, setPredictionType] = useState("");
   const [isRunningPredictions, setIsRunningPredictions] = useState(false);
   const [predictions, setPredictions] = useState<LinkPrediction[]>([]);
@@ -1933,6 +1949,46 @@ export function GraphWorkspace({ active = true, externalFocusNodeId, externalFoc
     setSearchResults([]);
     setSearchError("");
   }, []);
+
+  useEffect(() => {
+    if (!embeddedIdentity) return;
+    const receive = (event: MessageEvent) => {
+      if (event.origin !== embeddedIdentity.origin || event.source !== window.parent) return;
+      const command = event.data as Record<string, unknown> | null;
+      if (!command || command.projectId !== embeddedIdentity.projectId || command.generation !== embeddedIdentity.generation || typeof command.type !== 'string') return;
+      if (command.type === 'ontoscience:search' && typeof command.query === 'string') {
+        hostSearchControllerRef.current?.abort();
+        const query = command.query.trim();
+        setSearchQuery(query);
+        if (!query) { handleClearSearchResults(); postHost('semantica:search-results', { results: [] }); return; }
+        const controller = new AbortController();
+        hostSearchControllerRef.current = controller;
+        void fetch('/api/graph/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query, limit: 8 }), signal: controller.signal })
+          .then(async response => { if (!response.ok) throw new Error(`Search failed with status ${response.status}`); return response.json() as Promise<{ results?: SearchResult[] }>; })
+          .then(data => { const results = (data.results ?? []).filter(result => graph.hasNode(result.node.id)); setSearchResults(results); setSearchError(''); postHost('semantica:search-results', { results: results.map(result => ({ id: result.node.id, label: result.node.content || result.node.id, type: result.node.type, score: result.score })) }); })
+          .catch(error => { if (error instanceof DOMException && error.name === 'AbortError') return; const message = error instanceof Error ? error.message : String(error); setSearchError(message); postHost('semantica:search-results', { results: [], error: message }); });
+      } else if (command.type === 'ontoscience:focus' && typeof command.nodeId === 'string') {
+        focusNode(command.nodeId);
+      } else if (command.type === 'ontoscience:filters' && command.filters && typeof command.filters === 'object') {
+        const next = command.filters as GraphFilters;
+        if (typeof next.nodeType === 'string' && typeof next.edgeType === 'string' && typeof next.text === 'string') {
+          setFilterText(next.text);
+          updateFilters(next);
+        }
+      } else if (command.type === 'ontoscience:mode' && ['full', 'focused', 'grouped'].includes(String(command.mode))) {
+        if (command.mode === 'focused') {
+          const nodeId = focusedSelectionResolution.resolvedNodeId;
+          if (nodeId) enterLocalGraph(nodeId);
+        } else {
+          setLayoutViewMode(command.mode as GraphLayoutViewMode);
+        }
+      } else if (command.type === 'ontoscience:clear-selection') {
+        focusNode('');
+      }
+    };
+    window.addEventListener('message', receive);
+    return () => { window.removeEventListener('message', receive); hostSearchControllerRef.current?.abort(); };
+  }, [embeddedIdentity, enterLocalGraph, focusNode, focusedSelectionResolution.resolvedNodeId, handleClearSearchResults, postHost, setLayoutViewMode, updateFilters]);
 
   const handleRunPredictions = useCallback(async () => {
     if (!inspectableNodeId) return;
@@ -2528,6 +2584,36 @@ export function GraphWorkspace({ active = true, externalFocusNodeId, externalFoc
     () => buildSelectedEdgeState(selectedEdgeId, displayResult.graph),
     [displayResult.graph, selectedEdgeId, summary?.nodeCount, summary?.edgeCount],
   );
+  useEffect(() => {
+    if (!embeddedIdentity || !graphReady) return;
+    const viewModeItems = [
+      { id: 'full', label: 'Full Graph', active: viewMode === 'full', disabled: false },
+      { id: 'grouped', label: 'Grouped View', active: viewMode === 'grouped', disabled: !groupedViewAvailable,
+        title: groupedViewReasonText(displayState.groupedViewReason) ?? undefined },
+      { id: 'focused', label: 'Focus', active: viewMode === 'focused', disabled: viewMode !== 'focused' && !canActivateFocusedMode,
+        title: focusedUnavailableReasonText(focusedSelectionResolution.reason) ?? undefined },
+    ];
+    postHost('semantica:ready', {
+      filters: filterChoices,
+      modes: viewModeItems,
+    });
+  }, [embeddedIdentity, filterChoices, graphReady, groupedViewAvailable, canActivateFocusedMode, viewMode, displayState.groupedViewReason, focusedSelectionResolution.reason, postHost]);
+
+  useEffect(() => {
+    if (!embeddedIdentity) return;
+    const selection = selectedEdgeState ? {
+      kind: 'relationship', id: selectedEdgeState.id, label: selectedEdgeState.edgeType,
+      sourceId: selectedEdgeState.sourceId, sourceLabel: selectedEdgeState.sourceLabel,
+      targetId: selectedEdgeState.targetId, targetLabel: selectedEdgeState.targetLabel,
+      weight: selectedEdgeState.weight, properties: selectedEdgeState.properties,
+    } : selectedNodeState ? {
+      kind: 'node', id: selectedNodeState.id, label: selectedNodeState.label,
+      type: selectedNodeState.nodeType, content: selectedNodeState.content,
+      validFrom: selectedNodeState.valid_from, validUntil: selectedNodeState.valid_until,
+      properties: selectedNodeState.properties, neighborCount: selectedNodeState.neighborCount,
+    } : null;
+    postHost('semantica:selection', { selection });
+  }, [embeddedIdentity, postHost, selectedEdgeState, selectedNodeState]);
   const temporalState = useMemo(
     () => ({
       currentTime: scrubberTime,
@@ -3240,7 +3326,7 @@ export function GraphWorkspace({ active = true, externalFocusNodeId, externalFoc
                   {focusedSummary ? <MetricChip tone="warm">{focusedSummary}</MetricChip> : null}
                 </div>
                 <div className="explore-workflow-bar">
-                  <SearchCommandBar
+                  {!embedded && <SearchCommandBar
                     value={searchQuery}
                     disabled={searchDisabled}
                     onChange={setSearchQuery}
@@ -3249,8 +3335,8 @@ export function GraphWorkspace({ active = true, externalFocusNodeId, externalFoc
                       setSearchQuery("");
                       focusNode(result.node.id);
                     }}
-                  />
-                  <SegmentedModeControl items={viewModeItems} />
+                  />}
+                  {!embedded && <SegmentedModeControl items={viewModeItems} />}
                   <div className="explore-toolbelt">
                     {toolbarClusters.map((group) => (
                       <ToolbarCluster
@@ -3263,7 +3349,7 @@ export function GraphWorkspace({ active = true, externalFocusNodeId, externalFoc
                   </div>
                 </div>
                 {!showDistanceStatus ? <SemanticColorLegend items={colorLegendItems} expanded={colorLegendExpanded} onToggle={() => setColorLegendExpanded(value => !value)} /> : null}
-                <div className="explore-graph-filters" role="group" aria-label="Graph filters">
+                {!embedded && <div className="explore-graph-filters" role="group" aria-label="Graph filters">
                   <button type="button" className="explore-filter-toggle" aria-expanded={filtersExpanded} onClick={() => setFiltersExpanded(value => !value)}>
                     Filters{hasActiveFilters ? " · active" : ""}
                   </button>
@@ -3290,7 +3376,7 @@ export function GraphWorkspace({ active = true, externalFocusNodeId, externalFoc
                     onClick={() => { setFilterText(''); updateFilters(EMPTY_GRAPH_FILTERS); }}>Clear filters</button>
                   {hasActiveFilters && summary ? <span role="status">{summary.nodeCount.toLocaleString()} / {(summary.totalNodeCount ?? summary.nodeCount).toLocaleString()} nodes · {summary.edgeCount.toLocaleString()} / {(summary.totalEdgeCount ?? summary.edgeCount).toLocaleString()} relationships{summary.nodeCount === 0 ? ' · No matches. Clear or change filters.' : ''}</span> : null}
                   </> : null}
-                </div>
+                </div>}
               </div>
 
               {egoModeEnabled && (
@@ -3349,9 +3435,9 @@ export function GraphWorkspace({ active = true, externalFocusNodeId, externalFoc
                 </div>
               ) : null}
 
-              {searchError ? <div style={{ color: GRAPH_UI.control.dangerText, fontSize: 12 }}>{searchError}</div> : null}
+              {!embedded && searchError ? <div style={{ color: GRAPH_UI.control.dangerText, fontSize: 12 }}>{searchError}</div> : null}
 
-              {searchResults.length ? (
+              {!embedded && searchResults.length ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
                     <span style={{ color: GRAPH_UI.text.muted, fontSize: 12 }}>
@@ -3458,7 +3544,7 @@ export function GraphWorkspace({ active = true, externalFocusNodeId, externalFoc
         <div
           className="explore-main-grid"
           style={{
-            gridTemplateColumns: layoutState.showInspector ? "minmax(0, 1fr) minmax(320px, 360px)" : "minmax(0, 1fr)",
+            gridTemplateColumns: !embedded && layoutState.showInspector ? "minmax(0, 1fr) minmax(320px, 360px)" : "minmax(0, 1fr)",
           }}
         >
           <div className="explore-scene-stack">
@@ -3528,7 +3614,7 @@ export function GraphWorkspace({ active = true, externalFocusNodeId, externalFoc
             </SurfaceCard>
           </div>
 
-          {layoutState.showInspector ? (
+          {!embedded && layoutState.showInspector ? (
             <div className="explore-inspector-shell">
               <InspectorPanel open={layoutState.showInspector} className="explore-inspector-card">
                 <div className="explore-inspector-scroll hud-scrollbar">

@@ -1890,6 +1890,7 @@ export default function App() {
             <Suspense fallback={<WorkspaceFallback />}>
               {exploreView === 'graph' ? (
                 <GraphWorkspace
+                  embedded={embedded}
                   externalFocusNodeId={graphFocusRequest?.nodeId}
                   externalFocusToken={graphFocusRequest?.token}
                   onDirtyChange={setExploreDraftDirty}
@@ -2070,7 +2071,7 @@ export default function App() {
               <WorkspaceShell title="Explore" hideHeader={embedded}>
                 <ErrorBoundary key={graphDraftRevision}>
                   <Suspense fallback={<WorkspaceFallback />}>
-                    <GraphWorkspace active={graphActive} externalFocusNodeId={graphFocusRequest?.nodeId} externalFocusToken={graphFocusRequest?.token} onDirtyChange={dirty => { if (graphActive) setExploreDraftDirty(dirty); }} />
+                    <GraphWorkspace active={graphActive} embedded={embedded} externalFocusNodeId={graphFocusRequest?.nodeId} externalFocusToken={graphFocusRequest?.token} onDirtyChange={dirty => { if (graphActive) setExploreDraftDirty(dirty); }} />
                   </Suspense>
                 </ErrorBoundary>
               </WorkspaceShell>
