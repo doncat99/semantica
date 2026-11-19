@@ -59,15 +59,15 @@ export function Sidebar({ onSelectConcept }: SidebarProps) {
           </div>
         ) : (
           <select
+            aria-label="Vocabulary scheme"
             value={selectedSchemeUri || ''}
             onChange={(e) => setActiveScheme(e.target.value)}
             style={{
-              width: '100%', appearance: 'none',
+              width: '100%',
               background: 'var(--ws-surface)',
               border: '1px solid var(--ws-border)',
               color: 'var(--ws-text)', padding: '8px 12px',
               borderRadius: 6, fontSize: 13, cursor: 'pointer',
-              outline: 'none',
             }}
           >
             {schemes.map((s: VocabularyScheme) => (
