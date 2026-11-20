@@ -45,6 +45,7 @@ env/
 venv/
 ENV/
 .venv/
+.venv-page-progress/
 .venv-cassandra/
 build/
 develop-eggs/
