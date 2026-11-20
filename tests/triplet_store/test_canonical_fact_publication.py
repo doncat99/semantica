@@ -83,6 +83,86 @@ def prepare_native_fact_decisions(store, generation, refs):
     return index
 
 
+@pytest.mark.parametrize('bounds,expected', [
+    ([('2020-01-01', None), ('2020-01-01', None)],
+        dict(status='available', **{'from': '2020-01-01'})),
+    ([('2020-01-01', None), ('2021-01-01', None)],
+        dict(status='unavailable', reason='conflicting-support')),
+    ([('2020-01-01', None), (None, None)],
+        dict(status='unavailable', reason='conflicting-support')),
+    ([('last year', None), ('last year', None)],
+        dict(status='unavailable', reason='unresolved')),
+    ([('2022-01-01', '2020-01-01')]*2,
+        dict(status='unavailable', reason='unresolved')),
+    ([(None, None)]*2, dict(status='unavailable')),
+])
+def test_effective_time_requires_agreement_of_all_fact_support(tmp_path, bounds, expected):
+    from semantica.triplet_store.publication_records import PublicationRecords
+    store, generation, refs, _ = stage_duplicate_observations(tmp_path)
+    try:
+        owner = PublicationRecords(store, 'p')
+        for ref, (start, end) in zip(refs, bounds):
+            for field, value in [('valid_from', start), ('valid_until', end)]:
+                if value is not None:
+                    store.store.add(owner.ox.Quad(owner.iri(ref), owner.iri(F+field),
+                        owner.ox.Literal(value), owner.facts))
+        prepare_native_fact_decisions(store, generation, refs)
+        store.activate_publication('p', generation, indexes=indexes())
+        page = store.read_publication_scene('p', generation, dict(kind='topology',
+            fields=['id', 'source', 'target', 'predicate', 'status', 'validTime']))
+        assert len(page['links']) == 1
+        assert page['links'][0]['validTime'] == expected
+    finally:
+        store.close()
+
+
+@pytest.mark.parametrize('failure', ['rows', 'bytes', 'duplicate', 'nonliteral', 'count', 'cancel'])
+def test_effective_time_enforces_support_bounds_and_integrity(tmp_path, monkeypatch, failure):
+    from threading import Event
+    from semantica.semantic_worker_context import query_cancellation
+    from semantica.triplet_store import publication_records
+    from semantica.triplet_store.publication_records import P, PublicationRecords
+
+    store, generation, refs, _ = stage_duplicate_observations(tmp_path)
+    token = None
+    try:
+        prepare_native_fact_decisions(store, generation, refs)
+        store.activate_publication('p', generation, indexes=indexes())
+        owner = PublicationRecords(store, 'p')
+        fact_id = store.read_publication_scene('p', generation, dict(kind='topology',
+            fields=['id', 'source', 'target', 'predicate']))['links'][0]['id']
+        node = owner.iri(fact_id)
+        if failure == 'rows':
+            monkeypatch.setattr(publication_records, 'MAX_ROWS', 1)
+        elif failure == 'bytes':
+            monkeypatch.setattr(publication_records, 'MAX_BYTES', 1)
+        elif failure in ('duplicate', 'nonliteral'):
+            for ref in refs:
+                store.store.add(owner.ox.Quad(owner.iri(ref), owner.iri(F+'valid_from'),
+                    owner.ox.Literal('2020-01-01'), owner.facts))
+            value = owner.ox.Literal('2021-01-01') if failure == 'duplicate' else owner.iri('urn:invalid-date')
+            store.store.add(owner.ox.Quad(owner.iri(refs[0]), owner.iri(F+'valid_from'), value, owner.facts))
+        elif failure == 'count':
+            # Damage the persisted decision to verify that a partial support set is rejected.
+            graph = owner.record_graph(node)
+            member = next(store.store.quads_for_pattern(node, owner.iri(P+'member'), None, graph))
+            store.store.remove(member)
+        else:
+            event = Event()
+            event.set()
+            token = query_cancellation.set(event)
+        if failure in ('count', 'cancel'):
+            with pytest.raises(ProcessingError, match='incomplete|canceled'):
+                owner._fact_valid_time(node)
+        else:
+            assert owner._fact_valid_time(node) == dict(status='unavailable',
+                reason='support-budget-exceeded' if failure in ('rows', 'bytes') else 'unresolved')
+    finally:
+        if token is not None:
+            query_cancellation.reset(token)
+        store.close()
+
+
 def test_duplicate_native_observations_publish_one_canonical_fact_with_all_support(tmp_path):
     store, generation, native_relations, plan = stage_duplicate_observations(tmp_path)
     index = prepare_native_fact_decisions(store, generation, native_relations)
@@ -375,6 +455,8 @@ def test_compact_scene_never_expands_support_and_detail_preserves_evidence(tmp_p
         assert [{k: v for k, v in row.items() if k != 'status'} for row in compact['links']] == [
             {k: row[k] for k in fields if k != 'status'} for row in detail['links']]
         assert 'provenanceLookups' not in metrics
+        assert metrics['selectionQueries'] == 1
+        assert metrics['selectionRows'] >= len(compact['links'])
         assert all(isinstance(value, (int, float)) for value in metrics.values())
     finally:
         query_diagnostics.reset(token)

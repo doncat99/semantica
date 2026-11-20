@@ -133,7 +133,7 @@ function ConceptDetailPanel({
       <div style={detailHeaderStyle}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
           <BookOpen size={13} color="#9ee8d7" />
-          <span style={{ color: "var(--ws-text)", fontSize: 13, fontWeight: 700 }}>Concept Detail</span>
+          <span style={{ color: "#ebf3ff", fontSize: 13, fontWeight: 700 }}>Concept Detail</span>
         </div>
         <button onClick={onClose} style={iconBtnStyle}>
           <X size={14} />
@@ -156,7 +156,7 @@ function ConceptDetailPanel({
       {detail && !loading && (
         <div style={detailBodyStyle}>
           <div style={{ marginBottom: 14 }}>
-            <h3 style={{ margin: "0 0 4px", color: "var(--ws-text)", fontSize: 17, fontWeight: 800, letterSpacing: "-0.03em" }}>
+            <h3 style={{ margin: "0 0 4px", color: "#ebf3ff", fontSize: 17, fontWeight: 800, letterSpacing: "-0.03em" }}>
               {detail.pref_label}
             </h3>
             {detail.alt_labels.length > 0 && (
@@ -171,14 +171,14 @@ function ConceptDetailPanel({
                 ))}
               </div>
             )}
-            <div style={{ color: "var(--ws-text-dim)", fontSize: 10, fontFamily: "monospace", wordBreak: "break-all" }}>
+            <div style={{ color: "#5a7a9a", fontSize: 10, fontFamily: "monospace", wordBreak: "break-all" }}>
               {uri}
             </div>
           </div>
 
           {detail.definition && (
             <PropSection label="Definition">
-              <p style={{ margin: 0, color: "var(--ws-text)", fontSize: 13, lineHeight: 1.6 }}>
+              <p style={{ margin: 0, color: "#c6d4e3", fontSize: 13, lineHeight: 1.6 }}>
                 {detail.definition}
               </p>
             </PropSection>
@@ -186,7 +186,7 @@ function ConceptDetailPanel({
 
           {detail.scope_note && (
             <PropSection label="Scope Note">
-              <p style={{ margin: 0, color: "var(--ws-text-muted)", fontSize: 12, lineHeight: 1.5 }}>
+              <p style={{ margin: 0, color: "#8fa8c6", fontSize: 12, lineHeight: 1.5 }}>
                 {detail.scope_note}
               </p>
             </PropSection>
@@ -194,7 +194,7 @@ function ConceptDetailPanel({
 
           {detail.editorial_note && (
             <PropSection label="Editorial Note">
-              <p style={{ margin: 0, color: "var(--ws-text-muted)", fontSize: 12, lineHeight: 1.5 }}>
+              <p style={{ margin: 0, color: "#8fa8c6", fontSize: 12, lineHeight: 1.5 }}>
                 {detail.editorial_note}
               </p>
             </PropSection>
@@ -210,7 +210,7 @@ function ConceptDetailPanel({
 
           {detail.scheme_uri && (
             <PropSection label="Concept Scheme">
-              <span style={{ color: "var(--ws-text)", fontSize: 11, fontFamily: "monospace", wordBreak: "break-all" }}>
+              <span style={{ color: "#c6d4e3", fontSize: 11, fontFamily: "monospace", wordBreak: "break-all" }}>
                 {detail.scheme_uri}
               </span>
             </PropSection>
@@ -223,8 +223,8 @@ function ConceptDetailPanel({
 
 function PropSection({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div style={{ paddingTop: 10, borderTop: "1px solid var(--ws-surface-hover)", marginTop: 10 }}>
-      <div style={{ color: "var(--ws-text-dim)", fontSize: 10, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.07em", marginBottom: 5 }}>
+    <div style={{ paddingTop: 10, borderTop: "1px solid rgba(255,255,255,0.05)", marginTop: 10 }}>
+      <div style={{ color: "#6a7f97", fontSize: 10, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.07em", marginBottom: 5 }}>
         {label}
       </div>
       {children}
@@ -265,12 +265,12 @@ function ConceptTreeNode({
           paddingBottom: 5,
           borderRadius: 7,
           cursor: "pointer",
-          background: isSelected ? "var(--ws-accent-soft)" : "transparent",
+          background: isSelected ? "rgba(74,163,255,0.12)" : "transparent",
           transition: "120ms ease",
         }}
         onMouseEnter={(e) => {
           if (!isSelected)
-            (e.currentTarget as HTMLDivElement).style.background = "var(--ws-accent-soft)";
+            (e.currentTarget as HTMLDivElement).style.background = "rgba(74,163,255,0.06)";
         }}
         onMouseLeave={(e) => {
           if (!isSelected)
@@ -295,7 +295,7 @@ function ConceptTreeNode({
             overflow: "hidden",
             textOverflow: "ellipsis",
             whiteSpace: "nowrap",
-            color: isSelected ? "var(--ws-text)" : depth === 0 ? "var(--ws-text)" : "var(--ws-text-muted)",
+            color: isSelected ? "#ebf3ff" : depth === 0 ? "#c6d4e3" : "#8fa8c6",
             fontSize: depth === 0 ? 13 : 12,
             fontWeight: depth === 0 ? 600 : 400,
           }}
@@ -304,7 +304,7 @@ function ConceptTreeNode({
         </span>
 
         {hasChildren && (
-          <span style={{ color: "var(--ws-text-dim)", fontSize: 10, flexShrink: 0 }}>
+          <span style={{ color: "#5a7a9a", fontSize: 10, flexShrink: 0 }}>
             {children.length}
           </span>
         )}
@@ -406,10 +406,10 @@ function SchemePanel({
     <div style={schemePanelStyle}>
       <button onClick={() => setExpanded((v) => !v)} style={schemeHeaderBtnStyle}>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          {expanded ? <ChevronDown size={13} color="var(--ws-text-muted)" /> : <ChevronRight size={13} color="var(--ws-text-muted)" />}
-          <span style={{ color: "var(--ws-text)", fontSize: 14, fontWeight: 700 }}>{scheme.title}</span>
+          {expanded ? <ChevronDown size={13} color="#8fa8c6" /> : <ChevronRight size={13} color="#8fa8c6" />}
+          <span style={{ color: "#e6edf3", fontSize: 14, fontWeight: 700 }}>{scheme.title}</span>
         </div>
-        <span style={{ color: "var(--ws-text-dim)", fontSize: 11 }}>
+        <span style={{ color: "#6a7f97", fontSize: 11 }}>
           {loading ? "…" : `${totalConcepts} concept${totalConcepts !== 1 ? "s" : ""}`}
         </span>
       </button>
@@ -420,10 +420,10 @@ function SchemePanel({
           {loading ? (
             <div style={{ padding: "10px 20px", display: "flex", alignItems: "center", gap: 8 }}>
               <Loader2 size={12} color="#4aa3ff" style={{ animation: "spin 0.8s linear infinite" }} />
-              <span style={{ color: "var(--ws-text-dim)", fontSize: 12 }}>Loading concepts…</span>
+              <span style={{ color: "#6a7f97", fontSize: 12 }}>Loading concepts…</span>
             </div>
           ) : displayedConcepts.length === 0 ? (
-            <div style={{ padding: "8px 24px", color: "var(--ws-text-dim)", fontSize: 12, fontStyle: "italic" }}>
+            <div style={{ padding: "8px 24px", color: "#6a7f97", fontSize: 12, fontStyle: "italic" }}>
               {searchQuery ? "No matching concepts" : "No concepts in this scheme"}
             </div>
           ) : (
@@ -483,7 +483,7 @@ export function SKOSVocabularyManager({ schemeUri }: Props) {
       {/* Search bar */}
       <div style={skosToolbarStyle}>
         <div style={skosSearchBarStyle}>
-          <Search size={13} color="var(--ws-text-dim)" />
+          <Search size={13} color="#6a7f97" />
           <input
             value={searchQ}
             onChange={(e) => setSearchQ(e.target.value)}
@@ -517,10 +517,10 @@ export function SKOSVocabularyManager({ schemeUri }: Props) {
           {!loading && !error && displayedSchemes.length === 0 && (
             <div style={{ ...centerStyle, textAlign: "center", padding: 28 }}>
               <BookOpen size={28} color="rgba(158,232,215,0.15)" />
-              <span style={{ color: "var(--ws-text-muted)", fontSize: 12, marginTop: 10 }}>
+              <span style={{ color: "#8fa8c6", fontSize: 12, marginTop: 10 }}>
                 No SKOS concept schemes found
               </span>
-              <span style={{ color: "var(--ws-text-dim)", fontSize: 11, marginTop: 4, maxWidth: 220 }}>
+              <span style={{ color: "#6a7f97", fontSize: 11, marginTop: 4, maxWidth: 220 }}>
                 Import a SKOS vocabulary to browse concepts here
               </span>
             </div>
@@ -561,7 +561,7 @@ const managerShellStyle: React.CSSProperties = {
 
 const skosToolbarStyle: React.CSSProperties = {
   padding: "10px 12px",
-  borderBottom: "1px solid var(--ws-border)",
+  borderBottom: "1px solid rgba(127,208,255,0.08)",
   flexShrink: 0,
 };
 
@@ -571,8 +571,8 @@ const skosSearchBarStyle: React.CSSProperties = {
   gap: 7,
   padding: "6px 10px",
   borderRadius: 8,
-  border: "1px solid var(--ws-border)",
-  background: "var(--ws-surface)",
+  border: "1px solid rgba(127,208,255,0.12)",
+  background: "rgba(0,0,0,0.22)",
 };
 
 const skosSearchInputStyle: React.CSSProperties = {
@@ -580,7 +580,7 @@ const skosSearchInputStyle: React.CSSProperties = {
   background: "transparent",
   border: "none",
   outline: "none",
-  color: "var(--ws-text)",
+  color: "#ebf3ff",
   fontSize: 12,
 };
 
@@ -602,8 +602,8 @@ const detailPanelStyle: React.CSSProperties = {
   flexShrink: 0,
   display: "flex",
   flexDirection: "column",
-  borderLeft: "1px solid var(--ws-border)",
-  background: "var(--ws-surface)",
+  borderLeft: "1px solid rgba(127,208,255,0.1)",
+  background: "rgba(3,9,18,0.5)",
   overflow: "hidden",
 };
 
@@ -612,7 +612,7 @@ const detailHeaderStyle: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "space-between",
   padding: "12px 14px",
-  borderBottom: "1px solid var(--ws-border)",
+  borderBottom: "1px solid rgba(127,208,255,0.08)",
   flexShrink: 0,
 };
 
@@ -624,8 +624,8 @@ const detailBodyStyle: React.CSSProperties = {
 
 const schemePanelStyle: React.CSSProperties = {
   borderRadius: 10,
-  border: "1px solid var(--ws-border)",
-  background: "var(--ws-surface-hover)",
+  border: "1px solid rgba(127,208,255,0.1)",
+  background: "rgba(255,255,255,0.02)",
   overflow: "hidden",
   marginBottom: 8,
 };
@@ -639,13 +639,13 @@ const schemeHeaderBtnStyle: React.CSSProperties = {
   background: "transparent",
   border: "none",
   cursor: "pointer",
-  borderBottom: "1px solid var(--ws-surface-hover)",
+  borderBottom: "1px solid rgba(255,255,255,0.05)",
 };
 
 const expandBtnStyle: React.CSSProperties = {
   background: "transparent",
   border: "none",
-  color: "var(--ws-text-muted)",
+  color: "#8fa8c6",
   cursor: "pointer",
   padding: 0,
   display: "flex",
@@ -657,16 +657,16 @@ const expandBtnStyle: React.CSSProperties = {
 const chipStyle: React.CSSProperties = {
   padding: "2px 8px",
   borderRadius: 999,
-  background: "var(--ws-surface-hover)",
-  border: "1px solid var(--ws-surface-hover)",
-  color: "var(--ws-text-muted)",
+  background: "rgba(255,255,255,0.05)",
+  border: "1px solid rgba(255,255,255,0.08)",
+  color: "#8fa8c6",
   fontSize: 11,
 };
 
 const iconBtnStyle: React.CSSProperties = {
   background: "transparent",
   border: "none",
-  color: "var(--ws-text-muted)",
+  color: "#8fa8c6",
   cursor: "pointer",
   padding: 2,
   display: "grid",

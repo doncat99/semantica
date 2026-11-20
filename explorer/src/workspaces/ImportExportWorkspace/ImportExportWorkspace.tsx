@@ -98,7 +98,7 @@ export function ImportExportWorkspace() {
               style={{
                 border: `2px dashed ${isDragActive ? "var(--ws-accent)" : "var(--ws-border)"}`,
                 borderRadius: "var(--ws-radius)",
-                background: isDragActive ? "var(--ws-accent-soft)" : "var(--ws-surface)",
+                background: isDragActive ? "var(--ws-accent-soft)" : "rgba(0,0,0,0.18)",
                 padding: 32,
                 textAlign: "center",
                 cursor: "pointer",
@@ -161,7 +161,7 @@ export function ImportExportWorkspace() {
               </div>
             </div>
 
-            <div style={{ flex: 1, padding: "14px 16px", borderRadius: "var(--ws-radius-sm)", background: "var(--ws-surface)", border: "1px solid var(--ws-border)" }}>
+            <div style={{ flex: 1, padding: "14px 16px", borderRadius: "var(--ws-radius-sm)", background: "rgba(0,0,0,0.22)", border: "1px solid var(--ws-border)" }}>
               <div style={{ color: "var(--ws-text-muted)", fontWeight: 700, fontSize: 12, marginBottom: 6 }}>What's included</div>
               <div className="ws-body" style={{ fontSize: 12 }}>
                 {exportFormat === "json"
@@ -185,7 +185,7 @@ export function ImportExportWorkspace() {
       {/* Toasts */}
       <div style={{ position: "fixed", bottom: 28, right: 28, display: "flex", flexDirection: "column", gap: 10, zIndex: 1000 }}>
         {toasts.map((t) => (
-          <div key={t.id} className="ws-animate-in" style={{ display: "flex", alignItems: "center", gap: 10, padding: "13px 18px", borderRadius: "var(--ws-radius-sm)", background: t.type === "success" ? "rgba(16,36,22,0.96)" : "rgba(40,10,10,0.96)", border: `1px solid ${t.type === "success" ? "rgba(76,195,138,0.4)" : "rgba(255,123,114,0.4)"}`, boxShadow: "none", backdropFilter: "none" }}>
+          <div key={t.id} className="ws-animate-in" style={{ display: "flex", alignItems: "center", gap: 10, padding: "13px 18px", borderRadius: "var(--ws-radius-sm)", background: t.type === "success" ? "rgba(16,36,22,0.96)" : "rgba(40,10,10,0.96)", border: `1px solid ${t.type === "success" ? "rgba(76,195,138,0.4)" : "rgba(255,123,114,0.4)"}`, boxShadow: "0 8px 24px rgba(0,0,0,0.5)", backdropFilter: "blur(12px)" }}>
             {t.type === "success" ? <CheckCircle2 size={16} color="#4cc38a" /> : <AlertCircle size={16} color="#ff7b72" />}
             <span style={{ color: "var(--ws-text)", fontSize: 13, fontWeight: 500 }}>{t.text}</span>
           </div>

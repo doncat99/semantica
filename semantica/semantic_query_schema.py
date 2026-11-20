@@ -125,7 +125,7 @@ class SemanticQueryRequest(StrictModel):
     query: Optional[str] = None
     limit: int = Field(default=20, ge=1, le=128)
     top_k: Optional[int] = Field(default=None, alias='topK', ge=1, le=1000)
-    mode: Literal["keyword", "semantic"] = "keyword"
+    mode: Literal["keyword", "semantic", "hybrid"] = "keyword"
     target: Literal["knowledge", "documents"] = "knowledge"
     offset: int = Field(default=0, ge=0)
     position: Optional[Tuple[str, str, int, int]] = None
@@ -138,12 +138,14 @@ class SemanticQueryRequest(StrictModel):
     def validate_mode(self):
         if self.semantic_store.project != self.project_id or self.semantic_store.generation != self.generation:
             raise ValueError('native query publication identity differs')
-        if self.mode == 'semantic' and (self.position is not None or self.navigation != 'next'):
+        if self.mode in ('semantic', 'hybrid') and (self.position is not None or self.navigation != 'next'):
             raise ValueError('semantic top-k does not accept occurrence pagination')
-        if self.top_k is not None and self.mode != 'semantic':
+        if self.top_k is not None and self.mode not in ('semantic', 'hybrid'):
             raise ValueError('only semantic queries accept a top-k budget')
-        if self.mode == 'semantic' and self.offset >= (self.top_k or self.limit):
+        if self.mode in ('semantic', 'hybrid') and self.offset >= (self.top_k or self.limit):
             raise ValueError('semantic offset exceeds the requested top-k budget')
+        if self.mode == 'hybrid' and (self.target != 'knowledge' or (self.top_k or self.limit) > 128):
+            raise ValueError('hybrid queries require knowledge units and a top-k budget at most 128')
         if self.target == "knowledge" and self.mode == 'keyword' and self.offset:
             raise ValueError("knowledge queries do not accept document pagination")
         if self.position is not None and (self.target != 'documents' or not self.position[0]
@@ -158,9 +160,9 @@ class SemanticQueryRequest(StrictModel):
         if self.source_ids is not None and (len(self.source_ids)>128 or len(set(self.source_ids)) != len(self.source_ids)
                 or any(not source_id.strip() for source_id in self.source_ids)):
             raise ValueError("query source identities must be nonempty and unique")
-        if (self.mode == "semantic") != (self.embedding is not None):
+        if (self.mode in ('semantic', 'hybrid')) != (self.embedding is not None):
             raise ValueError("semantic mode requires a query embedding; keyword mode does not accept one")
-        if self.mode == 'semantic' and self.native_indexes.semantic is None:
+        if self.mode in ('semantic', 'hybrid') and self.native_indexes.semantic is None:
             raise ValueError('semantic query requires native vector publication')
         if self.source_artifacts is not None and (len(self.source_artifacts)>128
                 or any(key != ref.source_id for key,ref in self.source_artifacts.items())):
@@ -207,6 +209,26 @@ class QueryDocumentReference(StrictModel):
     ranges: List[QueryDocumentRange] = Field(min_length=1, max_length=128)
 
 
+class HybridRetrieval(StrictModel):
+    method: Literal['reciprocal_rank_fusion'] = 'reciprocal_rank_fusion'
+    k: Literal[60] = 60
+    keyword_rank: Optional[int] = Field(default=None, ge=1)
+    semantic_rank: Optional[int] = Field(default=None, ge=1)
+
+
+class HybridCandidates(StrictModel):
+    keyword_position_limit: int = Field(ge=1, le=128)
+    keyword_positions: int = Field(ge=0, le=128)
+    keyword_records: int = Field(ge=0, le=128)
+    keyword_truncated: bool
+    semantic_record_limit: int = Field(ge=1, le=128)
+    semantic_records: int = Field(ge=0, le=128)
+    semantic_budget_reached: bool
+    fused_records: int = Field(ge=0, le=256)
+    returned_record_limit: int = Field(ge=1, le=128)
+    fused_truncated: bool
+
+
 class QueryHit(StrictModel):
     id: str
     kind: Literal["entity", "assertion", "relation", "conflict", "topic", "report", "evidence", "source_text"]
@@ -222,6 +244,7 @@ class QueryHit(StrictModel):
     document_reference: Optional[QueryDocumentReference] = Field(default=None, alias="documentReference")
     match_index: Optional[int] = Field(default=None, alias="matchIndex", ge=0)
     position: Optional[Tuple[str, str, int, int]] = None
+    retrieval: Optional[HybridRetrieval] = None
 
     @model_validator(mode='after')
     def validate_id_like_fields(self):
@@ -239,6 +262,7 @@ class SemanticQueryResult(StrictModel):
     generation: str
     query: str
     contexts: List[QueryHit]
+    hybrid_candidates: Optional[HybridCandidates] = None
     total: Optional[int] = Field(default=None, ge=0)
     next_offset: Optional[int] = Field(default=None, alias="nextOffset", ge=0)
     next_position: Optional[Tuple[str, str, int, int]] = Field(default=None, alias='nextPosition')
@@ -250,7 +274,7 @@ class SemanticQueryResult(StrictModel):
 class QueryWorkerRequest(StrictModel):
     protocol: Literal[QUERY_PROTOCOL] = QUERY_PROTOCOL
     id: str
-    method: Literal["query", "schema", "records", "section", "scene", "fact_members", "classification", "classification_batch", "bindings", "evidence", "reader", "acquire_store", "release_store", "open_stream", "next_stream", "close_stream"]
+    method: Literal["query", "schema", "records", "section", "scene", "analyze", "path", "fact_members", "classification", "classification_batch", "bindings", "evidence", "reader", "acquire_store", "release_store", "open_stream", "next_stream", "close_stream"]
     params: Dict[str, object] = Field(default_factory=dict)
 
 
@@ -289,6 +313,57 @@ class NativeSceneRequest(StrictModel):
         # The native storage owner validates its single selection contract.
         if len(self.selection) > 8:
             raise ValueError('native scene selection exceeds field budget')
+        if self.selection.get('kind') == 'neighborhood':
+            allowed = {'kind', 'nodeId', 'after', 'limit', 'maxBytes', 'fields'}
+            node_id = self.selection.get('nodeId')
+            after = self.selection.get('after')
+            limit = self.selection.get('limit', 32)
+            max_bytes = self.selection.get('maxBytes', 262144)
+            fields = self.selection.get('fields')
+            if (set(self.selection) - allowed or not isinstance(node_id, str) or not node_id
+                    or len(node_id.encode()) > 8192 or any(char.isspace() for char in node_id)
+                    or after is not None and (not isinstance(after, str) or not after or len(after.encode()) > 8192
+                                               or any(char.isspace() for char in after))
+                    or type(limit) is not int or not 1 <= limit <= 32
+                    or type(max_bytes) is not int or not 1 <= max_bytes <= 262144
+                    or fields not in (['id', 'source', 'target', 'predicate'],
+                                      ['id', 'source', 'target', 'predicate', 'status'],
+                                      ['id', 'source', 'target', 'predicate', 'status', 'validTime'],
+                                      ['id', 'source', 'target', 'predicate', 'fields', 'sourceIds', 'evidenceIds'])):
+                raise ValueError('invalid bounded native neighborhood selection')
+        return self
+
+
+class NativeAnalysisRequest(StrictModel):
+    project_id: str = Field(alias='projectId', min_length=1, max_length=4096)
+    semantic_store: NativeStoreRef = Field(alias='semanticStore')
+
+    @model_validator(mode='after')
+    def validate_project(self):
+        if self.project_id != self.semantic_store.project:
+            raise ValueError('native analysis project differs from request project')
+        return self
+
+
+class NativePathRequest(StrictModel):
+    project_id: str = Field(alias="projectId", min_length=1, max_length=4096)
+    semantic_store: NativeStoreRef = Field(alias="semanticStore")
+    source: str = Field(min_length=1, max_length=8192)
+    target: str = Field(min_length=1, max_length=8192)
+    max_pages: int = Field(default=32, alias="maxPages", ge=1, le=32, strict=True)
+    max_edges: int = Field(default=1024, alias="maxEdges", ge=1, le=1024, strict=True)
+    max_nodes: int = Field(default=256, alias="maxNodes", ge=2, le=256, strict=True)
+    max_depth: int = Field(default=6, alias="maxDepth", ge=1, le=6, strict=True)
+    max_millis: int = Field(default=2000, alias="maxMillis", ge=1, le=2000, strict=True)
+    max_bytes: int = Field(default=2097152, alias="maxBytes", ge=1, le=2097152, strict=True)
+
+    @model_validator(mode="after")
+    def validate_path(self):
+        if self.project_id != self.semantic_store.project:
+            raise ValueError("native path project differs from request project")
+        for identity in (self.source, self.target):
+            if not identity.strip() or any(char.isspace() for char in identity) or ":" not in identity:
+                raise ValueError("native path endpoints must be canonical identities")
         return self
 
 

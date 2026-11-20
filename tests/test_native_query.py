@@ -99,6 +99,33 @@ def test_actual_native_semantic_and_grounded_knowledge(ready):
     assert next(hit for hit in knowledge.contexts if hit.kind == 'relation').text == 'designed'
 
 
+def test_actual_native_path_reads_only_scoped_publication_pages(ready, monkeypatch):
+    import semantica.semantic_query_worker as worker
+    from semantica.semantic_worker_context import query_diagnostics
+    result, _, session = ready
+    reference = request(result).semantic_store
+    owner = session.borrow(reference, 'project-1')
+    topology = owner.read_publication_scene('project-1', reference.generation, dict(
+        kind='topology', fields=['id', 'source', 'target', 'predicate'], limit=32, maxBytes=262144))
+    assert topology['links'], 'fixture publication must contain a relation'
+    relation = topology['links'][0]
+    monkeypatch.setattr(worker._native_store, 'borrow', lambda selected, project: session.borrow(selected, project))
+    metrics = {}
+    token = query_diagnostics.set(metrics)
+    try:
+        response = worker.handle_request(dict(id='native-path', method='path', protocol='semantica.semantic-query.v1',
+            params=dict(projectId='project-1', semanticStore=result['semantic_store'],
+                source=relation['source'], target=relation['target'], maxPages=32, maxEdges=1024,
+                maxNodes=256, maxDepth=6, maxMillis=2000, maxBytes=2097152)))
+    finally:
+        query_diagnostics.reset(token)
+    assert response['ok'] and response['result']['status'] == 'found'
+    assert response['result']['relations'][0]['id'] == relation['id']
+    assert response['result']['readBytes'] > 0
+    assert metrics['pathPages'] >= 2 and metrics['pathIncidentPages'] >= 1
+    assert metrics['pathIncidentEdges'] >= 1 and metrics['pathReadBytes'] > 0
+
+
 def test_native_query_rejects_stale_receipt_and_source_binding(ready):
     result, reader, session = ready
     raw = request(result).model_dump(by_alias=True)
@@ -148,6 +175,96 @@ def test_retired_aggregate_snapshot_query_api_is_not_available():
     assert find_spec('semantica.context.snapshot_search') is None
     assert not hasattr(ContextRetriever, 'prepare_snapshot_search')
     assert not hasattr(ContextRetriever, 'search_snapshot')
+
+
+def test_hybrid_native_knowledge_fuses_ids_preserves_evidence_and_reopens(ready, monkeypatch):
+    from semantica.vector_store.hybrid_search import SearchRanker
+    result, reader, session = ready
+    space = result['native_indexes']['semantic']['space']
+    raw = request(result).model_dump(by_alias=True)
+    raw.update(mode='hybrid', target='knowledge', topK=3, limit=1,
+        embedding=dict(bindingId=space['bindingId'], modelId=space['modelId'], vector=[.25,.5,.75]))
+    query = SemanticQueryRequest.model_validate(raw)
+    calls = []
+    original = SearchRanker.rank
+    def rank(self, results, **kwargs):
+        calls.append(results)
+        return original(self, results, **kwargs)
+    monkeypatch.setattr(SearchRanker, 'rank', rank)
+    selected = query_semantic_artifact(query, session=session)
+    assert selected.contexts == [] and selected.required_source_ids == ['source-1']
+    hydrated = SemanticQueryRequest.model_validate({**raw,
+        'sourceArtifacts': {'source-1': reader.model_dump(by_alias=True)}})
+    answer = query_semantic_artifact(hydrated, session=session)
+    assert calls and all(len(channels) == 2 for channels in calls)
+    assert len(answer.contexts) == 1 and answer.next_offset == 1
+    hit = answer.contexts[0]
+    assert hit.evidence_ids and hit.source_ids == ['source-1']
+    keyword, semantic = calls[-1]
+    assert hit.retrieval.keyword_rank == next(n for n, row in enumerate(keyword, 1) if row['id'] == hit.id)
+    assert hit.retrieval.semantic_rank == next(n for n, row in enumerate(semantic, 1) if row['id'] == hit.id)
+    assert hit.score == pytest.approx(1 / (60 + hit.retrieval.keyword_rank)
+        + 1 / (60 + hit.retrieval.semantic_rank))
+    assert hit.retrieval.method == 'reciprocal_rank_fusion'
+    assert answer.hybrid_candidates.keyword_positions == 1
+    pages = answer.contexts[:]
+    offset = answer.next_offset
+    while offset is not None:
+        page = query_semantic_artifact(hydrated.model_copy(update={'offset': offset}), session=session)
+        pages.extend(page.contexts)
+        offset = page.next_offset
+    assert len(pages) == len({item.id for item in pages}) == 3
+    session.close()
+    session.acquire(query.semantic_store)
+    assert query_semantic_artifact(hydrated, session=session) == answer
+    for scope in ([], ['not-granted']):
+        empty = query_semantic_artifact(hydrated.model_copy(update={'source_ids': scope}), session=session)
+        assert empty.contexts == []
+    stale = hydrated.model_dump(by_alias=True)
+    stale['nativeIndexes']['semantic']['receipt']['recipe_digest'] = '0'*64
+    with pytest.raises(QueryError, match='index differs'):
+        query_semantic_artifact(SemanticQueryRequest.model_validate(stale), session=session)
+
+
+def test_hybrid_rejects_missing_embedding_document_units_and_unbounded_candidates(ready):
+    from pydantic import ValidationError
+    result, _, _ = ready
+    raw = request(result).model_dump(by_alias=True)
+    space = result['native_indexes']['semantic']['space']
+    raw.update(mode='hybrid', target='knowledge',
+        embedding=dict(bindingId=space['bindingId'], modelId=space['modelId'], vector=[.25,.5,.75]))
+    for changes in ({'embedding': None}, {'target': 'documents'}, {'topK': 129},
+                    {'position': ['source-1', '#/document/text', 0, 3]}):
+        with pytest.raises(ValidationError):
+            SemanticQueryRequest.model_validate({**raw, **changes})
+
+
+def test_hybrid_union_and_candidate_bounds_do_not_depend_on_last_channel_metadata():
+    from types import SimpleNamespace
+    from semantica.semantic_query import _hybrid_records
+
+    class Owner:
+        def read_grounded_candidates(self, project, generation, positions, **budgets):
+            assert project == 'project' and generation == 'generation'
+            assert positions == [dict(source='lexical-source', nativeRef='#/document/text', start=0, end=1)]
+            assert budgets == dict(limit=128, max_bytes=262144)
+            return [dict(id='shared', evidenceIds=['lexical-evidence'], sourceIds=['lexical-source']),
+                dict(id='lexical-only', evidenceIds=['lexical-evidence'], sourceIds=['lexical-source'])]
+
+    request_value = SimpleNamespace(project_id='project', generation='generation', top_k=2, limit=1, offset=0)
+    page = dict(items=[dict(sourceId='lexical-source', nativeRef='#/document/text', start=0, end=1)],
+        nextCursor=('lexical-source', '#/document/text', 0, 1))
+    vector_rows = [dict(id='shared', evidenceIds=['vector-evidence'], sourceIds=['vector-source'],
+        evidenceNextCursor=('shared', 'vector-evidence')),
+        dict(id='vector-only', evidenceIds=['vector-evidence'], sourceIds=['vector-source'])]
+    selected, metadata, following = _hybrid_records(request_value, Owner(), page, vector_rows)
+    assert selected[0]['id'] == 'shared'
+    assert selected[0]['evidenceIds'] == ['lexical-evidence', 'vector-evidence']
+    assert selected[0]['sourceIds'] == ['lexical-source', 'vector-source']
+    assert selected[0]['evidenceNextCursor'] == ('shared', 'vector-evidence')
+    assert metadata['keyword_truncated'] and metadata['semantic_budget_reached']
+    assert metadata['fused_records'] == 3 and metadata['fused_truncated']
+    assert following == 1
 
 
 def test_document_hit_retains_every_scalar_range_and_identity(tmp_path):

@@ -41,7 +41,7 @@ const ENTITY_TYPE_COLORS: Record<string, string> = {
   individual: "#9ee8d7",
   concept: "#58a6ff",
   scheme: "#7fd0ff",
-  unknown: "var(--ws-text-dim)",
+  unknown: "#6a7f97",
 };
 
 const ENTITY_TYPE_LABELS: Record<string, string> = {
@@ -64,8 +64,8 @@ function TypeBadge({ entityType }: { entityType: string }) {
         fontWeight: 700,
         letterSpacing: "0.06em",
         textTransform: "uppercase" as const,
-        background: `color-mix(in srgb, ${color} 8%, transparent)`,
-        border: `1px solid color-mix(in srgb, ${color} 16%, transparent)`,
+        background: `${color}14`,
+        border: `1px solid ${color}28`,
         color,
         flexShrink: 0,
       }}
@@ -110,26 +110,26 @@ function ResultRow({
         border: "1px solid",
         cursor: "pointer",
         transition: "160ms ease",
-        background: selected ? "var(--ws-accent-soft)" : "var(--ws-surface-hover)",
-        borderColor: selected ? "var(--ws-border)" : "var(--ws-border)",
+        background: selected ? "rgba(74,163,255,0.1)" : "rgba(255,255,255,0.02)",
+        borderColor: selected ? "rgba(127,208,255,0.24)" : "rgba(127,208,255,0.08)",
       }}
     >
       <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
-        <span style={{ color: "var(--ws-text)", fontSize: 13, fontWeight: 700, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+        <span style={{ color: "#ebf3ff", fontSize: 13, fontWeight: 700, flex: 1, minWidth: 0, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
           {result.label || result.uri}
         </span>
         <TypeBadge entityType={result.entity_type} />
       </div>
-      <div style={{ color: "var(--ws-text-dim)", fontSize: 10, fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+      <div style={{ color: "#6a7f97", fontSize: 10, fontFamily: "monospace", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
         {result.uri}
       </div>
       {result.definition && (
-        <div style={{ color: "var(--ws-text-muted)", fontSize: 12, lineHeight: 1.4, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" as const }}>
+        <div style={{ color: "#8fa8c6", fontSize: 12, lineHeight: 1.4, overflow: "hidden", display: "-webkit-box", WebkitLineClamp: 2, WebkitBoxOrient: "vertical" as const }}>
           {result.definition}
         </div>
       )}
       {result.source_ontology && (
-        <div style={{ color: "var(--ws-text-dim)", fontSize: 10 }}>
+        <div style={{ color: "#5a7a9a", fontSize: 10 }}>
           From: {result.source_ontology}
         </div>
       )}
@@ -148,18 +148,18 @@ function CollapsibleList({ label, items }: { label: string; items: string[] }) {
       >
         {open ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
         <span>{label}</span>
-        <span style={{ color: "var(--ws-text-dim)", fontSize: 10 }}>({items.length})</span>
+        <span style={{ color: "#6a7f97", fontSize: 10 }}>({items.length})</span>
       </button>
       {open && (
         <div style={{ marginLeft: 16, marginTop: 4, display: "flex", flexDirection: "column", gap: 3 }}>
           {items.slice(0, 12).map((uri) => (
             <div key={uri} style={{ display: "flex", alignItems: "center", gap: 6 }}>
-              <span style={{ color: "var(--ws-text-dim)", fontSize: 10 }}>→</span>
+              <span style={{ color: "#6a7f97", fontSize: 10 }}>→</span>
               <UriRef uri={uri} />
             </div>
           ))}
           {items.length > 12 && (
-            <span style={{ color: "var(--ws-text-dim)", fontSize: 10 }}>+{items.length - 12} more</span>
+            <span style={{ color: "#5a7a9a", fontSize: 10 }}>+{items.length - 12} more</span>
           )}
         </div>
       )}
@@ -212,7 +212,7 @@ function DetailPanel({
       <div style={detailHeaderStyle}>
         <div style={{ display: "flex", alignItems: "center", gap: 8, minWidth: 0 }}>
           <BookOpen size={14} color="#d2a8ff" />
-          <span style={{ color: "var(--ws-text)", fontSize: 13, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+          <span style={{ color: "#ebf3ff", fontSize: 13, fontWeight: 700, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
             Entity Detail
           </span>
         </div>
@@ -238,19 +238,19 @@ function DetailPanel({
         <div style={detailBodyStyle}>
           <div style={{ marginBottom: 14 }}>
             <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap", marginBottom: 4 }}>
-              <h3 style={{ margin: 0, color: "var(--ws-text)", fontSize: 17, fontWeight: 800, letterSpacing: "-0.03em" }}>
+              <h3 style={{ margin: 0, color: "#ebf3ff", fontSize: 17, fontWeight: 800, letterSpacing: "-0.03em" }}>
                 {detail.label || detail.uri.split("/").pop()}
               </h3>
               <TypeBadge entityType={detail.entity_type} />
             </div>
-            <div style={{ color: "var(--ws-text-dim)", fontSize: 10, fontFamily: "monospace", wordBreak: "break-all" }}>
+            <div style={{ color: "#5a7a9a", fontSize: 10, fontFamily: "monospace", wordBreak: "break-all" }}>
               {detail.uri}
             </div>
           </div>
 
           {detail.definition && (
             <DetailSection label="Definition">
-              <p style={{ margin: 0, color: "var(--ws-text)", fontSize: 13, lineHeight: 1.6 }}>
+              <p style={{ margin: 0, color: "#c6d4e3", fontSize: 13, lineHeight: 1.6 }}>
                 {detail.definition}
               </p>
             </DetailSection>
@@ -271,7 +271,7 @@ function DetailPanel({
 
           {detail.source_ontology && (
             <DetailSection label="Source Ontology">
-              <span style={{ color: "var(--ws-text)", fontSize: 12, fontFamily: "monospace" }}>
+              <span style={{ color: "#c6d4e3", fontSize: 12, fontFamily: "monospace" }}>
                 {detail.source_ontology}
               </span>
             </DetailSection>
@@ -294,8 +294,8 @@ function DetailPanel({
 
 function DetailSection({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div style={{ paddingTop: 10, borderTop: "1px solid var(--ws-surface-hover)", marginTop: 10 }}>
-      <div style={{ color: "var(--ws-text-dim)", fontSize: 10, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.07em", marginBottom: 5 }}>
+    <div style={{ paddingTop: 10, borderTop: "1px solid rgba(255,255,255,0.05)", marginTop: 10 }}>
+      <div style={{ color: "#6a7f97", fontSize: 10, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.07em", marginBottom: 5 }}>
         {label}
       </div>
       {children}
@@ -345,7 +345,7 @@ export function OntologySearch() {
       {/* Search input */}
       <div style={searchTopStyle}>
         <div style={searchBarStyle}>
-          <Search size={14} color="var(--ws-text-dim)" />
+          <Search size={14} color="#6a7f97" />
           <input
             autoFocus
             value={query}
@@ -382,8 +382,8 @@ export function OntologySearch() {
         <div style={resultListStyle}>
           {!query && (
             <div style={hintStyle}>
-              <Search size={20} color="var(--ws-accent-soft)" />
-              <span style={{ color: "var(--ws-text-dim)", fontSize: 12, marginTop: 8 }}>
+              <Search size={20} color="rgba(74,163,255,0.2)" />
+              <span style={{ color: "#6a7f97", fontSize: 12, marginTop: 8 }}>
                 Type to search across all loaded ontologies
               </span>
             </div>
@@ -391,13 +391,13 @@ export function OntologySearch() {
 
           {query && results.length === 0 && !searching && (
             <div style={hintStyle}>
-              <span style={{ color: "var(--ws-text-dim)", fontSize: 12 }}>No results for "{query}"</span>
+              <span style={{ color: "#6a7f97", fontSize: 12 }}>No results for "{query}"</span>
             </div>
           )}
 
           {results.length > 0 && (
             <div style={{ padding: "10px 12px", display: "flex", flexDirection: "column", gap: 6 }}>
-              <div style={{ color: "var(--ws-text-dim)", fontSize: 11, fontWeight: 700, marginBottom: 2 }}>
+              <div style={{ color: "#6a7f97", fontSize: 11, fontWeight: 700, marginBottom: 2 }}>
                 {results.length} result{results.length !== 1 ? "s" : ""}
               </div>
               {results.map((r) => (
@@ -431,7 +431,7 @@ const searchShellStyle: React.CSSProperties = {
 
 const searchTopStyle: React.CSSProperties = {
   padding: "12px 14px 10px",
-  borderBottom: "1px solid var(--ws-border)",
+  borderBottom: "1px solid rgba(127,208,255,0.08)",
   display: "flex",
   flexDirection: "column",
   gap: 8,
@@ -444,8 +444,8 @@ const searchBarStyle: React.CSSProperties = {
   gap: 8,
   padding: "7px 12px",
   borderRadius: 10,
-  border: "1px solid var(--ws-border)",
-  background: "var(--ws-surface)",
+  border: "1px solid rgba(127,208,255,0.14)",
+  background: "rgba(0,0,0,0.24)",
 };
 
 const searchInputStyle: React.CSSProperties = {
@@ -453,14 +453,14 @@ const searchInputStyle: React.CSSProperties = {
   background: "transparent",
   border: "none",
   outline: "none",
-  color: "var(--ws-text)",
+  color: "#ebf3ff",
   fontSize: 13,
 };
 
 const clearBtnStyle: React.CSSProperties = {
   background: "transparent",
   border: "none",
-  color: "var(--ws-text-dim)",
+  color: "#6a7f97",
   cursor: "pointer",
   padding: 2,
   display: "grid",
@@ -485,14 +485,14 @@ const typeFilterBtnBase: React.CSSProperties = {
 
 const typeFilterBtnIdle: React.CSSProperties = {
   background: "transparent",
-  color: "var(--ws-text-muted)",
-  borderColor: "var(--ws-border)",
+  color: "#8fa8c6",
+  borderColor: "rgba(127,208,255,0.1)",
 };
 
 const typeFilterBtnActive: React.CSSProperties = {
-  background: "var(--ws-accent-soft)",
-  color: "var(--ws-text)",
-  borderColor: "var(--ws-border)",
+  background: "rgba(74,163,255,0.14)",
+  color: "#ebf3ff",
+  borderColor: "rgba(127,208,255,0.26)",
 };
 
 const searchBodyStyle: React.CSSProperties = {
@@ -522,8 +522,8 @@ const detailPanelStyle: React.CSSProperties = {
   flexShrink: 0,
   display: "flex",
   flexDirection: "column",
-  borderLeft: "1px solid var(--ws-border)",
-  background: "var(--ws-surface)",
+  borderLeft: "1px solid rgba(127,208,255,0.1)",
+  background: "rgba(3,9,18,0.5)",
   overflow: "hidden",
 };
 
@@ -532,14 +532,14 @@ const detailHeaderStyle: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "space-between",
   padding: "12px 14px",
-  borderBottom: "1px solid var(--ws-border)",
+  borderBottom: "1px solid rgba(127,208,255,0.08)",
   flexShrink: 0,
 };
 
 const closeDetailBtnStyle: React.CSSProperties = {
   background: "transparent",
   border: "none",
-  color: "var(--ws-text-muted)",
+  color: "#8fa8c6",
   cursor: "pointer",
   padding: 2,
   display: "grid",
@@ -570,7 +570,7 @@ const collapseHdrStyle: React.CSSProperties = {
   gap: 5,
   background: "transparent",
   border: "none",
-  color: "var(--ws-text-muted)",
+  color: "#8fa8c6",
   fontSize: 12,
   fontWeight: 600,
   cursor: "pointer",

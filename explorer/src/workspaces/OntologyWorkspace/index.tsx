@@ -80,7 +80,7 @@ export function OntologyWorkspace({ onJumpToGraphNode }: OntologyWorkspaceProps)
   return (
     <div className="ws-page">
       {/* Internal sub-tab bar */}
-      <div style={{ display: "flex", gap: 4, padding: "8px 16px", borderBottom: "1px solid var(--ws-border)", background: "var(--ws-surface)", flexShrink: 0, flexWrap: "wrap" }}>
+      <div style={{ display: "flex", gap: 4, padding: "8px 16px", borderBottom: "1px solid var(--ws-border)", background: "rgba(0,0,0,0.18)", flexShrink: 0, flexWrap: "wrap" }}>
         {TABS.map(({ id, label, icon: Icon }) => {
           const active = activeTab === id;
           return (

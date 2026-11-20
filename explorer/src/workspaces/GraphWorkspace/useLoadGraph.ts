@@ -22,7 +22,6 @@ import {
   resolveNodeLayoutPosition,
 } from "./smallGraphLayout";
 import type { GraphLoadProgress, GraphLoadSummary } from "./types";
-import { filterGraphInput, EMPTY_GRAPH_FILTERS, type GraphFilters } from './graphFilters';
 
 const SEMANTIC_COLOR_FIELDS = [
   "community",
@@ -470,22 +469,18 @@ function yieldToMain(): Promise<void> {
 }
 
 interface UseLoadGraphOptions {
-  filters?: GraphFilters;
   enabled?: boolean;
   onGraphReady?: (summary: GraphLoadSummary) => void;
   onProgress?: (progress: GraphLoadProgress) => void;
 }
 
 export function useLoadGraph(options: UseLoadGraphOptions = {}) {
-  const { enabled = true, onGraphReady, onProgress, filters = EMPTY_GRAPH_FILTERS } = options;
-  const queryClient = useQueryClient();
+  const { enabled = true, onGraphReady, onProgress } = options;
 
   return useQuery<GraphLoadSummary>({
-    queryKey: ["graph", "full-load", filters],
+    queryKey: ["graph", "full-load"],
     enabled,
-    staleTime: 0,
-    gcTime: 0,
-    refetchOnWindowFocus: false,
+    staleTime: Infinity,
     retry: 0,
     queryFn: async ({ signal }): Promise<GraphLoadSummary> => {
       const startedAt = performance.now();
@@ -499,18 +494,14 @@ export function useLoadGraph(options: UseLoadGraphOptions = {}) {
         message: "Preparing graph session",
       }));
 
-      const input = await queryClient.fetchQuery({
-        queryKey: ['graph', 'session-input'], staleTime: Infinity,
-        queryFn: async ({ signal: inputSignal }) => {
-          const nodes = await fetchAllNodes(inputSignal, onProgress);
-          const edges = await fetchAllEdges(inputSignal, new Set(nodes.map(node => node.id)),
-            { loaded: nodes.length, total: nodes.length }, onProgress);
-          return { nodes, edges };
-        },
-      });
-      signal.throwIfAborted();
-      const { nodes: fetchedNodes, edges: fetchedEdges } = filterGraphInput(input.nodes, input.edges, filters);
-      const nodeIds = new Set(fetchedNodes.map(node => node.id));
+      const fetchedNodes = await fetchAllNodes(signal, onProgress);
+      const nodeIds = new Set(fetchedNodes.map((node) => node.id));
+      const fetchedEdges = await fetchAllEdges(
+        signal,
+        nodeIds,
+        { loaded: fetchedNodes.length, total: fetchedNodes.length },
+        onProgress,
+      );
 
       const degreeByNode = new Map<string, number>();
       for (const nodeId of nodeIds) {
@@ -722,10 +713,6 @@ export function useLoadGraph(options: UseLoadGraphOptions = {}) {
       }
 
       const summary = {
-        nodeTypes: [...new Set(input.nodes.map(node => node.type))].sort(),
-        edgeTypes: [...new Set(input.edges.map(edge => edge.type))].sort(),
-        totalNodeCount: input.nodes.length,
-        totalEdgeCount: input.edges.length,
         nodeCount: nodesToMerge.length,
         edgeCount: edgesToMerge.length,
         loadTimeMs: Math.round(performance.now() - startedAt),
@@ -755,8 +742,5 @@ export function useLoadGraph(options: UseLoadGraphOptions = {}) {
 
 export function useReloadGraph() {
   const queryClient = useQueryClient();
-  return async () => {
-    await queryClient.invalidateQueries({ queryKey: ['graph', 'session-input'] });
-    return queryClient.invalidateQueries({ queryKey: ["graph", "full-load"] });
-  };
+  return () => queryClient.invalidateQueries({ queryKey: ["graph", "full-load"] });
 }

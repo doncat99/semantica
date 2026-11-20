@@ -8,7 +8,7 @@ function outcomeColor(outcome: string) {
   if (o.includes("approv") || o.includes("accept")) return { color: "#6ee7b7", bg: "var(--ws-green-soft)", border: "rgba(76,195,138,0.3)" };
   if (o.includes("reject") || o.includes("denied") || o.includes("fail"))  return { color: "#fca5a5", bg: "var(--ws-red-soft)",   border: "rgba(255,123,114,0.3)" };
   if (o.includes("defer") || o.includes("pending") || o.includes("review")) return { color: "#fbbf24", bg: "var(--ws-amber-soft)", border: "rgba(242,182,109,0.3)" };
-  return { color: "var(--ws-text-muted)", bg: "var(--ws-surface-hover)", border: "var(--ws-surface-hover)" };
+  return { color: "var(--ws-text-muted)", bg: "rgba(255,255,255,0.04)", border: "rgba(255,255,255,0.1)" };
 }
 
 function OutcomeBadge({ outcome }: { outcome: OutcomeKind }) {
@@ -86,9 +86,6 @@ function CausalFlow({ chain, loading }: { chain: ChainStep[]; loading: boolean }
 }
 
 export function DecisionWorkspace() {
-  const [creating, setCreating] = useState(false);
-  const [saving, setSaving] = useState(false);
-  const [draft, setDraft] = useState({ category: "", scenario: "", reasoning: "", outcome: "", confidence: "0.8", entities: "" });
   const [decisions, setDecisions] = useState<{ decision_id: string; category?: string; outcome?: string }[]>([]);
   const [selected, setSelected] = useState<{ decision_id: string; category?: string; outcome?: string } | null>(null);
   const [chain, setChain] = useState<ChainStep[]>([]);
@@ -96,26 +93,6 @@ export function DecisionWorkspace() {
   const [listLoading, setListLoading] = useState(true);
   const [filter, setFilter] = useState("");
   const [error, setError] = useState("");
-
-  async function saveDecision(event: React.FormEvent) {
-    event.preventDefault();
-    setSaving(true);
-    setError("");
-    try {
-      const response = await fetch("/api/decisions", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ ...draft, confidence: Number(draft.confidence), entities: draft.entities.split(/\r?\n/).map(value => value.trim()).filter(Boolean) }),
-      });
-      const data = await response.json();
-      if (!response.ok) throw new Error(typeof data.detail === "string" ? data.detail : `Unable to save decision: HTTP ${response.status}`);
-      setDecisions(current => [...current, data]);
-      setCreating(false);
-      setDraft({ category: "", scenario: "", reasoning: "", outcome: "", confidence: "0.8", entities: "" });
-      void loadChain(data);
-    } catch (error) {
-      setError(error instanceof Error ? error.message : "Unable to save decision");
-    } finally { setSaving(false); }
-  }
 
   // Tracks the active chain request so stale responses from rapid selections are ignored.
   const chainCtrlRef = useRef<AbortController | null>(null);
@@ -192,7 +169,6 @@ export function DecisionWorkspace() {
       {/* ── Sidebar list ── */}
       <div className="ws-sidebar" style={{ width: 290 }}>
         <div className="ws-sidebar-header">
-          <button className="ws-btn ws-btn--primary" disabled={listLoading || saving} onClick={() => setCreating(true)}>Record decision</button>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 12 }}>
             <div style={{ width: 30, height: 30, borderRadius: 9, background: "var(--ws-accent-soft)", border: "1px solid var(--ws-border-strong)", display: "grid", placeItems: "center", color: "var(--ws-accent)", flexShrink: 0 }}>
               <Scale size={15} />
@@ -223,7 +199,7 @@ export function DecisionWorkspace() {
           ) : filtered.length === 0 ? (
             <div className="ws-empty" style={{ padding: "28px 12px" }}>
               <div className="ws-empty-title">{decisions.length === 0 ? "No decisions" : "No matches"}</div>
-              <div className="ws-empty-body">{decisions.length === 0 ? "No decisions recorded yet. Record a decision or import a graph containing decision records." : "Adjust your filter."}</div>
+              <div className="ws-empty-body">{decisions.length === 0 ? "No decisions available in the graph." : "Adjust your filter."}</div>
             </div>
           ) : (
             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
@@ -252,7 +228,7 @@ export function DecisionWorkspace() {
 
       {/* ── Detail pane ── */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", position: "relative" }}>
-        <div style={{ position: "absolute", inset: 0, background: "var(--ws-surface)", pointerEvents: "none" }} />
+        <div style={{ position: "absolute", inset: 0, background: "radial-gradient(ellipse 60% 40% at 70% 20%, rgba(74,163,255,0.04), transparent 55%)", pointerEvents: "none" }} />
 
         {error ? (
           <div style={{ padding: 12, borderRadius: 14, color: "#ffb4c2", background: "rgba(255,157,175,0.1)", border: "1px solid rgba(255,157,175,0.18)", margin: "16px 16px 0 16px", zIndex: 2, position: "relative" }}>
@@ -260,23 +236,7 @@ export function DecisionWorkspace() {
           </div>
         ) : null}
 
-        {creating ? (
-          <form className="ws-scroll ws-padded" onSubmit={saveDecision}>
-            <h2 className="ws-title">Record decision</h2>
-            {(["category", "scenario", "reasoning", "outcome", "confidence", "entities"] as const).map(field => (
-              <label className="ws-label" key={field} style={{ display: "block", marginTop: 16 }}>
-                {field === "entities" ? "Related entity IDs (one per line, optional)" : field}
-                {field === "confidence" ? (
-                  <input className="ws-input" type="number" min="0" max="1" step="0.01" required value={draft[field]} onChange={event => setDraft({ ...draft, [field]: event.target.value })} />
-                ) : (
-                  <textarea className="ws-textarea" disabled={saving} required={field !== "entities"} value={draft[field]} onChange={event => setDraft({ ...draft, [field]: event.target.value })} />
-                )}
-              </label>
-            ))}
-            <button className="ws-btn ws-btn--primary" type="submit" disabled={saving}>{saving ? "Saving…" : "Save decision"}</button>
-            <button className="ws-btn ws-btn--ghost" type="button" disabled={saving} onClick={() => setCreating(false)}>Cancel</button>
-          </form>
-        ) : selected ? (
+        {selected ? (
           <div className="ws-scroll ws-padded ws-animate-in" style={{ position: "relative", zIndex: 1 }}>
             {/* Decision header */}
             <div style={{ marginBottom: 28 }}>
@@ -290,15 +250,12 @@ export function DecisionWorkspace() {
               {selected.category && (
                 <span className="ws-pill ws-pill--mono">{selected.category}</span>
               )}
-              {Object.entries(selected).filter(([key]) => ["scenario", "reasoning", "confidence", "timestamp"].includes(key)).map(([key, value]) => (
-                <p key={key}><strong>{key}: </strong>{String(value ?? "")}</p>
-              ))}
             </div>
 
             {/* Chain section */}
             <div className="ws-card" style={{ padding: 22 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 20 }}>
-                <div style={{ width: 8, height: 8, borderRadius: 999, background: "var(--ws-surface)", boxShadow: "none" }} />
+                <div style={{ width: 8, height: 8, borderRadius: 999, background: "linear-gradient(135deg, var(--ws-accent), var(--ws-amber))", boxShadow: "0 0 10px rgba(74,163,255,0.4)" }} />
                 <div style={{ color: "var(--ws-text)", fontSize: 14, fontWeight: 700 }}>Causal Chain</div>
                 {chain.length > 0 && !chainLoading && (
                   <span className="ws-pill ws-pill--accent" style={{ marginLeft: "auto" }}>{chain.length} step{chain.length !== 1 ? "s" : ""}</span>

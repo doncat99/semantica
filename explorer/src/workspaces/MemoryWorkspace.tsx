@@ -6,7 +6,7 @@ import {
   readMarkdownResource,
   type MarkdownApplyResult,
 } from "./GraphWorkspace/markdownResourceClient";
-import { GRAPH_UI } from "./GraphWorkspace/graphTheme";
+import { GRAPH_THEME } from "./GraphWorkspace/graphTheme";
 
 interface MemorySummary {
   id: string;
@@ -306,15 +306,15 @@ const workspaceStyle: CSSProperties = {
   gridTemplateColumns: "minmax(220px, 300px) minmax(0, 1fr)",
   height: "100%",
   minHeight: 0,
-  background: GRAPH_UI.surface.stage,
+  background: GRAPH_THEME.ui.surface.stage,
 };
 
 const listPanelStyle: CSSProperties = {
   display: "flex",
   flexDirection: "column",
   minHeight: 0,
-  borderRight: `1px solid ${GRAPH_UI.surface.panelBorder}`,
-  background: GRAPH_UI.surface.panel,
+  borderRight: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}`,
+  background: GRAPH_THEME.ui.surface.panel,
 };
 
 const listHeaderStyle: CSSProperties = {
@@ -323,17 +323,17 @@ const listHeaderStyle: CSSProperties = {
   justifyContent: "space-between",
   gap: 12,
   padding: 16,
-  borderBottom: `1px solid ${GRAPH_UI.surface.panelBorder}`,
+  borderBottom: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}`,
 };
 
 const listTitleStyle: CSSProperties = {
-  color: GRAPH_UI.text.strong,
+  color: GRAPH_THEME.ui.text.strong,
   fontSize: 14,
   fontWeight: 700,
 };
 
 const listCountStyle: CSSProperties = {
-  color: GRAPH_UI.text.muted,
+  color: GRAPH_THEME.ui.text.muted,
   fontSize: 11,
   marginTop: 3,
 };
@@ -344,9 +344,9 @@ const iconButtonStyle: CSSProperties = {
   width: 30,
   height: 30,
   borderRadius: 8,
-  border: `1px solid ${GRAPH_UI.surface.panelBorder}`,
-  background: "var(--ws-surface-hover)",
-  color: GRAPH_UI.text.body,
+  border: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}`,
+  background: "rgba(255, 255, 255, 0.04)",
+  color: GRAPH_THEME.ui.text.body,
   cursor: "pointer",
 };
 
@@ -368,18 +368,18 @@ const memoryButtonStyle: CSSProperties = {
   borderRadius: 9,
   border: "1px solid transparent",
   background: "transparent",
-  color: GRAPH_UI.text.body,
+  color: GRAPH_THEME.ui.text.body,
   textAlign: "left",
   cursor: "pointer",
 };
 
 const selectedMemoryButtonStyle: CSSProperties = {
-  border: `1px solid ${GRAPH_UI.control.activeBorder}`,
-  background: GRAPH_UI.timeline.playheadSoft,
+  border: `1px solid ${GRAPH_THEME.ui.control.activeBorder}`,
+  background: GRAPH_THEME.ui.timeline.playheadSoft,
 };
 
 const memoryTypeStyle: CSSProperties = {
-  color: GRAPH_UI.timeline.playhead,
+  color: GRAPH_THEME.ui.timeline.playhead,
   fontSize: 10,
   fontWeight: 700,
   textTransform: "uppercase",
@@ -388,7 +388,7 @@ const memoryTypeStyle: CSSProperties = {
 const memoryIdStyle: CSSProperties = {
   maxWidth: "100%",
   overflow: "hidden",
-  color: GRAPH_UI.text.strong,
+  color: GRAPH_THEME.ui.text.strong,
   fontFamily: "monospace",
   fontSize: 12,
   textOverflow: "ellipsis",
@@ -398,7 +398,7 @@ const memoryIdStyle: CSSProperties = {
 const memoryExcerptStyle: CSSProperties = {
   display: "-webkit-box",
   overflow: "hidden",
-  color: GRAPH_UI.text.muted,
+  color: GRAPH_THEME.ui.text.muted,
   fontSize: 11,
   lineHeight: 1.45,
   WebkitBoxOrient: "vertical",
@@ -420,12 +420,12 @@ const selectionHeaderStyle: CSSProperties = {
 };
 
 const selectionLabelStyle: CSSProperties = {
-  color: GRAPH_UI.text.muted,
+  color: GRAPH_THEME.ui.text.muted,
   fontSize: 11,
 };
 
 const selectionIdStyle: CSSProperties = {
-  color: GRAPH_UI.text.strong,
+  color: GRAPH_THEME.ui.text.strong,
   fontFamily: "monospace",
   fontSize: 14,
   wordBreak: "break-all",
@@ -439,7 +439,7 @@ const emptyStyle: CSSProperties = {
   gap: 10,
   minHeight: 160,
   padding: 20,
-  color: GRAPH_UI.text.muted,
+  color: GRAPH_THEME.ui.text.muted,
   fontSize: 12,
   textAlign: "center",
 };
@@ -447,9 +447,9 @@ const emptyStyle: CSSProperties = {
 const retryButtonStyle: CSSProperties = {
   padding: "6px 10px",
   borderRadius: 7,
-  border: `1px solid ${GRAPH_UI.control.activeBorder}`,
-  background: GRAPH_UI.timeline.playheadSoft,
-  color: GRAPH_UI.timeline.playhead,
+  border: `1px solid ${GRAPH_THEME.ui.control.activeBorder}`,
+  background: GRAPH_THEME.ui.timeline.playheadSoft,
+  color: GRAPH_THEME.ui.timeline.playhead,
   cursor: "pointer",
 };
 
@@ -457,8 +457,8 @@ const alertStyle: CSSProperties = {
   marginBottom: 12,
   padding: "10px 12px",
   borderRadius: 8,
-  border: "1px solid var(--ws-red)",
-  background: "var(--ws-red-soft)",
-  color: "var(--ws-red)",
+  border: "1px solid rgba(248, 81, 73, 0.28)",
+  background: "rgba(248, 81, 73, 0.1)",
+  color: "#ffb4ad",
   fontSize: 12,
 };

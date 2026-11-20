@@ -105,7 +105,7 @@ export function HealthTab({ onFixInEditor }: HealthTabProps) {
             {health.dimensions.map((dimension) => (
               <div key={dimension.key} style={dimensionCardStyle}>
                 <div style={dimensionHeadStyle}>
-                  <span style={{ color: "var(--ws-text)", fontWeight: 900 }}>{dimension.label}</span>
+                  <span style={{ color: "#ebf3ff", fontWeight: 900 }}>{dimension.label}</span>
                   <span style={statusBadgeStyle(dimension.status)}>{dimension.status}</span>
                 </div>
                 <div style={barTrackStyle}>
@@ -141,8 +141,8 @@ function IssueRow({ issue, onFixInEditor }: { issue: HealthIssue; onFixInEditor?
     <div style={issueRowStyle}>
       <div style={severityDotStyle(issue.severity)} />
       <div>
-        <div style={{ color: "var(--ws-text)", fontWeight: 800 }}>{issue.entity_label || issue.category}</div>
-        <div style={{ color: "var(--ws-text-muted)", fontSize: 13, lineHeight: 1.45 }}>{issue.message}</div>
+        <div style={{ color: "#ebf3ff", fontWeight: 800 }}>{issue.entity_label || issue.category}</div>
+        <div style={{ color: "#8fa8c6", fontSize: 13, lineHeight: 1.45 }}>{issue.message}</div>
         {issue.entity_uri ? <div style={monoStyle}>{issue.entity_uri}</div> : null}
       </div>
       <span style={categoryStyle}>{issue.category}</span>
@@ -159,18 +159,18 @@ function IssueRow({ issue, onFixInEditor }: { issue: HealthIssue; onFixInEditor?
 }
 
 function dimensionColor(score: number, status: string) {
-  if (status === "unavailable") return "var(--ws-text-dim)";
+  if (status === "unavailable") return "#6a7f97";
   if (score >= 80) return "#7ce7d3";
   if (score >= 55) return "#f2b66d";
   return "#ff9daf";
 }
 
 function statusBadgeStyle(status: string): CSSProperties {
-  const color = status === "ok" ? "#7ce7d3" : status === "unavailable" ? "var(--ws-text-dim)" : "#f2b66d";
+  const color = status === "ok" ? "#7ce7d3" : status === "unavailable" ? "#6a7f97" : "#f2b66d";
   return {
     color,
-    background: `color-mix(in srgb, ${color} 9%, transparent)`,
-    border: `1px solid color-mix(in srgb, ${color} 19%, transparent)`,
+    background: `${color}18`,
+    border: `1px solid ${color}30`,
     borderRadius: 999,
     padding: "2px 7px",
     fontSize: 10,
@@ -181,34 +181,34 @@ function statusBadgeStyle(status: string): CSSProperties {
 
 function severityDotStyle(severity: string): CSSProperties {
   const color = severity === "critical" ? "#ff9daf" : severity === "warning" ? "#f2b66d" : "#58a6ff";
-  return { width: 10, height: 10, borderRadius: "50%", background: color, boxShadow: `0 0 18px color-mix(in srgb, ${color} 33%, transparent)`, marginTop: 5 };
+  return { width: 10, height: 10, borderRadius: "50%", background: color, boxShadow: `0 0 18px ${color}55`, marginTop: 5 };
 }
 
 const pageStyle: CSSProperties = { height: "100%", overflow: "auto", padding: 22, display: "flex", flexDirection: "column", gap: 16 };
-const heroStyle: CSSProperties = { display: "flex", justifyContent: "space-between", gap: 18, padding: 22, border: "1px solid var(--ws-border)", borderRadius: 22, background: "var(--ws-surface)" };
+const heroStyle: CSSProperties = { display: "flex", justifyContent: "space-between", gap: 18, padding: 22, border: "1px solid rgba(127,208,255,0.12)", borderRadius: 22, background: "linear-gradient(135deg, rgba(11,25,42,0.94), rgba(7,14,25,0.9))" };
 const kickerStyle: CSSProperties = { display: "inline-flex", gap: 8, alignItems: "center", color: "#9ee8d7", fontSize: 11, fontWeight: 900, letterSpacing: "0.12em", textTransform: "uppercase" };
-const titleStyle: CSSProperties = { margin: "8px 0", color: "var(--ws-text)", fontSize: 26, letterSpacing: "-0.04em" };
-const textStyle: CSSProperties = { margin: 0, color: "var(--ws-text-muted)", lineHeight: 1.6, maxWidth: 620 };
+const titleStyle: CSSProperties = { margin: "8px 0", color: "#ebf3ff", fontSize: 26, letterSpacing: "-0.04em" };
+const textStyle: CSSProperties = { margin: 0, color: "#8fa8c6", lineHeight: 1.6, maxWidth: 620 };
 const selectorShellStyle: CSSProperties = { minWidth: 320 };
-const labelStyle: CSSProperties = { display: "block", color: "var(--ws-text-dim)", fontSize: 11, fontWeight: 800, margin: "0 0 6px", textTransform: "uppercase", letterSpacing: "0.08em" };
-const inputStyle: CSSProperties = { width: "100%", boxSizing: "border-box", border: "1px solid var(--ws-border)", borderRadius: 12, padding: "10px 12px", background: "var(--ws-surface)", color: "var(--ws-text)" };
+const labelStyle: CSSProperties = { display: "block", color: "#6a7f97", fontSize: 11, fontWeight: 800, margin: "0 0 6px", textTransform: "uppercase", letterSpacing: "0.08em" };
+const inputStyle: CSSProperties = { width: "100%", boxSizing: "border-box", border: "1px solid rgba(127,208,255,0.14)", borderRadius: 12, padding: "10px 12px", background: "rgba(3,9,18,0.8)", color: "#ebf3ff" };
 const scoreGridStyle: CSSProperties = { display: "grid", gridTemplateColumns: "220px repeat(5, minmax(180px, 1fr))", gap: 12 };
-const scoreCardStyle: CSSProperties = { padding: 18, borderRadius: 20, background: "var(--ws-surface)", border: "1px solid rgba(124,231,211,0.2)", display: "flex", flexDirection: "column", gap: 10 };
+const scoreCardStyle: CSSProperties = { padding: 18, borderRadius: 20, background: "rgba(15,35,52,0.88)", border: "1px solid rgba(124,231,211,0.2)", display: "flex", flexDirection: "column", gap: 10 };
 const scoreValueStyle: CSSProperties = { color: "#9ee8d7", fontSize: 52, lineHeight: 1, fontWeight: 950, letterSpacing: "-0.06em" };
-const dimensionCardStyle: CSSProperties = { padding: 16, borderRadius: 18, background: "var(--ws-surface)", border: "1px solid var(--ws-border)" };
+const dimensionCardStyle: CSSProperties = { padding: 16, borderRadius: 18, background: "rgba(9,19,34,0.78)", border: "1px solid rgba(127,208,255,0.12)" };
 const dimensionHeadStyle: CSSProperties = { display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center", marginBottom: 12 };
-const barTrackStyle: CSSProperties = { height: 8, borderRadius: 999, background: "var(--ws-surface-hover)", overflow: "hidden" };
+const barTrackStyle: CSSProperties = { height: 8, borderRadius: 999, background: "rgba(255,255,255,0.06)", overflow: "hidden" };
 const barFillStyle: CSSProperties = { height: "100%", borderRadius: 999 };
-const dimensionFootStyle: CSSProperties = { display: "flex", flexDirection: "column", gap: 6, color: "var(--ws-text-muted)", fontSize: 12, marginTop: 10 };
-const cardStyle: CSSProperties = { padding: 18, border: "1px solid var(--ws-border)", borderRadius: 20, background: "var(--ws-surface)" };
-const sectionTitleStyle: CSSProperties = { margin: "0 0 14px", color: "var(--ws-text)", fontSize: 16 };
+const dimensionFootStyle: CSSProperties = { display: "flex", flexDirection: "column", gap: 6, color: "#8fa8c6", fontSize: 12, marginTop: 10 };
+const cardStyle: CSSProperties = { padding: 18, border: "1px solid rgba(127,208,255,0.12)", borderRadius: 20, background: "rgba(9,19,34,0.78)" };
+const sectionTitleStyle: CSSProperties = { margin: "0 0 14px", color: "#ebf3ff", fontSize: 16 };
 const issueListStyle: CSSProperties = { display: "flex", flexDirection: "column", gap: 8 };
-const issueRowStyle: CSSProperties = { display: "grid", gridTemplateColumns: "14px 1fr auto auto", gap: 12, alignItems: "start", padding: 12, borderRadius: 14, background: "var(--ws-surface-hover)", border: "1px solid var(--ws-border)" };
+const issueRowStyle: CSSProperties = { display: "grid", gridTemplateColumns: "14px 1fr auto auto", gap: 12, alignItems: "start", padding: 12, borderRadius: 14, background: "rgba(255,255,255,0.03)", border: "1px solid rgba(127,208,255,0.08)" };
 const categoryStyle: CSSProperties = { color: "#9ee8d7", border: "1px solid rgba(158,232,215,0.22)", borderRadius: 999, padding: "4px 8px", fontSize: 10, fontWeight: 900 };
-const smallButtonStyle: CSSProperties = { display: "inline-flex", gap: 6, alignItems: "center", border: "1px solid var(--ws-border)", borderRadius: 10, padding: "7px 9px", background: "var(--ws-border)", color: "var(--ws-text)", cursor: "pointer", fontWeight: 800 };
-const secondaryButtonStyle: CSSProperties = { display: "inline-flex", gap: 8, alignItems: "center", justifyContent: "center", border: "1px solid var(--ws-border)", borderRadius: 12, padding: "10px 12px", background: "var(--ws-border)", color: "var(--ws-text)", cursor: "pointer", fontWeight: 900 };
-const monoStyle: CSSProperties = { marginTop: 4, color: "var(--ws-text-dim)", fontSize: 11, fontFamily: "JetBrains Mono, monospace", wordBreak: "break-all" };
-const mutedStyle: CSSProperties = { margin: 0, color: "var(--ws-text-dim)", fontSize: 13 };
-const loadingStyle: CSSProperties = { display: "inline-flex", alignItems: "center", gap: 8, color: "var(--ws-text-muted)", padding: 18 };
-const emptyStyle: CSSProperties = { color: "var(--ws-text-dim)", padding: 22 };
+const smallButtonStyle: CSSProperties = { display: "inline-flex", gap: 6, alignItems: "center", border: "1px solid rgba(127,208,255,0.16)", borderRadius: 10, padding: "7px 9px", background: "rgba(127,208,255,0.08)", color: "#ebf3ff", cursor: "pointer", fontWeight: 800 };
+const secondaryButtonStyle: CSSProperties = { display: "inline-flex", gap: 8, alignItems: "center", justifyContent: "center", border: "1px solid rgba(127,208,255,0.16)", borderRadius: 12, padding: "10px 12px", background: "rgba(127,208,255,0.08)", color: "#ebf3ff", cursor: "pointer", fontWeight: 900 };
+const monoStyle: CSSProperties = { marginTop: 4, color: "#6a7f97", fontSize: 11, fontFamily: "JetBrains Mono, monospace", wordBreak: "break-all" };
+const mutedStyle: CSSProperties = { margin: 0, color: "#6a7f97", fontSize: 13 };
+const loadingStyle: CSSProperties = { display: "inline-flex", alignItems: "center", gap: 8, color: "#8fa8c6", padding: 18 };
+const emptyStyle: CSSProperties = { color: "#6a7f97", padding: 22 };
 const errorStyle: CSSProperties = { display: "flex", alignItems: "center", gap: 8, padding: 12, borderRadius: 14, color: "#ffb4c2", background: "rgba(255,157,175,0.1)", border: "1px solid rgba(255,157,175,0.18)" };

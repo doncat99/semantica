@@ -214,6 +214,57 @@ def test_topic_incomplete_membership_prevents_activation(tmp_path):
     store.close()
 
 
+def test_native_vocabulary_scene_is_bounded_skos_projection(tmp_path):
+    from semantica.triplet_store.publication_records import P, PublicationRecords
+    from semantica.semantic_worker_context import query_cancellation
+    from threading import Event
+
+    store, _, receipt, identity = fixture(tmp_path)
+    try:
+        generation = stage(store, receipt, identity)
+        owner = PublicationRecords(store, 'p')
+        skos = 'http://www.w3.org/2004/02/skos/core#'
+        rdf = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#'
+        store.store.update(f'''INSERT DATA {{ GRAPH {owner.publication_graph} {{
+            <urn:scheme:one> <{rdf}type> <{skos}ConceptScheme> ;
+                <{skos}prefLabel> "One" .
+            <urn:scheme:two> <{rdf}type> <{skos}ConceptScheme> ;
+                <{skos}prefLabel> "Two" .
+            <urn:concept:a> <{rdf}type> <{skos}Concept> ;
+                <{skos}inScheme> <urn:scheme:one> ; <{skos}prefLabel> "Alpha" ;
+                <{skos}altLabel> "A" ; <{skos}broader> <urn:concept:parent> .
+            <urn:concept:b> <{rdf}type> <{skos}Concept> ;
+                <{skos}inScheme> <urn:scheme:one> ; <{skos}prefLabel> "Beta" .
+            <urn:concept:other> <{rdf}type> <{skos}Concept> ;
+                <{skos}inScheme> <urn:scheme:other> ; <{skos}prefLabel> "Other" .
+        }} }}''')
+        store.activate_publication('p', generation, indexes=indexes())
+
+        schemes = store.read_publication_scene('p', generation, dict(kind='schemes', limit=1))
+        assert schemes['nodes'] == [dict(id='urn:scheme:one', kind='scheme', label='One')]
+        assert schemes['next_cursor'] == 'urn:scheme:one'
+        assert store.read_publication_scene('p', generation, dict(kind='schemes', after=schemes['next_cursor']))['nodes'][0]['id'] == 'urn:scheme:two'
+
+        concepts = store.read_publication_scene('p', generation, dict(kind='concepts', scheme='urn:scheme:one'))
+        assert [node['id'] for node in concepts['nodes']] == ['urn:concept:a', 'urn:concept:b']
+        assert concepts['nodes'][0]['altLabels'] == ['A']
+        assert concepts['nodes'][0]['parent'] == 'urn:concept:parent'
+        assert store.read_publication_scene('p', generation, dict(kind='concepts', scheme='urn:scheme:other'))['nodes'][0]['id'] == 'urn:concept:other'
+        with pytest.raises(ProcessingError, match='byte budget'):
+            store.read_publication_scene('p', generation, dict(kind='concepts', scheme='urn:scheme:one', maxBytes=16))
+
+        event = Event()
+        token = query_cancellation.set(event)
+        try:
+            event.set()
+            with pytest.raises(ProcessingError, match='canceled'):
+                store.read_publication_scene('p', generation, dict(kind='concepts', scheme='urn:scheme:one'))
+        finally:
+            query_cancellation.reset(token)
+    finally:
+        store.close()
+
+
 def test_topic_staging_rejects_colliding_kinds_and_conflicting_batch_atomically(tmp_path):
     from semantica.triplet_store.publication_records import P
     store, _, receipt, identity = fixture(tmp_path)
@@ -732,6 +783,7 @@ def test_visible_native_scene_links_preserve_relation_qualifiers(tmp_path, monke
     entities = store.adopt_extraction(bound, 'entities', [acme, engine], text=text, native_ranges=ranges, accepted_digest='entities')
     relation = Relation(acme, 'owns', engine, .8, text, dict(subject_id='a', object_id='b',
         evidence_start=0, evidence_end=len(text), evidence_occurrence=0,
+        valid_from='2019-04-01', valid_until='2022-03-31',
         qualifiers=dict(polarity='negative', condition='under contract', time='2026', unit='shares', value='10')))
     relations = store.adopt_extraction(bound, 'relations', [relation], text=text, native_ranges=ranges, accepted_digest='relations')
     ids = [ExtractionRecords(store,bound,'entities').entity_node(entity).value for entity in (acme,engine)]
@@ -752,6 +804,9 @@ def test_visible_native_scene_links_preserve_relation_qualifiers(tmp_path, monke
     assert link['fields'][F+'polarity'][0] == dict(type='iri',value=F+'negative')
     assert link['fields'][F+'qualifiedValue'][0]['value'] == '10'
     assert link['evidenceIds'] and link['sourceIds'] == ['s']
+    effective = store.read_publication_scene('p', generation, dict(kind='links', visibleIds=['urn:canonical:0','urn:canonical:1'],
+        fields=['id','source','target','predicate','status','validTime']))['links'][0]
+    assert effective['validTime'] == {'status': 'available', 'from': '2019-04-01', 'until': '2022-03-31'}
     assert store.read_publication_scene('p',generation,dict(fields=['id', 'source', 'target', 'predicate', 'fields', 'sourceIds', 'evidenceIds'], kind='links',visibleIds=['urn:canonical:0']))['links'] == []
     incident = store.read_publication_scene('p', generation, dict(fields=['id', 'source', 'target', 'predicate', 'fields', 'sourceIds', 'evidenceIds', 'nodes'], kind='incident',nodeId='urn:canonical:0',limit=1))
     assert incident['links'] == page['links']
@@ -779,6 +834,9 @@ def test_visible_native_scene_links_preserve_relation_qualifiers(tmp_path, monke
     map_fields=['id','source','target','predicate','status']
     visible=store.read_publication_scene('p',generation,dict(kind='links',visibleIds=['urn:canonical:0','urn:canonical:1'],fields=map_fields))
     assert visible['links']==[dict(projected['links'][0],status='candidate')]
+    neighborhood=store.read_publication_scene('p',generation,dict(kind='neighborhood',nodeId='urn:canonical:0',fields=map_fields,limit=32))
+    assert neighborhood['links']==visible['links'] and neighborhood['nodes']==[]
+    assert neighborhood['next_cursor'] is None
     for selection in (dict(kind='topology'), dict(fields=['id', 'source', 'target', 'predicate', 'fields', 'sourceIds', 'evidenceIds', 'nodes'], kind='incident', nodeId='urn:canonical:0')):
         complete = store.read_publication_scene('p', generation, dict(selection, fields=map_fields))
         assert complete['links'] == visible['links'] and complete['nodes'] == []
@@ -1716,7 +1774,7 @@ def test_supporting_reference_requires_current_source_address_and_admitted_relat
     finally:
         store.close()
 
-@pytest.mark.parametrize('kind', ['nodes', 'links', 'incident'])
+@pytest.mark.parametrize('kind', ['nodes', 'links', 'incident', 'neighborhood'])
 def test_scene_requires_explicit_consumer_fields(tmp_path, kind):
     store, _, receipt, identity = fixture(tmp_path)
     try:
@@ -1725,7 +1783,7 @@ def test_scene_requires_explicit_consumer_fields(tmp_path, kind):
         selection = dict(kind=kind)
         if kind == 'links':
             selection['visibleIds'] = ['urn:canonical:acme']
-        if kind == 'incident':
+        if kind in {'incident', 'neighborhood'}:
             selection['nodeId'] = 'urn:canonical:acme'
         with pytest.raises(ProcessingError, match='explicit.*fields'):
             store.read_publication_scene('p', generation, selection)

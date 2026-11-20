@@ -242,7 +242,7 @@ export function AlignmentsTab() {
                       const cellItems = matrix.cells.get(key) ?? [];
                       const isDiag = row.uri === col.uri;
                       return (
-                        <td key={col.uri} style={{ ...matrixCellStyle, background: isDiag ? "var(--ws-surface-hover)" : undefined }}>
+                        <td key={col.uri} style={{ ...matrixCellStyle, background: isDiag ? "rgba(255,255,255,0.015)" : undefined }}>
                           {isDiag ? <span style={mutedStyle}>—</span> : cellItems.length ? (
                             <div style={{ display: "flex", flexDirection: "column", gap: 4 }}>
                               {cellItems.map((item) => (
@@ -262,7 +262,7 @@ export function AlignmentsTab() {
                                 </span>
                               ))}
                             </div>
-                          ) : <span style={{ color: "var(--ws-border)", fontSize: 12 }}>·</span>}
+                          ) : <span style={{ color: "rgba(127,208,255,0.15)", fontSize: 12 }}>·</span>}
                         </td>
                       );
                     })}
@@ -355,10 +355,10 @@ export function AlignmentsTab() {
           <div style={suggestionListStyle}>
             {suggestions.map((item) => (
               <button key={`${item.source_uri}-${item.target_uri}-${item.relation}`} style={suggestionStyle} onClick={() => handleAcceptSuggestion(item)}>
-                <span style={{ color: "var(--ws-text)", fontWeight: 800 }}>{item.source_label}</span>
+                <span style={{ color: "#ebf3ff", fontWeight: 800 }}>{item.source_label}</span>
                 <span style={{ color: RELATION_COLORS[item.relation] }}>{item.relation}</span>
-                <span style={{ color: "var(--ws-text)", fontWeight: 800 }}>{item.target_label}</span>
-                <span style={{ color: "var(--ws-text-muted)" }}>{Math.round(item.score * 100)}%</span>
+                <span style={{ color: "#ebf3ff", fontWeight: 800 }}>{item.target_label}</span>
+                <span style={{ color: "#8fa8c6" }}>{Math.round(item.score * 100)}%</span>
               </button>
             ))}
             {!suggestions.length ? <p style={mutedStyle}>Run suggestions to review ranked candidate mappings.</p> : null}
@@ -372,14 +372,14 @@ export function AlignmentsTab() {
           {alignments.map((item) => (
             <div key={item.id} style={rowStyle}>
               <div>
-                <div style={{ color: "var(--ws-text)", fontWeight: 800 }}>{item.source_label || item.source_uri}</div>
+                <div style={{ color: "#ebf3ff", fontWeight: 800 }}>{item.source_label || item.source_uri}</div>
                 <div style={monoStyle}>{item.source_uri}</div>
               </div>
               <div style={{ ...relationBadgeStyle, color: RELATION_COLORS[item.relation], borderColor: `${RELATION_COLORS[item.relation]}55` }}>
                 {item.relation}
               </div>
               <div>
-                <div style={{ color: "var(--ws-text)", fontWeight: 800 }}>{item.target_label || item.target_uri}</div>
+                <div style={{ color: "#ebf3ff", fontWeight: 800 }}>{item.target_label || item.target_uri}</div>
                 <div style={monoStyle}>{item.target_uri}</div>
               </div>
               <div style={confidenceStyle}>{Math.round(item.confidence * 100)}%</div>
@@ -399,39 +399,39 @@ function Metric({ label, value }: { label: string; value: number }) {
   return (
     <div style={metricStyle}>
       <span style={{ color: "#9ee8d7", fontSize: 20, fontWeight: 900 }}>{value.toLocaleString()}</span>
-      <span style={{ color: "var(--ws-text-dim)", fontSize: 11 }}>{label}</span>
+      <span style={{ color: "#6a7f97", fontSize: 11 }}>{label}</span>
     </div>
   );
 }
 
 const pageStyle: CSSProperties = { height: "100%", overflow: "auto", padding: 22, display: "flex", flexDirection: "column", gap: 16 };
-const heroStyle: CSSProperties = { display: "flex", justifyContent: "space-between", gap: 18, padding: 22, border: "1px solid var(--ws-border)", borderRadius: 22, background: "var(--ws-surface)" };
+const heroStyle: CSSProperties = { display: "flex", justifyContent: "space-between", gap: 18, padding: 22, border: "1px solid rgba(127,208,255,0.12)", borderRadius: 22, background: "linear-gradient(135deg, rgba(11,25,42,0.94), rgba(7,14,25,0.9))" };
 const kickerStyle: CSSProperties = { display: "inline-flex", gap: 8, alignItems: "center", color: "#9ee8d7", fontSize: 11, fontWeight: 900, letterSpacing: "0.12em", textTransform: "uppercase" };
-const titleStyle: CSSProperties = { margin: "8px 0", color: "var(--ws-text)", fontSize: 26, letterSpacing: "-0.04em" };
-const textStyle: CSSProperties = { margin: 0, color: "var(--ws-text-muted)", lineHeight: 1.6, maxWidth: 620 };
+const titleStyle: CSSProperties = { margin: "8px 0", color: "#ebf3ff", fontSize: 26, letterSpacing: "-0.04em" };
+const textStyle: CSSProperties = { margin: 0, color: "#8fa8c6", lineHeight: 1.6, maxWidth: 620 };
 const summaryGridStyle: CSSProperties = { display: "grid", gridTemplateColumns: "repeat(3, minmax(100px, 1fr))", gap: 10, minWidth: 320 };
-const metricStyle: CSSProperties = { padding: 14, borderRadius: 16, background: "var(--ws-surface-hover)", border: "1px solid var(--ws-border)", display: "flex", flexDirection: "column", gap: 4 };
+const metricStyle: CSSProperties = { padding: 14, borderRadius: 16, background: "rgba(255,255,255,0.035)", border: "1px solid rgba(127,208,255,0.1)", display: "flex", flexDirection: "column", gap: 4 };
 const gridStyle: CSSProperties = { display: "grid", gridTemplateColumns: "minmax(320px, 0.9fr) minmax(360px, 1.1fr)", gap: 16 };
-const cardStyle: CSSProperties = { padding: 18, border: "1px solid var(--ws-border)", borderRadius: 20, background: "var(--ws-surface)", boxShadow: "none" };
-const sectionTitleStyle: CSSProperties = { margin: "0 0 14px", color: "var(--ws-text)", fontSize: 16 };
-const labelStyle: CSSProperties = { display: "block", color: "var(--ws-text-dim)", fontSize: 11, fontWeight: 800, margin: "10px 0 6px", textTransform: "uppercase", letterSpacing: "0.08em" };
-const inputStyle: CSSProperties = { width: "100%", boxSizing: "border-box", border: "1px solid var(--ws-border)", borderRadius: 12, padding: "10px 12px", background: "var(--ws-surface)", color: "var(--ws-text)" };
+const cardStyle: CSSProperties = { padding: 18, border: "1px solid rgba(127,208,255,0.12)", borderRadius: 20, background: "rgba(9,19,34,0.78)", boxShadow: "inset 0 1px 0 rgba(255,255,255,0.04)" };
+const sectionTitleStyle: CSSProperties = { margin: "0 0 14px", color: "#ebf3ff", fontSize: 16 };
+const labelStyle: CSSProperties = { display: "block", color: "#6a7f97", fontSize: 11, fontWeight: 800, margin: "10px 0 6px", textTransform: "uppercase", letterSpacing: "0.08em" };
+const inputStyle: CSSProperties = { width: "100%", boxSizing: "border-box", border: "1px solid rgba(127,208,255,0.14)", borderRadius: 12, padding: "10px 12px", background: "rgba(3,9,18,0.8)", color: "#ebf3ff" };
 const twoColStyle: CSSProperties = { display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12 };
-const primaryButtonStyle: CSSProperties = { marginTop: 14, width: "100%", border: "1px solid rgba(124,231,211,0.35)", borderRadius: 12, padding: "11px 13px", background: "var(--ws-surface)", color: "var(--ws-text)", fontWeight: 900, cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8 };
-const secondaryButtonStyle: CSSProperties = { ...primaryButtonStyle, background: "var(--ws-border)", borderColor: "var(--ws-border)" };
+const primaryButtonStyle: CSSProperties = { marginTop: 14, width: "100%", border: "1px solid rgba(124,231,211,0.35)", borderRadius: 12, padding: "11px 13px", background: "linear-gradient(135deg, rgba(20,151,136,0.55), rgba(74,163,255,0.35))", color: "#ebf3ff", fontWeight: 900, cursor: "pointer", display: "inline-flex", alignItems: "center", justifyContent: "center", gap: 8 };
+const secondaryButtonStyle: CSSProperties = { ...primaryButtonStyle, background: "rgba(127,208,255,0.08)", borderColor: "rgba(127,208,255,0.18)" };
 const suggestionListStyle: CSSProperties = { display: "flex", flexDirection: "column", gap: 8, marginTop: 14, maxHeight: 260, overflow: "auto" };
-const suggestionStyle: CSSProperties = { display: "grid", gridTemplateColumns: "1fr auto 1fr auto", gap: 10, alignItems: "center", textAlign: "left", border: "1px solid var(--ws-border)", borderRadius: 12, background: "var(--ws-surface-hover)", padding: 10, cursor: "pointer" };
+const suggestionStyle: CSSProperties = { display: "grid", gridTemplateColumns: "1fr auto 1fr auto", gap: 10, alignItems: "center", textAlign: "left", border: "1px solid rgba(127,208,255,0.1)", borderRadius: 12, background: "rgba(255,255,255,0.03)", padding: 10, cursor: "pointer" };
 const tableStyle: CSSProperties = { display: "flex", flexDirection: "column", gap: 8 };
-const rowStyle: CSSProperties = { display: "grid", gridTemplateColumns: "1fr auto 1fr auto auto", gap: 12, alignItems: "center", padding: 12, borderRadius: 14, background: "var(--ws-surface-hover)", border: "1px solid var(--ws-border)" };
-const monoStyle: CSSProperties = { color: "var(--ws-text-dim)", fontSize: 11, fontFamily: "JetBrains Mono, monospace", wordBreak: "break-all" };
+const rowStyle: CSSProperties = { display: "grid", gridTemplateColumns: "1fr auto 1fr auto auto", gap: 12, alignItems: "center", padding: 12, borderRadius: 14, background: "rgba(255,255,255,0.03)", border: "1px solid rgba(127,208,255,0.08)" };
+const monoStyle: CSSProperties = { color: "#6a7f97", fontSize: 11, fontFamily: "JetBrains Mono, monospace", wordBreak: "break-all" };
 const relationBadgeStyle: CSSProperties = { padding: "5px 9px", border: "1px solid", borderRadius: 999, fontSize: 10, fontWeight: 900 };
 const confidenceStyle: CSSProperties = { color: "#f2b66d", fontWeight: 900 };
 const iconButtonStyle: CSSProperties = { width: 34, height: 34, borderRadius: 10, border: "1px solid rgba(255,157,175,0.18)", background: "rgba(255,157,175,0.08)", color: "#ff9daf", cursor: "pointer" };
-const mutedStyle: CSSProperties = { margin: 0, color: "var(--ws-text-dim)", fontSize: 13 };
+const mutedStyle: CSSProperties = { margin: 0, color: "#6a7f97", fontSize: 13 };
 const errorStyle: CSSProperties = { padding: 12, borderRadius: 14, color: "#ffb4c2", background: "rgba(255,157,175,0.1)", border: "1px solid rgba(255,157,175,0.18)" };
 const ephemeralBannerStyle: CSSProperties = { padding: "9px 14px", borderRadius: 12, color: "#f2b66d", background: "rgba(242,182,109,0.08)", border: "1px solid rgba(242,182,109,0.22)", fontSize: 12 };
 const matrixTableStyle: CSSProperties = { borderCollapse: "collapse", minWidth: "100%", fontSize: 12 };
-const matrixCornerStyle: CSSProperties = { padding: "8px 12px", borderBottom: "1px solid var(--ws-border)" };
-const matrixColHeaderStyle: CSSProperties = { padding: "8px 12px", color: "#9ee8d7", fontWeight: 900, borderBottom: "1px solid var(--ws-border)", textAlign: "center", whiteSpace: "nowrap" };
-const matrixRowHeaderStyle: CSSProperties = { padding: "8px 12px", color: "#9ee8d7", fontWeight: 900, borderRight: "1px solid var(--ws-border)", whiteSpace: "nowrap" };
-const matrixCellStyle: CSSProperties = { padding: "8px 10px", borderBottom: "1px solid var(--ws-border)", borderRight: "1px solid var(--ws-border)", textAlign: "center", verticalAlign: "middle", minWidth: 100 };
+const matrixCornerStyle: CSSProperties = { padding: "8px 12px", borderBottom: "1px solid rgba(127,208,255,0.1)" };
+const matrixColHeaderStyle: CSSProperties = { padding: "8px 12px", color: "#9ee8d7", fontWeight: 900, borderBottom: "1px solid rgba(127,208,255,0.1)", textAlign: "center", whiteSpace: "nowrap" };
+const matrixRowHeaderStyle: CSSProperties = { padding: "8px 12px", color: "#9ee8d7", fontWeight: 900, borderRight: "1px solid rgba(127,208,255,0.1)", whiteSpace: "nowrap" };
+const matrixCellStyle: CSSProperties = { padding: "8px 10px", borderBottom: "1px solid rgba(127,208,255,0.06)", borderRight: "1px solid rgba(127,208,255,0.06)", textAlign: "center", verticalAlign: "middle", minWidth: 100 };

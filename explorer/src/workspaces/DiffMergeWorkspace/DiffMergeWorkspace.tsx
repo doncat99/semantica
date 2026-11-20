@@ -77,13 +77,13 @@ export function DiffMergeWorkspace() {
             <span style={{ fontSize: 10, fontWeight: 700, color: "var(--ws-amber)", letterSpacing: "0.08em", textTransform: "uppercase" }}>Sample preview</span>
             <span style={{ fontSize: 11, color: "var(--ws-text-dim)" }}>— field comparison will load from the graph once the backend is connected</span>
           </div>
-          <div style={{ display: "grid", gridTemplateColumns: "140px 1fr 1fr", background: "var(--ws-surface)", borderBottom: "1px solid var(--ws-border)" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "140px 1fr 1fr", background: "rgba(0,0,0,0.28)", borderBottom: "1px solid var(--ws-border)" }}>
             <div style={{ padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "var(--ws-text-dim)", letterSpacing: "0.08em", textTransform: "uppercase" }}>Field</div>
             <div style={{ padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "var(--ws-accent)", letterSpacing: "0.08em", textTransform: "uppercase", borderLeft: "1px solid var(--ws-border)" }}>Primary (keep)</div>
             <div style={{ padding: "10px 16px", fontSize: 11, fontWeight: 700, color: "#fca5a5", letterSpacing: "0.08em", textTransform: "uppercase", borderLeft: "1px solid var(--ws-border)" }}>Duplicate (remove)</div>
           </div>
           {MOCK_FIELDS.map((row) => (
-            <div key={row.label} style={{ display: "grid", gridTemplateColumns: "140px 1fr 1fr", borderBottom: "1px solid var(--ws-accent-soft)", background: row.differs ? "rgba(242,182,109,0.03)" : "transparent" }}>
+            <div key={row.label} style={{ display: "grid", gridTemplateColumns: "140px 1fr 1fr", borderBottom: "1px solid rgba(74,163,255,0.06)", background: row.differs ? "rgba(242,182,109,0.03)" : "transparent" }}>
               <div style={{ padding: "12px 16px", fontSize: 12, fontWeight: 600, color: "var(--ws-text-dim)" }}>{row.label}</div>
               <div style={{ padding: "12px 16px", fontSize: 13, color: "var(--ws-text)", borderLeft: "1px solid var(--ws-border)" }}>{row.primary}</div>
               <div style={{ padding: "12px 16px", fontSize: 13, color: row.differs ? "#fbbf24" : "var(--ws-text)", fontWeight: row.differs ? 700 : 400, borderLeft: "1px solid var(--ws-border)" }}>

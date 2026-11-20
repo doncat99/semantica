@@ -25,10 +25,9 @@ import { InspectorPanel, MetricChip, SurfaceCard } from "../../ui/primitives";
 import { lazy, Suspense } from "react";
 import { SigmaSceneAdapter } from "./SigmaSceneAdapter";
 import { useLoadGraph, useReloadGraph } from "./useLoadGraph";
-import { EMPTY_GRAPH_FILTERS, type GraphFilters } from './graphFilters';
 import { GraphLoadingOverlay } from "./GraphLoadingOverlay";
 import { createGraphLoadProgress, getGraphLoadTitle } from "./graphLoading";
-import { GRAPH_THEME, GRAPH_UI, withAlpha } from "./graphTheme";
+import { GRAPH_THEME, withAlpha } from "./graphTheme";
 import { buildGraphColorLegend, type GraphColorLegendItem } from "./graphColorLegend";
 import { focusedUnavailableReasonText, groupedViewReasonText } from "./graphViewCopy";
 import { localGraphRequiresDraftConfirm } from "./localGraphTransition";
@@ -43,7 +42,7 @@ import {
 } from "./plugins";
 import { explorationEffectsShouldLoad, neighborhoodPanelShouldLoad, temporalOverlayShouldLoad } from "./pluginRegistryPredicates";
 import { shouldFetchTemporalBounds, shouldFetchTemporalSnapshot } from "./temporalLifecyclePredicates";
-import { clearTemporalVisibility, createTemporalSnapshotGuards, type TemporalSnapshotResponse } from "./temporalSnapshotGuards";
+import { createTemporalSnapshotGuards, type TemporalSnapshotResponse } from "./temporalSnapshotGuards";
 import { SMALL_GRAPH_MAX_NODES } from "./smallGraphLayout";
 import { buildRealtimeEdgeAttributes } from "./realtimeGraphAttributes";
 import type { LinkPrediction, PathResponse } from "./GraphInspectorPanel";
@@ -89,7 +88,6 @@ type TemporalBounds = {
   min?: string | null;
   max?: string | null;
 };
-type TemporalAvailability = "loading" | "ready" | "none" | "error";
 
 type ExploreLayoutState = {
   showInspector: boolean;
@@ -183,6 +181,16 @@ function debugGraphWorkspace(message: string, payload?: Record<string, unknown>)
     return;
   }
   console.debug(`[GraphWorkspace] ${message}`, payload ?? {});
+}
+
+function getGraphSummarySignature(summary: GraphLoadSummary): string {
+  return [
+    summary.nodeCount,
+    summary.edgeCount,
+    summary.layoutSource ?? "unknown",
+    summary.layoutReady ? "ready" : "runtime",
+    summary.loadTimeMs,
+  ].join(":");
 }
 
 function useDebounce<T>(value: T, delay: number): T {
@@ -340,7 +348,7 @@ function SearchCommandBar({
           return response.json();
         })
         .then((data: { results?: SearchResult[] }) => {
-          setSuggestions((data.results ?? []).filter(result => graph.hasNode(result.node.id)));
+          setSuggestions(data.results ?? []);
           setSuggestionsOpen(true);
           setHighlightedIndex(-1);
         })
@@ -451,28 +459,21 @@ function SearchCommandBar({
   );
 }
 
-function SemanticColorLegend({ items, expanded, onToggle }: {
-  items: GraphColorLegendItem[];
-  expanded: boolean;
-  onToggle: () => void;
-}) {
+function SemanticColorLegend({ items }: { items: GraphColorLegendItem[] }) {
   if (!items.length) return null;
   return (
     <div className="explore-color-legend" role="group" aria-label="Node colors">
-      <button type="button" className="explore-color-legend-toggle" aria-expanded={expanded} onClick={onToggle}>
-        <span className="explore-color-legend-label" title="Base semantic colors; selection, zoom, and distance effects can change node appearance.">
-          Node colors
-        </span>
-        <span aria-hidden="true">{expanded ? "Hide" : `${items.length} groups`}</span>
-      </button>
-      {expanded ? <ul className="explore-color-legend-items">
-          {items.map((item) => (
-            <li key={item.id} className="explore-color-legend-item" title={`${item.group}: ${item.count.toLocaleString()} nodes`}>
-              <span className="explore-color-legend-mark" style={{ backgroundColor: item.color }} aria-hidden="true" />
-              <span className="explore-color-legend-name">{item.group}</span>
-            </li>
-          ))}
-        </ul> : null}
+      <span className="explore-color-legend-label" title="Base semantic colors; selection, zoom, and distance effects can change node appearance.">
+        Node colors
+      </span>
+      <ul className="explore-color-legend-items">
+        {items.map((item) => (
+          <li key={item.id} className="explore-color-legend-item" title={`${item.group}: ${item.count.toLocaleString()} nodes`}>
+            <span className="explore-color-legend-mark" style={{ backgroundColor: item.color }} aria-hidden="true" />
+            <span className="explore-color-legend-name">{item.group}</span>
+          </li>
+        ))}
+      </ul>
     </div>
   );
 }
@@ -480,17 +481,17 @@ function SemanticColorLegend({ items, expanded, onToggle }: {
 const HUD_CSS = `
   .palantir-bg {
     background:
-      ${GRAPH_UI.scene.radialGlow},
-      ${GRAPH_UI.scene.background};
+      ${GRAPH_THEME.ui.scene.radialGlow},
+      ${GRAPH_THEME.ui.scene.background};
   }
   .palantir-grid {
     position: absolute;
     inset: 0;
     background-image:
-      linear-gradient(${GRAPH_UI.scene.grid} 1px, transparent 1px),
-      linear-gradient(90deg, ${GRAPH_UI.scene.grid} 1px, transparent 1px),
-      linear-gradient(${GRAPH_UI.scene.gridStrong} 1px, transparent 1px),
-      linear-gradient(90deg, ${GRAPH_UI.scene.gridStrong} 1px, transparent 1px);
+      linear-gradient(${GRAPH_THEME.ui.scene.grid} 1px, transparent 1px),
+      linear-gradient(90deg, ${GRAPH_THEME.ui.scene.grid} 1px, transparent 1px),
+      linear-gradient(${GRAPH_THEME.ui.scene.gridStrong} 1px, transparent 1px),
+      linear-gradient(90deg, ${GRAPH_THEME.ui.scene.gridStrong} 1px, transparent 1px);
     background-size: 48px 48px, 48px 48px, 240px 240px, 240px 240px;
     pointer-events: none;
     z-index: 1;
@@ -498,28 +499,28 @@ const HUD_CSS = `
   .palantir-vignette {
     position: absolute;
     inset: 0;
-    background: ${GRAPH_UI.scene.vignette};
+    background: ${GRAPH_THEME.ui.scene.vignette};
     pointer-events: none;
     z-index: 2;
   }
   .glass-header {
-    background: ${GRAPH_UI.surface.cardSubtle};
-    border-bottom: 1px solid ${GRAPH_UI.surface.panelBorder};
+    background: ${GRAPH_THEME.ui.surface.cardSubtle};
+    border-bottom: 1px solid ${GRAPH_THEME.ui.surface.panelBorder};
     backdrop-filter: blur(12px);
     -webkit-backdrop-filter: blur(12px);
   }
   .glass-hud {
-    background: ${GRAPH_UI.surface.panel};
+    background: ${GRAPH_THEME.ui.surface.panel};
     backdrop-filter: blur(14px) saturate(1.08);
     -webkit-backdrop-filter: blur(14px) saturate(1.08);
-    border-left: 1px solid ${GRAPH_UI.surface.panelBorder};
-    box-shadow: ${GRAPH_UI.surface.shadow};
+    border-left: 1px solid ${GRAPH_THEME.ui.surface.panelBorder};
+    box-shadow: ${GRAPH_THEME.ui.surface.shadow};
   }
   .hud-scrollbar::-webkit-scrollbar { width: 6px; }
   .hud-scrollbar::-webkit-scrollbar-track { background: transparent; }
   .hud-scrollbar::-webkit-scrollbar-thumb { background: rgba(215, 209, 196, 0.22); border-radius: 6px; }
   .node-panel-collapse {
-    border: 1px solid ${GRAPH_UI.surface.panelBorder};
+    border: 1px solid ${GRAPH_THEME.ui.surface.panelBorder};
     border-radius: 12px;
     background: rgba(255, 255, 255, 0.026);
     overflow: hidden;
@@ -535,7 +536,7 @@ const HUD_CSS = `
     justify-content: space-between;
     gap: 12px;
     padding: 12px 14px;
-    color: ${GRAPH_UI.text.body};
+    color: ${GRAPH_THEME.ui.text.body};
     font-size: 12px;
     font-weight: 700;
     letter-spacing: 0.04em;
@@ -546,7 +547,7 @@ const HUD_CSS = `
   }
   .node-panel-summary::after {
     content: "+";
-    color: ${GRAPH_UI.timeline.playhead};
+    color: ${GRAPH_THEME.ui.timeline.playhead};
     font-size: 16px;
     line-height: 1;
   }
@@ -569,9 +570,9 @@ const HUD_CSS = `
     width: min(460px, calc(100% - 48px));
     border-radius: 20px;
     padding: 22px 22px 18px;
-    background: ${GRAPH_UI.surface.cardStrong};
-    border: 1px solid ${GRAPH_UI.surface.panelBorder};
-    box-shadow: ${GRAPH_UI.surface.shadow};
+    background: ${GRAPH_THEME.ui.surface.cardStrong};
+    border: 1px solid ${GRAPH_THEME.ui.surface.panelBorder};
+    box-shadow: ${GRAPH_THEME.ui.surface.shadow};
     backdrop-filter: blur(18px);
     -webkit-backdrop-filter: blur(18px);
   }
@@ -584,7 +585,7 @@ const HUD_CSS = `
     width: 10px;
     height: 10px;
     border-radius: 999px;
-    background: linear-gradient(135deg, ${GRAPH_UI.timeline.playhead}, ${GRAPH_THEME.palette.accent.selected});
+    background: linear-gradient(135deg, ${GRAPH_THEME.ui.timeline.playhead}, ${GRAPH_THEME.palette.accent.selected});
     box-shadow: 0 0 18px rgba(98, 226, 205, 0.28);
     animation: sem-loader-pulse 1.2s ease-in-out infinite;
   }
@@ -610,7 +611,7 @@ const HUD_CSS = `
     border-radius: 999px;
     overflow: hidden;
     background: rgba(255, 255, 255, 0.052);
-    border: 1px solid ${GRAPH_UI.surface.panelBorder};
+    border: 1px solid ${GRAPH_THEME.ui.surface.panelBorder};
   }
   .graph-loading-bar > span {
     display: block;
@@ -667,7 +668,7 @@ const HUD_CSS = `
     flex: 1;
     overflow: hidden;
     border-radius: 20px 20px 0 0;
-    background: ${GRAPH_UI.surface.stage};
+    background: ${GRAPH_THEME.ui.surface.stage};
   }
   .explore-scene-stage {
     position: relative;
@@ -678,8 +679,8 @@ const HUD_CSS = `
   .explore-scene-footer {
     position: relative;
     z-index: 3;
-    border-top: 1px solid ${GRAPH_UI.timeline.border};
-    background: ${GRAPH_UI.timeline.background};
+    border-top: 1px solid ${GRAPH_THEME.ui.timeline.border};
+    background: ${GRAPH_THEME.ui.timeline.background};
   }
   .explore-plugin-dock {
     position: relative;
@@ -692,9 +693,9 @@ const HUD_CSS = `
     flex-wrap: wrap;
   }
   .explore-plugin-dock-tab {
-    border: 1px solid ${GRAPH_UI.control.defaultBorder};
-    background: ${GRAPH_UI.control.defaultBg};
-    color: ${GRAPH_UI.control.defaultText};
+    border: 1px solid ${GRAPH_THEME.ui.control.defaultBorder};
+    background: ${GRAPH_THEME.ui.control.defaultBg};
+    color: ${GRAPH_THEME.ui.control.defaultText};
     border-radius: 999px;
     padding: 6px 10px;
     font-size: 11px;
@@ -702,9 +703,9 @@ const HUD_CSS = `
     cursor: pointer;
   }
   .explore-plugin-dock-tab[data-active="true"] {
-    color: ${GRAPH_UI.control.activeText};
+    color: ${GRAPH_THEME.ui.control.activeText};
     background: rgba(74, 181, 166, 0.18);
-    border-color: ${GRAPH_UI.control.activeBorder};
+    border-color: ${GRAPH_THEME.ui.control.activeBorder};
   }
   .explore-toolbar {
     display: flex;
@@ -733,11 +734,11 @@ const HUD_CSS = `
     gap: 9px;
     padding: 4px 5px 4px 13px;
     border-radius: 16px;
-    border: 1px solid ${GRAPH_UI.control.inputBorder};
+    border: 1px solid ${GRAPH_THEME.ui.control.inputBorder};
     background:
       linear-gradient(135deg, rgba(255,255,255,0.06), rgba(255,255,255,0.018)),
-      ${GRAPH_UI.control.inputBg};
-    color: ${GRAPH_UI.text.muted};
+      ${GRAPH_THEME.ui.control.inputBg};
+    color: ${GRAPH_THEME.ui.text.muted};
     box-shadow: inset 0 1px 0 rgba(255,255,255,0.045), 0 14px 30px rgba(0,0,0,0.16);
   }
   .explore-search-suggestions {
@@ -752,8 +753,8 @@ const HUD_CSS = `
     max-height: 288px;
     overflow-y: auto;
     border-radius: 14px;
-    border: 1px solid ${GRAPH_UI.control.inputBorder};
-    background: ${GRAPH_UI.surface.cardStrong};
+    border: 1px solid ${GRAPH_THEME.ui.control.inputBorder};
+    background: ${GRAPH_THEME.ui.surface.cardStrong};
     box-shadow: 0 18px 40px rgba(0,0,0,0.32), inset 0 1px 0 rgba(255,255,255,0.04);
   }
   .explore-search-suggestions li {
@@ -764,10 +765,10 @@ const HUD_CSS = `
     padding: 8px 10px;
     border-radius: 10px;
     cursor: pointer;
-    color: ${GRAPH_UI.text.body};
+    color: ${GRAPH_THEME.ui.text.body};
   }
   .explore-search-suggestions li[data-highlighted="true"] {
-    background: ${GRAPH_UI.control.hoverBg};
+    background: ${GRAPH_THEME.ui.control.hoverBg};
   }
   .explore-search-suggestion-label {
     min-width: 0;
@@ -780,33 +781,33 @@ const HUD_CSS = `
   .explore-search-suggestion-type {
     flex-shrink: 0;
     font-size: 11px;
-    color: ${GRAPH_UI.text.subtle};
+    color: ${GRAPH_THEME.ui.text.subtle};
     text-transform: uppercase;
     letter-spacing: 0.04em;
   }
   .explore-search-command:focus-within {
-    border-color: ${GRAPH_UI.control.activeBorder};
-    box-shadow: inset 0 1px 0 rgba(255,255,255,0.06), 0 0 0 1px ${GRAPH_UI.control.focusRing}, 0 16px 32px rgba(0,0,0,0.18);
+    border-color: ${GRAPH_THEME.ui.control.activeBorder};
+    box-shadow: inset 0 1px 0 rgba(255,255,255,0.06), 0 0 0 1px ${GRAPH_THEME.ui.control.focusRing}, 0 16px 32px rgba(0,0,0,0.18);
   }
   .explore-search-command input {
     width: 100%;
     min-width: 0;
     border: 0;
     outline: 0;
-    color: ${GRAPH_UI.text.strong};
+    color: ${GRAPH_THEME.ui.text.strong};
     background: transparent;
     font-size: 13px;
   }
   .explore-search-command input::placeholder {
-    color: ${GRAPH_UI.text.subtle};
+    color: ${GRAPH_THEME.ui.text.subtle};
   }
   .explore-search-command button {
     height: 33px;
-    border: 1px solid ${GRAPH_UI.control.primaryBorder};
+    border: 1px solid ${GRAPH_THEME.ui.control.primaryBorder};
     border-radius: 12px;
     padding: 0 13px;
-    background: ${GRAPH_UI.control.primaryBg};
-    color: ${GRAPH_UI.control.primaryText};
+    background: ${GRAPH_THEME.ui.control.primaryBg};
+    color: ${GRAPH_THEME.ui.control.primaryText};
     font-size: 12px;
     font-weight: 800;
     cursor: pointer;
@@ -822,7 +823,7 @@ const HUD_CSS = `
     align-items: center;
     padding: 4px;
     border-radius: 16px;
-    border: 1px solid ${GRAPH_UI.control.defaultBorder};
+    border: 1px solid ${GRAPH_THEME.ui.control.defaultBorder};
     background: rgba(255, 255, 255, 0.026);
     box-shadow: inset 0 1px 0 rgba(255,255,255,0.035);
   }
@@ -850,7 +851,7 @@ const HUD_CSS = `
   }
   .explore-tool-cluster-label {
     padding: 0 4px 0 7px;
-    color: ${GRAPH_UI.text.subtle};
+    color: ${GRAPH_THEME.ui.text.subtle};
     font-size: 10px;
     font-weight: 800;
     letter-spacing: 0.08em;
@@ -869,11 +870,11 @@ const HUD_CSS = `
     align-items: center;
     justify-content: center;
     gap: 7px;
-    border: 1px solid ${GRAPH_UI.control.defaultBorder};
+    border: 1px solid ${GRAPH_THEME.ui.control.defaultBorder};
     border-radius: 12px;
     padding: 7px 10px;
-    background: ${GRAPH_UI.control.defaultBg};
-    color: ${GRAPH_UI.control.defaultText};
+    background: ${GRAPH_THEME.ui.control.defaultBg};
+    color: ${GRAPH_THEME.ui.control.defaultText};
     font-size: 12px;
     font-weight: 700;
     line-height: 1;
@@ -883,26 +884,26 @@ const HUD_CSS = `
     transition: background 140ms ease, border-color 140ms ease, color 140ms ease, transform 140ms ease;
   }
   .explore-tool-button:hover:not(:disabled) {
-    background: ${GRAPH_UI.control.hoverBg};
+    background: ${GRAPH_THEME.ui.control.hoverBg};
     border-color: rgba(211, 205, 190, 0.18);
     transform: translateY(-1px);
   }
   .explore-tool-button:disabled {
     cursor: not-allowed;
-    color: ${GRAPH_UI.control.disabledText};
+    color: ${GRAPH_THEME.ui.control.disabledText};
     opacity: 0.48;
     transform: none;
   }
   .explore-tool-button[data-active="true"] {
-    color: ${GRAPH_UI.control.activeText};
-    background: ${GRAPH_UI.control.activeBg};
-    border-color: ${GRAPH_UI.control.activeBorder};
-    box-shadow: 0 0 0 1px ${GRAPH_UI.control.focusRing}, inset 0 1px 0 rgba(255,255,255,0.06);
+    color: ${GRAPH_THEME.ui.control.activeText};
+    background: ${GRAPH_THEME.ui.control.activeBg};
+    border-color: ${GRAPH_THEME.ui.control.activeBorder};
+    box-shadow: 0 0 0 1px ${GRAPH_THEME.ui.control.focusRing}, inset 0 1px 0 rgba(255,255,255,0.06);
   }
   .explore-tool-button-primary {
-    color: ${GRAPH_UI.control.primaryText};
-    background: ${GRAPH_UI.control.primaryBg};
-    border-color: ${GRAPH_UI.control.primaryBorder};
+    color: ${GRAPH_THEME.ui.control.primaryText};
+    background: ${GRAPH_THEME.ui.control.primaryBg};
+    border-color: ${GRAPH_THEME.ui.control.primaryBorder};
   }
   .explore-tool-button[data-compact="true"] {
     min-width: 34px;
@@ -913,78 +914,16 @@ const HUD_CSS = `
   }
   .explore-color-legend {
     display: flex;
-    align-items: stretch;
-    flex-direction: column;
-    gap: 6px;
+    align-items: baseline;
+    gap: 12px;
     padding: 2px 1px 0;
-    color: ${GRAPH_UI.text.subtle};
+    color: ${GRAPH_THEME.ui.text.subtle};
     font-size: 11px;
     font-weight: 600;
   }
-  .explore-color-legend-toggle,
-  .explore-filter-toggle {
-    align-items: center;
-    justify-content: space-between;
-    gap: 10px;
-    border: 0;
-    background: transparent;
-    color: ${GRAPH_UI.text.muted};
-    cursor: pointer;
-    font: inherit;
-    text-align: left;
-  }
-  .explore-color-legend-toggle {
-    display: inline-flex;
-    width: fit-content;
-    padding: 2px 0;
-  }
-  .explore-color-legend-toggle:hover,
-  .explore-filter-toggle:hover { color: ${GRAPH_UI.text.strong}; }
-  .explore-filter-toggle {
-    display: flex;
-    min-height: 28px;
-    padding: 3px 0;
-  }
-  .explore-graph-filters {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: end;
-    gap: 10px;
-    color: ${GRAPH_UI.text.subtle};
-    font-size: 12px;
-  }
-  .explore-graph-filters label {
-    display: flex;
-    flex-direction: column;
-    gap: 4px;
-    min-width: 0;
-    flex: 1 1 150px;
-  }
-  .explore-graph-filters select, .explore-graph-filters input, .explore-graph-filters button {
-    min-width: 0;
-    max-width: 100%;
-    min-height: 34px;
-    padding: 6px 10px;
-    border-radius: 8px;
-    border: 1px solid ${GRAPH_UI.control.activeBorder};
-    background: ${GRAPH_UI.control.activeBg};
-    color: ${GRAPH_UI.text.strong};
-    font: inherit;
-  }
-  .explore-graph-filters .explore-filter-toggle {
-    flex: 1 0 100%;
-    border: 0;
-    background: transparent;
-    color: ${GRAPH_UI.text.muted};
-    padding: 3px 0;
-  }
-  .explore-graph-filters input::placeholder { color: ${GRAPH_UI.text.muted}; }
-  .explore-graph-filters :focus-visible { outline: 2px solid ${GRAPH_UI.control.focusRing}; outline-offset: 2px; }
-  .explore-graph-filters :disabled { opacity: 0.5; }
-  .explore-graph-filters [role="status"] { flex-basis: 100%; overflow-wrap: anywhere; }
   .explore-color-legend-label {
     flex-shrink: 0;
-    color: ${GRAPH_UI.text.muted};
+    color: ${GRAPH_THEME.ui.text.muted};
   }
   .explore-color-legend-items {
     display: flex;
@@ -1303,28 +1242,12 @@ function collectPluginOverlays(
 }
 
 interface GraphWorkspaceProps {
-  active?: boolean;
-  embedded?: boolean;
   externalFocusNodeId?: string;
   externalFocusToken?: number;
   onDirtyChange?: (dirty: boolean) => void;
 }
 
-export function GraphWorkspace({ active = true, embedded = false, externalFocusNodeId, externalFocusToken, onDirtyChange }: GraphWorkspaceProps = {}) {
-  const embeddedIdentity = useMemo(() => {
-    if (!embedded || window.parent === window) return null;
-    const params = new URLSearchParams(window.location.search);
-    const origin = params.get('hostOrigin');
-    const projectId = params.get('projectId');
-    const generation = params.get('generation');
-    if (!origin || !projectId || !generation || origin === 'null') return null;
-    try { if (new URL(origin).origin !== origin) return null; } catch { return null; }
-    return { origin, projectId, generation };
-  }, [embedded]);
-  const postHost = useCallback((type: string, payload: Record<string, unknown>) => {
-    if (!embeddedIdentity) return;
-    window.parent.postMessage({ type, projectId: embeddedIdentity.projectId, generation: embeddedIdentity.generation, ...payload }, embeddedIdentity.origin);
-  }, [embeddedIdentity]);
+export function GraphWorkspace({ externalFocusNodeId, externalFocusToken, onDirtyChange }: GraphWorkspaceProps = {}) {
   const [selectedNodeId, setSelectedNodeId] = useState("");
   const [focusedNodeId, setFocusedNodeId] = useState("");
   const [lastGroupedSelectedNodeId, setLastGroupedSelectedNodeId] = useState("");
@@ -1339,42 +1262,18 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
     onDirtyChange?.(dirty);
   }, [onDirtyChange]);
   const [viewMode, setViewMode] = useState<GraphViewMode>("full");
-  const [filters, setFilters] = useState<GraphFilters>(EMPTY_GRAPH_FILTERS);
-  const [filterText, setFilterText] = useState('');
-  const [filterChoices, setFilterChoices] = useState<{ nodes: string[]; edges: string[] }>({ nodes: [], edges: [] });
-  const updateFilters = useCallback((next: React.SetStateAction<GraphFilters>) => {
-    setFilters(next);
-    setSelectedNodeId('');
-    setFocusedNodeId('');
-    setSelectedEdgeId('');
-    setPathResult(null);
-    setSearchQuery('');
-    setSearchResults([]);
-    setCollapsedNeighborhoodNodeIds([]);
-  }, []);
-  useEffect(() => {
-    if (filterText === filters.text || markdownDraftDirty) return;
-    const timeout = setTimeout(() => {
-      updateFilters(current => current.text === filterText ? current : { ...current, text: filterText });
-    }, 250);
-    return () => clearTimeout(timeout);
-  }, [filterText, filters.text, markdownDraftDirty, updateFilters]);
   const [aggregationEnabled] = useState(true);
   const [collapsedNeighborhoodNodeIds, setCollapsedNeighborhoodNodeIds] = useState<string[]>([]);
   const [searchQuery, setSearchQuery] = useState("");
   const [searchResults, setSearchResults] = useState<SearchResult[]>([]);
   const [searchError, setSearchError] = useState("");
-  const hostSearchControllerRef = useRef<AbortController | null>(null);
   const [predictionType, setPredictionType] = useState("");
   const [isRunningPredictions, setIsRunningPredictions] = useState(false);
   const [predictions, setPredictions] = useState<LinkPrediction[]>([]);
   const [pathTargetId, setPathTargetId] = useState("");
   const [pathResult, setPathResult] = useState<PathResponse | null>(null);
   const [activeNodeCount, setActiveNodeCount] = useState<number | null>(null);
-  const [colorLegendExpanded, setColorLegendExpanded] = useState(false);
-  const [filtersExpanded, setFiltersExpanded] = useState(false);
   const [temporalBounds, setTemporalBounds] = useState<TemporalBounds | null>(null);
-  const [temporalAvailability, setTemporalAvailability] = useState<TemporalAvailability>("loading");
   const [scrubberTime, setScrubberTime] = useState<Date | null>(null);
   // Deduplicates setScrubberTime calls by millisecond value so that React 18
   // concurrent-mode re-renders with a new Date object for the same timestamp
@@ -1430,7 +1329,7 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
   const sceneRef = useRef<GraphSceneHandle>(null);
   const lastExternalFocusTokenRef = useRef<number | undefined>(undefined);
   const pluginRuntimeRef = useRef<GraphSceneRuntime | null>(null);
-  const appliedGraphSummaryRef = useRef<GraphLoadSummary | null>(null);
+  const appliedGraphSummarySignatureRef = useRef<string | null>(null);
   const smallGraphModeRef = useRef(false);
   const pluginInteractionStateRef = useRef<GraphInteractionState>({
     hoveredNodeId: null,
@@ -1453,11 +1352,12 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
   }, []);
 
   const applyGraphReadySummary = useCallback((graphSummary: GraphLoadSummary) => {
-    if (appliedGraphSummaryRef.current === graphSummary) {
+    const signature = getGraphSummarySignature(graphSummary);
+    if (appliedGraphSummarySignatureRef.current === signature) {
       return;
     }
 
-    appliedGraphSummaryRef.current = graphSummary;
+    appliedGraphSummarySignatureRef.current = signature;
     smallGraphModeRef.current = Boolean(
       graphSummary.layoutReady
       && !graphSummary.hasCoordinates
@@ -1465,7 +1365,6 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
       && graphSummary.nodeCount <= SMALL_GRAPH_MAX_NODES,
     );
     setGraphReady(true);
-    setFilterChoices({ nodes: graphSummary.nodeTypes ?? [], edges: graphSummary.edgeTypes ?? [] });
     setGraphVersion((current) => current + 1);
     setIsLayoutRunning(!graphSummary.layoutReady);
 
@@ -1496,7 +1395,6 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
     error: graphLoadError,
     refetch: refetchGraph,
   } = useLoadGraph({
-    filters,
     enabled: true,
     onGraphReady: applyGraphReadySummary,
     onProgress: handleLoadProgress,
@@ -1527,24 +1425,12 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
     applyGraphReadySummary(summary);
   }, [applyGraphReadySummary, graphReady, summary]);
 
-  const canFetchTemporalBounds = shouldFetchTemporalBounds(summary, active);
+  const canFetchTemporalBounds = shouldFetchTemporalBounds(summary);
   const canFetchTemporalSnapshot = shouldFetchTemporalSnapshot({
-    active,
     debouncedTime,
     isLoading,
     summary,
-    temporalBoundsStatus: temporalAvailability,
   });
-
-  useEffect(() => {
-    if (!active || !summary) {
-      setTemporalBounds(null);
-      setTemporalAvailability("loading");
-      setActiveNodeCount(null);
-      lastScrubberMsRef.current = null;
-      setScrubberTime(null);
-    }
-  }, [active, summary]);
 
   useEffect(() => {
     if (!canFetchTemporalBounds) {
@@ -1552,38 +1438,26 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
     }
 
     let cancelled = false;
-    const controller = new AbortController();
-    setTemporalBounds(null);
-    setTemporalAvailability("loading");
-    setActiveNodeCount(null);
-    lastScrubberMsRef.current = null;
-    setScrubberTime(null);
     const loadBounds = async () => {
       try {
-        const response = await fetch("/api/temporal/bounds", { signal: controller.signal });
-        if (!response.ok) throw new Error(`Temporal bounds request failed (${response.status})`);
-        if (cancelled) return;
+        const response = await fetch("/api/temporal/bounds");
+        if (!response.ok || cancelled) return;
         const data: TemporalBounds = await response.json();
         if (!cancelled) {
           setTemporalBounds(data);
-          setTemporalAvailability(data.min || data.max ? "ready" : "none");
         }
-      } catch (error) {
+      } catch {
         if (!cancelled) {
           setTemporalBounds(null);
-          setTemporalAvailability("error");
-          console.error("[Temporal] Bounds fetch failed", error);
         }
       }
     };
     loadBounds();
     return () => {
       cancelled = true;
-      controller.abort();
     };
   }, [
     canFetchTemporalBounds,
-    summary,
     summary?.nodeCount,
     summary?.edgeCount,
   ]);
@@ -1603,10 +1477,7 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
   // snapshots cached against the previous graph are stale, so reset all state.
   useEffect(() => {
     temporalSnapshotGuards.reset();
-    prevActiveIdsRef.current.clear();
-    clearTemporalVisibility(graph);
-    sceneRef.current?.getRuntime()?.requestRender();
-  }, [active, summary, temporalSnapshotGuards]);
+  }, [summary]);
 
   useEffect(() => {
     if (!canFetchTemporalSnapshot) {
@@ -1625,11 +1496,9 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
     }
 
     let cancelled = false;
-    const controller = new AbortController();
 
     const applyData = (data: TemporalSnapshotResponse) => {
       const nextActiveIds = new Set(data.active_node_ids);
-      const nextActiveEdgeIds = new Set(data.active_edge_ids);
       requestAnimationFrame(() => {
         if (cancelled) return;
         if (!temporalSnapshotGuards.shouldApply(atMs, seq)) {
@@ -1649,9 +1518,6 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
             graph.setNodeAttribute(id, "hidden", false);
           }
         });
-        graph.forEachEdge((edgeId) => {
-          graph.setEdgeAttribute(edgeId, "hidden", !nextActiveEdgeIds.has(edgeId));
-        });
         prevActiveIdsRef.current = nextActiveIds;
         setActiveNodeCount(data.active_node_count);
         setGraphVersion((current) => current + 1);
@@ -1670,11 +1536,10 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
     const applySnapshot = async () => {
       try {
         const at = debouncedTime.toISOString();
-        const response = await fetch(`/api/temporal/snapshot?at=${encodeURIComponent(at)}`, { signal: controller.signal });
+        const response = await fetch(`/api/temporal/snapshot?at=${encodeURIComponent(at)}`);
         if (!response.ok) {
           // A failed request must be retryable if the scrubber returns.
           if (!cancelled) temporalSnapshotGuards.finish(atMs, seq);
-          if (!cancelled) setTemporalAvailability("error");
           return;
         }
         if (cancelled) return;
@@ -1685,7 +1550,6 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
       } catch (fetchError) {
         temporalSnapshotGuards.finish(atMs, seq);
         if (!cancelled) {
-          setTemporalAvailability("error");
           console.error("[Temporal] Snapshot fetch failed", fetchError);
         }
       }
@@ -1694,7 +1558,6 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
     applySnapshot();
     return () => {
       cancelled = true;
-      controller.abort();
       // A cancelled request must be retryable when its position is revisited.
       temporalSnapshotGuards.finish(atMs, seq);
     };
@@ -1939,7 +1802,7 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
         throw new Error(`Search failed with status ${response.status}`);
       }
       const data = await response.json();
-      setSearchResults((data.results || []).filter((result: SearchResult) => graph.hasNode(result.node.id)));
+      setSearchResults(data.results || []);
     } catch (searchFetchError) {
       setSearchError(searchFetchError instanceof Error ? searchFetchError.message : "Search failed");
     }
@@ -1949,46 +1812,6 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
     setSearchResults([]);
     setSearchError("");
   }, []);
-
-  useEffect(() => {
-    if (!embeddedIdentity) return;
-    const receive = (event: MessageEvent) => {
-      if (event.origin !== embeddedIdentity.origin || event.source !== window.parent) return;
-      const command = event.data as Record<string, unknown> | null;
-      if (!command || command.projectId !== embeddedIdentity.projectId || command.generation !== embeddedIdentity.generation || typeof command.type !== 'string') return;
-      if (command.type === 'ontoscience:search' && typeof command.query === 'string') {
-        hostSearchControllerRef.current?.abort();
-        const query = command.query.trim();
-        setSearchQuery(query);
-        if (!query) { handleClearSearchResults(); postHost('semantica:search-results', { results: [] }); return; }
-        const controller = new AbortController();
-        hostSearchControllerRef.current = controller;
-        void fetch('/api/graph/search', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ query, limit: 8 }), signal: controller.signal })
-          .then(async response => { if (!response.ok) throw new Error(`Search failed with status ${response.status}`); return response.json() as Promise<{ results?: SearchResult[] }>; })
-          .then(data => { const results = (data.results ?? []).filter(result => graph.hasNode(result.node.id)); setSearchResults(results); setSearchError(''); postHost('semantica:search-results', { results: results.map(result => ({ id: result.node.id, label: result.node.content || result.node.id, type: result.node.type, score: result.score })) }); })
-          .catch(error => { if (error instanceof DOMException && error.name === 'AbortError') return; const message = error instanceof Error ? error.message : String(error); setSearchError(message); postHost('semantica:search-results', { results: [], error: message }); });
-      } else if (command.type === 'ontoscience:focus' && typeof command.nodeId === 'string') {
-        focusNode(command.nodeId);
-      } else if (command.type === 'ontoscience:filters' && command.filters && typeof command.filters === 'object') {
-        const next = command.filters as GraphFilters;
-        if (typeof next.nodeType === 'string' && typeof next.edgeType === 'string' && typeof next.text === 'string') {
-          setFilterText(next.text);
-          updateFilters(next);
-        }
-      } else if (command.type === 'ontoscience:mode' && ['full', 'focused', 'grouped'].includes(String(command.mode))) {
-        if (command.mode === 'focused') {
-          const nodeId = focusedSelectionResolution.resolvedNodeId;
-          if (nodeId) enterLocalGraph(nodeId);
-        } else {
-          setLayoutViewMode(command.mode as GraphLayoutViewMode);
-        }
-      } else if (command.type === 'ontoscience:clear-selection') {
-        focusNode('');
-      }
-    };
-    window.addEventListener('message', receive);
-    return () => { window.removeEventListener('message', receive); hostSearchControllerRef.current?.abort(); };
-  }, [embeddedIdentity, enterLocalGraph, focusNode, focusedSelectionResolution.resolvedNodeId, handleClearSearchResults, postHost, setLayoutViewMode, updateFilters]);
 
   const handleRunPredictions = useCallback(async () => {
     if (!inspectableNodeId) return;
@@ -2160,6 +1983,28 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
           logEvent("add-edge", `Added edge ${payload.edgeType ?? payload.id} (${payload.source_id} → ${payload.target_id}) via realtime ws`, { edgeId: payload.id, edgeType: payload.edgeType, source: payload.source_id, target: payload.target_id });
           setGraphVersion((current) => current + 1);
           sceneRef.current?.getRuntime()?.requestRender();
+        }
+        // Removals (a purge, or a `mode=replace` import that dropped entities the
+        // new source no longer has). The server sends REMOVE_EDGE before
+        // REMOVE_NODE; dropping a node also drops its incident edges, so the
+        // hasEdge/hasNode guards make either order, and repeats, harmless.
+        if (eventType === "REMOVE_EDGE") {
+          const removedEdgeId = String(message.data?.entity_id ?? "");
+          if (removedEdgeId && graph.hasEdge(removedEdgeId)) {
+            graph.dropEdge(removedEdgeId);
+            logEvent("delete", `Removed edge ${removedEdgeId} via realtime ws`, { edgeId: removedEdgeId });
+            setGraphVersion((current) => current + 1);
+            sceneRef.current?.getRuntime()?.requestRender();
+          }
+        }
+        if (eventType === "REMOVE_NODE") {
+          const removedNodeId = String(message.data?.entity_id ?? "");
+          if (removedNodeId && graph.hasNode(removedNodeId)) {
+            graph.dropNode(removedNodeId);
+            logEvent("delete", `Removed node ${removedNodeId} via realtime ws`, { nodeId: removedNodeId });
+            setGraphVersion((current) => current + 1);
+            sceneRef.current?.getRuntime()?.requestRender();
+          }
         }
       } catch (socketError) {
         console.error("[GraphWorkspace] websocket update failed", socketError);
@@ -2427,7 +2272,7 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
   ]);
 
   const showLoadingOverlay = !graphReady && (isLoading || isFetching || Boolean(loadingProgress) || isGraphLoadError);
-  const hasActiveFilters = Boolean(filterText || Object.values(filters).some(Boolean));
+  const showSettlingStatus = graphReady && loadingProgress?.phase === "stabilizing_layout";
   const hasGraphContent = Boolean(summary?.nodeCount);
   const activePath = pathResult?.path ?? EMPTY_PATH;
   const activePathEdgeIds = pathResult?.edge_ids ?? EMPTY_PATH;
@@ -2584,36 +2429,6 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
     () => buildSelectedEdgeState(selectedEdgeId, displayResult.graph),
     [displayResult.graph, selectedEdgeId, summary?.nodeCount, summary?.edgeCount],
   );
-  useEffect(() => {
-    if (!embeddedIdentity || !graphReady) return;
-    const viewModeItems = [
-      { id: 'full', label: 'Full Graph', active: viewMode === 'full', disabled: false },
-      { id: 'grouped', label: 'Grouped View', active: viewMode === 'grouped', disabled: !groupedViewAvailable,
-        title: groupedViewReasonText(displayState.groupedViewReason) ?? undefined },
-      { id: 'focused', label: 'Focus', active: viewMode === 'focused', disabled: viewMode !== 'focused' && !canActivateFocusedMode,
-        title: focusedUnavailableReasonText(focusedSelectionResolution.reason) ?? undefined },
-    ];
-    postHost('semantica:ready', {
-      filters: filterChoices,
-      modes: viewModeItems,
-    });
-  }, [embeddedIdentity, filterChoices, graphReady, groupedViewAvailable, canActivateFocusedMode, viewMode, displayState.groupedViewReason, focusedSelectionResolution.reason, postHost]);
-
-  useEffect(() => {
-    if (!embeddedIdentity) return;
-    const selection = selectedEdgeState ? {
-      kind: 'relationship', id: selectedEdgeState.id, label: selectedEdgeState.edgeType,
-      sourceId: selectedEdgeState.sourceId, sourceLabel: selectedEdgeState.sourceLabel,
-      targetId: selectedEdgeState.targetId, targetLabel: selectedEdgeState.targetLabel,
-      weight: selectedEdgeState.weight, properties: selectedEdgeState.properties,
-    } : selectedNodeState ? {
-      kind: 'node', id: selectedNodeState.id, label: selectedNodeState.label,
-      type: selectedNodeState.nodeType, content: selectedNodeState.content,
-      validFrom: selectedNodeState.valid_from, validUntil: selectedNodeState.valid_until,
-      properties: selectedNodeState.properties, neighborCount: selectedNodeState.neighborCount,
-    } : null;
-    postHost('semantica:selection', { selection });
-  }, [embeddedIdentity, postHost, selectedEdgeState, selectedNodeState]);
   const temporalState = useMemo(
     () => ({
       currentTime: scrubberTime,
@@ -3320,13 +3135,19 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               <div className="explore-toolbar">
                 <div className="explore-status-strip">
-                  {showLoadingOverlay && loadingProgress ? (
+                  {(showLoadingOverlay || showSettlingStatus) && loadingProgress ? (
                     <MetricChip>{getGraphLoadTitle(loadingProgress.phase)}</MetricChip>
+                  ) : null}
+                  {summary ? (
+                    <MetricChip>{summary.nodeCount.toLocaleString()} nodes · {summary.edgeCount.toLocaleString()} edges</MetricChip>
+                  ) : null}
+                  {activeNodeCount !== null ? (
+                    <MetricChip tone="success">{activeNodeCount.toLocaleString()} active</MetricChip>
                   ) : null}
                   {focusedSummary ? <MetricChip tone="warm">{focusedSummary}</MetricChip> : null}
                 </div>
                 <div className="explore-workflow-bar">
-                  {!embedded && <SearchCommandBar
+                  <SearchCommandBar
                     value={searchQuery}
                     disabled={searchDisabled}
                     onChange={setSearchQuery}
@@ -3335,8 +3156,8 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
                       setSearchQuery("");
                       focusNode(result.node.id);
                     }}
-                  />}
-                  {!embedded && <SegmentedModeControl items={viewModeItems} />}
+                  />
+                  <SegmentedModeControl items={viewModeItems} />
                   <div className="explore-toolbelt">
                     {toolbarClusters.map((group) => (
                       <ToolbarCluster
@@ -3348,50 +3169,22 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
                     ))}
                   </div>
                 </div>
-                {!showDistanceStatus ? <SemanticColorLegend items={colorLegendItems} expanded={colorLegendExpanded} onToggle={() => setColorLegendExpanded(value => !value)} /> : null}
-                {!embedded && <div className="explore-graph-filters" role="group" aria-label="Graph filters">
-                  <button type="button" className="explore-filter-toggle" aria-expanded={filtersExpanded} onClick={() => setFiltersExpanded(value => !value)}>
-                    Filters{hasActiveFilters ? " · active" : ""}
-                  </button>
-                  {filtersExpanded ? <>
-                  <label>Node type{' '}
-                    <select aria-label="Filter node type" value={filters.nodeType} disabled={isFetching || markdownDraftDirty}
-                      onChange={event => updateFilters({ ...filters, nodeType: event.target.value })}>
-                      <option value="">All node types</option>
-                      {filterChoices.nodes.map(type => <option key={type} value={type}>{type}</option>)}
-                    </select>
-                  </label>
-                  <label>Relationship{' '}
-                    <select aria-label="Filter relationship type" value={filters.edgeType} disabled={isFetching || markdownDraftDirty}
-                      onChange={event => updateFilters({ ...filters, edgeType: event.target.value })}>
-                      <option value="">All relationships</option>
-                      {filterChoices.edges.map(type => <option key={type} value={type}>{type}</option>)}
-                    </select>
-                  </label>
-                  <label>Content
-                    <input aria-label="Filter node content" placeholder="Contains text…" value={filterText}
-                      disabled={markdownDraftDirty} onChange={event => setFilterText(event.target.value)} />
-                  </label>
-                  <button type="button" disabled={isFetching || markdownDraftDirty || (!filterText && !Object.values(filters).some(Boolean))}
-                    onClick={() => { setFilterText(''); updateFilters(EMPTY_GRAPH_FILTERS); }}>Clear filters</button>
-                  {hasActiveFilters && summary ? <span role="status">{summary.nodeCount.toLocaleString()} / {(summary.totalNodeCount ?? summary.nodeCount).toLocaleString()} nodes · {summary.edgeCount.toLocaleString()} / {(summary.totalEdgeCount ?? summary.edgeCount).toLocaleString()} relationships{summary.nodeCount === 0 ? ' · No matches. Clear or change filters.' : ''}</span> : null}
-                  </> : null}
-                </div>}
+                {!showDistanceStatus ? <SemanticColorLegend items={colorLegendItems} /> : null}
               </div>
 
               {egoModeEnabled && (
-                <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12, color: GRAPH_UI.text.muted }}>
-                  <span style={{ fontWeight: 600, color: GRAPH_UI.text.strong }}>Ego depth:</span>
+                <div style={{ display: "flex", alignItems: "center", gap: 10, fontSize: 12, color: "#a0b4cc" }}>
+                  <span style={{ fontWeight: 600, color: "#79c0ff" }}>Ego depth:</span>
                   <input
                     type="range"
                     min={1}
                     max={8}
                     value={egoMaxHops}
                     onChange={(e) => setEgoMaxHops(Number(e.target.value))}
-                    style={{ width: 90, accentColor: GRAPH_UI.control.activeBorder }}
+                    style={{ width: 90, accentColor: "#79c0ff" }}
                     title={`Ego depth: ${egoMaxHops} hops`}
                   />
-                  <span style={{ fontFamily: "monospace", color: GRAPH_UI.text.strong }}>{egoMaxHops} hop{egoMaxHops !== 1 ? "s" : ""}</span>
+                  <span style={{ fontFamily: "monospace", color: "#e6f2ff" }}>{egoMaxHops} hop{egoMaxHops !== 1 ? "s" : ""}</span>
                 </div>
               )}
 
@@ -3418,10 +3211,10 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
                       <span>{distanceReachableCount.toLocaleString()} nodes within {distanceVisualState.maxHops} hops</span>
                     )}
                     {distanceVisualState.status === "unavailable" || distanceVisualState.status === "error" ? (
-                      <span style={{ color: GRAPH_UI.control.dangerText }}>{distanceVisualState.error}</span>
+                      <span style={{ color: GRAPH_THEME.ui.control.dangerText }}>{distanceVisualState.error}</span>
                     ) : null}
                     {heatmapRenderedSummary ? (
-                      <span style={{ color: GRAPH_UI.text.muted }}>{heatmapRenderedSummary}</span>
+                      <span style={{ color: GRAPH_THEME.ui.text.muted }}>{heatmapRenderedSummary}</span>
                     ) : null}
                   </div>
                   <div style={distanceLegendStyle}>
@@ -3435,12 +3228,12 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
                 </div>
               ) : null}
 
-              {!embedded && searchError ? <div style={{ color: GRAPH_UI.control.dangerText, fontSize: 12 }}>{searchError}</div> : null}
+              {searchError ? <div style={{ color: "#ff7b72", fontSize: 12 }}>{searchError}</div> : null}
 
-              {!embedded && searchResults.length ? (
+              {searchResults.length ? (
                 <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
                   <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
-                    <span style={{ color: GRAPH_UI.text.muted, fontSize: 12 }}>
+                    <span style={{ color: "#8b949e", fontSize: 12 }}>
                       {searchResults.length} result{searchResults.length === 1 ? "" : "s"}
                     </span>
                     <button
@@ -3458,10 +3251,10 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
                       <button key={result.node.id} style={predictionCardStyle} onClick={() => focusNode(result.node.id)}>
                         <div style={{ display: "flex", justifyContent: "space-between", gap: 12 }}>
                           <div style={{ minWidth: 0 }}>
-                            <div style={{ color: GRAPH_UI.text.strong, fontWeight: 600 }}>{result.node.content || result.node.id}</div>
-                            <div style={{ color: GRAPH_UI.text.muted, fontSize: 12 }}>{result.node.type}</div>
+                            <div style={{ color: "#fff", fontWeight: 600 }}>{result.node.content || result.node.id}</div>
+                            <div style={{ color: "#8b949e", fontSize: 12 }}>{result.node.type}</div>
                           </div>
-                          <div style={{ color: GRAPH_UI.text.body, fontSize: 12, whiteSpace: "nowrap" }}>
+                          <div style={{ color: "#58a6ff", fontSize: 12, whiteSpace: "nowrap" }}>
                             {Math.round(result.score)}
                           </div>
                         </div>
@@ -3475,10 +3268,10 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
                 <div style={selectedEdgeCardStyle}>
                   <div style={{ display: "flex", justifyContent: "space-between", gap: 12, alignItems: "flex-start" }}>
                     <div style={{ minWidth: 0 }}>
-                      <div style={{ color: GRAPH_UI.text.muted, fontSize: 11, fontWeight: 700, letterSpacing: 0, textTransform: "uppercase" }}>
+                      <div style={{ color: "rgba(127, 208, 255, 0.76)", fontSize: 11, fontWeight: 700, letterSpacing: "0.08em", textTransform: "uppercase" }}>
                         Relationship
                       </div>
-                      <div style={{ color: GRAPH_UI.text.strong, fontSize: 15, fontWeight: 700, marginTop: 6 }}>
+                      <div style={{ color: "#f4f8ff", fontSize: 15, fontWeight: 700, marginTop: 6 }}>
                         {selectedEdgeState.edgeType}
                       </div>
                     </div>
@@ -3494,7 +3287,7 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
                     <button style={selectedEdgeNodeChipStyle} onClick={() => focusNode(selectedEdgeState.sourceId)}>
                       {selectedEdgeState.sourceLabel}
                     </button>
-                    <span style={{ color: GRAPH_UI.text.muted, fontSize: 12 }}>→</span>
+                    <span style={{ color: "#7fa7ce", fontSize: 12 }}>→</span>
                     <button style={selectedEdgeNodeChipStyle} onClick={() => focusNode(selectedEdgeState.targetId)}>
                       {selectedEdgeState.targetLabel}
                     </button>
@@ -3525,10 +3318,10 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
                     <div style={selectedEdgePropertyGridStyle}>
                       {Object.entries(selectedEdgeState.properties).slice(0, 4).map(([key, value]) => (
                         <div key={key} style={selectedEdgePropertyCardStyle}>
-                          <div style={{ color: GRAPH_UI.text.muted, fontSize: 10, letterSpacing: 0, textTransform: "uppercase" }}>
+                          <div style={{ color: "rgba(127, 208, 255, 0.68)", fontSize: 10, letterSpacing: "0.06em", textTransform: "uppercase" }}>
                             {key}
                           </div>
-                          <div style={{ color: GRAPH_UI.text.body, fontSize: 12, marginTop: 4, wordBreak: "break-word" }}>
+                          <div style={{ color: "#dce7f4", fontSize: 12, marginTop: 4, wordBreak: "break-word" }}>
                             {typeof value === "object" ? JSON.stringify(value) : String(value)}
                           </div>
                         </div>
@@ -3544,7 +3337,7 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
         <div
           className="explore-main-grid"
           style={{
-            gridTemplateColumns: !embedded && layoutState.showInspector ? "minmax(0, 1fr) minmax(320px, 360px)" : "minmax(0, 1fr)",
+            gridTemplateColumns: layoutState.showInspector ? "minmax(0, 1fr) minmax(320px, 360px)" : "minmax(0, 1fr)",
           }}
         >
           <div className="explore-scene-stack">
@@ -3601,20 +3394,19 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
                 </div>
               ) : null}
 
-              {active ? <div className="explore-scene-footer">
+              <div className="explore-scene-footer">
                 <Suspense fallback={<div style={timelineFallbackStyle}>Loading timeline…</div>}>
                   <LazyTimelinePanel
                     onTimeChange={onTimeChange}
                     minDate={temporalBounds?.min ?? undefined}
                     maxDate={temporalBounds?.max ?? undefined}
-                    availability={temporalAvailability}
                   />
                 </Suspense>
-              </div> : null}
+              </div>
             </SurfaceCard>
           </div>
 
-          {!embedded && layoutState.showInspector ? (
+          {layoutState.showInspector ? (
             <div className="explore-inspector-shell">
               <InspectorPanel open={layoutState.showInspector} className="explore-inspector-card">
                 <div className="explore-inspector-scroll hud-scrollbar">
@@ -3651,9 +3443,9 @@ export function GraphWorkspace({ active = true, embedded = false, externalFocusN
 }
 
 const actionButtonStyle: React.CSSProperties = {
-  background: GRAPH_UI.control.primaryBg,
-  color: GRAPH_UI.control.primaryText,
-  border: `1px solid ${GRAPH_UI.control.primaryBorder}`,
+  background: GRAPH_THEME.ui.control.primaryBg,
+  color: GRAPH_THEME.ui.control.primaryText,
+  border: `1px solid ${GRAPH_THEME.ui.control.primaryBorder}`,
   borderRadius: 12,
   padding: "9px 12px",
   cursor: "pointer",
@@ -3667,9 +3459,9 @@ const actionButtonStyle: React.CSSProperties = {
 
 const secondaryActionButtonStyle: React.CSSProperties = {
   ...actionButtonStyle,
-  background: GRAPH_UI.control.defaultBg,
-  border: `1px solid ${GRAPH_UI.control.defaultBorder}`,
-  color: GRAPH_UI.control.defaultText,
+  background: GRAPH_THEME.ui.control.defaultBg,
+  border: `1px solid ${GRAPH_THEME.ui.control.defaultBorder}`,
+  color: GRAPH_THEME.ui.control.defaultText,
   fontWeight: 600,
 };
 
@@ -3677,7 +3469,7 @@ const predictionCardStyle: React.CSSProperties = {
   textAlign: "left",
   padding: 12,
   background: "rgba(255, 255, 255, 0.035)",
-  border: `1px solid ${GRAPH_UI.surface.panelBorder}`,
+  border: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}`,
   borderRadius: 10,
   cursor: "pointer",
 };
@@ -3688,7 +3480,7 @@ const selectedEdgeCardStyle: React.CSSProperties = {
   gap: 12,
   padding: 14,
   background: "linear-gradient(135deg, rgba(98, 226, 205, 0.1), rgba(233, 196, 122, 0.045))",
-  border: `1px solid ${GRAPH_UI.surface.panelBorder}`,
+  border: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}`,
   borderRadius: 14,
   boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03)",
 };
@@ -3705,7 +3497,7 @@ const distanceStatusStripStyle: React.CSSProperties = {
   alignItems: "center",
   gap: 12,
   flexWrap: "wrap",
-  border: `1px solid ${GRAPH_UI.control.activeBorder}`,
+  border: `1px solid ${GRAPH_THEME.ui.control.activeBorder}`,
   background: "linear-gradient(135deg, rgba(98, 226, 205, 0.09), rgba(227, 179, 65, 0.045))",
   borderRadius: 16,
   padding: "9px 12px",
@@ -3716,7 +3508,7 @@ const distanceStatusTitleStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   gap: 7,
-  color: GRAPH_UI.text.strong,
+  color: GRAPH_THEME.ui.text.strong,
   fontSize: 12,
   fontWeight: 800,
   letterSpacing: "0.04em",
@@ -3726,7 +3518,7 @@ const distanceStatusTitleStyle: React.CSSProperties = {
 const distanceModeBadgeStyle: React.CSSProperties = {
   padding: "2px 7px",
   borderRadius: 999,
-  border: `1px solid ${GRAPH_UI.surface.panelBorder}`,
+  border: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}`,
   color: GRAPH_THEME.palette.accent.path,
   background: "rgba(215, 144, 86, 0.1)",
   fontSize: 10,
@@ -3737,7 +3529,7 @@ const distanceStatusMetaStyle: React.CSSProperties = {
   alignItems: "center",
   gap: 10,
   flexWrap: "wrap",
-  color: GRAPH_UI.text.body,
+  color: GRAPH_THEME.ui.text.body,
   fontSize: 12,
 };
 
@@ -3746,7 +3538,7 @@ const distanceLegendStyle: React.CSSProperties = {
   alignItems: "center",
   gap: 8,
   marginLeft: "auto",
-  color: GRAPH_UI.text.muted,
+  color: GRAPH_THEME.ui.text.muted,
   fontSize: 11,
 };
 
@@ -3772,18 +3564,18 @@ const selectedEdgePropertyCardStyle: React.CSSProperties = {
   borderRadius: 10,
   padding: 10,
   background: "rgba(255, 255, 255, 0.03)",
-  border: `1px solid ${GRAPH_UI.surface.panelBorder}`,
+  border: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}`,
 };
 
 const pluginDockContentStyle: React.CSSProperties = {
   borderRadius: 16,
-  border: `1px solid ${GRAPH_UI.surface.panelBorder}`,
+  border: `1px solid ${GRAPH_THEME.ui.surface.panelBorder}`,
   background: "rgba(255, 255, 255, 0.02)",
   padding: 14,
 };
 
 const pluginLoadingStyle: React.CSSProperties = {
-  color: GRAPH_UI.text.muted,
+  color: GRAPH_THEME.ui.text.muted,
   fontSize: 12,
   padding: 10,
 };
@@ -3798,7 +3590,7 @@ const searchResultsStripStyle: React.CSSProperties = {
 
 const inspectorFallbackStyle: React.CSSProperties = {
   padding: 24,
-  color: GRAPH_UI.text.muted,
+  color: GRAPH_THEME.ui.text.muted,
   fontSize: 12,
 };
 
@@ -3807,8 +3599,8 @@ const timelineFallbackStyle: React.CSSProperties = {
   display: "flex",
   alignItems: "center",
   padding: "0 18px",
-  color: GRAPH_UI.text.muted,
+  color: GRAPH_THEME.ui.text.muted,
   fontSize: 12,
-  borderTop: `1px solid ${GRAPH_UI.timeline.border}`,
-  background: GRAPH_UI.timeline.background,
+  borderTop: `1px solid ${GRAPH_THEME.ui.timeline.border}`,
+  background: GRAPH_THEME.ui.timeline.background,
 };

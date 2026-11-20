@@ -1,7 +1,5 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef } from "react";
 import Editor, { useMonaco } from "@monaco-editor/react";
-import type { Monaco } from "@monaco-editor/react";
-import { PRESENTATION_CHANGED } from '../../embeddedPresentation';
 import { Play, Copy, Download, Table2, AlertCircle, FileCode2 } from "lucide-react";
 
 const TEMPLATES: { label: string; query: string }[] = [
@@ -11,43 +9,6 @@ const TEMPLATES: { label: string; query: string }[] = [
   { label: "Path between", query: "SELECT ?mid ?p1 ?p2\nWHERE {\n  <urn:node:a> ?p1 ?mid .\n  ?mid ?p2 <urn:node:b>\n}\nLIMIT 20" },
 ];
 
-function defineWorkspaceTheme(monaco: Monaco) {
-  const probe = document.createElement('span');
-  document.body.append(probe);
-  const channels = (token: string): number[] => {
-    probe.style.color = `var(--ws-${token})`;
-    return (getComputedStyle(probe).color.match(/[\d.]+/g) ?? []).map(Number);
-  };
-  const hex = (values: number[]) => '#' + values.slice(0, 3).map(value => Math.round(value).toString(16).padStart(2, '0')).join('');
-  const backgroundChannels = channels('surface');
-  const background = hex(backgroundChannels);
-  const color = (token: string) => hex(channels(token));
-  const text = color('text');
-  const muted = color('text-muted');
-  const accent = color('accent');
-  const hoverChannels = channels('surface-hover');
-  const hover = hex(hoverChannels.length === 4
-    ? hoverChannels.slice(0, 3).map((value, index) => value * hoverChannels[3] + backgroundChannels[index] * (1 - hoverChannels[3]))
-    : hoverChannels);
-  probe.remove();
-  const luminance = [1, 3, 5].reduce((sum, offset) => sum + parseInt(background.slice(offset, offset + 2), 16), 0) / 3;
-  monaco.editor.defineTheme('sparql-workspace', {
-    base: luminance > 128 ? 'vs' : 'vs-dark', inherit: true,
-    rules: [
-      { token: 'keyword', foreground: accent.slice(1), fontStyle: 'bold' },
-      { token: 'variable.name', foreground: text.slice(1) },
-      { token: 'string.uri', foreground: accent.slice(1) },
-      { token: 'string', foreground: text.slice(1) },
-      { token: 'comment', foreground: muted.slice(1), fontStyle: 'italic' },
-    ],
-    colors: {
-      'editor.background': background, 'editor.foreground': text,
-      'editor.lineHighlightBackground': hover, 'editorLineNumber.foreground': muted,
-      'editorCursor.foreground': accent, 'editor.selectionBackground': hover,
-    },
-  });
-}
-
 export function SparqlWorkspace() {
   const monaco = useMonaco();
   const editorRef = useRef<unknown>(null);
@@ -56,34 +17,8 @@ export function SparqlWorkspace() {
   const [isLoading, setIsLoading] = useState(false);
   const [copyState, setCopyState] = useState(false);
 
-  useEffect(() => {
-    if (!monaco) return;
-    const update = () => { defineWorkspaceTheme(monaco); monaco.editor.setTheme('sparql-workspace'); };
-    update();
-    window.addEventListener(PRESENTATION_CHANGED, update);
-    return () => window.removeEventListener(PRESENTATION_CHANGED, update);
-  }, [monaco]);
-
-  useEffect(() => {
-    const ctrl = new AbortController();
-    setIsLoading(true);
-    fetch("/api/sparql", {
-      method: "POST", headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ query: TEMPLATES[0].query }), signal: ctrl.signal,
-    }).then(async response => {
-      if (!response.ok) throw new Error(`Unable to query graph: HTTP ${response.status}`);
-      const data = await response.json();
-      if (!ctrl.signal.aborted) setResult(data);
-    }).catch(error => {
-      if (!ctrl.signal.aborted) setResult({ error: String(error) });
-    }).finally(() => {
-      if (!ctrl.signal.aborted) setIsLoading(false);
-    });
-    return () => ctrl.abort();
-  }, []);
-
-  function handleEditorWillMount(monacoIns: Monaco) {
-    if (!monacoIns.languages.getLanguages().some((l: { id: string }) => l.id === "sparql")) {
+  function handleEditorWillMount(monacoIns: { languages: { getLanguages(): { id: string }[]; register(opts: { id: string }): void; setMonarchTokensProvider(id: string, p: unknown): void }; editor: { defineTheme(id: string, t: unknown): void } }) {
+    if (!monacoIns.languages.getLanguages().some((l) => l.id === "sparql")) {
       monacoIns.languages.register({ id: "sparql" });
       monacoIns.languages.setMonarchTokensProvider("sparql", {
         keywords: ["SELECT", "WHERE", "LIMIT", "FILTER", "OPTIONAL", "PREFIX", "ORDER", "BY", "DESC", "ASC", "GROUP", "DISTINCT", "CONSTRUCT", "ASK", "DESCRIBE"],
@@ -98,8 +33,26 @@ export function SparqlWorkspace() {
           ],
         },
       });
+      monacoIns.editor.defineTheme("sparql-dark", {
+        base: "vs-dark",
+        inherit: true,
+        rules: [
+          { token: "keyword", foreground: "58a6ff", fontStyle: "bold" },
+          { token: "variable.name", foreground: "a5d6ff" },
+          { token: "string.uri", foreground: "7ee787" },
+          { token: "string", foreground: "a5d6ff" },
+          { token: "comment", foreground: "4a6a85", fontStyle: "italic" },
+          { token: "number", foreground: "f2b66d" },
+        ],
+        colors: {
+          "editor.background": "#050c18",
+          "editor.lineHighlightBackground": "#0a1628",
+          "editorLineNumber.foreground": "#2a4060",
+          "editorCursor.foreground": "#4aa3ff",
+          "editor.selectionBackground": "#1e3a5a",
+        },
+      });
     }
-    defineWorkspaceTheme(monacoIns);
   }
 
   function handleEditorDidMount(editor: unknown) {
@@ -178,7 +131,7 @@ export function SparqlWorkspace() {
     <div className="ws-page">
       <div style={{ display: "flex", flexDirection: "column", height: "100%", overflow: "hidden" }}>
         {/* ── Toolbar ── */}
-        <div style={{ padding: "10px 16px", borderBottom: "1px solid var(--ws-border)", display: "flex", alignItems: "center", gap: 8, flexShrink: 0, background: "var(--ws-surface)" }}>
+        <div style={{ padding: "10px 16px", borderBottom: "1px solid var(--ws-border)", display: "flex", alignItems: "center", gap: 8, flexShrink: 0, background: "rgba(0,0,0,0.18)" }}>
           <div style={{ display: "flex", gap: 6, flex: 1, flexWrap: "wrap" }}>
             <span className="ws-eyebrow" style={{ alignSelf: "center", marginRight: 4 }}>Templates:</span>
             {TEMPLATES.map((t) => (
@@ -208,7 +161,7 @@ export function SparqlWorkspace() {
         </div>
 
         {/* ── Editor + Results split ── */}
-        <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden" }}>
+        <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden" }}>
           {/* Editor */}
           <div style={{ flex: "0 0 55%", minHeight: 0, borderBottom: "1px solid var(--ws-border)", position: "relative" }}>
             <div style={{ position: "absolute", top: 8, right: 12, zIndex: 10, display: "flex", alignItems: "center", gap: 6 }}>
@@ -217,7 +170,7 @@ export function SparqlWorkspace() {
             <Editor
               height="100%"
               defaultLanguage="sparql"
-              theme="sparql-workspace"
+              theme="sparql-dark"
               value={query}
               onChange={(v) => setQuery(v || "")}
               beforeMount={handleEditorWillMount}
@@ -236,7 +189,7 @@ export function SparqlWorkspace() {
           </div>
 
           {/* Results */}
-          <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", background: "var(--ws-surface)" }}>
+          <div style={{ flex: 1, minHeight: 0, display: "flex", flexDirection: "column", overflow: "hidden", background: "rgba(0,0,0,0.12)" }}>
             <div style={{ padding: "10px 16px", borderBottom: "1px solid var(--ws-border)", display: "flex", alignItems: "center", gap: 10, flexShrink: 0 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 7, color: "var(--ws-text-muted)", fontSize: 13, fontWeight: 700 }}>
                 <Table2 size={14} />
@@ -274,7 +227,7 @@ export function SparqlWorkspace() {
                   ) : (
                     <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12, color: "var(--ws-text)" }}>
                       <thead>
-                        <tr style={{ borderBottom: "1px solid var(--ws-border)", background: "var(--ws-surface)" }}>
+                        <tr style={{ borderBottom: "1px solid var(--ws-border)", background: "rgba(0,0,0,0.2)" }}>
                           <th style={{ padding: "8px 14px", textAlign: "left", color: "var(--ws-text-dim)", fontFamily: "monospace", fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", width: 40 }}>#</th>
                           {result.columns.map((c) => (
                             <th key={c} style={{ padding: "8px 14px", textAlign: "left", color: "var(--ws-text-muted)", fontFamily: "monospace", fontSize: 11, fontWeight: 700, letterSpacing: "0.06em" }}>?{c}</th>
@@ -283,7 +236,7 @@ export function SparqlWorkspace() {
                       </thead>
                       <tbody>
                         {result.rows.map((r, i) => (
-                          <tr key={i} style={{ borderBottom: "1px solid var(--ws-accent-soft)" }}>
+                          <tr key={i} style={{ borderBottom: "1px solid rgba(74,163,255,0.06)" }}>
                             <td style={{ padding: "7px 14px", color: "var(--ws-text-dim)", fontFamily: "monospace", fontSize: 11 }}>{i + 1}</td>
                             {(result.columns ?? []).map((c) => (
                               <td key={c} style={{ padding: "7px 14px", maxWidth: 300, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", fontFamily: "monospace" }} title={String(r[c] ?? "")}>

@@ -47,11 +47,11 @@ const FORMAT_COLORS: Record<string, string> = {
   xml: "#ff9daf",
   "json-ld": "#f2b66d",
   nt: "#d2a8ff",
-  unknown: "var(--ws-text-dim)",
+  unknown: "#6a7f97",
 };
 
 function StatusBadge({ status }: { status: string }) {
-  const color = STATUS_COLORS[status] || "var(--ws-text-dim)";
+  const color = STATUS_COLORS[status] || "#6a7f97";
   return (
     <span
       style={{
@@ -61,8 +61,8 @@ function StatusBadge({ status }: { status: string }) {
         fontWeight: 700,
         letterSpacing: "0.07em",
         textTransform: "uppercase" as const,
-        background: `color-mix(in srgb, ${color} 9%, transparent)`,
-        border: `1px solid color-mix(in srgb, ${color} 20%, transparent)`,
+        background: `${color}18`,
+        border: `1px solid ${color}33`,
         color,
       }}
     >
@@ -80,8 +80,8 @@ function FormatBadge({ format }: { format: string }) {
         borderRadius: 999,
         fontSize: 10,
         fontWeight: 700,
-        background: `color-mix(in srgb, ${color} 8%, transparent)`,
-        border: `1px solid color-mix(in srgb, ${color} 16%, transparent)`,
+        background: `${color}14`,
+        border: `1px solid ${color}28`,
         color,
       }}
     >
@@ -93,10 +93,10 @@ function FormatBadge({ format }: { format: string }) {
 function Stat({ value, label }: { value: number; label: string }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", alignItems: "center", gap: 1 }}>
-      <span style={{ color: "var(--ws-text)", fontSize: 14, fontWeight: 800 }}>
+      <span style={{ color: "#ebf3ff", fontSize: 14, fontWeight: 800 }}>
         {value.toLocaleString()}
       </span>
-      <span style={{ color: "var(--ws-text-dim)", fontSize: 10 }}>{label}</span>
+      <span style={{ color: "#6a7f97", fontSize: 10 }}>{label}</span>
     </div>
   );
 }
@@ -148,11 +148,11 @@ function RegistryRow({
       style={{
         ...rowStyle,
         background: selected
-          ? "var(--ws-accent-soft)"
-          : "var(--ws-surface-hover)",
+          ? "rgba(74,163,255,0.1)"
+          : "rgba(255,255,255,0.02)",
         borderColor: selected
-          ? "var(--ws-border)"
-          : "var(--ws-border)",
+          ? "rgba(127,208,255,0.26)"
+          : "rgba(127,208,255,0.1)",
         opacity: entry.enabled ? 1 : 0.55,
       }}
     >
@@ -198,7 +198,7 @@ function RegistryRow({
           ) : entry.enabled ? (
             <ToggleRight size={15} color="#4cc38a" />
           ) : (
-            <ToggleLeft size={15} color="var(--ws-text-dim)" />
+            <ToggleLeft size={15} color="#6a7f97" />
           )}
         </button>
 
@@ -379,7 +379,7 @@ export function OntologyManager() {
         {/* Toolbar */}
         <div style={toolbarStyle}>
           <div style={searchBoxStyle}>
-            <Search size={14} color="var(--ws-text-dim)" />
+            <Search size={14} color="#6a7f97" />
             <input
               value={searchQ}
               onChange={(e) => setSearchQ(e.target.value)}
@@ -455,15 +455,15 @@ export function OntologyManager() {
             {loading ? (
               <div style={centerStyle}>
                 <Loader2 size={22} color="#4aa3ff" style={{ animation: "spin 1s linear infinite" }} />
-                <span style={{ color: "var(--ws-text-muted)", fontSize: 13, marginTop: 10 }}>Loading registry…</span>
+                <span style={{ color: "#8fa8c6", fontSize: 13, marginTop: 10 }}>Loading registry…</span>
               </div>
             ) : filteredEntries.length === 0 ? (
               <div style={emptyStateStyle}>
-                <BookMarked size={36} color="var(--ws-accent-soft)" />
-                <div style={{ color: "var(--ws-text-muted)", fontSize: 14, fontWeight: 600, marginTop: 14 }}>
+                <BookMarked size={36} color="rgba(74,163,255,0.18)" />
+                <div style={{ color: "#8fa8c6", fontSize: 14, fontWeight: 600, marginTop: 14 }}>
                   {searchQ ? "No ontologies match your search" : "No ontologies loaded yet"}
                 </div>
-                <div style={{ color: "var(--ws-text-dim)", fontSize: 12, marginTop: 6, textAlign: "center", maxWidth: 300, lineHeight: 1.6 }}>
+                <div style={{ color: "#6a7f97", fontSize: 12, marginTop: 6, textAlign: "center", maxWidth: 300, lineHeight: 1.6 }}>
                   {searchQ
                     ? "Try a different search term or clear the filter."
                     : <>Import from a URL, upload a file, or create a new ontology to get started. Click <strong style={{ color: "#7fd0ff" }}>Load Ontology</strong> above.</>}
@@ -527,13 +527,13 @@ export function OntologyManager() {
               </div>
               <div style={detailBodyStyle}>
                 <DetailSection label="URI">
-                  <span style={{ fontFamily: "monospace", fontSize: 11, wordBreak: "break-all", color: "var(--ws-text)" }}>
+                  <span style={{ fontFamily: "monospace", fontSize: 11, wordBreak: "break-all", color: "#c6d4e3" }}>
                     {selectedEntry.uri}
                   </span>
                 </DetailSection>
                 {selectedEntry.description && (
                   <DetailSection label="Description">
-                    <span style={{ color: "var(--ws-text)", fontSize: 13, lineHeight: 1.6 }}>
+                    <span style={{ color: "#c6d4e3", fontSize: 13, lineHeight: 1.6 }}>
                       {selectedEntry.description}
                     </span>
                   </DetailSection>
@@ -552,12 +552,12 @@ export function OntologyManager() {
                 )}
                 {selectedEntry.version && (
                   <DetailSection label="Version">
-                    <span style={{ color: "var(--ws-text)", fontSize: 12 }}>{selectedEntry.version}</span>
+                    <span style={{ color: "#c6d4e3", fontSize: 12 }}>{selectedEntry.version}</span>
                   </DetailSection>
                 )}
                 {selectedEntry.loaded_at && (
                   <DetailSection label="Loaded at">
-                    <span style={{ color: "var(--ws-text)", fontSize: 12 }}>
+                    <span style={{ color: "#c6d4e3", fontSize: 12 }}>
                       {new Date(selectedEntry.loaded_at).toLocaleString()}
                     </span>
                   </DetailSection>
@@ -605,8 +605,8 @@ export function OntologyManager() {
 
 function DetailSection({ label, children }: { label: string; children: React.ReactNode }) {
   return (
-    <div style={{ borderTop: "1px solid var(--ws-surface-hover)", paddingTop: 10, paddingBottom: 2 }}>
-      <div style={{ color: "var(--ws-text-dim)", fontSize: 10, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.07em", marginBottom: 4 }}>
+    <div style={{ borderTop: "1px solid rgba(255,255,255,0.05)", paddingTop: 10, paddingBottom: 2 }}>
+      <div style={{ color: "#6a7f97", fontSize: 10, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.07em", marginBottom: 4 }}>
         {label}
       </div>
       {children}
@@ -616,9 +616,9 @@ function DetailSection({ label, children }: { label: string; children: React.Rea
 
 function StatBlock({ value, label, color }: { value: number; label: string; color: string }) {
   return (
-    <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2, padding: "10px 6px", background: "var(--ws-surface-hover)", borderRadius: 8, border: "1px solid var(--ws-surface-hover)" }}>
+    <div style={{ flex: 1, display: "flex", flexDirection: "column", alignItems: "center", gap: 2, padding: "10px 6px", background: "rgba(255,255,255,0.02)", borderRadius: 8, border: "1px solid rgba(255,255,255,0.05)" }}>
       <span style={{ color, fontSize: 18, fontWeight: 800 }}>{value.toLocaleString()}</span>
-      <span style={{ color: "var(--ws-text-dim)", fontSize: 10 }}>{label}</span>
+      <span style={{ color: "#6a7f97", fontSize: 10 }}>{label}</span>
     </div>
   );
 }
@@ -630,7 +630,7 @@ const shellStyle: React.CSSProperties = {
   flexDirection: "column",
   width: "100%",
   height: "100%",
-  background: "var(--ws-surface)",
+  background: "#0a1525",
   overflow: "hidden",
 };
 
@@ -639,8 +639,8 @@ const toolbarStyle: React.CSSProperties = {
   alignItems: "center",
   gap: 10,
   padding: "12px 18px",
-  borderBottom: "1px solid var(--ws-border)",
-  background: "var(--ws-surface)",
+  borderBottom: "1px solid rgba(127,208,255,0.1)",
+  background: "rgba(5,12,22,0.72)",
   flexWrap: "wrap",
   flexShrink: 0,
 };
@@ -651,8 +651,8 @@ const searchBoxStyle: React.CSSProperties = {
   gap: 8,
   padding: "7px 12px",
   borderRadius: 10,
-  border: "1px solid var(--ws-border)",
-  background: "var(--ws-surface)",
+  border: "1px solid rgba(127,208,255,0.14)",
+  background: "rgba(0,0,0,0.24)",
   flex: "0 0 280px",
 };
 
@@ -660,7 +660,7 @@ const searchInputStyle: React.CSSProperties = {
   background: "transparent",
   border: "none",
   outline: "none",
-  color: "var(--ws-text)",
+  color: "#ebf3ff",
   fontSize: 12,
   width: "100%",
 };
@@ -677,14 +677,14 @@ const filterPillBase: React.CSSProperties = {
 
 const filterPillIdle: React.CSSProperties = {
   background: "transparent",
-  color: "var(--ws-text-muted)",
-  borderColor: "var(--ws-border)",
+  color: "#8fa8c6",
+  borderColor: "rgba(127,208,255,0.1)",
 };
 
 const filterPillActive: React.CSSProperties = {
-  background: "var(--ws-accent-soft)",
-  color: "var(--ws-text)",
-  borderColor: "var(--ws-border)",
+  background: "rgba(74,163,255,0.14)",
+  color: "#ebf3ff",
+  borderColor: "rgba(127,208,255,0.26)",
 };
 
 const toolBtnStyle: React.CSSProperties = {
@@ -693,18 +693,18 @@ const toolBtnStyle: React.CSSProperties = {
   gap: 6,
   padding: "7px 12px",
   borderRadius: 8,
-  border: "1px solid var(--ws-border)",
-  background: "var(--ws-accent-soft)",
-  color: "var(--ws-text-muted)",
+  border: "1px solid rgba(127,208,255,0.16)",
+  background: "rgba(74,163,255,0.06)",
+  color: "#8fa8c6",
   fontSize: 12,
   fontWeight: 600,
   cursor: "pointer",
 };
 
 const toolBtnActive: React.CSSProperties = {
-  background: "var(--ws-accent-soft)",
-  color: "var(--ws-text)",
-  borderColor: "var(--ws-border)",
+  background: "rgba(74,163,255,0.16)",
+  color: "#ebf3ff",
+  borderColor: "rgba(127,208,255,0.28)",
 };
 
 const primaryToolBtnStyle: React.CSSProperties = {
@@ -713,8 +713,8 @@ const primaryToolBtnStyle: React.CSSProperties = {
   gap: 7,
   padding: "7px 14px",
   borderRadius: 9,
-  border: "1px solid var(--ws-accent-soft)",
-  background: "var(--ws-surface)",
+  border: "1px solid rgba(74,163,255,0.3)",
+  background: "linear-gradient(135deg, rgba(74,163,255,0.2), rgba(74,163,255,0.08))",
   color: "#7fd0ff",
   fontSize: 12,
   fontWeight: 700,
@@ -742,7 +742,7 @@ const listPanelStyle: React.CSSProperties = {
   flex: 1,
   minWidth: 0,
   overflowY: "auto",
-  borderRight: "1px solid var(--ws-border)",
+  borderRight: "1px solid rgba(127,208,255,0.08)",
 };
 
 const listStyle: React.CSSProperties = {
@@ -757,7 +757,7 @@ const listHeaderStyle: React.CSSProperties = {
 };
 
 const listHeaderTextStyle: React.CSSProperties = {
-  color: "var(--ws-text-dim)",
+  color: "#6a7f97",
   fontSize: 11,
   fontWeight: 700,
 };
@@ -782,13 +782,13 @@ const rowMainStyle: React.CSSProperties = {
 };
 
 const rowNameStyle: React.CSSProperties = {
-  color: "var(--ws-text)",
+  color: "#ebf3ff",
   fontSize: 14,
   fontWeight: 700,
 };
 
 const rowUriStyle: React.CSSProperties = {
-  color: "var(--ws-text-dim)",
+  color: "#6a7f97",
   fontSize: 11,
   fontFamily: "monospace",
   overflow: "hidden",
@@ -825,7 +825,7 @@ const actionBtnStyle: React.CSSProperties = {
   borderRadius: 6,
   display: "grid",
   placeItems: "center",
-  color: "var(--ws-text-muted)",
+  color: "#8fa8c6",
 };
 
 const rightPanelStyle: React.CSSProperties = {
@@ -833,8 +833,8 @@ const rightPanelStyle: React.CSSProperties = {
   flexShrink: 0,
   display: "flex",
   flexDirection: "column",
-  borderLeft: "1px solid var(--ws-border)",
-  background: "var(--ws-surface)",
+  borderLeft: "1px solid rgba(127,208,255,0.1)",
+  background: "rgba(5,12,22,0.6)",
   overflow: "hidden",
 };
 
@@ -843,12 +843,12 @@ const rightPanelHeaderStyle: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "space-between",
   padding: "14px 16px",
-  borderBottom: "1px solid var(--ws-border)",
+  borderBottom: "1px solid rgba(127,208,255,0.1)",
   flexShrink: 0,
 };
 
 const rightPanelTitleStyle: React.CSSProperties = {
-  color: "var(--ws-text)",
+  color: "#ebf3ff",
   fontSize: 13,
   fontWeight: 700,
   overflow: "hidden",
@@ -859,7 +859,7 @@ const rightPanelTitleStyle: React.CSSProperties = {
 const closePanelBtnStyle: React.CSSProperties = {
   background: "transparent",
   border: "none",
-  color: "var(--ws-text-muted)",
+  color: "#8fa8c6",
   cursor: "pointer",
   fontSize: 18,
   lineHeight: 1,
@@ -872,8 +872,8 @@ const browseBtnStyle: React.CSSProperties = {
   gap: 5,
   padding: "4px 10px",
   borderRadius: 7,
-  border: "1px solid var(--ws-border)",
-  background: "var(--ws-accent-soft)",
+  border: "1px solid rgba(127,208,255,0.18)",
+  background: "rgba(74,163,255,0.06)",
   color: "#7fd0ff",
   fontSize: 11,
   fontWeight: 600,
@@ -899,9 +899,9 @@ const statRowStyle: React.CSSProperties = {
 const tagChipStyle: React.CSSProperties = {
   padding: "3px 8px",
   borderRadius: 999,
-  background: "var(--ws-surface-hover)",
-  border: "1px solid var(--ws-surface-hover)",
-  color: "var(--ws-text-muted)",
+  background: "rgba(255,255,255,0.04)",
+  border: "1px solid rgba(255,255,255,0.08)",
+  color: "#8fa8c6",
   fontSize: 11,
 };
 
@@ -912,7 +912,7 @@ const disabledBadgeStyle: React.CSSProperties = {
   fontWeight: 700,
   background: "rgba(106,127,151,0.12)",
   border: "1px solid rgba(106,127,151,0.2)",
-  color: "var(--ws-text-dim)",
+  color: "#6a7f97",
 };
 
 const centerStyle: React.CSSProperties = {

@@ -10,6 +10,7 @@ import hashlib
 import json
 import math
 import re
+from datetime import date
 from itertools import islice
 
 from ..semantic_extract.types import Entity, Relation
@@ -1159,11 +1160,35 @@ class ExtractionRecords:
         self.add(node, "status", self.ox.NamedNode(F + "active"))
         self.confidence(node, relation.confidence)
         data = relation.metadata
-        allowed = {"provider", "model", "extraction_method", "subject_id", "object_id", "evidence_start", "evidence_end", "evidence_occurrence", "qualifiers", "supporting_refs"}
+        allowed = {"provider", "model", "extraction_method", "subject_id", "object_id", "evidence_start", "evidence_end", "evidence_occurrence", "qualifiers", "supporting_refs", "valid_from", "valid_until"}
         if set(data) - allowed:
             raise ProcessingError("Unknown relation metadata fields")
-        self.metadata(node, {k: data[k] for k in data if k not in {"evidence_start", "evidence_end", "qualifiers", "supporting_refs"}}, {
+        self.metadata(node, {k: data[k] for k in data if k not in {"evidence_start", "evidence_end", "qualifiers", "supporting_refs", "valid_from", "valid_until"}}, {
             "provider": "provider", "model": "model", "extraction_method": "extractionMethod", "subject_id": "subjectId", "object_id": "objectId", "evidence_occurrence": "evidenceOccurrence"})
+        from ..kg.temporal_model import TemporalBound, parse_temporal_bound, parse_temporal_value, serialize_temporal_bound, serialize_temporal_value
+        def serialize_valid_time(value, *, upper_bound=False):
+            if isinstance(value, str) and re.fullmatch(r"\d{4}-\d{2}-\d{2}", value):
+                try:
+                    return date.fromisoformat(value).isoformat()
+                except ValueError as exc:
+                    raise ProcessingError("Invalid native relation effective date") from exc
+            if upper_bound:
+                bound = parse_temporal_bound(value)
+                return None if bound is TemporalBound.OPEN else serialize_temporal_bound(bound)
+            return serialize_temporal_value(parse_temporal_value(value))
+        if data.get("valid_from") is not None:
+            try:
+                value = serialize_valid_time(data["valid_from"])
+            except (TypeError, ValueError) as exc:
+                raise ProcessingError("Invalid native relation valid_from") from exc
+            self.add(node, "valid_from", value)
+        if data.get("valid_until") is not None:
+            try:
+                value = serialize_valid_time(data["valid_until"], upper_bound=True)
+            except (TypeError, ValueError) as exc:
+                raise ProcessingError("Invalid native relation valid_until") from exc
+            if value is not None:
+                self.add(node, "valid_until", value)
         evidence = self.node("evidence:" + str(index))
         self.own(evidence, "Evidence")
         self.evidence(evidence, text, data.get("evidence_start"), data.get("evidence_end"))

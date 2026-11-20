@@ -306,10 +306,6 @@ export interface ApiEdge {
 }
 
 export interface GraphLoadSummary {
-  nodeTypes?: string[];
-  edgeTypes?: string[];
-  totalNodeCount?: number;
-  totalEdgeCount?: number;
   nodeCount: number;
   edgeCount: number;
   loadTimeMs: number;

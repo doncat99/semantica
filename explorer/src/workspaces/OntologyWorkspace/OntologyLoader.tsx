@@ -40,8 +40,8 @@ function Badge({ label, color }: { label: string; color: string }) {
         fontWeight: 700,
         letterSpacing: "0.07em",
         textTransform: "uppercase" as const,
-        background: `color-mix(in srgb, ${color} 9%, transparent)`,
-        border: `1px solid color-mix(in srgb, ${color} 20%, transparent)`,
+        background: `${color}18`,
+        border: `1px solid ${color}33`,
         color,
       }}
     >
@@ -122,7 +122,7 @@ function PreviewCard({ preview }: { preview: OntologyPreview }) {
 
       <div style={previewTitleStyle}>{preview.name}</div>
       {preview.description && (
-        <div style={{ color: "var(--ws-text-muted)", fontSize: 12, marginTop: 6, lineHeight: 1.5 }}>
+        <div style={{ color: "#8fa8c6", fontSize: 12, marginTop: 6, lineHeight: 1.5 }}>
           {preview.description}
         </div>
       )}
@@ -151,12 +151,12 @@ function PreviewRow({
 }) {
   return (
     <div style={{ display: "flex", flexDirection: "column", gap: 2 }}>
-      <span style={{ color: "var(--ws-text-dim)", fontSize: 10, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.07em" }}>
+      <span style={{ color: "#6a7f97", fontSize: 10, fontWeight: 700, textTransform: "uppercase" as const, letterSpacing: "0.07em" }}>
         {label}
       </span>
       <span
         style={{
-          color: "var(--ws-text)",
+          color: "#c6d4e3",
           fontSize: 11,
           fontFamily: mono ? "monospace" : undefined,
           wordBreak: "break-all",
@@ -415,9 +415,9 @@ function FileUploadPanel({ onLoaded }: { onLoaded: () => void }) {
         style={{
           ...dropzoneStyle,
           borderColor: dragging
-            ? "var(--ws-accent-soft)"
-            : "var(--ws-border)",
-          background: dragging ? "var(--ws-accent-soft)" : undefined,
+            ? "rgba(74,163,255,0.5)"
+            : "rgba(127,208,255,0.18)",
+          background: dragging ? "rgba(74,163,255,0.06)" : undefined,
         }}
         onDragOver={(e) => { e.preventDefault(); setDragging(true); }}
         onDragLeave={() => setDragging(false)}
@@ -426,13 +426,13 @@ function FileUploadPanel({ onLoaded }: { onLoaded: () => void }) {
       >
         <FileUp size={24} color="#4aa3ff" />
         {fileName ? (
-          <div style={{ color: "var(--ws-text)", fontSize: 13, fontWeight: 600 }}>{fileName}</div>
+          <div style={{ color: "#ebf3ff", fontSize: 13, fontWeight: 600 }}>{fileName}</div>
         ) : (
           <>
-            <div style={{ color: "var(--ws-text-muted)", fontSize: 13 }}>
+            <div style={{ color: "#8fa8c6", fontSize: 13 }}>
               Drop a file here or <span style={{ color: "#4aa3ff" }}>browse</span>
             </div>
-            <div style={{ color: "var(--ws-text-dim)", fontSize: 11 }}>
+            <div style={{ color: "#5a7a9a", fontSize: 11 }}>
               .ttl · .rdf · .owl · .xml · .nt · .jsonld · .json · .n3
             </div>
           </>
@@ -649,8 +649,8 @@ export function OntologyLoader({ onLoaded, onClose }: LoaderProps) {
       <div style={modalStyle}>
         <div style={modalHeaderStyle}>
           <div>
-            <div style={{ color: "var(--ws-text)", fontSize: 16, fontWeight: 800 }}>Load Ontology</div>
-            <div style={{ color: "var(--ws-text-muted)", fontSize: 12, marginTop: 2 }}>
+            <div style={{ color: "#ebf3ff", fontSize: 16, fontWeight: 800 }}>Load Ontology</div>
+            <div style={{ color: "#8fa8c6", fontSize: 12, marginTop: 2 }}>
               Import from URL, upload a file, or create a new ontology
             </div>
           </div>
@@ -659,7 +659,7 @@ export function OntologyLoader({ onLoaded, onClose }: LoaderProps) {
           </button>
         </div>
 
-        <div style={{ display: "flex", gap: 2, padding: "0 20px", borderBottom: "1px solid var(--ws-border)" }}>
+        <div style={{ display: "flex", gap: 2, padding: "0 20px", borderBottom: "1px solid rgba(127,208,255,0.1)" }}>
           {(["url", "file", "create"] as LoaderMode[]).map((m) => (
             <button
               key={m}
@@ -695,8 +695,8 @@ export function OntologyLoader({ onLoaded, onClose }: LoaderProps) {
 const overlayStyle: React.CSSProperties = {
   position: "fixed",
   inset: 0,
-  background: "var(--ws-surface)",
-  backdropFilter: "none",
+  background: "rgba(3,9,18,0.78)",
+  backdropFilter: "blur(6px)",
   display: "flex",
   alignItems: "center",
   justifyContent: "center",
@@ -709,9 +709,9 @@ const modalStyle: React.CSSProperties = {
   display: "flex",
   flexDirection: "column",
   borderRadius: 20,
-  border: "1px solid var(--ws-border)",
-  background: "var(--ws-surface)",
-  boxShadow: "none",
+  border: "1px solid rgba(127,208,255,0.16)",
+  background: "linear-gradient(180deg, rgba(11,21,34,0.98), rgba(6,13,22,0.96))",
+  boxShadow: "0 32px 80px rgba(0,0,0,0.5), inset 0 1px 0 rgba(255,255,255,0.06)",
   overflow: "hidden",
 };
 
@@ -749,7 +749,7 @@ const modalTabBase: React.CSSProperties = {
 };
 
 const modalTabIdle: React.CSSProperties = {
-  color: "var(--ws-text-muted)",
+  color: "#8fa8c6",
 };
 
 const modalTabActive: React.CSSProperties = {
@@ -760,7 +760,7 @@ const modalTabActive: React.CSSProperties = {
 const closeIconBtnStyle: React.CSSProperties = {
   background: "transparent",
   border: "none",
-  color: "var(--ws-text-muted)",
+  color: "#8fa8c6",
   cursor: "pointer",
   padding: 4,
   borderRadius: 8,
@@ -769,7 +769,7 @@ const closeIconBtnStyle: React.CSSProperties = {
 };
 
 const fieldLabelStyle: React.CSSProperties = {
-  color: "var(--ws-text-muted)",
+  color: "#8fa8c6",
   fontSize: 11,
   fontWeight: 700,
   letterSpacing: "0.05em",
@@ -779,9 +779,9 @@ const inputStyle: React.CSSProperties = {
   width: "100%",
   padding: "8px 12px",
   borderRadius: 8,
-  border: "1px solid var(--ws-border)",
-  background: "var(--ws-surface)",
-  color: "var(--ws-text)",
+  border: "1px solid rgba(127,208,255,0.16)",
+  background: "rgba(0,0,0,0.24)",
+  color: "#ebf3ff",
   fontSize: 13,
   outline: "none",
   boxSizing: "border-box",
@@ -796,8 +796,8 @@ const selectStyle: React.CSSProperties = {
 const previewBtnStyle: React.CSSProperties = {
   padding: "8px 14px",
   borderRadius: 8,
-  border: "1px solid var(--ws-border)",
-  background: "var(--ws-accent-soft)",
+  border: "1px solid rgba(127,208,255,0.2)",
+  background: "rgba(74,163,255,0.08)",
   color: "#7fd0ff",
   fontSize: 12,
   fontWeight: 600,
@@ -814,8 +814,8 @@ const primaryBtnStyle: React.CSSProperties = {
   gap: 7,
   padding: "9px 18px",
   borderRadius: 10,
-  border: "1px solid var(--ws-accent-soft)",
-  background: "var(--ws-surface)",
+  border: "1px solid rgba(74,163,255,0.3)",
+  background: "linear-gradient(135deg, rgba(74,163,255,0.2), rgba(74,163,255,0.1))",
   color: "#7fd0ff",
   fontSize: 13,
   fontWeight: 700,
@@ -828,7 +828,7 @@ const advancedToggleStyle: React.CSSProperties = {
   gap: 6,
   background: "transparent",
   border: "none",
-  color: "var(--ws-text-dim)",
+  color: "#6a7f97",
   fontSize: 12,
   cursor: "pointer",
   padding: 0,
@@ -842,7 +842,7 @@ const previewCardStyle: React.CSSProperties = {
 };
 
 const previewTitleStyle: React.CSSProperties = {
-  color: "var(--ws-text)",
+  color: "#ebf3ff",
   fontSize: 15,
   fontWeight: 800,
   letterSpacing: "-0.03em",
@@ -902,12 +902,12 @@ const modeTabBase: React.CSSProperties = {
 
 const modeTabIdle: React.CSSProperties = {
   background: "transparent",
-  color: "var(--ws-text-muted)",
-  borderColor: "var(--ws-border)",
+  color: "#8fa8c6",
+  borderColor: "rgba(127,208,255,0.1)",
 };
 
 const modeTabActive: React.CSSProperties = {
-  background: "var(--ws-accent-soft)",
-  color: "var(--ws-text)",
-  borderColor: "var(--ws-border)",
+  background: "rgba(74,163,255,0.14)",
+  color: "#ebf3ff",
+  borderColor: "rgba(127,208,255,0.24)",
 };

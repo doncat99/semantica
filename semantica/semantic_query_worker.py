@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import io
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
 from threading import Event
 from typing import Any, Dict, Optional, TextIO
@@ -22,6 +23,7 @@ from .semantic_query_schema import (
     NativeBindingRequest,
     NativeEvidenceRequest,
     NativeSceneRequest,
+    NativePathRequest,
     NativeFactMembersRequest,
     NativeClassificationRequest,
     NativeClassificationBatchRequest,
@@ -159,6 +161,108 @@ def handle_request(raw: Dict[str, Any]) -> Dict[str, Any]:
             selected.semantic_store.generation, selected.selection)
         _native_store.borrow(selected.semantic_store, selected.project_id)
         return _response(request.id, True, result=result)
+    if request.method == 'analyze':
+        from .semantic_query_schema import NativeAnalysisRequest
+        from .kg.publication_analysis import analyze_publication
+        selected = NativeAnalysisRequest.model_validate(request.params)
+        owner = _native_store.borrow(selected.semantic_store, selected.project_id)
+        result = analyze_publication(owner, selected.project_id, selected.semantic_store.generation)
+        _native_store.borrow(selected.semantic_store, selected.project_id)
+        return _response(request.id, True, result=result)
+    if request.method == 'path':
+        from collections import deque
+        from .semantic_worker_context import check_query_cancellation, count_query_work
+        selected = NativePathRequest.model_validate(request.params)
+        check_query_cancellation()
+        owner = _native_store.borrow(selected.semantic_store, selected.project_id)
+        generation = selected.semantic_store.generation
+        endpoints = list(dict.fromkeys((selected.source, selected.target)))
+        admitted = owner.read_publication_scene(selected.project_id, generation, dict(
+            kind='nodes', fields=['id'], nodeIds=endpoints, limit=len(endpoints), maxBytes=min(262144, selected.max_bytes)))
+        pages = 1
+        read_bytes = len(json.dumps(admitted, ensure_ascii=False).encode())
+        count_query_work('pathEndpointRows', len(admitted.get('nodes', [])))
+        count_query_work('pathPages')
+        count_query_work('pathReadBytes', read_bytes)
+        check_query_cancellation()
+        _native_store.borrow(selected.semantic_store, selected.project_id)
+        if admitted.get('next_cursor') is not None or {row.get('id') for row in admitted.get('nodes', [])} != set(endpoints):
+            return _response(request.id, True, result=dict(project=selected.project_id, generation=generation,
+                status='unavailable', nodeIds=[], relations=[], pages=1, inspectedEdges=0, visitedNodes=0,
+                readBytes=read_bytes, detail='A path endpoint is unavailable in this publication.'))
+        if selected.source == selected.target:
+            return _response(request.id, True, result=dict(project=selected.project_id, generation=generation,
+                status='found', nodeIds=[selected.source], relations=[], pages=1, inspectedEdges=0, visitedNodes=1, readBytes=read_bytes))
+
+        started = time.monotonic()
+        deadline = started + selected.max_millis / 1000
+        queue = deque([(selected.source, 0)])
+        visited = {selected.source}
+        parents = {}
+        inspected = 0
+        depth_limited = False
+
+        def response(status, *, detail=None, path=None):
+            result = dict(project=selected.project_id, generation=generation, status=status,
+                nodeIds=path[0] if path else [], relations=path[1] if path else [], pages=pages,
+                inspectedEdges=inspected, visitedNodes=len(visited), readBytes=read_bytes)
+            if detail:
+                result['detail'] = detail
+            check_query_cancellation()
+            _native_store.borrow(selected.semantic_store, selected.project_id)
+            return _response(request.id, True, result=result)
+
+        while queue:
+            check_query_cancellation()
+            node, depth = queue.popleft()
+            if depth >= selected.max_depth:
+                depth_limited = True
+                continue
+            after = None
+            while True:
+                check_query_cancellation()
+                if pages >= selected.max_pages or inspected >= selected.max_edges or time.monotonic() >= deadline:
+                    return response('incomplete', detail='Path search reached its bounded traversal budget.')
+                remaining_bytes = selected.max_bytes - read_bytes
+                if remaining_bytes <= 0:
+                    return response('incomplete', detail='Path search reached its total read-byte budget.')
+                page = owner.read_publication_scene(selected.project_id, generation, dict(
+                    kind='incident', fields=['id', 'source', 'target', 'predicate'], nodeId=node,
+                    limit=32, maxBytes=min(262144, remaining_bytes), **({'after': after} if after else {})))
+                pages += 1
+                page_bytes = len(json.dumps(page, ensure_ascii=False).encode())
+                read_bytes += page_bytes
+                count_query_work('pathPages')
+                count_query_work('pathReadBytes', page_bytes)
+                count_query_work('pathIncidentPages')
+                count_query_work('pathIncidentEdges', len(page.get('links', [])))
+                if read_bytes > selected.max_bytes:
+                    return response('incomplete', detail='Path search reached its total read-byte budget.')
+                for link in page.get('links', []):
+                    check_query_cancellation()
+                    inspected += 1
+                    next_node = link['target'] if link['source'] == node else link['source']
+                    if next_node in visited:
+                        continue
+                    if len(visited) >= selected.max_nodes:
+                        return response('incomplete', detail='Path search reached its visited-node budget.')
+                    parents[next_node] = (node, dict(id=link['id'], source=link['source'], target=link['target'], type=link['predicate']))
+                    visited.add(next_node)
+                    if next_node == selected.target:
+                        node_ids, relations, cursor = [next_node], [], next_node
+                        while cursor != selected.source:
+                            previous, relation = parents[cursor]
+                            relations.append(relation)
+                            node_ids.append(previous)
+                            cursor = previous
+                        return response('found', path=(list(reversed(node_ids)), list(reversed(relations))))
+                    queue.append((next_node, depth + 1))
+                after = page.get('next_cursor')
+                if not after:
+                    break
+        return response('incomplete' if depth_limited else 'not_found', detail=(
+            'Search reached the maximum path length.' if depth_limited else
+            'No connection exists between the selected nodes in this publication.'))
     if request.method == 'evidence':
         from .vector_store.sqlite_vec_store import SQLiteVecStore
         selected = NativeEvidenceRequest.model_validate(request.params)
@@ -247,7 +351,7 @@ def _serve(stdin, stdout, executor) -> int:
         if pending is not None:
             pending.result()
         if (isinstance(raw, dict) and raw.get('method') == 'query'
-                and isinstance(raw.get('params'), dict) and raw['params'].get('mode') == 'semantic'):
+                and isinstance(raw.get('params'), dict) and raw['params'].get('mode') in ('semantic', 'hybrid')):
             # Windows NumPy/BLAS DLL initialization can block on first import
             # inside an executor thread. Load the existing vector owner on the
             # serving thread before dispatch, only when a vector query needs it.

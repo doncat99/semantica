@@ -10,28 +10,21 @@ import type { GraphLoadSummary } from "./types";
 
 export function shouldFetchTemporalBounds(
   summary: GraphLoadSummary | undefined,
-  active = true,
 ): boolean {
-  return active && summary !== undefined;
+  return summary !== undefined;
 }
 
 export function shouldFetchTemporalSnapshot({
   debouncedTime,
-  active = true,
   isLoading,
   summary,
-  temporalBoundsStatus,
 }: {
   debouncedTime: Date | null;
-  active?: boolean;
   isLoading: boolean;
   summary: GraphLoadSummary | undefined;
-  temporalBoundsStatus: "loading" | "ready" | "none" | "error";
 }): boolean {
   return (
-    active &&
     summary !== undefined &&
-    temporalBoundsStatus === "ready" &&
     debouncedTime !== null &&
     !isLoading
   );

@@ -26,7 +26,6 @@
 export interface TemporalSnapshotResponse {
   active_node_ids: string[];
   active_node_count: number;
-  active_edge_ids: string[];
 }
 
 export interface TemporalSnapshotRequest {
@@ -34,18 +33,6 @@ export interface TemporalSnapshotRequest {
   seq: number | null;
   /** The snapshot previously applied for this position, when revisiting it. */
   cached: TemporalSnapshotResponse | null;
-}
-
-export interface TemporalVisibilityGraph {
-  nodes(): string[];
-  edges(): string[];
-  setNodeAttribute(nodeId: string, name: string, value: unknown): void;
-  setEdgeAttribute(edgeId: string, name: string, value: unknown): void;
-}
-
-export function clearTemporalVisibility(graph: TemporalVisibilityGraph): void {
-  graph.nodes().forEach((nodeId) => graph.setNodeAttribute(nodeId, "hidden", false));
-  graph.edges().forEach((edgeId) => graph.setEdgeAttribute(edgeId, "hidden", false));
 }
 
 export interface TemporalSnapshotGuards {

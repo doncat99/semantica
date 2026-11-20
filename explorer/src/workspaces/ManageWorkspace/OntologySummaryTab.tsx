@@ -41,17 +41,17 @@ function ConceptRow({
           paddingBottom: 5,
           borderRadius: 6,
           cursor: "pointer",
-          color: depth === 0 ? "var(--ws-text)" : "var(--ws-text-muted)",
+          color: depth === 0 ? "#c6d4e3" : "#8b949e",
           fontSize: depth === 0 ? 13 : 12,
           transition: "background 120ms ease",
         }}
-        onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = "var(--ws-accent-soft)"; }}
+        onMouseEnter={(e) => { (e.currentTarget as HTMLDivElement).style.background = "rgba(74,163,255,0.07)"; }}
         onMouseLeave={(e) => { (e.currentTarget as HTMLDivElement).style.background = "transparent"; }}
       >
         {hasChildren ? (
           <button
             onClick={() => setExpanded((v) => !v)}
-            style={{ background: "transparent", border: "none", color: "var(--ws-text-muted)", cursor: "pointer", padding: 0, display: "flex", alignItems: "center" }}
+            style={{ background: "transparent", border: "none", color: "#8b949e", cursor: "pointer", padding: 0, display: "flex", alignItems: "center" }}
           >
             {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
           </button>
@@ -65,7 +65,7 @@ function ConceptRow({
           {concept.pref_label || concept.uri}
         </span>
         {children.length > 0 ? (
-          <span style={{ color: "var(--ws-text-dim)", fontSize: 10 }}>{children.length}</span>
+          <span style={{ color: "#6a7f97", fontSize: 10 }}>{children.length}</span>
         ) : null}
       </div>
       {expanded && hasChildren
@@ -96,10 +96,10 @@ function SchemePanel({
         style={schemeHeaderStyle}
       >
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          {expanded ? <ChevronDown size={14} color="var(--ws-text-muted)" /> : <ChevronRight size={14} color="var(--ws-text-muted)" />}
-          <span style={{ color: "var(--ws-text)", fontSize: 14, fontWeight: 700 }}>{scheme.label}</span>
+          {expanded ? <ChevronDown size={14} color="#8b949e" /> : <ChevronRight size={14} color="#8b949e" />}
+          <span style={{ color: "#e6edf3", fontSize: 14, fontWeight: 700 }}>{scheme.label}</span>
         </div>
-        <span style={{ color: "var(--ws-text-dim)", fontSize: 11 }}>
+        <span style={{ color: "#6a7f97", fontSize: 11 }}>
           {isLoading ? "…" : `${totalConcepts} concept${totalConcepts !== 1 ? "s" : ""}`}
         </span>
       </button>
@@ -108,9 +108,9 @@ function SchemePanel({
       {expanded ? (
         <div style={{ paddingTop: 4, paddingBottom: 8 }}>
           {isLoading ? (
-            <div style={{ padding: "8px 24px", color: "var(--ws-text-dim)", fontSize: 12 }}>Loading concepts…</div>
+            <div style={{ padding: "8px 24px", color: "#6a7f97", fontSize: 12 }}>Loading concepts…</div>
           ) : hierarchy.length === 0 ? (
-            <div style={{ padding: "8px 24px", color: "var(--ws-text-dim)", fontSize: 12, fontStyle: "italic" }}>
+            <div style={{ padding: "8px 24px", color: "#6a7f97", fontSize: 12, fontStyle: "italic" }}>
               No concepts found in this scheme.
             </div>
           ) : (
@@ -139,8 +139,8 @@ export function OntologySummaryTab({
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <BookOpen size={18} color="#d2a8ff" />
           <div>
-            <div style={{ color: "var(--ws-text)", fontSize: 16, fontWeight: 700 }}>Ontology Summary</div>
-            <div style={{ color: "var(--ws-text-muted)", fontSize: 12 }}>
+            <div style={{ color: "#ebf3ff", fontSize: 16, fontWeight: 700 }}>Ontology Summary</div>
+            <div style={{ color: "#8b949e", fontSize: 12 }}>
               {isLoading
                 ? "Loading schemes…"
                 : `${schemes.length} vocabulary scheme${schemes.length !== 1 ? "s" : ""} loaded`}
@@ -161,14 +161,14 @@ export function OntologySummaryTab({
           {isLoading ? (
             <div style={{ padding: 24, display: "flex", flexDirection: "column", gap: 10 }}>
               {[90, 75, 60].map((w, i) => (
-                <div key={i} style={{ height: 36, borderRadius: 8, background: "var(--ws-surface-hover)", width: `${w}%` }} />
+                <div key={i} style={{ height: 36, borderRadius: 8, background: "rgba(255,255,255,0.04)", width: `${w}%` }} />
               ))}
             </div>
           ) : schemes.length === 0 ? (
             <div style={emptyStateStyle}>
               <BookOpen size={32} color="rgba(210,168,255,0.15)" />
-              <div style={{ color: "var(--ws-text-muted)", fontSize: 13, marginTop: 12 }}>No vocabulary schemes loaded</div>
-              <div style={{ color: "var(--ws-text-dim)", fontSize: 12, marginTop: 4, textAlign: "center", maxWidth: 240 }}>
+              <div style={{ color: "#8b949e", fontSize: 13, marginTop: 12 }}>No vocabulary schemes loaded</div>
+              <div style={{ color: "#6a7f97", fontSize: 12, marginTop: 4, textAlign: "center", maxWidth: 240 }}>
                 Import a .ttl or .rdf file via the Vocabulary Browser to see your ontology here.
               </div>
             </div>
@@ -188,23 +188,23 @@ export function OntologySummaryTab({
               <div style={{ color: "#d2a8ff", fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase" }}>
                 Concept Detail
               </div>
-              <button onClick={() => setSelectedConcept(null)} style={{ background: "transparent", border: "none", color: "var(--ws-text-muted)", cursor: "pointer", fontSize: 16 }}>×</button>
+              <button onClick={() => setSelectedConcept(null)} style={{ background: "transparent", border: "none", color: "#8b949e", cursor: "pointer", fontSize: 16 }}>×</button>
             </div>
 
-            <h3 style={{ color: "var(--ws-text)", fontSize: 18, fontWeight: 800, letterSpacing: "-0.03em", margin: "0 0 6px 0" }}>
+            <h3 style={{ color: "#ffffff", fontSize: 18, fontWeight: 800, letterSpacing: "-0.03em", margin: "0 0 6px 0" }}>
               {selectedConcept.pref_label}
             </h3>
             {selectedConcept.notation ? (
-              <div style={{ color: "var(--ws-text-muted)", fontSize: 12, marginBottom: 8 }}>Notation: {selectedConcept.notation}</div>
+              <div style={{ color: "#8b949e", fontSize: 12, marginBottom: 8 }}>Notation: {selectedConcept.notation}</div>
             ) : null}
-            <div style={{ color: "var(--ws-text-dim)", fontSize: 11, fontFamily: "monospace", wordBreak: "break-all", marginBottom: 14 }}>
+            <div style={{ color: "#6a7f97", fontSize: 11, fontFamily: "monospace", wordBreak: "break-all", marginBottom: 14 }}>
               {selectedConcept.uri}
             </div>
 
             {selectedConcept.description ? (
               <div style={detailSectionStyle}>
                 <div style={detailLabelStyle}>Description</div>
-                <div style={{ color: "var(--ws-text)", fontSize: 13, lineHeight: 1.6 }}>{selectedConcept.description}</div>
+                <div style={{ color: "#c6d4e3", fontSize: 13, lineHeight: 1.6 }}>{selectedConcept.description}</div>
               </div>
             ) : null}
 
@@ -233,7 +233,7 @@ export function OntologySummaryTab({
                     </div>
                   ))}
                   {selectedConcept.children!.length > 8 ? (
-                    <div style={{ color: "var(--ws-text-dim)", fontSize: 11 }}>+{selectedConcept.children!.length - 8} more</div>
+                    <div style={{ color: "#6a7f97", fontSize: 11 }}>+{selectedConcept.children!.length - 8} more</div>
                   ) : null}
                 </div>
               </div>
@@ -252,7 +252,7 @@ const shellStyle: React.CSSProperties = {
   flexDirection: "column",
   width: "100%",
   height: "100%",
-  background: "var(--ws-bg)",
+  background: "#0d1117",
   overflow: "hidden",
 };
 
@@ -261,7 +261,7 @@ const headerStyle: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "space-between",
   padding: "20px 24px 16px",
-  borderBottom: "1px solid var(--ws-border)",
+  borderBottom: "1px solid rgba(88,166,255,0.1)",
   flexShrink: 0,
 };
 
@@ -282,13 +282,13 @@ const openBrowserBtnStyle: React.CSSProperties = {
 const treeColumnStyle: React.CSSProperties = {
   flex: 1,
   overflowY: "auto",
-  borderRight: "1px solid var(--ws-surface-hover)",
+  borderRight: "1px solid rgba(255,255,255,0.06)",
 };
 
 const schemeCardStyle: React.CSSProperties = {
   borderRadius: 10,
   border: "1px solid rgba(210,168,255,0.1)",
-  background: "var(--ws-surface-hover)",
+  background: "rgba(255,255,255,0.02)",
   overflow: "hidden",
 };
 
@@ -301,25 +301,25 @@ const schemeHeaderStyle: React.CSSProperties = {
   background: "transparent",
   border: "none",
   cursor: "pointer",
-  borderBottom: "1px solid var(--ws-surface-hover)",
+  borderBottom: "1px solid rgba(255,255,255,0.05)",
 };
 
 const detailPanelStyle: React.CSSProperties = {
   width: 300,
   padding: "20px",
   overflowY: "auto",
-  borderLeft: "1px solid var(--ws-surface-hover)",
+  borderLeft: "1px solid rgba(255,255,255,0.06)",
   flexShrink: 0,
 };
 
 const detailSectionStyle: React.CSSProperties = {
   marginTop: 14,
   paddingTop: 12,
-  borderTop: "1px solid var(--ws-surface-hover)",
+  borderTop: "1px solid rgba(255,255,255,0.06)",
 };
 
 const detailLabelStyle: React.CSSProperties = {
-  color: "var(--ws-text-muted)",
+  color: "#8b949e",
   fontSize: 10,
   fontWeight: 700,
   textTransform: "uppercase",
@@ -330,9 +330,9 @@ const detailLabelStyle: React.CSSProperties = {
 const altLabelChipStyle: React.CSSProperties = {
   padding: "3px 8px",
   borderRadius: 999,
-  background: "var(--ws-surface-hover)",
-  border: "1px solid var(--ws-surface-hover)",
-  color: "var(--ws-text-muted)",
+  background: "rgba(255,255,255,0.05)",
+  border: "1px solid rgba(255,255,255,0.08)",
+  color: "#8fa8c6",
   fontSize: 11,
 };
 

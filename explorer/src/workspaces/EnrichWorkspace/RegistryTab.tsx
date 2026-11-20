@@ -12,8 +12,8 @@ const OP_META: Record<
   RegistryEntryOp,
   { label: string; color: string; bg: string; border: string }
 > = {
-  import:       { label: "IMPORT",       color: "#4aa3ff", bg: "var(--ws-accent-soft)",  border: "var(--ws-accent-soft)" },
-  export:       { label: "EXPORT",       color: "var(--ws-text-muted)", bg: "rgba(143,168,198,0.08)", border: "rgba(143,168,198,0.18)" },
+  import:       { label: "IMPORT",       color: "#4aa3ff", bg: "rgba(74,163,255,0.12)",  border: "rgba(74,163,255,0.28)" },
+  export:       { label: "EXPORT",       color: "#8fa8c6", bg: "rgba(143,168,198,0.08)", border: "rgba(143,168,198,0.18)" },
   merge:        { label: "MERGE",        color: "#f2b66d", bg: "rgba(242,182,109,0.12)", border: "rgba(242,182,109,0.28)" },
   "add-node":   { label: "ADD NODE",     color: "#4cc38a", bg: "rgba(76,195,138,0.12)",  border: "rgba(76,195,138,0.28)" },
   "update-node": { label: "UPDATE NODE",  color: "#79c0ff", bg: "rgba(121,192,255,0.10)", border: "rgba(121,192,255,0.24)" },
@@ -64,10 +64,10 @@ function EntryRow({ entry }: { entry: ReturnType<typeof useRegistry>[number] }) 
 
         {/* Content */}
         <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ color: "var(--ws-text)", fontSize: 13, fontWeight: 500, wordBreak: "break-word" }}>
+          <div style={{ color: "#e6edf3", fontSize: 13, fontWeight: 500, wordBreak: "break-word" }}>
             {entry.summary}
           </div>
-          <div style={{ color: "var(--ws-text-muted)", fontSize: 11, marginTop: 3 }}>
+          <div style={{ color: "#8b949e", fontSize: 11, marginTop: 3 }}>
             {formatDate(entry.timestamp)} · {formatTimestamp(entry.timestamp)}
           </div>
         </div>
@@ -109,14 +109,14 @@ export function RegistryTab() {
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <ClipboardList size={18} color="#4aa3ff" />
           <div>
-            <div style={{ color: "var(--ws-text)", fontSize: 16, fontWeight: 700 }}>Document Registry</div>
-            <div style={{ color: "var(--ws-text-muted)", fontSize: 12 }}>
+            <div style={{ color: "#ebf3ff", fontSize: 16, fontWeight: 700 }}>Document Registry</div>
+            <div style={{ color: "#8b949e", fontSize: 12 }}>
               Audit log of all KG and Ontology mutations this session
             </div>
           </div>
         </div>
         <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-          <span style={{ color: "var(--ws-text-muted)", fontSize: 12 }}>
+          <span style={{ color: "#8fa8c6", fontSize: 12 }}>
             {entries.length} event{entries.length !== 1 ? "s" : ""}
           </span>
           {entries.length > 0 ? (
@@ -134,7 +134,7 @@ export function RegistryTab() {
 
       {/* Filter pills */}
       <div style={filterBarStyle}>
-        <Filter size={13} color="var(--ws-text-muted)" />
+        <Filter size={13} color="#8fa8c6" />
         <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
           {ALL_OPS.map((op) => {
             const isActive = op === activeFilter;
@@ -150,14 +150,14 @@ export function RegistryTab() {
                   fontWeight: 600,
                   cursor: "pointer",
                   border: isActive
-                    ? `1px solid ${meta?.border ?? "var(--ws-border)"}`
-                    : "1px solid var(--ws-surface-hover)",
+                    ? `1px solid ${meta?.border ?? "rgba(127,208,255,0.35)"}`
+                    : "1px solid rgba(255,255,255,0.06)",
                   background: isActive
-                    ? (meta?.bg ?? "var(--ws-accent-soft)")
+                    ? (meta?.bg ?? "rgba(74,163,255,0.14)")
                     : "transparent",
                   color: isActive
                     ? (meta?.color ?? "#8ed3ff")
-                    : "var(--ws-text-muted)",
+                    : "#8b949e",
                   transition: "all 140ms ease",
                 }}
               >
@@ -172,11 +172,11 @@ export function RegistryTab() {
       <div style={feedStyle}>
         {filtered.length === 0 ? (
           <div style={emptyStateStyle}>
-            <ClipboardList size={36} color="var(--ws-border)" />
-            <div style={{ color: "var(--ws-text-muted)", fontSize: 14, marginTop: 12, fontWeight: 500 }}>
+            <ClipboardList size={36} color="rgba(127,208,255,0.15)" />
+            <div style={{ color: "#8b949e", fontSize: 14, marginTop: 12, fontWeight: 500 }}>
               No events recorded yet
             </div>
-            <div style={{ color: "var(--ws-text-dim)", fontSize: 12, marginTop: 4, textAlign: "center", maxWidth: 300 }}>
+            <div style={{ color: "#6a7f97", fontSize: 12, marginTop: 4, textAlign: "center", maxWidth: 300 }}>
               Import a file, run reasoning, or merge entities to see activity appear here.
             </div>
           </div>
@@ -195,7 +195,7 @@ const shellStyle: React.CSSProperties = {
   flexDirection: "column",
   width: "100%",
   height: "100%",
-  background: "var(--ws-bg)",
+  background: "#0d1117",
   overflow: "hidden",
 };
 
@@ -204,7 +204,7 @@ const headerStyle: React.CSSProperties = {
   alignItems: "center",
   justifyContent: "space-between",
   padding: "20px 24px 16px",
-  borderBottom: "1px solid var(--ws-border)",
+  borderBottom: "1px solid rgba(88,166,255,0.1)",
   flexShrink: 0,
 };
 
@@ -213,7 +213,7 @@ const filterBarStyle: React.CSSProperties = {
   alignItems: "center",
   gap: 10,
   padding: "12px 24px",
-  borderBottom: "1px solid var(--ws-surface-hover)",
+  borderBottom: "1px solid rgba(255,255,255,0.05)",
   flexShrink: 0,
 };
 
@@ -229,16 +229,16 @@ const feedStyle: React.CSSProperties = {
 const entryCardStyle: React.CSSProperties = {
   padding: "12px 14px",
   borderRadius: 12,
-  background: "var(--ws-surface)",
-  border: "1px solid var(--ws-surface-hover)",
-  boxShadow: "none",
+  background: "linear-gradient(135deg, rgba(13,17,23,0.6), rgba(22,27,34,0.4))",
+  border: "1px solid rgba(255,255,255,0.06)",
+  boxShadow: "inset 0 1px 0 rgba(255,255,255,0.03)",
 };
 
 const expandBtnStyle: React.CSSProperties = {
   flexShrink: 0,
   background: "transparent",
   border: "none",
-  color: "var(--ws-text-muted)",
+  color: "#8b949e",
   cursor: "pointer",
   padding: 4,
   borderRadius: 6,
@@ -250,8 +250,8 @@ const detailPreStyle: React.CSSProperties = {
   marginTop: 10,
   padding: "10px 12px",
   borderRadius: 8,
-  background: "var(--ws-surface)",
-  border: "1px solid var(--ws-surface-hover)",
+  background: "rgba(0,0,0,0.28)",
+  border: "1px solid rgba(255,255,255,0.06)",
   color: "#79c0ff",
   fontSize: 11,
   fontFamily: "'JetBrains Mono', monospace",

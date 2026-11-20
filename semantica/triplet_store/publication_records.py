@@ -1063,7 +1063,49 @@ class PublicationRecords:
         return response
 
     @_stage('fact')
-    def _projected_scene_link(self, row, *, status=False):
+    def _fact_valid_time(self, node):
+        from ..kg.temporal_model import parse_temporal_value
+        from ..utils.exceptions import TemporalValidationError
+
+        if int(self.one(node, 'memberCount')) > MAX_ROWS:
+            return dict(status='unavailable', reason='support-budget-exceeded')
+        expected, temporal, seen, retained = None, {}, 0, 0
+        for quad in islice(self.owner.store.quads_for_pattern(
+                node, self.ox.NamedNode(P+'member'), None, self.record_graph(node)), MAX_ROWS+1):
+            check_query_cancellation()
+            seen += 1
+            count_query_work('temporalSupportMembers')
+            retained += len(quad.object.value.encode())
+            if seen > MAX_ROWS or retained > MAX_BYTES:
+                return dict(status='unavailable', reason='support-budget-exceeded')
+            current, normalized = {}, []
+            for field, output in [('valid_from', 'from'), ('valid_until', 'until')]:
+                values = list(islice(self.owner.store.quads_for_pattern(
+                    quad.object, self.ox.NamedNode(F+field), None, self.facts), 2))
+                if len(values) > 1 or values and not isinstance(values[0].object, self.ox.Literal):
+                    return dict(status='unavailable', reason='unresolved')
+                value = values[0].object.value if values else None
+                retained += len(value.encode()) if value is not None else 0
+                if retained > MAX_BYTES:
+                    return dict(status='unavailable', reason='support-budget-exceeded')
+                try:
+                    normalized.append(parse_temporal_value(value))
+                except (TemporalValidationError, ValueError, OverflowError):
+                    return dict(status='unavailable', reason='unresolved')
+                if value is not None:
+                    current[output] = value
+            if all(value is not None for value in normalized) and normalized[0] > normalized[1]:
+                return dict(status='unavailable', reason='unresolved')
+            # A representative's interval is not the validity of all its support.
+            if expected is not None and normalized != expected:
+                return dict(status='unavailable', reason='conflicting-support')
+            expected, temporal = normalized, current
+        if seen != int(self.one(node, 'memberCount')):
+            raise ProcessingError('Canonical fact support count is incomplete')
+        return dict(status='available', **temporal) if temporal else dict(status='unavailable')
+
+    @_stage('fact')
+    def _projected_scene_link(self, row, *, status=False, valid_time=False):
         node = self.iri(row['id'].value)
         representative = self.iri(self.one(node, 'representative'))
         predicates = list(islice(self.owner.store.quads_for_pattern(
@@ -1075,6 +1117,8 @@ class PublicationRecords:
                     predicate=normalize_fact_predicate(predicate))
         if status:
             item['status'] = self.one(node, 'status')
+        if valid_time:
+            item['validTime'] = self._fact_valid_time(node)
         return item
 
     @_stage('fact')
@@ -1926,6 +1970,76 @@ class PublicationRecords:
         self.fence(generation)
         return response
 
+    @_stage(None)
+    def vocabulary_scene(self, generation, selection, traversal=None):
+        """Bounded SKOS scheme/concept summaries for the native vocabulary owner."""
+        from ..semantic_worker_context import check_query_cancellation
+        self.fence(generation)
+        if not isinstance(selection, dict) or selection.get('kind') not in {'schemes', 'concepts'}:
+            raise ProcessingError('Invalid native vocabulary selection')
+        kind = selection['kind']
+        allowed = {'kind', 'scheme', 'after', 'limit', 'maxBytes'}
+        limit, budget = selection.get('limit', MAX_ROWS), selection.get('maxBytes', MAX_BYTES)
+        if set(selection) - allowed or type(limit) is not int or not 1 <= limit <= MAX_ROWS \
+                or type(budget) is not int or not 1 <= budget <= MAX_BYTES:
+            raise ProcessingError('Invalid native vocabulary budget')
+        scheme = selection.get('scheme')
+        if kind == 'concepts' and (not isinstance(scheme, str) or not scheme or len(scheme.encode()) > 4096):
+            raise ProcessingError('Concept queries require a bounded scheme identity')
+        after = selection.get('after')
+        if after is not None and (not isinstance(after, str) or not after or len(after.encode()) > 4096):
+            raise ProcessingError('Invalid native vocabulary cursor')
+        cursor = f'FILTER(STR(?id) > {self.scalar(after)})' if after is not None else ''
+        skos = 'http://www.w3.org/2004/02/skos/core#'
+        rdf_type = 'http://www.w3.org/1999/02/22-rdf-syntax-ns#type'
+        if kind == 'schemes':
+            query = f'''SELECT ?id ?label ?description WHERE {{ GRAPH {self.graph} {{
+                ?id <{rdf_type}> <{skos}ConceptScheme> .
+                OPTIONAL {{ ?id <{skos}prefLabel> ?label }}
+                OPTIONAL {{ ?id <{skos}description> ?description }}
+            }} {cursor} }} ORDER BY ?id LIMIT {limit + 1}'''
+        else:
+            scheme_term = self.iri(scheme)
+            query = f'''SELECT ?id ?label ?altLabel ?description ?notation ?parent WHERE {{ GRAPH {self.graph} {{
+                ?id <{rdf_type}> <{skos}Concept> .
+                {{ ?id <{skos}inScheme> {scheme_term} }} UNION
+                {{ ?id <{skos}topConceptOf> {scheme_term} }}
+                OPTIONAL {{ ?id <{skos}prefLabel> ?label }}
+                OPTIONAL {{ ?id <{skos}altLabel> ?altLabel }}
+                OPTIONAL {{ ?id <{skos}description> ?description }}
+                OPTIONAL {{ ?id <{skos}notation> ?notation }}
+                OPTIONAL {{ ?id <{skos}broader> ?parent }}
+            }} {cursor} }} ORDER BY ?id LIMIT {limit + 1}'''
+        rows = traversal.window(self.owner.store, query, limit) if traversal else self.owner.store.query(query)
+        response = dict(project=self.project, generation=generation, nodes=[], links=[], next_cursor=None)
+        for row in rows:
+            check_query_cancellation()
+            item = {'id': row['id'].value, 'kind': kind[:-1], 'scheme': scheme} if kind == 'concepts' else {'id': row['id'].value, 'kind': 'scheme'}
+            def optional_value(name):
+                try:
+                    return row[name]
+                except KeyError:
+                    return None
+            for field in ('label', 'description', 'notation', 'parent'):
+                value = optional_value(field)
+                if value is not None:
+                    item[field] = value.value
+            alt_label = optional_value('altLabel')
+            if kind == 'concepts' and alt_label is not None:
+                item.setdefault('altLabels', []).append(alt_label.value)
+            if len(response['nodes']) == limit:
+                response['next_cursor'] = response['nodes'][-1]['id']
+                break
+            encoded = len(json.dumps(dict(response, next_cursor=item['id']), ensure_ascii=False).encode())
+            if encoded > budget:
+                if not response['nodes']:
+                    raise ProcessingError('Native vocabulary item exceeds byte budget')
+                response['next_cursor'] = response['nodes'][-1]['id']
+                break
+            response['nodes'].append(item)
+        self.fence(generation)
+        return response
+
     @_locked
     @_stage(None)
     def stream_members(self, generation, selection, traversal):
@@ -1960,6 +2074,8 @@ class PublicationRecords:
             allowed = [['id','type','recordId','fields','sourceIds','evidenceIds','members','selectors'], ['id'], ['id','name','sourceIds'], ['id','name','entityType'], ['id','name','entityType','sourceIds']]
         elif kind in {'links', 'incident', 'topology'}:
             allowed = [['id','source','target','predicate'], ['id','source','target','predicate','status']]
+            allowed += [['id','source','target','predicate','validTime'],
+                        ['id','source','target','predicate','status','validTime']]
             if kind != 'topology':
                 detail = ['id','source','target','predicate','fields','sourceIds','evidenceIds']
                 allowed.append(detail + ['nodes'] if kind == 'incident' else detail)
@@ -2118,6 +2234,8 @@ class PublicationRecords:
         """
         from ..semantic_worker_context import check_query_cancellation
         self.fence(generation)
+        if isinstance(selection, dict) and selection.get('kind') == 'neighborhood':
+            selection = dict(selection, kind='incident')
         identity_graph, identity_head = self.stage_graph('identity'), self.stage_head('identity')
         fact_graph, fact_head = self.stage_graph('fact'), self.stage_head('fact')
         if not isinstance(selection, dict):
@@ -2128,6 +2246,8 @@ class PublicationRecords:
             return self._fact_cards(generation, selection, traversal)
         if kind == 'sources':
             return self.source_scene(generation, selection, traversal)
+        if kind in {'schemes', 'concepts'}:
+            return self.vocabulary_scene(generation, selection, traversal)
         if kind in {'communities', 'topics'}:
             return self.organization_scene(generation, selection, traversal)
         if kind in {'incident','topology'}:
@@ -2262,7 +2382,7 @@ class PublicationRecords:
                         evidenceIds=evidence, members=members, selectors=selectors)
                     target = response['nodes']
             else:
-                item = self._projected_scene_link(row, status='status' in projection) if 'fields' not in projection else self._fact_scene_link(generation, row)
+                item = self._projected_scene_link(row, status='status' in projection, valid_time='validTime' in projection) if 'fields' not in projection else self._fact_scene_link(generation, row)
                 target = response['links']
             target.append(item)
             response['next_cursor'] = identity
@@ -2391,7 +2511,7 @@ class PublicationRecords:
         for row in rows[:limit]:
             check_query_cancellation()
             if 'fields' not in projection:
-                link = self._projected_scene_link(row, status='status' in projection)
+                link = self._projected_scene_link(row, status='status' in projection, valid_time='validTime' in projection)
                 missing = []
             else:
                 link = self._fact_scene_link(generation, row)

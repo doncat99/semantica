@@ -226,7 +226,7 @@ export function VersionsTab() {
       case "proposed":
         return <AlertCircle size={16} color="#f2b66d" />;
       default:
-        return <Clock size={16} color="var(--ws-text-muted)" />;
+        return <Clock size={16} color="#8fa8c6" />;
     }
   };
 
@@ -234,7 +234,7 @@ export function VersionsTab() {
     display: "flex",
     flexDirection: "column",
     height: "100%",
-    background: "var(--ws-bg)",
+    background: "#07111f",
     padding: "20px",
     overflow: "auto",
   };
@@ -248,7 +248,7 @@ export function VersionsTab() {
 
   const titleStyle: React.CSSProperties = {
     margin: 0,
-    color: "var(--ws-text)",
+    color: "#ebf3ff",
     fontSize: "20px",
     fontWeight: "700",
   };
@@ -259,7 +259,7 @@ export function VersionsTab() {
 
   const sectionTitleStyle: React.CSSProperties = {
     margin: "0 0 12px",
-    color: "var(--ws-text)",
+    color: "#ebf3ff",
     fontSize: "14px",
     fontWeight: "600",
     display: "flex",
@@ -279,15 +279,15 @@ export function VersionsTab() {
     gap: "12px",
     padding: "12px 16px",
     borderRadius: "8px",
-    background: "var(--ws-surface)",
-    border: "1px solid var(--ws-border)",
+    background: "rgba(9, 19, 34, 0.8)",
+    border: "1px solid rgba(127, 208, 255, 0.12)",
     transition: "160ms ease",
   };
 
   const modalOverlayStyle: React.CSSProperties = {
     position: "fixed",
     inset: 0,
-    background: "var(--ws-surface)",
+    background: "rgba(0, 0, 0, 0.7)",
     display: "flex",
     alignItems: "center",
     justifyContent: "center",
@@ -295,15 +295,15 @@ export function VersionsTab() {
   };
 
   const modalStyle: React.CSSProperties = {
-    background: "var(--ws-surface)",
-    border: "1px solid var(--ws-border)",
+    background: "rgba(9, 19, 34, 0.95)",
+    border: "1px solid rgba(127, 208, 255, 0.2)",
     borderRadius: "12px",
     padding: "24px",
     minWidth: "480px",
     maxWidth: "640px",
     maxHeight: "80vh",
     overflow: "auto",
-    backdropFilter: "none",
+    backdropFilter: "blur(18px)",
   };
 
   const buttonStyle: React.CSSProperties = {
@@ -312,9 +312,9 @@ export function VersionsTab() {
     gap: "6px",
     padding: "8px 14px",
     borderRadius: "6px",
-    border: "1px solid var(--ws-border)",
-    background: "var(--ws-accent-soft)",
-    color: "var(--ws-text)",
+    border: "1px solid rgba(127, 208, 255, 0.2)",
+    background: "rgba(74, 163, 255, 0.1)",
+    color: "#ebf3ff",
     fontSize: "12px",
     fontWeight: "600",
     cursor: "pointer",
@@ -325,9 +325,9 @@ export function VersionsTab() {
     width: "100%",
     padding: "10px 12px",
     borderRadius: "6px",
-    border: "1px solid var(--ws-border)",
-    background: "var(--ws-surface)",
-    color: "var(--ws-text)",
+    border: "1px solid rgba(127, 208, 255, 0.2)",
+    background: "rgba(3, 9, 18, 0.8)",
+    color: "#ebf3ff",
     fontSize: "13px",
     marginBottom: "12px",
   };
@@ -356,16 +356,16 @@ export function VersionsTab() {
         </h2>
         <div style={listStyle}>
           {versions.length === 0 ? (
-            <div style={{ color: "var(--ws-text-muted)", fontSize: "13px" }}>No versions found</div>
+            <div style={{ color: "#8fa8c6", fontSize: "13px" }}>No versions found</div>
           ) : (
             versions.map((version) => (
               <div key={version.version_id} style={itemStyle}>
                 {getStateIcon(version.state)}
                 <div style={{ flex: 1 }}>
-                  <div style={{ color: "var(--ws-text)", fontSize: "13px", fontWeight: "600" }}>
+                  <div style={{ color: "#ebf3ff", fontSize: "13px", fontWeight: "600" }}>
                     {version.version_id}
                   </div>
-                  <div style={{ color: "var(--ws-text-muted)", fontSize: "11px" }}>
+                  <div style={{ color: "#8fa8c6", fontSize: "11px" }}>
                     {version.author} • {new Date(version.date).toLocaleDateString()}
                   </div>
                 </div>
@@ -392,16 +392,16 @@ export function VersionsTab() {
         </h2>
         <div style={listStyle}>
           {proposals.length === 0 ? (
-            <div style={{ color: "var(--ws-text-muted)", fontSize: "13px" }}>No proposals found</div>
+            <div style={{ color: "#8fa8c6", fontSize: "13px" }}>No proposals found</div>
           ) : (
             proposals.map((proposal) => (
               <div key={proposal.proposal_id} style={itemStyle}>
                 {getStateIcon(proposal.state)}
                 <div style={{ flex: 1 }}>
-                  <div style={{ color: "var(--ws-text)", fontSize: "13px", fontWeight: "600" }}>
+                  <div style={{ color: "#ebf3ff", fontSize: "13px", fontWeight: "600" }}>
                     {proposal.summary}
                   </div>
-                  <div style={{ color: "var(--ws-text-muted)", fontSize: "11px" }}>
+                  <div style={{ color: "#8fa8c6", fontSize: "11px" }}>
                     {proposal.author} • {new Date(proposal.created_at).toLocaleDateString()}
                   </div>
                 </div>
@@ -443,51 +443,51 @@ export function VersionsTab() {
         <div style={modalOverlayStyle} onClick={() => setShowProposalModal(false)}>
           <div style={modalStyle} onClick={(e) => e.stopPropagation()}>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "16px" }}>
-              <h3 style={{ margin: 0, color: "var(--ws-text)", fontSize: "16px" }}>Proposal Details</h3>
-              <button onClick={() => setShowProposalModal(false)} style={{ background: "none", border: "none", color: "var(--ws-text-muted)", cursor: "pointer" }}>
+              <h3 style={{ margin: 0, color: "#ebf3ff", fontSize: "16px" }}>Proposal Details</h3>
+              <button onClick={() => setShowProposalModal(false)} style={{ background: "none", border: "none", color: "#8fa8c6", cursor: "pointer" }}>
                 <X size={18} />
               </button>
             </div>
             <div style={{ marginBottom: "12px" }}>
-              <label style={{ display: "block", color: "var(--ws-text-muted)", fontSize: "12px", marginBottom: "4px" }}>
+              <label style={{ display: "block", color: "#8fa8c6", fontSize: "12px", marginBottom: "4px" }}>
                 Summary
               </label>
-              <div style={{ color: "var(--ws-text)", fontSize: "13px" }}>{selectedProposal.summary}</div>
+              <div style={{ color: "#ebf3ff", fontSize: "13px" }}>{selectedProposal.summary}</div>
             </div>
             <div style={{ marginBottom: "12px" }}>
-              <label style={{ display: "block", color: "var(--ws-text-muted)", fontSize: "12px", marginBottom: "4px" }}>
+              <label style={{ display: "block", color: "#8fa8c6", fontSize: "12px", marginBottom: "4px" }}>
                 State
               </label>
-              <div style={{ display: "flex", alignItems: "center", gap: "6px", color: "var(--ws-text)", fontSize: "13px" }}>
+              <div style={{ display: "flex", alignItems: "center", gap: "6px", color: "#ebf3ff", fontSize: "13px" }}>
                 {getStateIcon(selectedProposal.state)}
                 {selectedProposal.state}
               </div>
             </div>
             <div style={{ marginBottom: "12px" }}>
-              <label style={{ display: "block", color: "var(--ws-text-muted)", fontSize: "12px", marginBottom: "4px" }}>
+              <label style={{ display: "block", color: "#8fa8c6", fontSize: "12px", marginBottom: "4px" }}>
                 Impact Analysis
               </label>
-              <pre style={{ background: "var(--ws-surface)", padding: "12px", borderRadius: "6px", color: "var(--ws-text)", fontSize: "12px", overflow: "auto" }}>
+              <pre style={{ background: "rgba(3, 9, 18, 0.8)", padding: "12px", borderRadius: "6px", color: "#ebf3ff", fontSize: "12px", overflow: "auto" }}>
                 {JSON.stringify(selectedProposal.impact_analysis, null, 2)}
               </pre>
             </div>
             <div style={{ marginBottom: "12px" }}>
-              <label style={{ display: "block", color: "var(--ws-text-muted)", fontSize: "12px", marginBottom: "4px" }}>
+              <label style={{ display: "block", color: "#8fa8c6", fontSize: "12px", marginBottom: "4px" }}>
                 SHACL Validation
               </label>
-              <pre style={{ background: "var(--ws-surface)", padding: "12px", borderRadius: "6px", color: "var(--ws-text)", fontSize: "12px", overflow: "auto" }}>
+              <pre style={{ background: "rgba(3, 9, 18, 0.8)", padding: "12px", borderRadius: "6px", color: "#ebf3ff", fontSize: "12px", overflow: "auto" }}>
                 {JSON.stringify(selectedProposal.shacl_validation, null, 2)}
               </pre>
             </div>
             <div>
-              <label style={{ display: "block", color: "var(--ws-text-muted)", fontSize: "12px", marginBottom: "4px" }}>
+              <label style={{ display: "block", color: "#8fa8c6", fontSize: "12px", marginBottom: "4px" }}>
                 Comments ({selectedProposal.comments.length})
               </label>
               <div style={{ maxHeight: "120px", overflow: "auto" }}>
                 {selectedProposal.comments.map((comment) => (
-                  <div key={comment.id} style={{ padding: "8px", background: "var(--ws-surface)", borderRadius: "4px", marginBottom: "6px" }}>
-                    <div style={{ color: "var(--ws-text)", fontSize: "12px", fontWeight: "600" }}>{comment.author}</div>
-                    <div style={{ color: "var(--ws-text-muted)", fontSize: "11px" }}>{comment.text}</div>
+                  <div key={comment.id} style={{ padding: "8px", background: "rgba(3, 9, 18, 0.6)", borderRadius: "4px", marginBottom: "6px" }}>
+                    <div style={{ color: "#ebf3ff", fontSize: "12px", fontWeight: "600" }}>{comment.author}</div>
+                    <div style={{ color: "#8fa8c6", fontSize: "11px" }}>{comment.text}</div>
                   </div>
                 ))}
               </div>
@@ -500,14 +500,14 @@ export function VersionsTab() {
         <div style={modalOverlayStyle} onClick={() => setShowCompareModal(false)}>
           <div style={modalStyle} onClick={(e) => e.stopPropagation()}>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: "16px" }}>
-              <h3 style={{ margin: 0, color: "var(--ws-text)", fontSize: "16px" }}>Compare Versions</h3>
-              <button onClick={() => setShowCompareModal(false)} style={{ background: "none", border: "none", color: "var(--ws-text-muted)", cursor: "pointer" }}>
+              <h3 style={{ margin: 0, color: "#ebf3ff", fontSize: "16px" }}>Compare Versions</h3>
+              <button onClick={() => setShowCompareModal(false)} style={{ background: "none", border: "none", color: "#8fa8c6", cursor: "pointer" }}>
                 <X size={18} />
               </button>
             </div>
             <div style={{ display: "flex", gap: "12px", marginBottom: "16px" }}>
               <div style={{ flex: 1 }}>
-                <label style={{ display: "block", color: "var(--ws-text-muted)", fontSize: "12px", marginBottom: "4px" }}>
+                <label style={{ display: "block", color: "#8fa8c6", fontSize: "12px", marginBottom: "4px" }}>
                   Version 1
                 </label>
                 <input
@@ -518,7 +518,7 @@ export function VersionsTab() {
                 />
               </div>
               <div style={{ flex: 1 }}>
-                <label style={{ display: "block", color: "var(--ws-text-muted)", fontSize: "12px", marginBottom: "4px" }}>
+                <label style={{ display: "block", color: "#8fa8c6", fontSize: "12px", marginBottom: "4px" }}>
                   Version 2
                 </label>
                 <input
@@ -534,7 +534,7 @@ export function VersionsTab() {
               {isLoading ? "Comparing..." : "Compare"}
             </button>
             {compareResult && (
-              <pre style={{ marginTop: "16px", background: "var(--ws-surface)", padding: "12px", borderRadius: "6px", color: "var(--ws-text)", fontSize: "12px", overflow: "auto" }}>
+              <pre style={{ marginTop: "16px", background: "rgba(3, 9, 18, 0.8)", padding: "12px", borderRadius: "6px", color: "#ebf3ff", fontSize: "12px", overflow: "auto" }}>
                 {JSON.stringify(compareResult, null, 2)}
               </pre>
             )}

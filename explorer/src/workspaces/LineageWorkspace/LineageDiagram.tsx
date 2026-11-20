@@ -9,23 +9,23 @@ import "@xyflow/react/dist/style.css";
 const THEME_CSS = `
   .react-flow { background: var(--ws-bg, #060d1a); }
   .react-flow__node-group {
-    background: var(--ws-accent-soft);
-    border: 1px dashed var(--ws-accent-soft);
+    background: rgba(74,163,255,0.04);
+    border: 1px dashed rgba(74,163,255,0.18);
     border-radius: 10px;
   }
   .react-flow__node-default {
-    background: var(--ws-surface);
+    background: rgba(6,13,26,0.92);
     color: var(--ws-text, #ddeeff);
-    border: 1px solid var(--ws-accent-soft);
+    border: 1px solid rgba(74,163,255,0.22);
     border-radius: 8px;
     padding: 10px 12px;
     white-space: pre-wrap;
     font-size: 12px;
-    box-shadow: 0 4px 16px var(--ws-surface);
+    box-shadow: 0 4px 16px rgba(0,0,0,0.4);
   }
-  .react-flow__controls { background: var(--ws-surface); border: 1px solid var(--ws-accent-soft); border-radius: 10px; }
-  .react-flow__controls-button { background: transparent; border-color: var(--ws-accent-soft); color: var(--ws-text-muted, var(--ws-text-dim)); }
-  .react-flow__controls-button:hover { background: var(--ws-accent-soft); color: var(--ws-text, #ddeeff); }
+  .react-flow__controls { background: rgba(6,13,26,0.9); border: 1px solid rgba(74,163,255,0.18); border-radius: 10px; }
+  .react-flow__controls-button { background: transparent; border-color: rgba(74,163,255,0.15); color: var(--ws-text-muted, #5a7a9a); }
+  .react-flow__controls-button:hover { background: rgba(74,163,255,0.1); color: var(--ws-text, #ddeeff); }
 `;
 
 export function LineageDiagram() {
@@ -34,24 +34,6 @@ export function LineageDiagram() {
   const [searchId, setSearchId] = useState("");
   const [activeId, setActiveId] = useState("");
   const [error, setError] = useState("");
-  const [graphNodes, setGraphNodes] = useState<{ id: string; content?: string }[]>([]);
-
-  useEffect(() => {
-    const ctrl = new AbortController();
-    fetch("/api/graph/nodes?limit=100", { signal: ctrl.signal }).then(async response => {
-      if (!response.ok) throw new Error(`Unable to load graph nodes: HTTP ${response.status}`);
-      const data = await response.json();
-      if (ctrl.signal.aborted) return;
-      setGraphNodes(data.nodes);
-      if (data.nodes.length) {
-        setSearchId(data.nodes[0].id);
-        setActiveId(data.nodes[0].id);
-      }
-    }).catch(error => {
-      if (!ctrl.signal.aborted) setError(String(error));
-    });
-    return () => ctrl.abort();
-  }, []);
 
   const downloadReport = async (format: "json" | "markdown") => {
     if (!activeId) return;
@@ -149,12 +131,10 @@ export function LineageDiagram() {
       <style>{THEME_CSS}</style>
 
       {/* Toolbar */}
-      <div style={{ position: "absolute", top: 14, left: 14, right: 14, zIndex: 10, display: "flex", gap: 8, alignItems: "center", background: "var(--ws-surface)", backdropFilter: "none", padding: "8px 12px", borderRadius: 12, border: "1px solid var(--ws-accent-soft)", boxShadow: "none" }}>
+      <div style={{ position: "absolute", top: 14, left: 14, right: 14, zIndex: 10, display: "flex", gap: 8, alignItems: "center", background: "rgba(4,10,18,0.88)", backdropFilter: "blur(14px)", padding: "8px 12px", borderRadius: 12, border: "1px solid rgba(74,163,255,0.16)", boxShadow: "0 4px 20px rgba(0,0,0,0.4)" }}>
         <span className="ws-eyebrow" style={{ color: "var(--ws-accent, #4aa3ff)", marginRight: 4 }}>PROV-O Lineage</span>
         <input
           className="ws-input"
-          aria-label="Lineage node"
-          list="lineage-graph-nodes"
           type="text"
           placeholder="Enter Node ID…"
           value={searchId}
@@ -162,9 +142,6 @@ export function LineageDiagram() {
           onKeyDown={(e) => { if (e.key === "Enter") setActiveId(searchId); }}
           style={{ width: 200, padding: "6px 10px", fontSize: 12 }}
         />
-        <datalist id="lineage-graph-nodes">
-          {graphNodes.map(node => <option key={node.id} value={node.id}>{node.content || node.id}</option>)}
-        </datalist>
         <button className="ws-btn ws-btn--primary" style={{ padding: "6px 12px" }} onClick={() => setActiveId(searchId)}>
           Trace
         </button>
@@ -185,7 +162,7 @@ export function LineageDiagram() {
 
       {activeId ? (
         <ReactFlow nodes={nodes} edges={edges} fitView>
-          <Background color="var(--ws-accent-soft)" gap={24} />
+          <Background color="rgba(74,163,255,0.08)" gap={24} />
           <Controls />
         </ReactFlow>
       ) : (

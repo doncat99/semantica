@@ -49,11 +49,11 @@ test("only draft-supported class and property nodes are editable", () => {
   assert.equal(isEditableEntityType("external"), false);
 });
 
-test("the ontology minimap follows the workspace presentation", () => {
-  assert.equal(ONTOLOGY_MINIMAP_THEME.bgColor, "var(--ws-surface)");
-  assert.equal(ONTOLOGY_MINIMAP_THEME.maskStrokeColor, "var(--ws-accent)");
-  assert.equal(ONTOLOGY_MINIMAP_THEME.nodeStrokeColor, "var(--ws-accent)");
-  assert.match(ONTOLOGY_MINIMAP_THEME.style.border, /var\(--ws-border\)/);
+test("the ontology minimap has an explicit dark, high-contrast theme", () => {
+  assert.equal(ONTOLOGY_MINIMAP_THEME.bgColor, "#0b1625");
+  assert.equal(ONTOLOGY_MINIMAP_THEME.maskStrokeColor, "#5faeff");
+  assert.equal(ONTOLOGY_MINIMAP_THEME.nodeStrokeColor, "#9acbff");
+  assert.match(ONTOLOGY_MINIMAP_THEME.style.border, /#29435c/);
 });
 
 test("an authoritative no-owner verdict suppresses the namespace guess", () => {

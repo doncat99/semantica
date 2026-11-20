@@ -203,15 +203,16 @@ def query_semantic_artifact(request: SemanticQueryRequest, *, session, metrics=N
             if descriptor is not None and _receipt(descriptor.receipt) != status['indexes'].get(name):
                 raise QueryError('query index differs from the current native publication')
         before = time.perf_counter()
-        if request.mode == 'keyword':
+        if request.mode in ('keyword', 'hybrid'):
             descriptor = request.native_indexes.keyword
             lexical = GraphSearchIndex.open_native_positions(descriptor.path, project=request.project_id,
                 generation=request.generation, receipt=_receipt(descriptor.receipt),
                 installation_identity=tuple(map(int, descriptor.installation.identity.split(':'))))
             page = lexical.search_native_positions(request.query, source_ids=request.source_ids,
-                limit=request.limit, after=request.position, navigation=request.navigation)
+                limit=128 if request.mode == 'hybrid' else request.limit,
+                after=request.position, navigation=request.navigation)
             rows = page['items']
-        else:
+        if request.mode in ('semantic', 'hybrid'):
             from .vector_store.sqlite_vec_store import SQLiteVecStore
             descriptor = request.native_indexes.semantic
             space = descriptor.space
@@ -222,9 +223,15 @@ def query_semantic_artifact(request: SemanticQueryRequest, *, session, metrics=N
             if vector is None or vector.dimension != space.dimensions:
                 raise QueryError('native vector owner missing or incompatible')
             search = vector.search_native_records if request.target == 'knowledge' else vector.search_native_ranges
-            rows = search(request.embedding.vector, project=request.project_id,
+            vector_rows = search(request.embedding.vector, project=request.project_id,
                 generation=request.generation,receipt=_receipt(descriptor.receipt),top_k=request.top_k or request.limit,
-                source_ids=request.source_ids,page_limit=request.limit,offset=request.offset)
+                source_ids=request.source_ids,
+                page_limit=(request.top_k or request.limit) if request.mode == 'hybrid' else request.limit,
+                offset=0 if request.mode == 'hybrid' else request.offset)
+            if request.mode == 'hybrid':
+                rows, hybrid_candidates, following = _hybrid_records(request, owner, page, vector_rows)
+            else:
+                rows = vector_rows
             page = dict(total=None,nextCursor=None,previousCursor=None,startOffset=request.offset)
         metrics['retrievalMs'] = (time.perf_counter()-before)*1000
         common = dict(project_id=request.project_id,generation=request.generation,query=request.query,
@@ -233,8 +240,12 @@ def query_semantic_artifact(request: SemanticQueryRequest, *, session, metrics=N
         if request.mode == 'semantic':
             following = request.offset + len(rows)
             common['next_offset'] = following if len(rows) == request.limit and following < (request.top_k or request.limit) else None
+        if request.mode == 'hybrid':
+            common.update(hybrid_candidates=hybrid_candidates, next_offset=following)
         required = sorted({source for row in rows for source in row.get('sourceIds',[row.get('sourceId')])})
         if request.source_artifacts is None:
+            check_query_cancellation()
+            admit_native_store(request.semantic_store,request.project_id,owner)
             return SemanticQueryResult(**common,contexts=[],required_source_ids=required)
         if any(source not in request.source_artifacts for source in required):
             raise QueryError('hydration requires selected native reader references')
@@ -245,12 +256,14 @@ def query_semantic_artifact(request: SemanticQueryRequest, *, session, metrics=N
             if (reader.material_revision,reader.representation_revision) != (binding['material'],binding['representation']):
                 raise QueryError('selected reader differs from native source membership')
         if request.target == 'knowledge':
-            if request.mode == 'semantic':
+            if request.mode in ('semantic', 'hybrid'):
                 records = owner.read_native_records(request.project_id,request.generation,
                     [row['id'] for row in rows],max_bytes=262144) if rows else []
                 for record,row in zip(records,rows,strict=True):
                     record.update(evidenceIds=row['evidenceIds'],sourceIds=row['sourceIds'],score=row['score'],
-                        evidenceNextCursor=row['evidenceNextCursor'])
+                        evidenceNextCursor=row.get('evidenceNextCursor'))
+                    if request.mode == 'hybrid':
+                        record['retrieval'] = row['retrieval']
             else:
                 positions = [dict(source=row['sourceId'],**address) for row in rows
                     for address in row.get('ranges',[dict(nativeRef=row.get('nativeRef'),start=row.get('start'),end=row.get('end'))])]
@@ -274,6 +287,39 @@ def query_semantic_artifact(request: SemanticQueryRequest, *, session, metrics=N
         if vector is not None:
             vector.close()
         metrics['durationMs'] = (time.perf_counter()-started)*1000
+
+
+def _hybrid_records(request, owner, keyword_page, vector_rows):
+    """Join native units and retain provenance around the existing fusion owner."""
+    from .vector_store.hybrid_search import SearchRanker
+    positions = [dict(source=row['sourceId'], **address) for row in keyword_page['items']
+        for address in row.get('ranges', [dict(nativeRef=row.get('nativeRef'),
+            start=row.get('start'), end=row.get('end'))])]
+    lexical_rows = owner.read_grounded_candidates(request.project_id, request.generation,
+        positions, limit=128, max_bytes=262144) if positions else []
+    metadata = {}
+    for channel, rows in (('keyword_rank', lexical_rows), ('semantic_rank', vector_rows)):
+        for rank, row in enumerate(rows, 1):
+            item = metadata.setdefault(row['id'], dict(evidenceIds=set(), sourceIds=set(), retrieval={}))
+            item['evidenceIds'].update(row['evidenceIds'])
+            item['sourceIds'].update(row['sourceIds'])
+            item['retrieval'][channel] = rank
+            if row.get('evidenceNextCursor') is not None:
+                item['evidenceNextCursor'] = row['evidenceNextCursor']
+    fused = SearchRanker().rank([lexical_rows, vector_rows], k=60)
+    budget = request.top_k or request.limit
+    end = min(len(fused), budget, request.offset + request.limit)
+    selected = fused[request.offset:end]
+    for row in selected:
+        item = metadata[row['id']]
+        row.update(evidenceIds=sorted(item['evidenceIds']), sourceIds=sorted(item['sourceIds']),
+            retrieval=item['retrieval'], evidenceNextCursor=item.get('evidenceNextCursor'))
+    candidates = dict(keyword_position_limit=128, keyword_positions=len(keyword_page['items']),
+        keyword_records=len(lexical_rows), keyword_truncated=keyword_page['nextCursor'] is not None,
+        semantic_record_limit=budget, semantic_records=len(vector_rows),
+        semantic_budget_reached=len(vector_rows) == budget, fused_records=len(fused),
+        returned_record_limit=budget, fused_truncated=len(fused) > budget)
+    return selected, candidates, end if end < min(len(fused), budget) else None
 
 
 def _document_hit(request,row,metrics,match_index):
@@ -318,5 +364,6 @@ def _knowledge_hits(records):
             for value in values if value['type']=='literal']
         text=' '.join(words)
         hits.append(QueryHit(id=item['id'],kind=kind,title=text[:160] or item['id'],text=text,score=item.get('score',1.),
-            evidence_ids=item['evidenceIds'],source_ids=item['sourceIds'],evidence_next_cursor=item.get('evidenceNextCursor')))
+            evidence_ids=item['evidenceIds'],source_ids=item['sourceIds'],evidence_next_cursor=item.get('evidenceNextCursor'),
+            retrieval=item.get('retrieval')))
     return hits

@@ -233,8 +233,8 @@ export function ShaclStudio({ onJumpToNode }: ShaclStudioProps) {
                       style={{
                         ...shapeRowStyle,
                         cursor: "pointer",
-                        background: isSelected ? "rgba(124,231,211,0.1)" : "var(--ws-surface-hover)",
-                        border: isSelected ? "1px solid rgba(124,231,211,0.35)" : "1px solid var(--ws-border)",
+                        background: isSelected ? "rgba(124,231,211,0.1)" : "rgba(255,255,255,0.03)",
+                        border: isSelected ? "1px solid rgba(124,231,211,0.35)" : "1px solid rgba(127,208,255,0.08)",
                         textAlign: "left",
                         width: "100%",
                       }}
@@ -243,7 +243,7 @@ export function ShaclStudio({ onJumpToNode }: ShaclStudioProps) {
                     >
                       <FileCode2 size={14} color={isSelected ? "#7ce7d3" : "#9ee8d7"} />
                       <div>
-                        <div style={{ color: "var(--ws-text)", fontWeight: 800 }}>{shape.id}</div>
+                        <div style={{ color: "#ebf3ff", fontWeight: 800 }}>{shape.id}</div>
                         <div style={mutedStyle}>
                           {shape.constraint_count} constraints
                           {shape.constraints.length ? ` · ${shape.constraints.join(", ")}` : ""}
@@ -306,7 +306,7 @@ export function ShaclStudio({ onJumpToNode }: ShaclStudioProps) {
                 return (
                   <div key={`${violation.node}-${violation.path}-${index}`} style={violationRowStyle}>
                     <div>
-                      <div style={{ color: "var(--ws-text)", fontWeight: 800 }}>{violation.message}</div>
+                      <div style={{ color: "#ebf3ff", fontWeight: 800 }}>{violation.message}</div>
                       <div style={mutedStyle}>{violation.severity} {violation.path ? `· ${violation.path}` : ""}</div>
                       {nodeId ? <div style={monoStyle}>{nodeId}</div> : null}
                     </div>
@@ -331,33 +331,33 @@ export function ShaclStudio({ onJumpToNode }: ShaclStudioProps) {
 
 function validationBadgeStyle(status: string, conforms: boolean): CSSProperties {
   const color = status === "unavailable" ? "#f2b66d" : conforms ? "#7ce7d3" : "#ff9daf";
-  return { color, border: `1px solid color-mix(in srgb, ${color} 21%, transparent)`, background: `color-mix(in srgb, ${color} 8%, transparent)`, borderRadius: 999, padding: "4px 9px", fontSize: 11, fontWeight: 900, textTransform: "uppercase" };
+  return { color, border: `1px solid ${color}35`, background: `${color}14`, borderRadius: 999, padding: "4px 9px", fontSize: 11, fontWeight: 900, textTransform: "uppercase" };
 }
 
 const pageStyle: CSSProperties = { height: "100%", overflow: "auto", padding: 22, display: "flex", flexDirection: "column", gap: 16 };
-const heroStyle: CSSProperties = { display: "flex", justifyContent: "space-between", gap: 18, padding: 22, border: "1px solid var(--ws-border)", borderRadius: 22, background: "var(--ws-surface)" };
+const heroStyle: CSSProperties = { display: "flex", justifyContent: "space-between", gap: 18, padding: 22, border: "1px solid rgba(127,208,255,0.12)", borderRadius: 22, background: "linear-gradient(135deg, rgba(11,25,42,0.94), rgba(7,14,25,0.9))" };
 const kickerStyle: CSSProperties = { display: "inline-flex", gap: 8, alignItems: "center", color: "#9ee8d7", fontSize: 11, fontWeight: 900, letterSpacing: "0.12em", textTransform: "uppercase" };
-const titleStyle: CSSProperties = { margin: "8px 0", color: "var(--ws-text)", fontSize: 26, letterSpacing: "-0.04em" };
-const textStyle: CSSProperties = { margin: 0, color: "var(--ws-text-muted)", lineHeight: 1.6, maxWidth: 680 };
+const titleStyle: CSSProperties = { margin: "8px 0", color: "#ebf3ff", fontSize: 26, letterSpacing: "-0.04em" };
+const textStyle: CSSProperties = { margin: 0, color: "#8fa8c6", lineHeight: 1.6, maxWidth: 680 };
 const selectorShellStyle: CSSProperties = { minWidth: 320 };
-const labelStyle: CSSProperties = { display: "block", color: "var(--ws-text-dim)", fontSize: 11, fontWeight: 800, margin: "0 0 6px", textTransform: "uppercase", letterSpacing: "0.08em" };
-const inputStyle: CSSProperties = { width: "100%", boxSizing: "border-box", border: "1px solid var(--ws-border)", borderRadius: 12, padding: "10px 12px", background: "var(--ws-surface)", color: "var(--ws-text)" };
+const labelStyle: CSSProperties = { display: "block", color: "#6a7f97", fontSize: 11, fontWeight: 800, margin: "0 0 6px", textTransform: "uppercase", letterSpacing: "0.08em" };
+const inputStyle: CSSProperties = { width: "100%", boxSizing: "border-box", border: "1px solid rgba(127,208,255,0.14)", borderRadius: 12, padding: "10px 12px", background: "rgba(3,9,18,0.8)", color: "#ebf3ff" };
 const gridStyle: CSSProperties = { display: "grid", gridTemplateColumns: "360px minmax(0, 1fr)", gap: 16, minHeight: 560 };
-const cardStyle: CSSProperties = { padding: 18, border: "1px solid var(--ws-border)", borderRadius: 20, background: "var(--ws-surface)" };
+const cardStyle: CSSProperties = { padding: 18, border: "1px solid rgba(127,208,255,0.12)", borderRadius: 20, background: "rgba(9,19,34,0.78)" };
 const editorShellStyle: CSSProperties = { ...cardStyle, display: "flex", flexDirection: "column", minHeight: 560 };
 const panelHeaderStyle: CSSProperties = { display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, marginBottom: 12 };
-const sectionTitleStyle: CSSProperties = { margin: 0, color: "var(--ws-text)", fontSize: 16 };
+const sectionTitleStyle: CSSProperties = { margin: 0, color: "#ebf3ff", fontSize: 16 };
 const countBadgeStyle: CSSProperties = { color: "#9ee8d7", border: "1px solid rgba(158,232,215,0.2)", borderRadius: 999, padding: "4px 9px", fontSize: 11, fontWeight: 900 };
 const shapeListStyle: CSSProperties = { display: "flex", flexDirection: "column", gap: 10 };
 const shapeGroupStyle: CSSProperties = { display: "flex", flexDirection: "column", gap: 6 };
-const shapeTargetStyle: CSSProperties = { color: "var(--ws-text-dim)", fontSize: 11, fontWeight: 900, textTransform: "uppercase", letterSpacing: "0.08em" };
-const shapeRowStyle: CSSProperties = { display: "grid", gridTemplateColumns: "18px 1fr auto", gap: 10, padding: 10, borderRadius: 14, background: "var(--ws-surface-hover)", border: "1px solid var(--ws-border)" };
+const shapeTargetStyle: CSSProperties = { color: "#6a7f97", fontSize: 11, fontWeight: 900, textTransform: "uppercase", letterSpacing: "0.08em" };
+const shapeRowStyle: CSSProperties = { display: "grid", gridTemplateColumns: "18px 1fr auto", gap: 10, padding: 10, borderRadius: 14, background: "rgba(255,255,255,0.03)", border: "1px solid rgba(127,208,255,0.08)" };
 const violationBadgeStyle: CSSProperties = { color: "#f2b66d", fontWeight: 900 };
-const editorFrameStyle: CSSProperties = { flex: 1, minHeight: 0, border: "1px solid var(--ws-border)", borderRadius: 16, overflow: "hidden" };
-const primaryButtonStyle: CSSProperties = { border: "1px solid rgba(124,231,211,0.35)", borderRadius: 12, padding: "9px 11px", background: "var(--ws-surface)", color: "var(--ws-text)", fontWeight: 900, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 8 };
-const secondaryButtonStyle: CSSProperties = { ...primaryButtonStyle, background: "var(--ws-border)", borderColor: "var(--ws-border)" };
-const violationRowStyle: CSSProperties = { display: "grid", gridTemplateColumns: "1fr auto", gap: 12, padding: 12, borderRadius: 14, background: "var(--ws-surface-hover)", border: "1px solid var(--ws-border)" };
-const smallButtonStyle: CSSProperties = { border: "1px solid var(--ws-border)", borderRadius: 10, padding: "7px 9px", background: "var(--ws-border)", color: "var(--ws-text)", cursor: "pointer", fontWeight: 800 };
-const monoStyle: CSSProperties = { marginTop: 4, color: "var(--ws-text-dim)", fontSize: 11, fontFamily: "JetBrains Mono, monospace", wordBreak: "break-all" };
-const mutedStyle: CSSProperties = { margin: 0, color: "var(--ws-text-dim)", fontSize: 12, lineHeight: 1.5 };
+const editorFrameStyle: CSSProperties = { flex: 1, minHeight: 0, border: "1px solid rgba(127,208,255,0.12)", borderRadius: 16, overflow: "hidden" };
+const primaryButtonStyle: CSSProperties = { border: "1px solid rgba(124,231,211,0.35)", borderRadius: 12, padding: "9px 11px", background: "linear-gradient(135deg, rgba(20,151,136,0.55), rgba(74,163,255,0.35))", color: "#ebf3ff", fontWeight: 900, cursor: "pointer", display: "inline-flex", alignItems: "center", gap: 8 };
+const secondaryButtonStyle: CSSProperties = { ...primaryButtonStyle, background: "rgba(127,208,255,0.08)", borderColor: "rgba(127,208,255,0.18)" };
+const violationRowStyle: CSSProperties = { display: "grid", gridTemplateColumns: "1fr auto", gap: 12, padding: 12, borderRadius: 14, background: "rgba(255,255,255,0.03)", border: "1px solid rgba(127,208,255,0.08)" };
+const smallButtonStyle: CSSProperties = { border: "1px solid rgba(127,208,255,0.16)", borderRadius: 10, padding: "7px 9px", background: "rgba(127,208,255,0.08)", color: "#ebf3ff", cursor: "pointer", fontWeight: 800 };
+const monoStyle: CSSProperties = { marginTop: 4, color: "#6a7f97", fontSize: 11, fontFamily: "JetBrains Mono, monospace", wordBreak: "break-all" };
+const mutedStyle: CSSProperties = { margin: 0, color: "#6a7f97", fontSize: 12, lineHeight: 1.5 };
 const errorStyle: CSSProperties = { padding: 12, borderRadius: 14, color: "#ffb4c2", background: "rgba(255,157,175,0.1)", border: "1px solid rgba(255,157,175,0.18)" };
