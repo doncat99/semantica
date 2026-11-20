@@ -34,6 +34,7 @@ License: MIT
 
 import time
 import json
+import mimetypes
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -44,6 +45,10 @@ from ..utils.exceptions import ProcessingError, ValidationError
 from ..utils.helpers import safe_import
 from ..utils.logging import get_logger
 from ..utils.progress_tracker import get_progress_tracker
+
+# Docling imports openpyxl eagerly; host MIME files are unavailable in App sandboxes.
+mimetypes.knownfiles.clear()
+mimetypes.init(files=[])
 
 # Try to import docling, handle gracefully if not available
 DOCLING_AVAILABLE = False

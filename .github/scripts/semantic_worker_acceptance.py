@@ -1,5 +1,6 @@
 """Validate the relocated installed artifact with offline OCR and fresh workers."""
 import json
+import mimetypes
 import os
 from pathlib import Path
 import subprocess
@@ -12,6 +13,15 @@ root = Path(sys.argv[1]).resolve()
 destination = Path(sys.argv[2]).resolve()
 # Docling reads model settings during imports, before the first conversion.
 os.environ.update(DOCLING_ARTIFACTS_PATH=str(root / "models"), HF_HUB_OFFLINE="1", TRANSFORMERS_OFFLINE="1", DOCLING_DEVICE="cpu", ORT_DISABLE_TELEMETRY="1")
+
+# Qualify the installed parser with the same denied host MIME reads as a sandbox.
+host_mime_files = frozenset(mimetypes.knownfiles)
+def deny_host_mime_reads(event, args):
+    if event == "open" and args[0] in host_mime_files:
+        raise PermissionError(1, "Operation not permitted", args[0])
+sys.addaudithook(deny_host_mime_reads)
+from semantica.parse.docling_parser import DOCLING_AVAILABLE, DOCLING_IMPORT_ERROR
+assert DOCLING_AVAILABLE, DOCLING_IMPORT_ERROR
 
 from docx import Document
 from PIL import Image, ImageDraw, ImageFont

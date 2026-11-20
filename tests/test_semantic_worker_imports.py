@@ -5,6 +5,38 @@ import textwrap
 from pathlib import Path
 
 
+def test_docling_initializes_mime_types_without_host_files():
+    code = textwrap.dedent('''
+        import builtins, importlib.util, mimetypes, os.path
+        blocked = "/semantica-denied-system-mime.types"
+        mimetypes.knownfiles[:] = [blocked]
+        original_open, original_isfile = builtins.open, os.path.isfile
+        def denied_open(file, *args, **kwargs):
+            if str(file) == blocked:
+                raise PermissionError(1, "Operation not permitted", blocked)
+            return original_open(file, *args, **kwargs)
+        builtins.open = denied_open
+        os.path.isfile = lambda path: str(path) == blocked or original_isfile(path)
+
+        from semantica.parse import docling_parser
+        # Exercise the same eager MIME initialization used by openpyxl,
+        # plus later explicit reinitialization by ingestion.
+        assert mimetypes.MimeTypes().guess_type("report.pdf")[0] == "application/pdf"
+        mimetypes.init()
+        assert mimetypes.guess_type("report.doc")[0] == "application/msword"
+        assert mimetypes.guess_type("figure.png")[0] == "image/png"
+        mimetypes.add_type("application/x-ndjson", ".ndjson")
+        mimetypes.init(files=[])
+        assert mimetypes.guess_type("records.ndjson")[0] == "application/x-ndjson"
+        if importlib.util.find_spec("docling") is not None:
+            assert docling_parser.DOCLING_AVAILABLE, docling_parser.DOCLING_IMPORT_ERROR
+    ''')
+    result = subprocess.run([sys.executable, "-B", "-c", code],
+                            cwd=Path(__file__).resolve().parents[1],
+                            capture_output=True, text=True, timeout=120)
+    assert result.returncode == 0, result.stdout + result.stderr
+
+
 def test_lightweight_worker_operations_do_not_import_build_pipeline():
     code = textwrap.dedent('''
         import io, json, sys, tempfile

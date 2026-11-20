@@ -165,7 +165,8 @@ def test_offline_acceptance_sets_model_environment_before_dependency_imports(tmp
         monkeypatch.delenv(key, raising=False)
     tree = ast.parse(SCRIPT.with_name("semantic_worker_acceptance.py").read_text())
     boundary = next(index for index, node in enumerate(tree.body)
-                    if isinstance(node, ast.ImportFrom) and node.module == "docx")
+                    if isinstance(node, ast.FunctionDef)
+                    or isinstance(node, ast.ImportFrom) and node.module == "docx")
     exec(compile(ast.Module(body=tree.body[:boundary], type_ignores=[]), str(SCRIPT), "exec"), {})
     assert os.environ["DOCLING_ARTIFACTS_PATH"] == str(tmp_path / "models")
     assert [os.environ[key] for key in keys[1:]] == ["1", "1", "cpu", "1"]
