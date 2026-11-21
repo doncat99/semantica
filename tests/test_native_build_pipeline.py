@@ -315,10 +315,15 @@ def test_fact_reconciliation_reads_each_observation_once_then_reuses_completion(
     import urllib.request
     from tests.test_native_extraction_handoff import build_child
     monkeypatch.setattr(urllib.request,'urlopen',urllib.request.urlopen)
-    build_child(tmp_path,stop_before_publication=False)
+    first = build_child(tmp_path,stop_before_publication=False)
     assert reads and set(reads.values())=={1}
     def forbidden(*args,**kwargs):
         pytest.fail('unchanged input must not rebuild facts or source projections')
     monkeypatch.setattr(QualifiedFactIndex,'reconcile_and_stage',forbidden)
     monkeypatch.setattr(builder,'_build_source',forbidden)
-    build_child(tmp_path,stop_before_publication=False)
+    paid_calls = (tmp_path / 'build-calls.jsonl').read_bytes()
+    reused = build_child(tmp_path,stop_before_publication=False)
+    assert reused['completion_input'] == first['completion_input']
+    assert reused['publication'] == first['publication']
+    assert reused['native_indexes'] == first['native_indexes']
+    assert (tmp_path / 'build-calls.jsonl').read_bytes() == paid_calls

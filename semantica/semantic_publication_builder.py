@@ -3242,7 +3242,7 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
         return dict(publication=status, semantic_store=dict(
             path=str(Path(request.native_store_dir).resolve()), projectId=request.project_id,
             generationId=status['generation']), native_indexes=completed_indexes,
-            model_receipts=[])
+            completion_input=completion_key, model_receipts=[])
 
     source_builds = []
     model_receipts: list[ModelReceipt] = []
