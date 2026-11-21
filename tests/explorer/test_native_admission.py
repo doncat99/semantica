@@ -20,7 +20,17 @@ def test_native_cli_process_requires_stdin_admission(tmp_path, admission, starte
 import builtins
 import pathlib
 import sys
+import types
 from semantica.explorer import main
+native = types.ModuleType("semantica.explorer.native_scope")
+class Session:
+    def get_stats(self): return {"node_count": 1, "edge_count": 0}
+class NativeScope:
+    def __init__(self, path, project, generation):
+        assert (path, project, generation) == ("/native/store", "project", "generation")
+    def select(self, selection): return Session(), {"selection": selection}
+native.NativeScope = NativeScope
+sys.modules[native.__name__] = native
 original_import = builtins.__import__
 def guarded_import(name, *args, **kwargs):
     if name == "uvicorn":
@@ -29,7 +39,8 @@ def guarded_import(name, *args, **kwargs):
     return original_import(name, *args, **kwargs)
 builtins.__import__ = guarded_import
 print("waiting", flush=True)
-main(["--native-endpoint", "http://127.0.0.1:1/scene", "--no-browser"])
+main(["--native-store-path", "/native/store", "--native-project", "project",
+      "--native-generation", "generation", "--no-browser"])
 '''
     env = {**os.environ, "PYTHONDONTWRITEBYTECODE": "1"}
     child = subprocess.Popen([sys.executable, "-B", "-c", script, str(marker)],
@@ -52,7 +63,17 @@ def test_native_cli_host_crash_before_admission_exits_without_server_work(tmp_pa
     marker = tmp_path / "server-imported"
     child_script = '''
 import builtins, pathlib, sys
+import types
 from semantica.explorer import main
+native = types.ModuleType("semantica.explorer.native_scope")
+class Session:
+    def get_stats(self): return {"node_count": 1, "edge_count": 0}
+class NativeScope:
+    def __init__(self, path, project, generation):
+        assert (path, project, generation) == ("/native/store", "project", "generation")
+    def select(self, selection): return Session(), {"selection": selection}
+native.NativeScope = NativeScope
+sys.modules[native.__name__] = native
 original_import = builtins.__import__
 def guarded_import(name, *args, **kwargs):
     if name == "uvicorn":
@@ -61,7 +82,8 @@ def guarded_import(name, *args, **kwargs):
     return original_import(name, *args, **kwargs)
 builtins.__import__ = guarded_import
 print("waiting", flush=True)
-main(["--native-endpoint", "http://127.0.0.1:1/scene", "--no-browser"])
+main(["--native-store-path", "/native/store", "--native-project", "project",
+      "--native-generation", "generation", "--no-browser"])
 '''
     host_script = '''
 import subprocess, sys, time
@@ -91,3 +113,24 @@ time.sleep(30)
                 os.kill(child_pid, 9)
             except ProcessLookupError:
                 pass
+
+
+@pytest.mark.parametrize("args,expected", [
+    (["--native-store-path", "/native/store", "--native-project", "project"],
+     b"requires project and generation"),
+    (["--graph", "/not-read-yet", "--native-generation", "generation"],
+     b"require --native-store-path"),
+])
+def test_native_cli_rejects_unbound_publication_identity(args, expected):
+    child_script = '''
+from semantica.explorer import main
+import sys
+main(sys.argv[1:])
+'''
+    child = subprocess.Popen([sys.executable, "-B", "-c", child_script, *args],
+        cwd=Path(__file__).resolve().parents[2],
+        env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+        stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    _, stderr = child.communicate(b"SEMANTICA_NATIVE_EXPLORER_ADMIT\n", timeout=10)
+    assert child.returncode == 2
+    assert expected in stderr

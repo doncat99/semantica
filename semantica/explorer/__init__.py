@@ -59,7 +59,9 @@ def main(argv=None):
         "--graph", "-g",
         help="Path to a ContextGraph JSON file to load.",
     )
-    source.add_argument('--native-endpoint', help='Scoped native owner scene relay (loopback only).')
+    source.add_argument('--native-store-path', help='Path to the admitted native publication store.')
+    parser.add_argument('--native-project', help='Project identity for the native publication.')
+    parser.add_argument('--native-generation', help='Publication generation for the native scene.')
     parser.add_argument(
         "--port", "-p",
         type=_port,
@@ -85,9 +87,13 @@ def main(argv=None):
 
     # The host persists this process identity before admitting any runtime work.
     # EOF on host death before admission exits without constructing the server.
-    if args.native_endpoint:
+    if args.native_store_path:
         if sys.stdin.buffer.readline(64) != b"SEMANTICA_NATIVE_EXPLORER_ADMIT\n":
             parser.error("native Explorer requires host stdin admission")
+        if not args.native_project or not args.native_generation:
+            parser.error("native Explorer requires project and generation")
+    elif args.native_project or args.native_generation:
+        parser.error("native project and generation require --native-store-path")
 
     import os
     if args.graph and not os.path.isfile(args.graph):
@@ -107,10 +113,9 @@ def main(argv=None):
     from .app import create_app
 
     native_scope = None
-    if args.native_endpoint:
+    if args.native_store_path:
         from .native_scope import NativeScope
-        native_scope = NativeScope(args.native_endpoint, os.environ.get('SEMANTICA_NATIVE_SCENE_TOKEN'),
-            os.environ.get('SEMANTICA_NATIVE_SCENE_PROJECT'),os.environ.get('SEMANTICA_NATIVE_SCENE_GENERATION'))
+        native_scope = NativeScope(args.native_store_path, args.native_project, args.native_generation)
         session, _ = native_scope.select({})
     else:
         with _out.status("[dim]Loading graph…[/dim]", spinner="dots"):

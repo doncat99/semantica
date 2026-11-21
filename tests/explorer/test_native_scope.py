@@ -1,4 +1,6 @@
 import pytest
+from types import SimpleNamespace
+import threading
 
 from semantica.explorer.native_scope import NativeScope
 
@@ -8,7 +10,16 @@ def node(identity='urn:canonical:one'):
 
 
 def scope():
-    return NativeScope('http://127.0.0.1:1234/scene','secret','project','generation')
+    # Selection traversal tests replace page() with bounded synthetic pages;
+    # construct only the runtime state they exercise.
+    owner = object.__new__(NativeScope)
+    owner.reference = SimpleNamespace(path='/native/project', project='project', generation='generation')
+    owner.owner = object()
+    owner.project, owner.generation = 'project', 'generation'
+    owner.selection = None
+    owner._lock = threading.Lock()
+    owner._cancelled = threading.Event()
+    return owner
 
 
 def test_native_scope_complete_filter_and_existing_native_graph(monkeypatch):
@@ -137,10 +148,30 @@ def test_native_scope_api_loads_bound_project_without_an_extra_selection(monkeyp
         assert client.post('/api/graph/nodes',json={}).status_code==403
 
 
-@pytest.mark.parametrize('endpoint',['https://127.0.0.1/scene','http://example.com/scene','http://127.0.0.1/other'])
-def test_native_scope_requires_loopback(endpoint):
-    with pytest.raises(ValueError,match='loopback'):
-        NativeScope(endpoint,'token','p','g')
+def test_native_scope_requires_existing_project_store(tmp_path, monkeypatch):
+    from semantica import semantic_query
+    from semantica.triplet_store import oxigraph_store
+
+    path = tmp_path / 'store'
+    path.mkdir()
+    (path / 'CURRENT').write_text('current')
+
+    class Owner:
+        def __init__(self, _path):
+            self.closed = False
+        def close(self):
+            self.closed = True
+
+    monkeypatch.setattr(oxigraph_store, 'OxigraphStore', Owner)
+    monkeypatch.setattr(semantic_query, 'admit_native_store', lambda reference, project, _owner: (
+        None if (reference.project, reference.generation, project) == ('project', 'generation', 'project')
+        else (_ for _ in ()).throw(ValueError('native publication stale or not ready'))))
+    admitted = NativeScope(str(path), 'project', 'generation')
+    assert admitted.project == 'project' and admitted.generation == 'generation'
+    with pytest.raises(ValueError, match='publication stale'):
+        NativeScope(str(path), 'other-project', 'generation')
+    with pytest.raises(ValueError, match='existing scoped publication store'):
+        NativeScope(str(path), 'project', '')
 
 
 def test_project_startup_failure_is_not_an_empty_success(monkeypatch):
@@ -171,6 +202,31 @@ def test_completed_topic_scope_preserves_native_types_and_fact_edges(monkeypatch
     edges, total = session.get_edges()
     assert total == 1
     assert edges[0]['properties']['status'] == 'disputed'
+
+
+def test_native_page_binds_each_read_to_project_generation(monkeypatch):
+    import semantica.triplet_store.publication_records as module
+    owner = scope()
+    calls = []
+
+    class Records:
+        def __init__(self, native_owner, project):
+            assert native_owner is owner.owner
+            assert project == 'project'
+        def scene(self, generation, selection):
+            calls.append((generation, selection))
+            return dict(nodes=[], links=[], next_cursor=None)
+
+    monkeypatch.setattr(module, 'PublicationRecords', Records)
+    monkeypatch.setattr('semantica.semantic_query.admit_native_store', lambda reference, project, native_owner:
+        assert_scope(reference, project, native_owner, owner))
+    result = owner.page(dict(kind='facts', after='cursor'))
+    assert result['project'] == 'project' and result['generation'] == 'generation'
+    assert calls == [('generation', dict(kind='facts', after='cursor', limit=128, maxBytes=262144))]
+
+
+def assert_scope(reference, project, native_owner, owner):
+    assert reference == owner.reference and project == owner.project and native_owner is owner.owner
 
 
 @pytest.mark.parametrize('selection', [

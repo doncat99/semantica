@@ -1,15 +1,9 @@
-"""Load the native Explorer graph through bounded owner reads.
-
-The owner relay runs in the host's existing worker queue. This client neither
-opens RocksDB nor writes graph files. Transport cursors are consumed internally;
-native graph algorithms receive the complete Project or optional filtered graph.
-"""
+"""Load a read-only Explorer scene from its admitted native publication."""
 import json
 import threading
 import time
-from urllib.parse import urlsplit
-from urllib.request import Request, urlopen
-from urllib.error import HTTPError
+from pathlib import Path
+from types import SimpleNamespace
 
 from fastapi import Depends, HTTPException, Request as WebRequest
 from starlette.concurrency import run_in_threadpool
@@ -25,38 +19,37 @@ MAX_LOAD_SECONDS = 300
 
 
 class NativeScope:
-    def __init__(self, endpoint, token, project, generation):
-        address = urlsplit(endpoint)
-        if (address.scheme != 'http' or address.hostname != '127.0.0.1'
-                or address.path != '/scene' or address.query or address.fragment
-                or address.username or not token or not project or not generation):
-            raise ValueError('Native Explorer requires a scoped loopback relay')
-        self.endpoint, self.token = endpoint, token
+    def __init__(self, path, project, generation):
+        from ..semantic_query import admit_native_store
+        from ..triplet_store.oxigraph_store import OxigraphStore
+        location = Path(path)
+        if not location.is_dir() or not (location / 'CURRENT').is_file() or not project or not generation:
+            raise ValueError('Native Explorer requires an existing scoped publication store')
+        self.reference = SimpleNamespace(path=str(location), project=project, generation=generation)
+        self.owner = OxigraphStore(location)
+        try:
+            admit_native_store(self.reference, project, self.owner)
+        except BaseException:
+            self.owner.close()
+            raise
         self.project, self.generation = project, generation
         self.selection = None
         self._lock = threading.Lock()
         self._cancelled = threading.Event()
 
     def page(self, selection):
-        body = json.dumps(dict(selection, limit=32 if selection['kind'] == 'incident' else 128, maxBytes=MAX_BYTES)).encode()
-        if len(body) > MAX_BYTES:
-            raise ValueError('Native scene selection exceeds byte budget')
-        request = Request(self.endpoint, data=body, method='POST', headers={
-            'Authorization': 'Bearer ' + self.token, 'Content-Type': 'application/json'})
-        try:
-            with urlopen(request, timeout=16) as response:
-                data = response.read(MAX_BYTES + 1)
-        except HTTPError as error:
-            raise ValueError('Native scene owner rejected the scoped request ('+str(error.code)+')') from error
-        if len(data) > MAX_BYTES:
-            raise ValueError('Native scene exceeds byte budget')
-        page = json.loads(data)
-        if page.get('project') != self.project or page.get('generation') != self.generation:
-            raise ValueError('Native scene publication changed')
+        from ..semantic_query import admit_native_store
+        from ..triplet_store.publication_records import PublicationRecords
+        admit_native_store(self.reference, self.project, self.owner)
+        query = dict(selection, limit=32 if selection['kind'] == 'incident' else 128, maxBytes=MAX_BYTES)
+        page = PublicationRecords(self.owner, self.project).scene(self.generation, query)
         for field in ('nodes', 'links'):
             if not isinstance(page.get(field), list) or len(page[field]) > 128:
                 raise ValueError('Native scene exceeds row budget')
-        return page
+        result = dict(page)
+        result['project'] = self.project
+        result['generation'] = self.generation
+        return result
 
     def select(self, selection, install=None):
         if not self._lock.acquire(blocking=False):
@@ -142,6 +135,9 @@ class NativeScope:
             return session, self.selection
         finally:
             self._lock.release()
+
+    def close(self):
+        self.owner.close()
 
 
 def install_native_scope(app, scope):
