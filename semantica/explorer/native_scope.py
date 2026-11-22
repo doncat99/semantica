@@ -37,12 +37,13 @@ class NativeScope:
         self._lock = threading.Lock()
         self._cancelled = threading.Event()
 
-    def page(self, selection):
+    def page(self, selection, *, traversal=None):
         from ..semantic_query import admit_native_store
         from ..triplet_store.publication_records import PublicationRecords
         admit_native_store(self.reference, self.project, self.owner)
         query = dict(selection, limit=32 if selection['kind'] == 'incident' else 128, maxBytes=MAX_BYTES)
-        page = PublicationRecords(self.owner, self.project).scene(self.generation, query)
+        page = (traversal.read(self.owner) if traversal is not None else
+                PublicationRecords(self.owner, self.project).scene(self.generation, query))
         for field in ('nodes', 'links'):
             if not isinstance(page.get(field), list) or len(page[field]) > 128:
                 raise ValueError('Native scene exceeds row budget')
@@ -51,7 +52,7 @@ class NativeScope:
         result['generation'] = self.generation
         return result
 
-    def select(self, selection, install=None):
+    def select(self, selection, install=None, *, cancel_event=None):
         if not self._lock.acquire(blocking=False):
             raise ValueError('Another Explorer selection is in progress')
         try:
@@ -77,16 +78,22 @@ class NativeScope:
             def pages(query, field):
                 nonlocal size
                 after = None
+                traversal = None
+                if not selection and query['kind'] in {'nodes', 'topology'}:
+                    from ..semantic_query import NativeTraversal
+                    traversal = NativeTraversal(SimpleNamespace(semantic_store=self.reference,
+                        build_id=None, selection=dict(query, limit=128, maxBytes=MAX_BYTES)))
                 while True:
-                    if self._cancelled.is_set():
+                    if self._cancelled.is_set() or cancel_event is not None and cancel_event.is_set():
                         raise ValueError('Native scene selection cancelled')
                     if time.monotonic() > deadline:
                         raise ValueError('Native graph loading exceeded time budget')
-                    page = self.page(dict(query, **({'after': after} if after else {})))
+                    page_query = dict(query, **({'after': after} if after else {}))
+                    page = self.page(page_query, traversal=traversal) if traversal is not None else self.page(page_query)
                     size += len(json.dumps(page, ensure_ascii=False).encode())
                     if size > MAX_GRAPH_BYTES:
                         raise ValueError('Native graph exceeds in-memory Explorer byte budget')
-                    if self._cancelled.is_set():
+                    if self._cancelled.is_set() or cancel_event is not None and cancel_event.is_set():
                         raise ValueError('Native scene selection cancelled')
                     yield page[field]
                     cursor = page.get('next_cursor')
@@ -127,7 +134,7 @@ class NativeScope:
             session._read_only = True
             selected = dict(selection=selection, nodeCount=len(identities),linkCount=len(edge_ids),
                 project=self.project,generation=self.generation)
-            if self._cancelled.is_set():
+            if self._cancelled.is_set() or cancel_event is not None and cancel_event.is_set():
                 raise ValueError('Native scene selection cancelled')
             if install is not None:
                 install(session)
@@ -141,12 +148,15 @@ class NativeScope:
 
 
 def install_native_scope(app, scope):
+    resolve_scope = scope if callable(scope) else lambda: scope
     @app.get('/api/native-scope', dependencies=[Depends(require_auth)])
     def status():
+        scope = resolve_scope()
         return dict(available=True,project=scope.project,generation=scope.generation,active=scope.selection)
 
     @app.get('/api/native-scope/catalog', dependencies=[Depends(require_auth)])
     def catalog(kind: str, after: str = None):
+        scope = resolve_scope()
         if kind not in {'sources','communities','topics'}:
             raise HTTPException(422, 'Invalid native catalog')
         try:
@@ -156,11 +166,13 @@ def install_native_scope(app, scope):
 
     @app.post('/api/native-scope/cancel', dependencies=[Depends(require_auth)])
     def cancel():
+        scope = resolve_scope()
         scope._cancelled.set()
         return dict(state='cancellation_requested')
 
     @app.post('/api/native-scope/select', dependencies=[Depends(require_auth)])
     async def select(request: WebRequest):
+        scope = resolve_scope()
         raw=bytearray()
         async for chunk in request.stream():
             raw.extend(chunk)

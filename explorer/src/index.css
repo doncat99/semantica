@@ -1,6 +1,7 @@
+@scope (.semantica-explorer) {
 /* ── Semantica Explorer — Global CSS Reset ── */
 
-@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;600;700;800&display=swap');
+
 
 *, *::before, *::after {
   margin: 0;
@@ -8,7 +9,7 @@
   box-sizing: border-box;
 }
 
-html, body, #root {
+:scope {
   width: 100%;
   height: 100%;
   overflow: hidden;
@@ -69,3 +70,7 @@ code, pre, .mono {
   0%, 100% { opacity: 0.45; }
   50%       { opacity: 0.85; }
 }
+
+}
+
+.semantica-explorer { container: semantica-explorer / inline-size; }

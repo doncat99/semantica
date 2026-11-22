@@ -194,7 +194,7 @@ export function ReasoningWorkspace() {
 
         <div className="ws-scroll ws-padded" style={{ display: "flex", flexDirection: "column", gap: 12 }}>
           {error && (
-            <div className="ws-animate-in" style={{ display: "flex", gap: 10, padding: "12px 14px", borderRadius: "var(--ws-radius-sm)", background: "var(--ws-red-soft)", border: "1px solid rgba(255,123,114,0.28)", color: "#fca5a5", fontSize: 13 }}>
+            <div className="ws-animate-in" style={{ display: "flex", gap: 10, padding: "12px 14px", borderRadius: "var(--ws-radius-sm)", background: "var(--ws-red-soft)", border: "1px solid var(--ws-red)", color: "var(--ws-red)", fontSize: 13 }}>
               <AlertCircle size={16} style={{ flexShrink: 0, marginTop: 1 }} />
               <div>{error}</div>
             </div>

@@ -8,7 +8,7 @@ function outcomeColor(outcome: string) {
   if (o.includes("approv") || o.includes("accept")) return { color: "#6ee7b7", bg: "var(--ws-green-soft)", border: "rgba(76,195,138,0.3)" };
   if (o.includes("reject") || o.includes("denied") || o.includes("fail"))  return { color: "#fca5a5", bg: "var(--ws-red-soft)",   border: "rgba(255,123,114,0.3)" };
   if (o.includes("defer") || o.includes("pending") || o.includes("review")) return { color: "#fbbf24", bg: "var(--ws-amber-soft)", border: "rgba(242,182,109,0.3)" };
-  return { color: "var(--ws-text-muted)", bg: "rgba(255,255,255,0.04)", border: "rgba(255,255,255,0.1)" };
+  return { color: "var(--ws-text-muted)", bg: "var(--ws-surface-hover)", border: "var(--ws-surface-hover)" };
 }
 
 function OutcomeBadge({ outcome }: { outcome: OutcomeKind }) {
@@ -228,7 +228,7 @@ export function DecisionWorkspace() {
 
       {/* ── Detail pane ── */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", overflow: "hidden", position: "relative" }}>
-        <div style={{ position: "absolute", inset: 0, background: "radial-gradient(ellipse 60% 40% at 70% 20%, rgba(74,163,255,0.04), transparent 55%)", pointerEvents: "none" }} />
+        <div style={{ position: "absolute", inset: 0, background: "var(--ws-surface)", pointerEvents: "none" }} />
 
         {error ? (
           <div style={{ padding: 12, borderRadius: 14, color: "#ffb4c2", background: "rgba(255,157,175,0.1)", border: "1px solid rgba(255,157,175,0.18)", margin: "16px 16px 0 16px", zIndex: 2, position: "relative" }}>
@@ -255,7 +255,7 @@ export function DecisionWorkspace() {
             {/* Chain section */}
             <div className="ws-card" style={{ padding: 22 }}>
               <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 20 }}>
-                <div style={{ width: 8, height: 8, borderRadius: 999, background: "linear-gradient(135deg, var(--ws-accent), var(--ws-amber))", boxShadow: "0 0 10px rgba(74,163,255,0.4)" }} />
+                <div style={{ width: 8, height: 8, borderRadius: 999, background: "var(--ws-surface)", boxShadow: "none" }} />
                 <div style={{ color: "var(--ws-text)", fontSize: 14, fontWeight: 700 }}>Causal Chain</div>
                 {chain.length > 0 && !chainLoading && (
                   <span className="ws-pill ws-pill--accent" style={{ marginLeft: "auto" }}>{chain.length} step{chain.length !== 1 ? "s" : ""}</span>

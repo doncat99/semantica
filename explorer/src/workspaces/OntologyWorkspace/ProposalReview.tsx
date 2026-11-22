@@ -189,7 +189,7 @@ export function ProposalReview({ proposalId }: { proposalId: string }) {
       case "proposed":
         return <AlertCircle size={20} color="#f2b66d" />;
       default:
-        return <Clock size={20} color="#8fa8c6" />;
+        return <Clock size={20} color="var(--ws-text-muted)" />;
     }
   };
 
@@ -197,7 +197,7 @@ export function ProposalReview({ proposalId }: { proposalId: string }) {
     display: "flex",
     flexDirection: "column",
     height: "100%",
-    background: "#07111f",
+    background: "var(--ws-bg)",
     padding: "20px",
     overflow: "auto",
   };
@@ -213,7 +213,7 @@ export function ProposalReview({ proposalId }: { proposalId: string }) {
 
   const titleStyle: React.CSSProperties = {
     margin: 0,
-    color: "#ebf3ff",
+    color: "var(--ws-text)",
     fontSize: "20px",
     fontWeight: "700",
   };
@@ -227,18 +227,18 @@ export function ProposalReview({ proposalId }: { proposalId: string }) {
 
   const diffPanelStyle: React.CSSProperties = {
     flex: 1,
-    background: "rgba(9, 19, 34, 0.8)",
+    background: "var(--ws-surface)",
     borderRadius: "8px",
-    border: "1px solid rgba(127, 208, 255, 0.12)",
+    border: "1px solid var(--ws-border)",
     padding: "16px",
     overflow: "auto",
   };
 
   const commentsPanelStyle: React.CSSProperties = {
     width: "320px",
-    background: "rgba(9, 19, 34, 0.8)",
+    background: "var(--ws-surface)",
     borderRadius: "8px",
-    border: "1px solid rgba(127, 208, 255, 0.12)",
+    border: "1px solid var(--ws-border)",
     padding: "16px",
     display: "flex",
     flexDirection: "column",
@@ -250,7 +250,7 @@ export function ProposalReview({ proposalId }: { proposalId: string }) {
     gap: "10px",
     padding: "10px 12px",
     borderRadius: "6px",
-    background: "rgba(3, 9, 18, 0.6)",
+    background: "var(--ws-surface)",
     marginBottom: "8px",
     cursor: "pointer",
     transition: "160ms ease",
@@ -262,9 +262,9 @@ export function ProposalReview({ proposalId }: { proposalId: string }) {
     gap: "6px",
     padding: "8px 14px",
     borderRadius: "6px",
-    border: "1px solid rgba(127, 208, 255, 0.2)",
-    background: "rgba(74, 163, 255, 0.1)",
-    color: "#ebf3ff",
+    border: "1px solid var(--ws-border)",
+    background: "var(--ws-accent-soft)",
+    color: "var(--ws-text)",
     fontSize: "12px",
     fontWeight: "600",
     cursor: "pointer",
@@ -275,9 +275,9 @@ export function ProposalReview({ proposalId }: { proposalId: string }) {
     width: "100%",
     padding: "10px 12px",
     borderRadius: "6px",
-    border: "1px solid rgba(127, 208, 255, 0.2)",
-    background: "rgba(3, 9, 18, 0.8)",
-    color: "#ebf3ff",
+    border: "1px solid var(--ws-border)",
+    background: "var(--ws-surface)",
+    color: "var(--ws-text)",
     fontSize: "13px",
     resize: "vertical",
     minHeight: "80px",
@@ -286,7 +286,7 @@ export function ProposalReview({ proposalId }: { proposalId: string }) {
   if (!proposal) {
     return (
       <div style={containerStyle}>
-        <div style={{ color: "#8fa8c6", fontSize: "14px" }}>Loading proposal...</div>
+        <div style={{ color: "var(--ws-text-muted)", fontSize: "14px" }}>Loading proposal...</div>
       </div>
     );
   }
@@ -298,7 +298,7 @@ export function ProposalReview({ proposalId }: { proposalId: string }) {
           {getStateIcon(proposal.state)}
           <div>
             <h1 style={titleStyle}>{proposal.summary}</h1>
-            <div style={{ color: "#8fa8c6", fontSize: "12px", marginTop: "4px" }}>
+            <div style={{ color: "var(--ws-text-muted)", fontSize: "12px", marginTop: "4px" }}>
               {proposal.author} • {new Date(proposal.created_at).toLocaleString()}
             </div>
           </div>
@@ -327,28 +327,28 @@ export function ProposalReview({ proposalId }: { proposalId: string }) {
 
       <div style={contentStyle}>
         <div style={diffPanelStyle}>
-          <h2 style={{ margin: "0 0 16px", color: "#ebf3ff", fontSize: "14px", fontWeight: "600" }}>
+          <h2 style={{ margin: "0 0 16px", color: "var(--ws-text)", fontSize: "14px", fontWeight: "600" }}>
             <GitMerge size={16} style={{ marginRight: "8px", verticalAlign: "middle" }} />
             Diff Viewer
           </h2>
           {diff.length === 0 ? (
-            <div style={{ color: "#8fa8c6", fontSize: "13px" }}>No changes detected</div>
+            <div style={{ color: "var(--ws-text-muted)", fontSize: "13px" }}>No changes detected</div>
           ) : (
             diff.map((change, index) => (
               <div
                 key={index}
                 style={{
                   ...diffItemStyle,
-                  border: selectedElement === change.element ? "1px solid rgba(74, 163, 255, 0.4)" : "1px solid transparent",
+                  border: selectedElement === change.element ? "1px solid var(--ws-accent-soft)" : "1px solid transparent",
                 }}
                 onClick={() => setSelectedElement(change.element)}
               >
                 {getChangeIcon(change.type)}
                 <div style={{ flex: 1 }}>
-                  <div style={{ color: "#ebf3ff", fontSize: "13px", fontWeight: "600" }}>
+                  <div style={{ color: "var(--ws-text)", fontSize: "13px", fontWeight: "600" }}>
                     {change.element}
                   </div>
-                  <div style={{ color: "#8fa8c6", fontSize: "11px" }}>
+                  <div style={{ color: "var(--ws-text-muted)", fontSize: "11px" }}>
                     {change.type}
                   </div>
                 </div>
@@ -357,51 +357,51 @@ export function ProposalReview({ proposalId }: { proposalId: string }) {
           )}
 
           <div style={{ marginTop: "20px", paddingTop: "16px", borderTop: "1px solid rgba(140, 192, 255, 0.12)" }}>
-            <h3 style={{ margin: "0 0 12px", color: "#ebf3ff", fontSize: "13px", fontWeight: "600" }}>
+            <h3 style={{ margin: "0 0 12px", color: "var(--ws-text)", fontSize: "13px", fontWeight: "600" }}>
               Impact Analysis
             </h3>
-            <pre style={{ background: "rgba(3, 9, 18, 0.8)", padding: "12px", borderRadius: "6px", color: "#ebf3ff", fontSize: "12px", overflow: "auto" }}>
+            <pre style={{ background: "var(--ws-surface)", padding: "12px", borderRadius: "6px", color: "var(--ws-text)", fontSize: "12px", overflow: "auto" }}>
               {JSON.stringify(proposal.impact_analysis, null, 2)}
             </pre>
           </div>
 
           <div style={{ marginTop: "16px" }}>
-            <h3 style={{ margin: "0 0 12px", color: "#ebf3ff", fontSize: "13px", fontWeight: "600" }}>
+            <h3 style={{ margin: "0 0 12px", color: "var(--ws-text)", fontSize: "13px", fontWeight: "600" }}>
               SHACL Validation
             </h3>
-            <pre style={{ background: "rgba(3, 9, 18, 0.8)", padding: "12px", borderRadius: "6px", color: "#ebf3ff", fontSize: "12px", overflow: "auto" }}>
+            <pre style={{ background: "var(--ws-surface)", padding: "12px", borderRadius: "6px", color: "var(--ws-text)", fontSize: "12px", overflow: "auto" }}>
               {JSON.stringify(proposal.shacl_validation, null, 2)}
             </pre>
           </div>
         </div>
 
         <div style={commentsPanelStyle}>
-          <h2 style={{ margin: "0 0 16px", color: "#ebf3ff", fontSize: "14px", fontWeight: "600" }}>
+          <h2 style={{ margin: "0 0 16px", color: "var(--ws-text)", fontSize: "14px", fontWeight: "600" }}>
             <MessageSquare size={16} style={{ marginRight: "8px", verticalAlign: "middle" }} />
             Comments ({proposal.comments.length})
           </h2>
           <div style={{ flex: 1, overflow: "auto", marginBottom: "12px" }}>
             {proposal.comments.length === 0 ? (
-              <div style={{ color: "#8fa8c6", fontSize: "13px" }}>No comments yet</div>
+              <div style={{ color: "var(--ws-text-muted)", fontSize: "13px" }}>No comments yet</div>
             ) : (
               proposal.comments.map((comment) => (
                 <div
                   key={comment.id}
                   style={{
                     padding: "10px",
-                    background: "rgba(3, 9, 18, 0.6)",
+                    background: "var(--ws-surface)",
                     borderRadius: "6px",
                     marginBottom: "8px",
                   }}
                 >
                   <div style={{ display: "flex", alignItems: "center", gap: "6px", marginBottom: "4px" }}>
-                    <User size={12} color="#8fa8c6" />
-                    <span style={{ color: "#ebf3ff", fontSize: "12px", fontWeight: "600" }}>
+                    <User size={12} color="var(--ws-text-muted)" />
+                    <span style={{ color: "var(--ws-text)", fontSize: "12px", fontWeight: "600" }}>
                       {comment.author}
                     </span>
                   </div>
-                  <div style={{ color: "#8fa8c6", fontSize: "12px", marginBottom: "4px" }}>{comment.text}</div>
-                  <div style={{ color: "#5a7a9a", fontSize: "10px" }}>
+                  <div style={{ color: "var(--ws-text-muted)", fontSize: "12px", marginBottom: "4px" }}>{comment.text}</div>
+                  <div style={{ color: "var(--ws-text-dim)", fontSize: "10px" }}>
                     {new Date(comment.created_at).toLocaleString()}
                   </div>
                 </div>

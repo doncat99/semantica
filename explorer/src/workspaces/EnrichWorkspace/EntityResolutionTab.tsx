@@ -61,7 +61,7 @@ function ScoreBar({ score }: { score: number }) {
   const color = score >= 0.9 ? "#ff7b72" : score >= 0.75 ? "#f2b66d" : "#4cc38a";
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-      <div style={{ flex: 1, height: 4, borderRadius: 999, background: "rgba(255,255,255,0.06)", overflow: "hidden" }}>
+      <div style={{ flex: 1, height: 4, borderRadius: 999, background: "var(--ws-surface-hover)", overflow: "hidden" }}>
         <div style={{ width: `${pct}%`, height: "100%", borderRadius: 999, background: color, transition: "width 300ms ease" }} />
       </div>
       <span style={{ fontSize: 11, fontWeight: 700, color, minWidth: 34, textAlign: "right" }}>
@@ -141,9 +141,9 @@ function PairRow({
               <div style={{ color: accentColor, fontSize: 10, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 6 }}>
                 {label}
               </div>
-              <div style={{ color: "#e6edf3", fontSize: 13, fontWeight: 600 }}>{entity.label || entity.id}</div>
-              <div style={{ color: "#8b949e", fontSize: 11, marginTop: 3 }}>{entity.type}</div>
-              <div style={{ color: "#6a7f97", fontSize: 10, marginTop: 4, fontFamily: "monospace" }}>{entity.id}</div>
+              <div style={{ color: "var(--ws-text)", fontSize: 13, fontWeight: 600 }}>{entity.label || entity.id}</div>
+              <div style={{ color: "var(--ws-text-muted)", fontSize: 11, marginTop: 3 }}>{entity.type}</div>
+              <div style={{ color: "var(--ws-text-dim)", fontSize: 10, marginTop: 4, fontFamily: "monospace" }}>{entity.id}</div>
             </div>
           ))}
         </div>
@@ -226,8 +226,8 @@ export function EntityResolutionTab() {
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <ScanSearch size={18} color="#f2b66d" />
           <div>
-            <div style={{ color: "#ebf3ff", fontSize: 16, fontWeight: 700 }}>Entity Resolution</div>
-            <div style={{ color: "#8b949e", fontSize: 12 }}>Detect and merge duplicate entities in the knowledge graph</div>
+            <div style={{ color: "var(--ws-text)", fontSize: 16, fontWeight: 700 }}>Entity Resolution</div>
+            <div style={{ color: "var(--ws-text-muted)", fontSize: 12 }}>Detect and merge duplicate entities in the knowledge graph</div>
           </div>
         </div>
       </div>
@@ -237,7 +237,7 @@ export function EntityResolutionTab() {
         <div style={{ display: "flex", alignItems: "center", gap: 16, flexWrap: "wrap" }}>
           <div style={{ flex: 1, minWidth: 240 }}>
             <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
-              <label style={{ color: "#c6d4e3", fontSize: 12, fontWeight: 600 }}>Similarity Threshold</label>
+              <label style={{ color: "var(--ws-text)", fontSize: 12, fontWeight: 600 }}>Similarity Threshold</label>
               <span style={{ color: "#f2b66d", fontSize: 12, fontWeight: 700 }}>{threshold.toFixed(2)}</span>
             </div>
             <input
@@ -249,7 +249,7 @@ export function EntityResolutionTab() {
               onChange={(e) => setThreshold(parseFloat(e.target.value))}
               style={{ width: "100%", accentColor: "#f2b66d", cursor: "pointer" }}
             />
-            <div style={{ display: "flex", justifyContent: "space-between", color: "#6a7f97", fontSize: 10, marginTop: 2 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", color: "var(--ws-text-dim)", fontSize: 10, marginTop: 2 }}>
               <span>More results (0.50)</span>
               <span>Fewer, higher confidence (0.99)</span>
             </div>
@@ -274,7 +274,7 @@ export function EntityResolutionTab() {
           {pairs.length > 0 ? (
             <>
               <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 4 }}>
-                <div style={{ color: "#8b949e", fontSize: 12, fontWeight: 600 }}>
+                <div style={{ color: "var(--ws-text-muted)", fontSize: 12, fontWeight: 600 }}>
                   {pairs.length} flagged pair{pairs.length !== 1 ? "s" : ""}
                 </div>
                 <button onClick={() => setPairs([])} style={clearAllBtnStyle}>Clear all</button>
@@ -291,10 +291,10 @@ export function EntityResolutionTab() {
           ) : (
             <div style={emptyStateStyle}>
               <ScanSearch size={36} color="rgba(242,182,109,0.15)" />
-              <div style={{ color: "#8b949e", fontSize: 14, marginTop: 12, fontWeight: 500 }}>
+              <div style={{ color: "var(--ws-text-muted)", fontSize: 14, marginTop: 12, fontWeight: 500 }}>
                 No flagged pairs
               </div>
-              <div style={{ color: "#6a7f97", fontSize: 12, marginTop: 4, textAlign: "center", maxWidth: 280 }}>
+              <div style={{ color: "var(--ws-text-dim)", fontSize: 12, marginTop: 4, textAlign: "center", maxWidth: 280 }}>
                 Set a similarity threshold and run a dedup scan to detect potential duplicates.
               </div>
             </div>
@@ -304,7 +304,7 @@ export function EntityResolutionTab() {
         {/* Merge history sidebar */}
         {mergeHistory.length > 0 ? (
           <div style={historyPanelStyle}>
-            <div style={{ color: "#8b949e", fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 10 }}>
+            <div style={{ color: "var(--ws-text-muted)", fontSize: 11, fontWeight: 700, letterSpacing: "0.06em", textTransform: "uppercase", marginBottom: 10 }}>
               Merge History
             </div>
             <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
@@ -312,10 +312,10 @@ export function EntityResolutionTab() {
                 <div key={entry.id} style={historyRowStyle}>
                   <GitMerge size={11} color="#f2b66d" />
                   <div style={{ flex: 1, minWidth: 0 }}>
-                    <div style={{ color: "#c6d4e3", fontSize: 11, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    <div style={{ color: "var(--ws-text)", fontSize: 11, fontWeight: 500, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
                       {entry.summary}
                     </div>
-                    <div style={{ color: "#6a7f97", fontSize: 10 }}>
+                    <div style={{ color: "var(--ws-text-dim)", fontSize: 10 }}>
                       {entry.timestamp.toLocaleTimeString()}
                     </div>
                   </div>
@@ -336,13 +336,13 @@ const shellStyle: React.CSSProperties = {
   flexDirection: "column",
   width: "100%",
   height: "100%",
-  background: "#0d1117",
+  background: "var(--ws-bg)",
   overflow: "hidden",
 };
 
 const headerStyle: React.CSSProperties = {
   padding: "20px 24px 16px",
-  borderBottom: "1px solid rgba(88,166,255,0.1)",
+  borderBottom: "1px solid var(--ws-border)",
   flexShrink: 0,
 };
 
@@ -350,7 +350,7 @@ const controlsCardStyle: React.CSSProperties = {
   margin: "16px 24px",
   padding: "16px 20px",
   borderRadius: 14,
-  background: "linear-gradient(135deg, rgba(13,17,23,0.75), rgba(22,27,34,0.6))",
+  background: "var(--ws-surface)",
   border: "1px solid rgba(242,182,109,0.18)",
   flexShrink: 0,
 };
@@ -361,7 +361,7 @@ const scanBtnStyle: React.CSSProperties = {
   gap: 7,
   padding: "10px 18px",
   borderRadius: 10,
-  background: "linear-gradient(135deg, rgba(242,182,109,0.22), rgba(242,182,109,0.1))",
+  background: "var(--ws-surface)",
   border: "1px solid rgba(242,182,109,0.32)",
   color: "#f2b66d",
   fontSize: 13,
@@ -373,17 +373,17 @@ const scanBtnStyle: React.CSSProperties = {
 const pairCardStyle: React.CSSProperties = {
   padding: "12px 14px",
   borderRadius: 12,
-  background: "linear-gradient(135deg, rgba(13,17,23,0.6), rgba(22,27,34,0.4))",
-  border: "1px solid rgba(255,255,255,0.07)",
+  background: "var(--ws-surface)",
+  border: "1px solid var(--ws-surface-hover)",
 };
 
 const entityChipStyle: React.CSSProperties = {
   display: "inline-block",
   padding: "4px 10px",
   borderRadius: 8,
-  background: "rgba(255,255,255,0.04)",
-  border: "1px solid rgba(255,255,255,0.08)",
-  color: "#e6edf3",
+  background: "var(--ws-surface-hover)",
+  border: "1px solid var(--ws-surface-hover)",
+  color: "var(--ws-text)",
   fontSize: 12,
   fontWeight: 600,
 };
@@ -402,7 +402,7 @@ const actionBtnStyle: React.CSSProperties = {
 const iconBtnStyle: React.CSSProperties = {
   background: "transparent",
   border: "none",
-  color: "#8b949e",
+  color: "var(--ws-text-muted)",
   cursor: "pointer",
   padding: 4,
   borderRadius: 6,
@@ -413,13 +413,13 @@ const iconBtnStyle: React.CSSProperties = {
 const diffCardStyle: React.CSSProperties = {
   padding: "10px 12px",
   borderRadius: 10,
-  background: "rgba(0,0,0,0.2)",
+  background: "var(--ws-surface)",
   border: "1px solid transparent",
 };
 
 const historyPanelStyle: React.CSSProperties = {
   width: 240,
-  borderLeft: "1px solid rgba(255,255,255,0.06)",
+  borderLeft: "1px solid var(--ws-surface-hover)",
   padding: "16px 16px",
   overflowY: "auto",
   flexShrink: 0,
@@ -430,7 +430,7 @@ const historyRowStyle: React.CSSProperties = {
   alignItems: "flex-start",
   gap: 7,
   padding: "8px 0",
-  borderBottom: "1px solid rgba(255,255,255,0.04)",
+  borderBottom: "1px solid var(--ws-surface-hover)",
 };
 
 const emptyStateStyle: React.CSSProperties = {
@@ -446,7 +446,7 @@ const emptyStateStyle: React.CSSProperties = {
 const clearAllBtnStyle: React.CSSProperties = {
   background: "transparent",
   border: "none",
-  color: "#8b949e",
+  color: "var(--ws-text-muted)",
   fontSize: 12,
   cursor: "pointer",
   padding: "2px 6px",

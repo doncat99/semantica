@@ -1,0 +1,175 @@
+/* Native presentation rules restored from ecce6944 parent; confined to the Explorer mount. */
+.semantica-explorer[data-host-presentation] :is(.app-shell) {
+  background: var(--app-bg);
+  color: var(--text-main);
+  font-family: var(--host-font);
+}
+.semantica-explorer[data-host-presentation] :is(button, input, select, textarea) {
+  font-family: var(--host-font);
+  color: var(--text-main);
+  letter-spacing: 0;
+}
+.semantica-explorer[data-host-presentation] :is(.app-rail, .workspace-header, .workspace-header--compact) {
+  background: var(--panel-bg);
+  backdrop-filter: none;
+}
+.semantica-explorer[data-host-presentation] :is(.brand-pill, .nav-button, .workspace-kicker, .workspace-tab, .ws-panel, .ws-card) {
+  border-radius: 8px;
+  letter-spacing: 0;
+  box-shadow: none;
+}
+.semantica-explorer[data-host-presentation] :is(.brand-pill, .nav-button[data-active='true'], .workspace-tab[data-active='true'], .ws-btn--primary) {
+  background: var(--ws-accent-soft);
+  border-color: var(--ws-accent);
+  color: var(--text-main);
+}
+.semantica-explorer[data-host-presentation] :is(.nav-button:hover, .workspace-tab:hover, .ws-btn--ghost:hover) {
+  background: var(--ws-surface-hover);
+  border-color: var(--ws-border-strong);
+}
+.semantica-explorer[data-host-presentation] :is(.workspace-kicker, .ws-panel--inset, .ws-btn--ghost) {
+  background: var(--ws-surface);
+  border-color: var(--ws-border);
+  color: var(--text-muted);
+}
+.semantica-explorer[data-host-presentation] .workspace-kicker::before {
+  background: var(--ws-accent);
+  box-shadow: none;
+}
+.semantica-explorer[data-host-presentation] :is(.nav-label, .workspace-title, .ws-title, .ws-label, .ws-eyebrow) {
+  font-family: var(--host-font);
+  letter-spacing: 0;
+}
+.semantica-explorer[data-host-presentation] [aria-label='Native graph scope'] :is(button, select, input) {
+  min-height: 28px;
+  padding: 3px 8px;
+  background: var(--panel-bg);
+  border: 1px solid var(--ws-border);
+  border-radius: 6px;
+}
+.semantica-explorer[data-host-presentation] :is(button, input, select, textarea):disabled { opacity: .5; }
+.semantica-explorer[data-host-presentation] :focus-visible { outline: 2px solid var(--ws-accent); outline-offset: 2px; }
+.semantica-explorer[data-host-presentation] ::selection { color: var(--text-main); background: var(--ws-accent-soft); }
+.semantica-explorer[data-host-presentation] ::-webkit-scrollbar-thumb { background: var(--ws-border-strong); }
+.semantica-explorer[data-host-presentation] :is(.explore-search-command, .explore-search-suggestions, .explore-mode-control, .explore-tool-cluster, .explore-tool-button, .explore-mode-segment, .explore-inspector-card) {
+  border-radius: 6px;
+  box-shadow: none;
+  background-image: none;
+}
+.semantica-explorer[data-host-presentation] :is(.explore-tool-cluster, .explore-mode-control, .explore-search-suggestions, .explore-inspector-card) {
+  background: var(--ws-surface);
+  border-color: var(--ws-border);
+}
+.semantica-explorer[data-host-presentation] .explore-search-command {
+  background: var(--panel-bg);
+  border-color: var(--ws-border);
+}
+.semantica-explorer[data-host-presentation] .explore-search-command:focus-within {
+  border-color: var(--ws-accent);
+  outline: 0;
+  box-shadow: none;
+}
+.semantica-explorer[data-host-presentation] .explore-search-command input:focus-visible { outline: 0; }
+.semantica-explorer[data-host-presentation] .explore-search-command :is(input, button) {
+  border-radius: 4px;
+  box-shadow: none;
+}
+.semantica-explorer[data-host-presentation] .explore-search-command button,
+.semantica-explorer[data-host-presentation] .explore-tool-button-primary {
+  background: var(--ws-accent-soft);
+  border-color: var(--ws-accent);
+  color: var(--text-main);
+}
+.semantica-explorer[data-host-presentation] .explore-mode-segment,
+.semantica-explorer[data-host-presentation] .explore-tool-button {
+  border-color: var(--ws-border);
+  background: var(--panel-bg);
+  color: var(--text-main);
+  transition: background-color 120ms ease, border-color 120ms ease, color 120ms ease;
+}
+.semantica-explorer[data-host-presentation] .explore-tool-button:hover:not(:disabled) {
+  background: var(--ws-surface-hover);
+  border-color: var(--ws-border-strong);
+  transform: none;
+}
+.semantica-explorer[data-host-presentation] :is(.explore-mode-segment, .explore-tool-button)[data-active="true"] {
+  background: var(--ws-accent-soft);
+  border-color: var(--ws-accent);
+  color: var(--text-main);
+  box-shadow: none;
+}
+.semantica-explorer[data-host-presentation] .explore-graph-filters :is(select, input, button) {
+  min-height: 30px;
+  padding: 4px 8px;
+  border: 1px solid var(--ws-border);
+  border-radius: 6px;
+  background: var(--panel-bg);
+  color: var(--text-main);
+  box-shadow: none;
+}
+.semantica-explorer[data-host-presentation] .explore-graph-filters .explore-filter-toggle {
+  min-height: 28px;
+  padding: 3px 0;
+  border: 0;
+  background: transparent;
+  color: var(--text-muted);
+}
+.semantica-explorer[data-host-presentation] .explore-graph-filters .explore-filter-toggle:hover {
+  color: var(--text-strong);
+}
+.semantica-explorer[data-host-presentation] .explore-graph-filters :is(select, input):focus-visible {
+  border-color: var(--ws-accent);
+  outline: 2px solid var(--ws-accent-soft);
+  outline-offset: 1px;
+}
+.semantica-explorer[data-host-presentation] .explore-search-suggestions li { border-radius: 4px; }
+.semantica-explorer[data-host-presentation] .explore-inspector-card {
+  background: var(--ws-surface);
+  border-color: var(--ws-border);
+}
+.semantica-explorer[data-host-presentation] .explore-tool-cluster-label {
+  color: var(--text-muted);
+  font-size: 11px;
+  font-weight: 600;
+  letter-spacing: 0;
+  text-transform: none;
+}
+.semantica-explorer[data-host-presentation] .explore-color-legend-title { letter-spacing: 0; }
+.semantica-explorer[data-host-presentation] .explore-search-command input { background: transparent; border: 0; }
+.semantica-explorer[data-host-presentation] .workspace-tab:not([data-active='true']) {
+  background: var(--ws-surface);
+  border-color: var(--ws-border);
+  color: var(--text-muted);
+}
+
+
+.semantica-explorer[data-host-presentation] :is(.landing-page, .workspace-loading) {
+  background: var(--app-bg);
+  color: var(--text-main);
+}
+.semantica-explorer[data-host-presentation] .landing-page::before { display: none; }
+.semantica-explorer[data-host-presentation] :is(.landing-title, .landing-title span) {
+  color: var(--text-main);
+  background: none;
+  font-family: var(--host-font);
+}
+.semantica-explorer[data-host-presentation] :is(.landing-preview, .landing-preview-topbar, .landing-command-card, .landing-dossier-card, .landing-timeline-card, .landing-metric, .landing-workspace-card) {
+  background: var(--panel-bg);
+  border-color: var(--ws-border);
+  box-shadow: none;
+}
+.semantica-explorer[data-host-presentation] :is(.landing-subtitle, .landing-status-version, .landing-command-meta, .landing-dossier-row, .landing-timeline-title, .landing-timeline-labels, .landing-metric-label, .landing-section-copy, .landing-workspace-card-desc) {
+  color: var(--text-muted);
+}
+.semantica-explorer[data-host-presentation] :is(.landing-command-label, .landing-dossier-title, .landing-metric-value, .landing-section-title, .landing-workspace-card-title) {
+  color: var(--text-main);
+  font-family: var(--host-font);
+}
+.semantica-explorer[data-host-presentation] :is(.landing-kicker, .landing-preview-tab, .landing-cta-primary, .landing-cta-secondary) {
+  color: var(--text-main);
+  background: var(--ws-accent-soft);
+  border-color: var(--ws-border);
+  box-shadow: none;
+}
+
+.semantica-explorer[data-host-presentation] .landing-page * { font-family: var(--host-font); }

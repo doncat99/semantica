@@ -1,3 +1,4 @@
+import { PRESENTATION_CHANGED } from '../../embeddedPresentation';
 import { useEffect, useMemo, useRef, useCallback, forwardRef, useImperativeHandle, useState, type ReactNode } from "react";
 import Sigma from "sigma";
 import FA2Layout from "graphology-layout-forceatlas2/worker";
@@ -1295,6 +1296,11 @@ export const GraphCanvas = forwardRef<GraphCanvasHandle, GraphCanvasProps>(
     const structureLayerLastDrawAtRef = useRef<number | null>(null);
     const structureLayerDiagnosticsRef = useRef<GraphStructureLayerDiagnostics | null>(null);
     const sigmaRef = useRef<Sigma | null>(null);
+    useEffect(() => {
+      const update = () => sigmaRef.current?.refresh();
+      window.addEventListener(PRESENTATION_CHANGED, update);
+      return () => window.removeEventListener(PRESENTATION_CHANGED, update);
+    }, []);
     const fa2Ref = useRef<FA2Layout | null>(null);
     const behaviorContextRef = useRef<GraphBehaviorContext | null>(null);
     const runtimeRef = useRef<GraphSceneRuntime | null>(null);

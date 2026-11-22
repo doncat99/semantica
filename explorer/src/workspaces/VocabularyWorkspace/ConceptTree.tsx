@@ -1,10 +1,9 @@
 /**
  * ConceptTree.tsx — react-arborist SKOS hierarchy viewer.
  *
- * Styled for the Palantir/Glassmorphism dark theme rather than
- * the default light-mode colours.
+ * Uses the workspace theme and measures the available scrolling viewport.
  */
-import React from 'react';
+import React, { useLayoutEffect, useRef, useState } from 'react';
 import { Tree } from 'react-arborist';
 import type { NodeRendererProps } from 'react-arborist';
 import { ChevronRight, ChevronDown, Folder, FileText } from 'lucide-react';
@@ -16,17 +15,26 @@ interface ConceptTreeProps {
 }
 
 export const ConceptTree: React.FC<ConceptTreeProps> = ({ data, onSelectConcept }) => {
+  const container = useRef<HTMLDivElement>(null);
+  const [height, setHeight] = useState(0);
+  useLayoutEffect(() => {
+    const element = container.current!;
+    const observer = new ResizeObserver(() => setHeight(element.clientHeight));
+    observer.observe(element);
+    setHeight(element.clientHeight);
+    return () => observer.disconnect();
+  }, []);
   return (
-    <div style={{
-      height: '100%', width: '100%',
+    <div ref={container} style={{
+      height: '100%', width: '100%', minHeight: 0,
       backgroundColor: 'transparent',
       overflow: 'hidden',
     }}>
-      <Tree
+      {height > 0 && <Tree
         data={data}
         idAccessor="uri"
         width="100%"
-        height={600}
+        height={height}
         indent={24}
         rowHeight={36}
         childrenAccessor="children"
@@ -49,15 +57,15 @@ export const ConceptTree: React.FC<ConceptTreeProps> = ({ data, onSelectConcept 
                 padding: '0 8px',
                 cursor: 'pointer',
                 backgroundColor: node.isSelected
-                  ? 'rgba(88,166,255,0.12)'
+                  ? 'var(--ws-border)'
                   : 'transparent',
                 userSelect: 'none',
-                borderBottom: '1px solid rgba(255,255,255,0.04)',
+                borderBottom: '1px solid var(--ws-surface-hover)',
                 transition: 'background 0.15s',
               }}
               onMouseEnter={(e) => {
                 if (!node.isSelected) {
-                  (e.currentTarget as HTMLDivElement).style.background = 'rgba(88,166,255,0.06)';
+                  (e.currentTarget as HTMLDivElement).style.background = 'var(--ws-border)';
                 }
               }}
               onMouseLeave={(e) => {
@@ -69,20 +77,20 @@ export const ConceptTree: React.FC<ConceptTreeProps> = ({ data, onSelectConcept 
               <span style={{ width: 20, display: 'flex', justifyContent: 'center' }}>
                 {isFolder ? (
                   node.isOpen
-                    ? <ChevronDown size={14} color="#8b949e" />
-                    : <ChevronRight size={14} color="#8b949e" />
+                    ? <ChevronDown size={14} color="var(--ws-text-muted)" />
+                    : <ChevronRight size={14} color="var(--ws-text-muted)" />
                 ) : null}
               </span>
 
               <span style={{ marginRight: 8, display: 'flex', alignItems: 'center' }}>
                 {isFolder
-                  ? <Folder size={14} color="#d2a8ff" />
-                  : <FileText size={14} color="#484f58" />
+                  ? <Folder size={14} color="var(--ws-purple)" />
+                  : <FileText size={14} color="var(--ws-text-dim)" />
                 }
               </span>
 
               <span style={{
-                fontSize: 13, color: '#c9d1d9',
+                fontSize: 13, color: 'var(--ws-text)',
                 whiteSpace: 'nowrap', overflow: 'hidden',
                 textOverflow: 'ellipsis',
               }}>
@@ -91,7 +99,7 @@ export const ConceptTree: React.FC<ConceptTreeProps> = ({ data, onSelectConcept 
             </div>
           );
         }}
-      </Tree>
+      </Tree>}
     </div>
   );
 };

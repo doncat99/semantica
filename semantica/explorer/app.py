@@ -63,6 +63,7 @@ def create_app(
     agent_memory: Optional[AgentMemory] = None,
     allowed_origins: Optional[Sequence[str]] = None,
     native_scope=None,
+    native_service=False,
 ) -> FastAPI:
     """Create an Explorer application over live graph and memory objects.
 
@@ -84,6 +85,11 @@ def create_app(
         settings["allowed_origins"] = [
             origin.strip() for origin in allowed_origins if origin.strip()
         ]
+    elif native_service:
+        # The host binds the exact browser origin after process startup. HTTP
+        # requests remain fenced by NativeService; this wildcard only permits
+        # CORS preflight while WebSocket origins are checked dynamically.
+        settings["allowed_origins"] = ["*"]
     prov_path = provenance_storage_path or settings.get("provenance_storage_path")
     if session is None and native_scope is not None:
         active_session, _ = native_scope.select({})
@@ -104,7 +110,9 @@ def create_app(
     async def lifespan(app: FastAPI):
         import logging as _lifespan_logging
         _lifespan_logger = _lifespan_logging.getLogger(__name__)
-        if anonymous_access_allowed():
+        if native_service:
+            _lifespan_logger.info("Native Explorer authentication: host control key and revocable Project session keys.")
+        elif anonymous_access_allowed():
             _lifespan_logger.warning(
                 "Explorer is running with SEMANTICA_ALLOW_ANONYMOUS=true — "
                 "all API routes are unauthenticated. Do not expose this "
@@ -124,7 +132,11 @@ def create_app(
         app.state.agent_memory = agent_memory
         app.state.markdown_resources = markdown_resources
         install_mutation_bridge(app, active_session)
-        yield
+        try:
+            yield
+        finally:
+            if native_service:
+                await app.state.native_service.unbind()
 
     app = FastAPI(
         title="Semantica Knowledge Explorer",
@@ -137,15 +149,17 @@ def create_app(
 
     @app.middleware("http")
     async def protect_published_graph(request: Request, call_next):
-        if active_session.read_only and request.method not in {"GET", "HEAD", "OPTIONS"}:
+        current_session = getattr(app.state, "session", active_session)
+        if (native_service or current_session is not None and current_session.read_only) and request.method not in {"GET", "HEAD", "OPTIONS"}:
             # The viewer's POST queries do not modify the loaded graph.
-            if request.method != "POST" or request.url.path not in {
+            if not (native_service and request.url.path == "/api/native-service/session" and request.method == "DELETE") and (request.method != "POST" or request.url.path not in {
                 "/api/graph/search", "/api/graph/distance-matrix",
                 "/api/export", "/api/export/distance-enriched", "/api/sparql",
                 "/api/ontology/preview", "/api/ontology/skos/search",
                 "/api/native-scope/select",
                 "/api/native-scope/cancel",
-            }:
+                "/api/native-service/session", "/api/native-service/cancel",
+            }):
                 return JSONResponse(status_code=403, content={"detail": "Published graph is read-only"})
         return await call_next(request)
 
@@ -202,6 +216,9 @@ def create_app(
     if native_scope is not None:
         from .native_scope import install_native_scope
         install_native_scope(app,native_scope)
+    if native_service:
+        from .native_service import install_native_service
+        install_native_service(app)
     app.include_router(graph_router, dependencies=_auth)
     app.include_router(analytics_router, dependencies=_auth)
     app.include_router(decisions_router, dependencies=_auth)

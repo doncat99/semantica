@@ -975,7 +975,7 @@ const HUD_CSS = `
     height: 100%;
     overflow-y: auto;
   }
-  @media (max-width: 1260px) {
+  @container semantica-explorer (max-width: 1260px) {
     .explore-main-grid {
       grid-template-columns: 1fr;
     }
@@ -987,7 +987,7 @@ const HUD_CSS = `
       justify-content: flex-start;
     }
   }
-  @media (max-width: 980px) {
+  @container semantica-explorer (max-width: 980px) {
     .explore-shell {
       padding: 10px;
       gap: 10px;

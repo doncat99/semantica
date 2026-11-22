@@ -45,7 +45,7 @@ def is_valid_api_key(candidate: Optional[str]) -> bool:
     return bool(candidate) and hmac.compare_digest(candidate, expected)
 
 
-def require_auth(api_key: Optional[str] = Security(_api_key_header)) -> None:
+def require_auth(request: Request, api_key: Optional[str] = Security(_api_key_header)) -> None:
     """Dependency enforcing the ``X-API-Key`` header on protected routes.
 
     Every Explorer/API router (except health/info/static assets) should be
@@ -54,9 +54,10 @@ def require_auth(api_key: Optional[str] = Security(_api_key_header)) -> None:
     silently served unauthenticated — SEMANTICA_ALLOW_ANONYMOUS=true opts
     into that explicitly for local development.
     """
-    if anonymous_access_allowed():
+    service = getattr(request.app.state, "native_service", None)
+    if service is None and anonymous_access_allowed():
         return
-    expected = get_expected_api_key()
+    expected = service.api_key if service is not None else get_expected_api_key()
     if not expected:
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,

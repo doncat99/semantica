@@ -31,10 +31,10 @@ function TypeBar({ label, count, total, color }: { label: string; count: number;
   const pct = total > 0 ? Math.round((count / total) * 100) : 0;
   return (
     <div style={{ display: "flex", alignItems: "center", gap: 10, padding: "5px 0" }}>
-      <div style={{ width: 120, flexShrink: 0, color: "#c6d4e3", fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={label}>
+      <div style={{ width: 120, flexShrink: 0, color: "var(--ws-text)", fontSize: 12, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={label}>
         {label}
       </div>
-      <div style={{ flex: 1, height: 6, borderRadius: 999, background: "rgba(255,255,255,0.06)", overflow: "hidden" }}>
+      <div style={{ flex: 1, height: 6, borderRadius: 999, background: "var(--ws-surface-hover)", overflow: "hidden" }}>
         <div
           style={{
             width: `${pct}%`,
@@ -46,8 +46,8 @@ function TypeBar({ label, count, total, color }: { label: string; count: number;
         />
       </div>
       <div style={{ width: 52, textAlign: "right", flexShrink: 0, display: "flex", gap: 6, justifyContent: "flex-end" }}>
-        <span style={{ color: "#8b949e", fontSize: 11 }}>{count.toLocaleString()}</span>
-        <span style={{ color: "#6a7f97", fontSize: 11 }}>{pct}%</span>
+        <span style={{ color: "var(--ws-text-muted)", fontSize: 11 }}>{count.toLocaleString()}</span>
+        <span style={{ color: "var(--ws-text-dim)", fontSize: 11 }}>{pct}%</span>
       </div>
     </div>
   );
@@ -273,7 +273,7 @@ export function KGOverviewTab() {
             <div className="ws-eyebrow" style={{ marginBottom: 12 }}>Top Connected Nodes (by degree)</div>
             <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fill, minmax(260px, 1fr))", gap: 8 }}>
               {topNodes.map(({ node, neighborCount }, rank) => (
-                <div key={node.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderRadius: "var(--ws-radius-sm)", background: "rgba(0,0,0,0.18)", border: "1px solid var(--ws-border)" }}>
+                <div key={node.id} style={{ display: "flex", alignItems: "center", gap: 10, padding: "9px 12px", borderRadius: "var(--ws-radius-sm)", background: "var(--ws-surface)", border: "1px solid var(--ws-border)" }}>
                   <div style={{ color: "var(--ws-text-dim)", fontSize: 11, fontWeight: 700, minWidth: 22 }}>#{rank + 1}</div>
                   <div style={{ flex: 1, minWidth: 0 }}>
                     <div style={{ color: "var(--ws-text)", fontSize: 12, fontWeight: 600, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>{node.content || node.id}</div>

@@ -59,6 +59,7 @@ def main(argv=None):
         "--graph", "-g",
         help="Path to a ContextGraph JSON file to load.",
     )
+    source.add_argument("--native-service", action="store_true", help="Start an unbound host-managed native Explorer service.")
     source.add_argument('--native-store-path', help='Path to the admitted native publication store.')
     parser.add_argument('--native-project', help='Project identity for the native publication.')
     parser.add_argument('--native-generation', help='Publication generation for the native scene.')
@@ -87,12 +88,12 @@ def main(argv=None):
 
     # The host persists this process identity before admitting any runtime work.
     # EOF on host death before admission exits without constructing the server.
-    if args.native_store_path:
+    if args.native_store_path or args.native_service:
         if sys.stdin.buffer.readline(64) != b"SEMANTICA_NATIVE_EXPLORER_ADMIT\n":
             parser.error("native Explorer requires host stdin admission")
-        if not args.native_project or not args.native_generation:
+        if args.native_store_path and (not args.native_project or not args.native_generation):
             parser.error("native Explorer requires project and generation")
-    elif args.native_project or args.native_generation:
+    if not args.native_store_path and (args.native_project or args.native_generation):
         parser.error("native project and generation require --native-store-path")
 
     import os
@@ -113,19 +114,22 @@ def main(argv=None):
     from .app import create_app
 
     native_scope = None
-    if args.native_store_path:
+    if args.native_service:
+        session = None
+    elif args.native_store_path:
         from .native_scope import NativeScope
         native_scope = NativeScope(args.native_store_path, args.native_project, args.native_generation)
+        _out.print("[dim]Loading admitted native publication (nodes, then relations)…[/dim]")
         session, _ = native_scope.select({})
     else:
         with _out.status("[dim]Loading graph…[/dim]", spinner="dots"):
             session = GraphSession.from_file(args.graph, read_only=args.read_only)
-    stats = session.get_stats()
-    _out.print(
+    stats = session.get_stats() if session is not None else {}
+    _out.print("[dim]Native Explorer service ready to bind an authorized Project.[/dim]" if args.native_service else (
         f"[bold green]✓[/bold green] Graph loaded — "
         f"[cyan]{stats.get('node_count', 0)}[/cyan] nodes, "
         f"[cyan]{stats.get('edge_count', 0)}[/cyan] edges"
-    )
+    ))
 
     allowed_origins = None
     if "ALLOWED_ORIGINS" not in os.environ and "EXPLORER_CORS_ORIGINS" not in os.environ:
@@ -140,7 +144,7 @@ def main(argv=None):
             default_origins.append(_browser_origin(args.host, args.port))
         allowed_origins = list(dict.fromkeys(default_origins))
 
-    app = create_app(session=session, allowed_origins=allowed_origins, native_scope=native_scope)
+    app = create_app(session=session, allowed_origins=allowed_origins, native_scope=native_scope, native_service=args.native_service)
 
     # The page is served at its origin, so the URL the browser opens and the
     # banner shows is written the same way (an IPv6 host in brackets).
@@ -178,7 +182,17 @@ def main(argv=None):
         )
     )
 
-    uvicorn.run(app, host=args.host, port=args.port, log_level="info")
+    if args.native_service:
+        import threading
+        server = uvicorn.Server(uvicorn.Config(app, host=args.host, port=args.port, log_level="info"))
+        def watch_host():
+            # The inherited private pipe closes when the owning App dies.
+            sys.stdin.buffer.read(1)
+            server.should_exit = True
+        threading.Thread(target=watch_host, daemon=True).start()
+        server.run()
+    else:
+        uvicorn.run(app, host=args.host, port=args.port, log_level="info")
 
 
 if __name__ == "__main__":

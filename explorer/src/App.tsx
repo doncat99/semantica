@@ -16,6 +16,7 @@ import {
   ShieldCheck,
   type LucideIcon,
 } from 'lucide-react';
+import { PRESENTATION_CHANGED } from './embeddedPresentation';
 import { ErrorBoundary } from './ErrorBoundary';
 import { ExploreWorkspaceTabs, type ExploreView } from './ExploreWorkspaceTabs';
 import { fetchAgentMemoryAvailability } from './explorerCapabilities';
@@ -101,7 +102,8 @@ function readInitialWorkspace(): WorkspaceId {
 }
 
 const shellStyles = `
-  :root {
+@scope (.semantica-explorer) {
+  :scope {
     --app-bg: #07111f;
     --panel-bg: rgba(7, 17, 31, 0.82);
     --panel-border: rgba(140, 192, 255, 0.14);
@@ -486,8 +488,8 @@ const shellStyles = `
 
   .app-shell {
     display: flex;
-    width: 100vw;
-    height: 100vh;
+    width: 100%;
+    height: 100%;
     overflow: hidden;
     color: var(--text-main);
     background:
@@ -565,6 +567,7 @@ const shellStyles = `
   }
 
   .workspace-header {
+    flex-shrink: 0;
     padding: 14px 22px;
     border-bottom: 1px solid var(--panel-border);
     background: linear-gradient(180deg, rgba(7, 17, 31, 0.94), rgba(7, 17, 31, 0.82));
@@ -1366,7 +1369,7 @@ const shellStyles = `
     font-size: 14px;
   }
 
-  @media (max-width: 980px) {
+  @container semantica-explorer (max-width: 980px) {
     .workspace-header {
       flex-direction: column;
       align-items: stretch;
@@ -1409,7 +1412,7 @@ const shellStyles = `
     }
   }
 
-  @media (max-width: 680px) {
+  @container semantica-explorer (max-width: 680px) {
     .app-rail {
       width: 72px;
       padding: 14px 9px;
@@ -1457,6 +1460,8 @@ const shellStyles = `
       transition: none;
     }
   }
+
+}
 `;
 
 function WorkspaceShell({
@@ -1780,6 +1785,12 @@ function WelcomeScreen({
 }
 
 export default function App() {
+  const [, refreshPresentation] = useState(0);
+  useEffect(() => {
+    const update = () => refreshPresentation(value => value + 1);
+    window.addEventListener(PRESENTATION_CHANGED, update);
+    return () => window.removeEventListener(PRESENTATION_CHANGED, update);
+  }, []);
   const [activeWorkspace, setActiveWorkspace] = useState<WorkspaceId>(readInitialWorkspace);
   const [exploreView, setExploreView] = useState<ExploreView>('graph');
   const [analyzeView, setAnalyzeView] = useState<AnalyzeView>('reasoning');

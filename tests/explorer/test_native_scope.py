@@ -25,7 +25,7 @@ def scope():
 def test_native_scope_complete_filter_and_existing_native_graph(monkeypatch):
     owner=scope()
     calls=[]
-    def page(selection):
+    def page(selection, **kwargs):
         calls.append(selection)
         if selection['kind']=='nodes':
             return dict(nodes=[node()],links=[],next_cursor=None)
@@ -45,7 +45,7 @@ def test_native_scope_complete_filter_and_existing_native_graph(monkeypatch):
 def test_complete_multi_page_graph_preserves_cross_page_relations_and_status(monkeypatch, selection):
     owner = scope()
     calls = []
-    def page(selection):
+    def page(selection, **kwargs):
         calls.append(selection)
         if selection['kind'] == 'nodes':
             start = 128 if selection.get('after') else 0
@@ -72,7 +72,7 @@ def test_complete_multi_page_graph_preserves_cross_page_relations_and_status(mon
 
 def test_high_connection_source_is_read_to_completion(monkeypatch):
     owner = scope()
-    def page(selection):
+    def page(selection, **kwargs):
         if selection['kind'] == 'nodes':
             return dict(nodes=[node('urn:a'), node('urn:b')], links=[], next_cursor=None)
         assert selection['kind'] == 'links'
@@ -99,7 +99,7 @@ def test_failed_continuation_preserves_installed_graph(monkeypatch):
     import semantica.explorer.native_scope as module
     owner = scope()
     installed = []
-    monkeypatch.setattr(owner, 'page', lambda selection: dict(
+    monkeypatch.setattr(owner, 'page', lambda selection, **kwargs: dict(
         nodes=[node()] if selection['kind'] == 'nodes' else [], links=[], next_cursor=None))
     owner.select({}, installed.append)
     previous = owner.selection
@@ -112,14 +112,14 @@ def test_failed_continuation_preserves_installed_graph(monkeypatch):
 def test_cancelled_selection_does_not_install_and_next_request_runs(monkeypatch):
     owner=scope()
     installed=[]
-    def cancelled_page(selection):
+    def cancelled_page(selection, **kwargs):
         owner._cancelled.set()
         return dict(nodes=[node()],links=[],next_cursor=None)
     monkeypatch.setattr(owner,'page',cancelled_page)
     with pytest.raises(ValueError,match='cancelled'):
         owner.select(dict(sourceId='source'),installed.append)
     assert owner.selection is None and installed==[]
-    monkeypatch.setattr(owner,'page',lambda selection:dict(
+    monkeypatch.setattr(owner,'page',lambda selection, **kwargs:dict(
         nodes=[node()] if selection['kind']=='nodes' else [],links=[],next_cursor=None))
     owner.select(dict(sourceId='source'),installed.append)
     assert len(installed)==1 and owner.selection['nodeCount']==1
@@ -131,7 +131,7 @@ def test_native_scope_api_loads_bound_project_without_an_extra_selection(monkeyp
     monkeypatch.setenv('SEMANTICA_ALLOW_ANONYMOUS','true')
     owner=scope()
     calls=[]
-    def page(selection):
+    def page(selection, **kwargs):
         calls.append(selection)
         return dict(nodes=[node()] if selection['kind']=='nodes' else [],links=[],next_cursor=None)
     monkeypatch.setattr(owner,'page',page)
@@ -177,7 +177,7 @@ def test_native_scope_requires_existing_project_store(tmp_path, monkeypatch):
 def test_project_startup_failure_is_not_an_empty_success(monkeypatch):
     from semantica.explorer.app import create_app
     owner = scope()
-    def unavailable(selection):
+    def unavailable(selection, **kwargs):
         raise ValueError('Native scene publication changed')
     monkeypatch.setattr(owner, 'page', unavailable)
     with pytest.raises(ValueError, match='publication changed'):
@@ -188,7 +188,7 @@ def test_project_startup_failure_is_not_an_empty_success(monkeypatch):
 def test_completed_topic_scope_preserves_native_types_and_fact_edges(monkeypatch):
     owner = scope()
     calls = []
-    def page(selection):
+    def page(selection, **kwargs):
         calls.append(selection)
         if selection['kind'] == 'nodes':
             return dict(nodes=[node('urn:a'), node('urn:b')], links=[], next_cursor=None)
@@ -240,7 +240,7 @@ def test_native_types_survive_selection_and_api_filtering(monkeypatch, selection
     owner = scope()
     nodes = [dict(id=identity, name=identity, entityType=kind) for identity, kind in
         [('urn:org', 'ORG'), ('urn:person', 'PERSON'), ('urn:concept', 'Concept')]]
-    monkeypatch.setattr(owner, 'page', lambda query: dict(
+    monkeypatch.setattr(owner, 'page', lambda query, **kwargs: dict(
         nodes=nodes if query['kind'] == 'nodes' else [], links=[], next_cursor=None))
     with TestClient(create_app(native_scope=owner)) as client:
         selected = client.post('/api/native-scope/select', json=selection)
@@ -253,3 +253,31 @@ def test_native_types_survive_selection_and_api_filtering(monkeypatch, selection
             assert [item['id'] for item in filtered.json()['nodes']] == [native['id']]
             properties = filtered.json()['nodes'][0]['properties']
             assert {key: properties[key] for key in native} == native
+
+
+def test_complete_project_reuses_native_traversal_across_pages(monkeypatch):
+    from semantica import semantic_query
+    owner = scope()
+    streams = []
+    class Traversal:
+        def __init__(self, request):
+            self.selection = request.selection
+            assert request.semantic_store is owner.reference
+            streams.append(self)
+    monkeypatch.setattr(semantic_query, 'NativeTraversal', Traversal)
+    calls = []
+    def page(selection, *, traversal=None):
+        assert traversal is not None, 'complete Project must reuse the native iterator'
+        calls.append((selection, traversal))
+        if selection['kind'] == 'nodes':
+            last = bool(selection.get('after'))
+            return dict(nodes=[node('urn:b' if last else 'urn:a')], links=[],
+                next_cursor=None if last else 'urn:a')
+        return dict(nodes=[], links=[dict(id='urn:edge', source='urn:a', target='urn:b',
+            predicate='owns', status='supported')], next_cursor=None)
+    monkeypatch.setattr(owner, 'page', page)
+    _, selected = owner.select({})
+    assert selected['nodeCount'] == 2 and selected['linkCount'] == 1
+    assert len(streams) == 2
+    assert calls[0][1] is calls[1][1] is streams[0]
+    assert calls[2][1] is streams[1]

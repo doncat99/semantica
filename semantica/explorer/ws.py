@@ -7,6 +7,7 @@ import progress events, and mutation broadcasts.
 
 import asyncio
 import json
+import hmac
 import threading
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Sequence, Set
@@ -30,7 +31,9 @@ def install_graph_updates_websocket(
         # CORSMiddleware does not cover WebSocket handshakes. Reject foreign
         # browser origins against the same allowlist used for HTTP CORS.
         origin = websocket.headers.get("origin")
-        if origin is not None and origin not in allowed_origin_set:
+        service = getattr(app.state, "native_service", None)
+        origins = {service.origin} if service is not None else allowed_origin_set
+        if origin is not None and origin not in origins:
             await websocket.close(code=4403)
             return
 
@@ -39,7 +42,8 @@ def install_graph_updates_websocket(
         candidate = websocket.headers.get("x-api-key") or websocket.query_params.get(
             "api_key"
         )
-        if not is_valid_api_key(candidate):
+        valid = (service.bound and bool(candidate) and hmac.compare_digest(candidate, service.api_key or "")) if service is not None else is_valid_api_key(candidate)
+        if not valid:
             await websocket.close(code=4401)
             return
 
@@ -55,6 +59,8 @@ def install_graph_updates_websocket(
                 if message.strip().lower() == "ping":
                     await manager.send_personal(websocket, "pong", {"ok": True})
         except WebSocketDisconnect:
+            pass
+        finally:
             manager.disconnect(websocket)
 
 
@@ -86,6 +92,12 @@ class ConnectionManager:
         """Number of active connections."""
         with self._lock:
             return len(self._active_connections)
+
+    async def close_all(self):
+        with self._lock:
+            connections = tuple(self._active_connections)
+            self._active_connections.clear()
+        await asyncio.gather(*(ws.close(code=4401) for ws in connections), return_exceptions=True)
 
     async def broadcast(self, event_type: str, data: Any = None) -> None:
         """
