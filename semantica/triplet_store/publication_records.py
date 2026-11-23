@@ -7,6 +7,7 @@ import io
 import hashlib
 import json
 import uuid
+from pathlib import Path
 from contextlib import contextmanager
 from functools import wraps
 from heapq import nsmallest
@@ -1241,6 +1242,59 @@ class PublicationRecords:
                 OPTIONAL {{ GRAPH {self.registry} {{ {self.registry_head} <{P}active> ?old }} }} }}''')
         self.owner.flush()
         return self.fence(generation)
+
+    @_locked
+    def replace_keyword_index(self, generation, receipt, address):
+        """Adopt a rebuilt lexical index while preserving the published generation."""
+        status = self.fence(generation, 'ready')
+        if (not isinstance(receipt, dict) or set(receipt) != {'kind', 'store_id', 'recipe_digest'}
+                or any(not isinstance(value, str) or not value for value in receipt.values())):
+            raise ProcessingError('Keyword index receipt is incomplete')
+        installation = address.get('installation') if isinstance(address, dict) else None
+        if (not isinstance(address, dict) or set(address) != {'path', 'receipt', 'installation'}
+                or address['receipt'] != receipt or not isinstance(address['path'], str)
+                or not Path(address['path']).is_absolute() or not isinstance(installation, dict)
+                or set(installation) != {'digest', 'identity'} or installation['digest'] != receipt['store_id']
+                or not isinstance(installation['identity'], str)):
+            raise ProcessingError('Keyword index address is invalid')
+
+        current = status['indexes']['keyword']
+        encoded = self.one(self.head, 'completedIndexes')
+        if hashlib.sha256(encoded.encode()).hexdigest() != self.one(self.head, 'completedIndexesDigest'):
+            raise ProcessingError('Completed publication addresses are corrupt')
+        addresses = json.loads(encoded)
+        if not isinstance(addresses, dict) or addresses.get('keyword', {}).get('receipt') not in (current, receipt):
+            raise ProcessingError('Completed keyword index address differs from publication')
+        addresses['keyword'] = address
+        indexes = {**status['indexes'], 'keyword': receipt}
+        self._check_index_addresses(addresses, indexes)
+        next_encoded = json.dumps(addresses, ensure_ascii=False, separators=(',', ':'))
+        if len(next_encoded.encode()) > MAX_BYTES:
+            raise ProcessingError('Completed publication addresses exceed budget')
+        next_digest = hashlib.sha256(next_encoded.encode()).hexdigest()
+
+        if current == receipt:
+            if addresses['keyword'] != address:
+                raise ProcessingError('Keyword index address differs from its native receipt')
+            return status
+
+        node = self.ox.NamedNode(self.graph.value + ':index:keyword:' + receipt['store_id'].removeprefix('sha256:'))
+        insert = [self.triple(self.head, 'keyword', node)]
+        insert.extend(self.triple(node, field, self.scalar(value)) for field, value in receipt.items())
+        insert.extend((self.triple(self.head, 'completedIndexes', self.ox.Literal(next_encoded)),
+            self.triple(self.head, 'completedIndexesDigest', self.ox.Literal(next_digest))))
+        delete = f'''{self.head} <{P}keyword> ?oldKeyword ; <{P}completedIndexes> ?oldIndexes ;
+            <{P}completedIndexesDigest> ?oldDigest . ?oldKeyword ?oldPredicate ?oldObject .'''
+        where = f'''GRAPH {self.graph} {{ {self.head} <{P}generation> {self.scalar(generation)} ;
+            <{P}state> {self.scalar('ready')} ; <{P}keyword> ?oldKeyword ;
+            <{P}completedIndexes> ?oldIndexes ; <{P}completedIndexesDigest> ?oldDigest .
+            ?oldKeyword ?oldPredicate ?oldObject . }}'''
+        self.owner._update_derived_graph(self.graph, delete=delete, insert=' '.join(insert), where=where)
+        self.owner.flush()
+        updated = self.fence(generation, 'ready')
+        if updated['indexes']['keyword'] != receipt:
+            raise ProcessingError('Keyword index publication adoption failed')
+        return updated
 
     @_locked
     @_stage(None)

@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 from pathlib import Path
 import sqlite3
 import sys
@@ -207,6 +208,133 @@ def verify_native_installation(request, *, cancelled=lambda: False, progress=lam
         owner.close()
 
 
+def rebuild_keyword_index(request, *, cancelled=lambda: False, progress=lambda counts: None):
+    """Rebuild only the native lexical projection from installed readers."""
+    from .explorer.search_index import GraphSearchIndex, _file_identity
+    from .semantic_query_schema import DocumentReaderRequest
+    from .triplet_store.oxigraph_store import OxigraphStore
+    from .triplet_store.publication_records import PublicationRecords
+
+    fields = {'semanticStorePath', 'publicationReference', 'readers', 'targetPath', 'deadlineSeconds'}
+    if (not isinstance(request, dict) or set(request) != fields
+            or len(json.dumps(request, ensure_ascii=False).encode()) > 65536
+            or not isinstance(request['readers'], list) or len(request['readers']) > 512):
+        raise ProcessingError('Invalid keyword index rebuild request')
+    seconds = request['deadlineSeconds']
+    if type(seconds) is not int or not 1 <= seconds <= 600:
+        raise ProcessingError('Keyword index rebuild deadline must be 1..600 seconds')
+    deadline = time.monotonic() + seconds
+
+    def check():
+        if cancelled() or time.monotonic() >= deadline:
+            raise ProcessingError('Keyword index rebuild cancelled or deadline exceeded')
+
+    store_path = Path(request['semanticStorePath'])
+    if store_path.is_symlink() or not store_path.is_dir():
+        raise ProcessingError('Keyword index rebuild requires an installed semantic store')
+    store_path = store_path.resolve()
+    reference = request['publicationReference']
+    if (not isinstance(reference, dict) or set(reference) != {'project', 'generation', 'state', 'source_count', 'canonical_count', 'indexes'}
+            or reference['state'] != 'ready' or type(reference['source_count']) is not int
+            or not isinstance(reference['generation'], str)
+            or len(reference['generation']) != 64
+            or any(character not in '0123456789abcdef' for character in reference['generation'])):
+        raise ProcessingError('Keyword index rebuild requires a complete ready publication')
+    recipe = GraphSearchIndex.native_positions_recipe_digest()
+    target = Path(request['targetPath'])
+    expected_name = f"keyword-{reference['generation']}-{recipe.removeprefix('sha256:')[:16]}.sqlite"
+    if (not target.is_absolute() or target.parent.resolve() != store_path.parent
+            or target.name != expected_name or target.parent.is_symlink() or target.is_symlink()):
+        raise ProcessingError('Keyword index rebuild target is outside its canonical project store')
+
+    owner = OxigraphStore(store_path)
+    try:
+        publication = PublicationRecords(owner, reference['project'])
+        actual = publication.status()
+        expected_identity = {key: reference[key] for key in ('project', 'generation', 'state', 'source_count', 'canonical_count')}
+        if (actual is None or any(actual.get(key) != value for key, value in expected_identity.items())
+                or actual['indexes']['semantic'] != reference['indexes']['semantic']):
+            raise ProcessingError('Native publication identity changed before keyword rebuild')
+        if actual['indexes']['keyword'].get('kind') != 'native-scalar-positions':
+            raise ProcessingError('Native keyword publication kind changed before keyword rebuild')
+
+        readers = []
+        seen = set()
+        for raw in request['readers']:
+            check()
+            reader = DocumentReaderRequest.model_validate(raw)
+            if reader.source_id in seen:
+                raise ProcessingError('Keyword index rebuild contains duplicate source readers')
+            seen.add(reader.source_id)
+            binding = publication.source_binding(reference['generation'], reader.source_id)
+            if (binding['material'] != reader.material_revision
+                    or binding['representation'] != reader.representation_revision):
+                raise ProcessingError('Keyword reader differs from published source identity')
+            readers.append(reader)
+        if len(readers) != reference['source_count']:
+            raise ProcessingError('Keyword readers do not cover the complete publication')
+
+        def installed_receipt(index_path):
+            before = _file_identity(index_path)
+            digest = hashlib.sha256()
+            with index_path.open('rb') as stream:
+                while block := stream.read(262144):
+                    check()
+                    digest.update(block)
+            receipt = dict(kind='native-scalar-positions', store_id='sha256:' + digest.hexdigest(), recipe_digest=recipe)
+            lexical_owner = GraphSearchIndex.open_native_positions(index_path, project=reference['project'],
+                generation=reference['generation'], receipt=receipt, installation_identity=before)
+            count = 0
+            try:
+                for source, material, representation in lexical_owner._native_db.execute(
+                        'SELECT source,material,representation FROM sources'):
+                    check()
+                    binding = publication.source_binding(reference['generation'], source)
+                    if binding['material'] != material or binding['representation'] != representation:
+                        raise ProcessingError('Keyword index source binding differs')
+                    count += 1
+            finally:
+                lexical_owner.close_native_positions()
+            if count != reference['source_count'] or _file_identity(index_path) != before:
+                raise ProcessingError('Keyword index source coverage or installation changed')
+            return receipt, before
+
+        if target.exists():
+            receipt, identity = installed_receipt(target)
+        else:
+            staging = target.with_name(f'.{target.name}.upgrade')
+            if staging.is_symlink():
+                raise ProcessingError('Stale keyword rebuild stage is a symbolic link')
+            staging.unlink(missing_ok=True)
+            try:
+                check()
+                receipt = GraphSearchIndex.publish_native_positions(staging, project=reference['project'],
+                    generation=reference['generation'], readers=readers)
+                check()
+                os.replace(staging, target)
+                receipt, identity = installed_receipt(target)
+            finally:
+                staging.unlink(missing_ok=True)
+
+        address = dict(path=str(target), receipt=receipt, installation=dict(digest=receipt['store_id'],
+            identity=':'.join(map(str, identity))))
+        if actual['indexes']['keyword'] != receipt:
+            if (actual['generation'] != reference['generation']
+                    or actual['indexes']['semantic'] != reference['indexes']['semantic']):
+                raise ProcessingError('Native keyword publication changed during recovery')
+            updated = publication.replace_keyword_index(reference['generation'], receipt, address)
+        else:
+            updated = actual
+        if (updated['generation'] != reference['generation'] or updated['indexes']['keyword'] != receipt
+                or updated['indexes']['semantic'] != reference['indexes']['semantic']):
+            raise ProcessingError('Native keyword index adoption did not preserve publication identity')
+        return dict(state='rebuilt', project=reference['project'], generation=reference['generation'],
+            publicationReference=updated, keyword=dict(path=str(target), receipt=receipt,
+                installation=dict(digest=receipt['store_id'], identity=':'.join(map(str, identity)))))
+    finally:
+        owner.close()
+
+
 def _verify_vectors(path, semantic, reference, publication, counts, check, sqlite_integrity):
     from .vector_store.sqlite_vec_store import SQLiteVecStore
     from .vector_store import sqlite_vec_store as module
@@ -315,16 +443,20 @@ def main():
         help='Offline semantic rebind of a reviewed historical projection; dry-run unless --execute')
     parser.add_argument('--index-embedding-scope', action='store_true',
         help='Explicit offline upgrade of the accepted embedding range lookup index')
+    parser.add_argument('--rebuild-keyword-index', action='store_true',
+        help='Rebuild a stale derived keyword index from installed document readers')
     parser.add_argument('--execute', action='store_true')
     args = parser.parse_args()
-    if sum((args.index_source_projection, args.rebind_source_projection, args.index_embedding_scope)) > 1:
+    if sum((args.index_source_projection, args.rebind_source_projection, args.index_embedding_scope, args.rebuild_keyword_index)) > 1:
         parser.error('Choose exactly one maintenance operation')
     with open(args.request_file, 'rb') as stream:
         raw = stream.read(65537)
     if len(raw) > 65536:
         raise ProcessingError('Native maintenance request exceeds 64KiB')
     request=json.loads(raw)
-    if args.index_embedding_scope:
+    if args.rebuild_keyword_index:
+        result = rebuild_keyword_index(request)
+    elif args.index_embedding_scope:
         from .vector_store.sqlite_vec_store import SQLiteVecStore
         from .triplet_store.oxigraph_store import OxigraphStore
         if set(request) != {'semanticStorePath', 'vectorStorePath'}:

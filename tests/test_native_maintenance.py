@@ -1,10 +1,13 @@
 """Offline restore admission uses native receipts, never a rebuilt graph."""
 import copy
+import hashlib
 import json
+from pathlib import Path
 import shutil
 import sqlite3
 import subprocess
 import sys
+from types import SimpleNamespace
 
 import pytest
 
@@ -116,6 +119,88 @@ def test_ready_restart_relocation_cli_and_corrupt_keyword_rejection(ready, tmp_p
         db.execute("UPDATE metadata SET value='wrong' WHERE key='project'")
     with pytest.raises(ProcessingError,match='digest'):
         verify_native_installation(restored)
+
+
+def test_rebuild_keyword_index_uses_saved_reader_and_recovers_native_receipt(tmp_path, monkeypatch):
+    import semantica.native_maintenance as maintenance
+
+    project, source, generation = 'project-1', 'source-1', 'a' * 64
+    old_keyword = dict(kind='native-scalar-positions', store_id='sha256:' + '1' * 64,
+        recipe_digest='sha256:' + '2' * 64)
+    semantic = dict(kind='native-sqlite-vec', store_id='sha256:' + '3' * 64,
+        recipe_digest='sha256:' + '4' * 64, space_id='sha256:' + '5' * 64)
+    reference = dict(project=project, generation=generation, state='ready', source_count=1,
+        canonical_count=0, indexes=dict(keyword=old_keyword, semantic=semantic))
+    state = {'publication': copy.deepcopy(reference), 'addresses': None}
+
+    class NativeStore:
+        def __init__(self, _path): pass
+        def close(self): pass
+
+    class Publication:
+        def __init__(self, _owner, _project): pass
+        def status(self): return copy.deepcopy(state['publication'])
+        def source_binding(self, _generation, source_id):
+            assert source_id == source
+            return dict(source=source, material='sha256:' + '6' * 64, representation='sha256:' + '7' * 64)
+        def replace_keyword_index(self, _generation, receipt, address):
+            state['publication']['indexes']['keyword'] = receipt
+            state['addresses'] = address
+            return copy.deepcopy(state['publication'])
+
+    class SearchIndex:
+        @staticmethod
+        def native_positions_recipe_digest(): return 'sha256:' + '8' * 64
+        @staticmethod
+        def publish_native_positions(path, *, project, generation, readers):
+            assert project == project_id and generation == expected_generation
+            assert [item.source_id for item in readers] == [source]
+            with sqlite3.connect(path) as db:
+                db.execute('CREATE TABLE sources(source TEXT,material TEXT,representation TEXT,digest TEXT)')
+                db.execute('INSERT INTO sources VALUES (?,?,?,?)',
+                    (source, 'sha256:' + '6' * 64, 'sha256:' + '7' * 64, 'sha256:' + '9' * 64))
+            digest = hashlib.sha256(Path(path).read_bytes()).hexdigest()
+            return dict(kind='native-scalar-positions', store_id='sha256:' + digest,
+                recipe_digest=SearchIndex.native_positions_recipe_digest())
+        @staticmethod
+        def open_native_positions(path, **_kwargs):
+            db = sqlite3.connect(path)
+            return SimpleNamespace(_native_db=db, close_native_positions=db.close)
+
+    project_id, expected_generation = project, generation
+    monkeypatch.setattr(maintenance, 'OxigraphStore', NativeStore, raising=False)
+    monkeypatch.setattr('semantica.triplet_store.oxigraph_store.OxigraphStore', NativeStore)
+    monkeypatch.setattr('semantica.triplet_store.publication_records.PublicationRecords', Publication)
+    monkeypatch.setattr('semantica.explorer.search_index.GraphSearchIndex', SearchIndex)
+    monkeypatch.setattr('semantica.explorer.search_index._file_identity',
+        lambda path: (Path(path).stat().st_dev, Path(path).stat().st_ino, Path(path).stat().st_size,
+            Path(path).stat().st_mtime_ns, Path(path).stat().st_ctime_ns))
+
+    class Reader:
+        source_id = source
+        material_revision = 'sha256:' + '6' * 64
+        representation_revision = 'sha256:' + '7' * 64
+
+    class ReaderRequest:
+        @classmethod
+        def model_validate(cls, _value): return Reader()
+
+    monkeypatch.setattr('semantica.semantic_query_schema.DocumentReaderRequest', ReaderRequest)
+    store_path = tmp_path/'native'/'store'
+    store_path.mkdir(parents=True)
+    target = store_path.parent / f"keyword-{generation}-{'8' * 16}.sqlite"
+    request = dict(semanticStorePath=str(store_path), publicationReference=reference,
+        readers=[{}], targetPath=str(target), deadlineSeconds=10)
+
+    first = maintenance.rebuild_keyword_index(request)
+    assert first['state'] == 'rebuilt'
+    assert first['generation'] == generation
+    assert first['publicationReference']['indexes']['semantic'] == semantic
+    assert state['addresses']['receipt'] == first['keyword']['receipt']
+
+    request['publicationReference'] = first['publicationReference']
+    second = maintenance.rebuild_keyword_index(request)
+    assert second == first
 
 
 def test_native_facts_corruption_is_rejected_by_owner_receipt(ready):
