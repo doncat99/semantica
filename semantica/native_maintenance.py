@@ -250,6 +250,12 @@ def rebuild_keyword_index(request, *, cancelled=lambda: False, progress=lambda c
     owner = OxigraphStore(store_path)
     try:
         publication = PublicationRecords(owner, reference['project'])
+        active_generation = publication._pointer(publication.registry_head, 'active', publication.registry)
+        if active_generation is None or active_generation.value != reference['generation']:
+            raise ProcessingError('Native active publication differs from the host receipt')
+        # The latest pointer may name an interrupted pending build. Startup
+        # migration repairs only the active ready generation named by the host.
+        publication.generation = active_generation
         actual = publication.status()
         expected_identity = {key: reference[key] for key in ('project', 'generation', 'state', 'source_count', 'canonical_count')}
         if (actual is None or any(actual.get(key) != value for key, value in expected_identity.items())
