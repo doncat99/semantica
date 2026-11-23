@@ -229,6 +229,15 @@ class HybridCandidates(StrictModel):
     fused_truncated: bool
 
 
+class PdfSearchFocus(StrictModel):
+    """Top-left normalized native region and its zero-based keyword occurrence."""
+    x: float = Field(ge=0, le=1, allow_inf_nan=False)
+    y: float = Field(ge=0, le=1, allow_inf_nan=False)
+    width: float = Field(gt=0, le=1, allow_inf_nan=False)
+    height: float = Field(gt=0, le=1, allow_inf_nan=False)
+    match_index: int = Field(alias='matchIndex', ge=0)
+
+
 class QueryHit(StrictModel):
     id: str
     kind: Literal["entity", "assertion", "relation", "conflict", "topic", "report", "evidence", "source_text"]
@@ -243,6 +252,7 @@ class QueryHit(StrictModel):
     locator: Optional["DocumentLocator"] = None
     document_reference: Optional[QueryDocumentReference] = Field(default=None, alias="documentReference")
     match_index: Optional[int] = Field(default=None, alias="matchIndex", ge=0)
+    pdf_focus: Optional[PdfSearchFocus] = Field(default=None, alias='pdfFocus')
     position: Optional[Tuple[str, str, int, int]] = None
     retrieval: Optional[HybridRetrieval] = None
 

@@ -338,7 +338,22 @@ def _document_hit(request,row,metrics,match_index):
     text = ''.join(item.get('joinBefore','')+value['text']+item.get('joinAfter','')
                    for item,value in zip(ranges,page['items'],strict=True))
     first = ranges[0]
-    location = row.get('locator',page['items'][0]['locator'])
+    location = page['items'][0]['locator']
+    pdf_focus = None
+    region = page['items'][0].get('pdfRegion')
+    if request.mode == 'keyword' and region is not None:
+        import re
+        prefix = ''
+        if region['start'] < first['start']:
+            before = read_document_reader(reader.model_copy(update={'selection':DocumentReaderSelection.model_validate(
+                dict(field='ranges',ranges=[dict(nativeRef=first['nativeRef'],start=region['start'],end=first['start'])],maxBytes=262144))}))
+            metrics['canonicalBytes'] += before['readBytes']
+            prefix = before['items'][0]['text']
+        pattern = r'\s+'.join(re.escape(part) for part in request.query.strip().split())
+        box = region['box']
+        pdf_focus = dict(x=box['x']/region['width'], y=box['y']/region['height'],
+            width=box['width']/region['width'], height=box['height']/region['height'],
+            matchIndex=len(list(re.finditer(pattern, prefix, re.IGNORECASE))))
     locator = DocumentLocator(representation_id=reader.representation_revision,nativeRef=first['nativeRef'],
         origin='native',quote=page['items'][0]['text'],start_char=first['start'],end_char=first['end'],quality='precise',
         **{key:location[key] for key in ('page','bbox','table_id','cell','slide','section_path') if location.get(key) is not None})
@@ -347,7 +362,7 @@ def _document_hit(request,row,metrics,match_index):
     identity = json.dumps([source,reference],separators=(',',':'),ensure_ascii=False)
     return QueryHit(id='text:'+sha256(identity.encode()).hexdigest(),kind='source_text',title=source,text=text,
         score=row.get('score',1.),source_ids=[source],locator=locator,documentReference=reference,
-        match_index=match_index if request.mode=='keyword' else None,position=row.get('position'))
+        match_index=match_index if request.mode=='keyword' else None,pdfFocus=pdf_focus,position=row.get('position'))
 
 
 def _knowledge_hits(records):

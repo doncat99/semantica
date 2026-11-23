@@ -816,7 +816,7 @@ def _read_installed_document_reader(request, *, source_range=None, header_only=F
             def range_rows():
                 metadata_bytes = 0
                 for ordinal, item in enumerate(selection.ranges):
-                    locator, page_numbers = {}, set()
+                    locator, page_numbers, regions = {}, set(), []
                     for field in ('chunks', 'pages'):
                         candidates = db.execute('''SELECT descriptor FROM items
                             WHERE field=? AND json_extract(descriptor,'$.ref')=?
@@ -835,12 +835,35 @@ def _read_installed_document_reader(request, *, source_range=None, header_only=F
                                 locator = descriptor['locator']
                             else:
                                 page_numbers.add(descriptor['pageNumber'])
+                                if 'box' in descriptor:
+                                    regions.append(descriptor)
                     # A cross-page scalar opens at the page containing the range start.
                     if len(page_numbers) == 1:
                         locator = {**locator, 'page': next(iter(page_numbers))}
+                    region = None
+                    if len(regions) == 1:
+                        region = regions[0]
+                        # Earlier scalar segments retain the same native provenance box.
+                        previous = db.execute('''SELECT descriptor FROM items
+                            WHERE field='pages' AND json_extract(descriptor,'$.ref')=?
+                            AND json_extract(descriptor,'$.start')<?
+                            ORDER BY json_extract(descriptor,'$.start') DESC LIMIT 129''',
+                            (item.native_ref, region['start']))
+                        for position, (encoded,) in enumerate(previous):
+                            check()
+                            metadata_bytes += len(encoded.encode('utf-8'))
+                            if position >= 128 or metadata_bytes > PHYSICAL_READ_LIMIT:
+                                raise DocumentReaderBudgetError('native reader region metadata exceeds budget')
+                            earlier = json.loads(encoded)
+                            if earlier['pageNumber'] != region['pageNumber'] or earlier.get('box') != region['box']:
+                                break
+                            region = {**region, 'start': earlier['start']}
+                    elif header.get('format') == 'pdf-text' and len(page_numbers) == 1:
+                        region = dict(start=0, width=1, height=1, box=dict(x=0,y=0,width=1,height=1))
                     yield ordinal, json.dumps({'ref': item.native_ref, 'start': item.start,
                         'end': item.end, 'locator': {**locator, 'nativeRef': item.native_ref,
-                            'startChar': item.start, 'endChar': item.end}})
+                            'startChar': item.start, 'endChar': item.end},
+                        **({'pdfRegion': {key: region[key] for key in ('box','width','height','start')}} if region else {})})
             rows = range_rows()
         elif selection.page_number is None:
             total = int(metadata[selection.field])
@@ -897,6 +920,8 @@ def _read_installed_document_reader(request, *, source_range=None, header_only=F
                 value = ''.join(parts)
             if selection.field in ('chunks', 'ranges'):
                 item = {'text': value, 'locator': record['locator']}
+                if 'pdfRegion' in record:
+                    item['pdfRegion'] = record['pdfRegion']
             else:
                 item = {key: val for key, val in record.items() if key not in ('ref','start','end','locator','box')}
                 item['text'] = value

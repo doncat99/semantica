@@ -67,6 +67,33 @@ def test_vector_document_hydration_preserves_serializer_boundary_joins(tmp_path)
         ranges=[dict(nativeRef='#/document/text', start=0, end=4, joinBefore='\n', joinAfter='\n\n')])
 
 
+@pytest.mark.parametrize("padding", ["", "x" * 17000])
+def test_keyword_docling_hit_keeps_resolved_page_and_region_occurrence_across_buffers(tmp_path, padding):
+    from types import SimpleNamespace
+    from docling_core.types.doc import DoclingDocument
+    from docling_core.types.doc.base import BoundingBox, Size, CoordOrigin
+    from docling_core.types.doc.document import ProvenanceItem
+    from semantica.semantic_query import _document_hit
+    from semantica.semantic_document_reader import write_reader_artifact
+    from tests.test_native_document_reader import payload, request as reader_request
+    native = DoclingDocument(name='search-navigation')
+    native.add_page(page_no=10, size=Size(width=600, height=800))
+    text = 'ESG first. ' + padding + ' ESG second. ESG third.'
+    native.add_text(label='text', text=text, prov=ProvenanceItem(page_no=10,
+        charspan=(0, len(text)), bbox=BoundingBox(l=300, t=200, r=570, b=400, coord_origin=CoordOrigin.TOPLEFT)))
+    path = tmp_path / 'docling.json'
+    reader = reader_request(path, write_reader_artifact(path, payload(
+        dict(format='docling', document=native.export_to_dict()))))
+    query = SimpleNamespace(source_artifacts={reader.source_id: reader}, mode='keyword', query='ESG')
+    start = text.rindex('ESG')
+    row = dict(sourceId=reader.source_id, nativeRef='#/document/document/texts/0/text',
+        start=start, end=start+3, locator=dict(nativeRef='#/document/document/texts/0/text', startChar=start, endChar=start+3))
+    for query_index in (0, 128, 256):
+        hit = _document_hit(query, row, dict(canonicalBytes=0), query_index)
+        assert hit.locator.page == 10
+        assert hit.model_dump(by_alias=True)['pdfFocus'] == dict(x=.5, y=.25, width=.45, height=.25, matchIndex=2)
+
+
 def test_actual_native_keyword_two_phase_hydration_and_reopen(ready):
     result, reader, session = ready
     selected = query_semantic_artifact(request(result), session=session)
