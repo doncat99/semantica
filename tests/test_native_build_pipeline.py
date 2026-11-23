@@ -12,6 +12,17 @@ STAGES = ['prepare', 'source_processing', 'source_classification',
           'semantic_organization', 'artifact_writing']
 
 
+def test_completed_publication_identity_includes_keyword_index_recipe(tmp_path, monkeypatch):
+    from semantica.explorer.search_index import GraphSearchIndex
+
+    source = tmp_path / 'source.txt'
+    source.write_text('Ada Lovelace designed the Analytical Engine.')
+    request = SemanticArtifactBuildRequest.model_validate(_request(source, tmp_path / 'out')['params'])
+    original = builder._publication_completion_key(request)
+    monkeypatch.setattr(GraphSearchIndex, 'native_positions_recipe_digest', staticmethod(lambda: 'f' * 64))
+    assert builder._publication_completion_key(request) != original
+
+
 def test_build_executes_real_native_dependency_stages(tmp_path, monkeypatch):
     source = tmp_path / 'source.txt'
     source.write_text('Ada Lovelace designed the Analytical Engine.')

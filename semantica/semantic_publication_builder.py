@@ -3195,13 +3195,10 @@ def build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=Non
             cache_backend.close()
 
 
-def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=None) -> dict[str, Any]:
-    """Assemble product contracts; native pipeline owns stage execution."""
-    from .pipeline import PipelineBuilder, ExecutionEngine
-    from .triplet_store.publication_records import PublicationRecords
-
-    publication = PublicationRecords(_native_build.get()[1], request.project_id)
-    completion_key = stable_digest(dict(project=request.project_id, mode=request.recipe.id,
+def _publication_completion_key(request: SemanticArtifactBuildRequest) -> str:
+    from .explorer.search_index import GraphSearchIndex
+    return stable_digest(dict(project=request.project_id, mode=request.recipe.id,
+        keyword_index_recipe=GraphSearchIndex.native_positions_recipe_digest(),
         sources=sorted((dict(source=item.source_id, material=item.material_revision, mime=item.mime_type)
             for item in request.sources), key=lambda item: item['source']),
         parses=sorted((dict(source=item.source_id, revision=item.representation_revision)
@@ -3215,6 +3212,16 @@ def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=No
             context=relay.context_window_tokens, output=relay.max_output_tokens)
             for kind, relay in request.relays.items()},
         organization=request.organization_reports.recipe_digest))
+
+
+def _build_semantic_artifacts(request: SemanticArtifactBuildRequest, progress=None) -> dict[str, Any]:
+    """Assemble product contracts; native pipeline owns stage execution."""
+    from .pipeline import PipelineBuilder, ExecutionEngine
+    from .explorer.search_index import GraphSearchIndex
+    from .triplet_store.publication_records import PublicationRecords
+
+    publication = PublicationRecords(_native_build.get()[1], request.project_id)
+    completion_key = _publication_completion_key(request)
     completed_indexes = publication.completed_publication(completion_key)
     if completed_indexes is not None:
         from .explorer.search_index import GraphSearchIndex

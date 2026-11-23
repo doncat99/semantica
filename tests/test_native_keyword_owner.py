@@ -112,6 +112,27 @@ def test_native_keyword_phrase_unicode_and_identity_admission(tmp_path):
             receipt=receipt, installation_identity=_file_identity(path))
 
 
+def test_native_keyword_rejects_a_receipt_for_an_old_position_recipe(tmp_path):
+    path, receipt, _ = publish(tmp_path, 'ESG report')
+    stale = {**receipt, 'recipe_digest': sha256(b'GraphSearchIndex:native-scalar-literal-positions').hexdigest()}
+    with pytest.raises(ValueError, match='recipe is stale'):
+        GraphSearchIndex.open_native_positions(path, project='p', generation='g',
+            receipt=stale, installation_identity=_file_identity(path))
+
+
+def test_native_keyword_rejects_schema_missing_page_geometry(tmp_path):
+    path, receipt, _ = publish(tmp_path, 'ESG report')
+    with sqlite3.connect(path) as db:
+        db.execute('DROP INDEX positions_term')
+        db.execute('ALTER TABLE positions DROP COLUMN page')
+    from hashlib import file_digest
+    with path.open('rb') as stream:
+        receipt = {**receipt, 'store_id': 'sha256:' + file_digest(stream, 'sha256').hexdigest()}
+    with pytest.raises(ValueError, match='schema is stale'):
+        GraphSearchIndex.open_native_positions(path, project='p', generation='g',
+            receipt=receipt, installation_identity=_file_identity(path))
+
+
 def test_native_keyword_large_page_oracle_bidirectional_navigation_and_restart(tmp_path):
     texts = ['😀漢 ' + 'padding ' * 2300 + ('ESG/esg ESG\n' * 160) for _ in range(3)]
     artifact = tmp_path / 'pages.json'

@@ -201,7 +201,7 @@ def test_production_damaged_adopted_result_never_rebuys_paid_work(tmp_path, muta
     assert 'missing' in resumed.stderr.lower()
 
 
-def build_child(root, stop_before_publication=True, activate_publication=True):
+def build_child(root, stop_before_publication=True, activate_publication=True, index_recipe=None, monkeypatch=None):
     """Actual build stages; only the remote transport is a no-network fixture."""
     import urllib.request
     from semantica.semantic_publication_builder import build_semantic_artifacts
@@ -214,6 +214,11 @@ def build_child(root, stop_before_publication=True, activate_publication=True):
         source.write_text('Ada Lovelace designed the Analytical Engine.')
     os.environ['OPENAI_API_KEY'] = 'fixture-only'
     request = _request(source, root/'published', recipe='model')['params']
+    if index_recipe is not None:
+        if monkeypatch is None:
+            raise AssertionError('index recipe fixtures require pytest monkeypatch restoration')
+        from semantica.explorer.search_index import GraphSearchIndex
+        monkeypatch.setattr(GraphSearchIndex, 'native_positions_recipe_digest', staticmethod(lambda: index_recipe))
     request['activatePublication'] = activate_publication
     request['relays']['embedding']['bindingId'] = 'binding:fixture-embedding'
     request['recipe']['classificationProfile'] = _classification_profile()
@@ -302,7 +307,7 @@ def test_actual_build_restarts_without_rebuy_or_checkpoint_before_publication(tm
         assert db.execute('SELECT count(*) FROM cache WHERE accepted_digest IS NOT NULL').fetchone()[0] == 0
 
 
-def test_failed_publication_recovers_to_ready_without_repeating_paid_work(tmp_path):
+def test_failed_publication_recovers_to_ready_without_repeating_paid_work(tmp_path, monkeypatch):
     command = [sys.executable, '-c',
         "import runpy,sys; runpy.run_path(sys.argv[1])['build_child'](sys.argv[2], stop_before_publication=sys.argv[3]=='stop')",
         str(Path(__file__).resolve()), str(tmp_path)]
@@ -316,4 +321,9 @@ def test_failed_publication_recovers_to_ready_without_repeating_paid_work(tmp_pa
     from tests.test_native_extraction_handoff import build_child
     result = build_child(tmp_path, stop_before_publication=False)
     assert result['publication']['state'] == 'ready'
+    assert (tmp_path/'build-calls.jsonl').read_text() == paid_before
+    updated_index = build_child(tmp_path, stop_before_publication=False,
+        index_recipe='f' * 64, monkeypatch=monkeypatch)
+    assert updated_index['publication']['generation'] != result['publication']['generation']
+    assert updated_index['native_indexes']['keyword']['receipt']['recipe_digest'] == 'f' * 64
     assert (tmp_path/'build-calls.jsonl').read_text() == paid_before

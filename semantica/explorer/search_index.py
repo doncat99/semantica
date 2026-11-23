@@ -118,6 +118,10 @@ class IndexedNodeDocument:
 
 class GraphSearchIndex:
     @staticmethod
+    def native_positions_recipe_digest():
+        return sha256(b'GraphSearchIndex:native-page-geometry-docling-origin-literal-positions').hexdigest()
+
+    @staticmethod
     def publish_native_positions(index_path, *, project, generation, readers):
         """Maintenance traversal over native reader pages; persist lexical features only.
 
@@ -134,7 +138,7 @@ class GraphSearchIndex:
             raise ValueError('native position publication target already exists')
         if any(not isinstance(v, str) or not v or len(v.encode()) > 4096 for v in (project, generation)):
             raise ValueError('native position publication identity is invalid')
-        recipe = sha256(b'GraphSearchIndex:native-page-geometry-literal-positions').hexdigest()
+        recipe = GraphSearchIndex.native_positions_recipe_digest()
         try:
             with closing(sqlite3.connect(index_path)) as db, db:
                 db.execute('PRAGMA cache_size=-2048')
@@ -274,12 +278,17 @@ class GraphSearchIndex:
                 or receipt['kind'] != 'native-scalar-positions'
                 or not re.fullmatch(r'sha256:[0-9a-f]{64}', receipt['store_id'])):
             raise ValueError('native position receipt identity is invalid')
+        if receipt['recipe_digest'] != cls.native_positions_recipe_digest():
+            raise ValueError('native position recipe is stale; rebuild the derived index')
         db = sqlite3.connect(path.resolve().as_uri() + '?mode=ro&immutable=1', uri=True)
         try:
             db.execute('PRAGMA cache_size=-2048')
             metadata = dict(db.execute('SELECT key,value FROM metadata LIMIT 4'))
             if metadata != {'project':project, 'generation':generation, 'recipe':receipt['recipe_digest']}:
                 raise ValueError('native position publication identity differs')
+            columns = {row[1] for row in db.execute('PRAGMA table_info(positions)')}
+            if not {'page', 'y', 'x'} <= columns:
+                raise ValueError('native position schema is stale; rebuild the derived index')
             owner = cls()
             owner._native_db, owner._native_path, owner._native_identity = db, path, tuple(installation_identity)
             db.create_function('original_position', 3, _original_position)
