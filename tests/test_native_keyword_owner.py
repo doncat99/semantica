@@ -16,6 +16,39 @@ from semantica.semantic_query_schema import DocumentReaderSelection
 from tests.test_native_document_reader import payload, request
 
 
+def test_pdf_positions_follow_page_geometry_across_reversible_pages(tmp_path):
+    from docling_core.types.doc import DoclingDocument
+    from docling_core.types.doc.base import BoundingBox, Size, CoordOrigin
+    from docling_core.types.doc.document import ProvenanceItem
+
+    document = DoclingDocument(name='visual-order')
+    document.add_page(page_no=1, size=Size(width=600, height=800))
+    document.add_page(page_no=2, size=Size(width=600, height=800))
+    # Deliberately place extraction order opposite to scrolling order, including
+    # enough hits to exercise both sides of the 128-result continuation.
+    for page, y, x, count in [(2, 10, 10, 1), (1, 400, 10, 70),
+                              (1, 100, 300, 70), (1, 100, 10, 1)]:
+        text = 'ESG ' * count
+        document.add_text(label='text', text=text, prov=ProvenanceItem(
+            page_no=page, charspan=(0, len(text)),
+            bbox=BoundingBox(l=x, t=y, r=x + 100, b=y + 20, coord_origin=CoordOrigin.TOPLEFT)))
+    artifact = tmp_path / 'visual.json'
+    reader = request(artifact, write_reader_artifact(artifact,
+        payload({'format': 'docling', 'document': document.export_to_dict()})))
+    index = tmp_path / 'visual.sqlite'
+    receipt = GraphSearchIndex.publish_native_positions(index, project='p', generation='g', readers=[reader])
+    owner = GraphSearchIndex.open_native_positions(index, project='p', generation='g',
+        receipt=receipt, installation_identity=_file_identity(index))
+    first = owner.search_native_positions('ESG', limit=128)
+    second = owner.search_native_positions('ESG', limit=128, after=first['nextCursor'])
+    hits = first['items'] + second['items']
+    assert [item['nativeRef'].split('/')[4] for item in hits] == ['3'] + ['2'] * 70 + ['1'] * 70 + ['0']
+    previous = owner.search_native_positions('ESG', limit=128,
+        after=second['previousCursor'], navigation='previous')
+    assert previous['items'] == first['items']
+    owner.close_native_positions()
+
+
 def publish(tmp_path, text):
     source = tmp_path / 'source.json'
     digests = write_reader_artifact(source, payload({'format': 'text', 'text': text}))
@@ -61,7 +94,7 @@ def test_native_keyword_has_every_position_across_reader_segments_and_restart(tm
     owner.close_native_positions()
     with sqlite3.connect(path) as db:
         tables = [row[0] for row in db.execute("SELECT name FROM sqlite_master WHERE type='table'")]
-        assert set(tables) == {'metadata', 'sources', 'terms', 'grams', 'positions'}
+        assert set(tables) == {'metadata', 'sources', 'terms', 'grams', 'positions', 'origins'}
         assert all('text' not in row[1] for name in tables for row in db.execute('PRAGMA table_info(' + name + ')'))
 
 
@@ -332,3 +365,30 @@ def test_native_keyword_cleanup_failure_preserves_original_cancellation(tmp_path
     finally:
         owner._native_db = connection
         owner.close_native_positions()
+
+
+def test_identical_docling_regions_are_not_proof_of_duplicate_glyphs(tmp_path):
+    from docling_core.types.doc import DoclingDocument
+    from docling_core.types.doc.base import BoundingBox, Size, CoordOrigin
+    from docling_core.types.doc.document import ProvenanceItem
+
+    document = DoclingDocument(name='duplicates')
+    document.add_page(page_no=1, size=Size(width=600, height=800))
+    for y in (100, 100, 200):
+        text = 'ESG ESG'
+        document.add_text(label='text', text=text, prov=ProvenanceItem(
+            page_no=1, charspan=(0, len(text)),
+            bbox=BoundingBox(l=10, t=y, r=100, b=y + 20, coord_origin=CoordOrigin.TOPLEFT)))
+    artifact = tmp_path / 'duplicates.json'
+    reader = request(artifact, write_reader_artifact(artifact,
+        payload({'format': 'docling', 'document': document.export_to_dict()})))
+    index = tmp_path / 'duplicates.sqlite'
+    receipt = GraphSearchIndex.publish_native_positions(index, project='p', generation='g', readers=[reader])
+    owner = GraphSearchIndex.open_native_positions(index, project='p', generation='g',
+        receipt=receipt, installation_identity=_file_identity(index))
+    result = owner.search_native_positions('ESG')
+    assert result['total'] == 6
+    assert [item['start'] for item in result['items']] == [0, 4, 0, 4, 0, 4]
+    assert [item['locator']['doclingRefs'] for item in result['items'][::2]] == [
+        ['#/texts/0'], ['#/texts/1'], ['#/texts/2']]
+    owner.close_native_positions()

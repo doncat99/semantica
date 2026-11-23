@@ -127,13 +127,14 @@ class GraphSearchIndex:
         """
         from hashlib import file_digest
         from ..semantic_document_reader import read_document_reader
+        from ..parse.document_reader import SCALAR_SEGMENT
         from ..semantic_worker_context import check_query_cancellation
         index_path = Path(index_path)
         if index_path.exists():
             raise ValueError('native position publication target already exists')
         if any(not isinstance(v, str) or not v or len(v.encode()) > 4096 for v in (project, generation)):
             raise ValueError('native position publication identity is invalid')
-        recipe = sha256(b'GraphSearchIndex:native-scalar-literal-positions').hexdigest()
+        recipe = sha256(b'GraphSearchIndex:native-page-geometry-literal-positions').hexdigest()
         try:
             with closing(sqlite3.connect(index_path)) as db, db:
                 db.execute('PRAGMA cache_size=-2048')
@@ -144,7 +145,10 @@ class GraphSearchIndex:
                     CREATE TABLE grams(gram TEXT,term INTEGER,PRIMARY KEY(gram,term)) WITHOUT ROWID;
                     CREATE TABLE positions(source TEXT,ref TEXT,ordinal INTEGER,scalar INTEGER,term INTEGER,
                         start INTEGER,end INTEGER,expansions TEXT,locator TEXT,
+                        page INTEGER NOT NULL,y REAL NOT NULL,x REAL NOT NULL,
                         PRIMARY KEY(source,ref,ordinal)) WITHOUT ROWID;
+                    CREATE TABLE origins(source TEXT,ref TEXT,origin TEXT,
+                        PRIMARY KEY(source,ref,origin)) WITHOUT ROWID;
                 ''')
                 db.executemany('INSERT INTO metadata VALUES (?,?)',
                     [('project', project), ('generation', generation), ('recipe', recipe)])
@@ -171,6 +175,28 @@ class GraphSearchIndex:
                     return term_id
                 for reader in readers:
                     check_query_cancellation()
+                    location_db = sqlite3.connect(Path(reader.reader_index.path).resolve().as_uri() + '?mode=ro', uri=True)
+                    location_cache = {}
+                    def location(ref, start):
+                        key = (ref, start // SCALAR_SEGMENT)
+                        if key not in location_cache:
+                            segment_start = key[1] * SCALAR_SEGMENT
+                            rows = location_db.execute('''SELECT descriptor FROM items
+                                WHERE field='pages' AND json_extract(descriptor,'$.ref')=?
+                                AND json_extract(descriptor,'$.start')<?
+                                AND json_extract(descriptor,'$.end')>?
+                                ORDER BY json_extract(descriptor,'$.start') DESC LIMIT 129''',
+                                (ref, segment_start + SCALAR_SEGMENT, segment_start)).fetchall()
+                            if len(rows) > 128:
+                                raise ValueError('native position location metadata exceeds budget')
+                            location_cache.clear()
+                            location_cache[key] = [json.loads(row[0]) for row in rows]
+                        candidates = [item for item in location_cache[key] if item['start'] <= start < item['end']]
+                        if len(candidates) != 1:
+                            return (2147483647, 0, 0)
+                        item = candidates[0]
+                        box = item.get('box') or {}
+                        return (item['pageNumber'], box.get('y', 0), box.get('x', 0))
                     source = reader.source_id
                     db.execute('INSERT INTO sources VALUES (?,?,?,?)', (source,
                         reader.material_revision, reader.representation_revision, reader.artifact.digest))
@@ -187,9 +213,9 @@ class GraphSearchIndex:
                             if width != 1:
                                 expansion.append((n, folded, width))
                             folded += width
-                        db.execute('INSERT INTO positions VALUES (?,?,?,?,?,?,?,?,?)',
+                        db.execute('INSERT INTO positions VALUES (?,?,?,?,?,?,?,?,?,?,?,?)',
                             (source, active_ref, ordinal, scalar, intern(token.lower()), start, start+len(token),
-                             json.dumps(expansion), json.dumps(locator, ensure_ascii=False)))
+                             json.dumps(expansion), json.dumps(locator, ensure_ascii=False), *location(active_ref, start)))
                         ordinal += 1
                     while True:
                         selection = reader.selection.model_copy(update={'field':'chunks', 'after':after,
@@ -224,10 +250,11 @@ class GraphSearchIndex:
                         after = page['nextCursor']
                     if pending:
                         emit_token(pending, pending_start, pending_locator)
+                    location_db.close()
                 # Build the inverted B-tree once, rather than random writes per token.
                 db.set_progress_handler(lambda: (check_query_cancellation() or 0), 1000)
                 try:
-                    db.execute('CREATE INDEX positions_term ON positions(term,source,scalar,ordinal)')
+                    db.execute('CREATE INDEX positions_term ON positions(term,source,page,y,x,scalar,ordinal)')
                 finally:
                     db.set_progress_handler(None, 0)
             with index_path.open('rb') as stream:
@@ -320,23 +347,23 @@ class GraphSearchIndex:
                 if navigation.endswith('_source'):
                     cursor_sql, cursor_params = ' AND p.source'+comparison+'?', [after[0]]
                 elif navigation.endswith('_page'):
-                    row = db.execute('SELECT json_extract(locator,\'$.page\') FROM positions WHERE source=? AND ref=? AND ordinal=?', after[:3]).fetchone()
-                    if row is None or row[0] is None:
+                    row = db.execute('SELECT page FROM positions WHERE source=? AND ref=? AND ordinal=?', after[:3]).fetchone()
+                    if row is None or row[0] == 2147483647:
                         raise ValueError('native keyword position has no page navigation address')
-                    cursor_sql, cursor_params = (' AND p.source=? AND json_extract(p.locator,\'$.page\')'+comparison+'?', [after[0],row[0]])
+                    cursor_sql, cursor_params = (' AND p.source=? AND p.page'+comparison+'?', [after[0],row[0]])
                 else:
-                    scalar_row = db.execute('SELECT scalar FROM positions WHERE source=? AND ref=? AND ordinal=?',after[:3]).fetchone()
+                    scalar_row = db.execute('SELECT page,y,x,scalar FROM positions WHERE source=? AND ref=? AND ordinal=?',after[:3]).fetchone()
                     if scalar_row is None:
                         raise ValueError('native keyword cursor is not an installed position')
-                    cursor_sql, cursor_params = ' AND (p.source,p.scalar,p.ordinal,c.relative)'+comparison+'(?,?,?,?)', [after[0],scalar_row[0],*after[2:]]
+                    cursor_sql, cursor_params = ' AND (p.source,p.page,p.y,p.x,p.scalar,p.ordinal,c.relative)'+comparison+'(?,?,?,?,?,?,?)', [after[0],*scalar_row,*after[2:]]
             rows = db.execute('SELECT p.source,p.ref,p.ordinal,c.relative'+joins+cursor_sql+
-                (' ORDER BY p.source DESC,p.scalar DESC,p.ordinal DESC,c.relative DESC' if backward else ' ORDER BY p.source,p.scalar,p.ordinal,c.relative')+
+                (' ORDER BY p.source DESC,p.page DESC,p.y DESC,p.x DESC,p.scalar DESC,p.ordinal DESC,c.relative DESC' if backward else ' ORDER BY p.source,p.page,p.y,p.x,p.scalar,p.ordinal,c.relative')+
                 ' LIMIT ?', [*params, *cursor_params,limit]).fetchall()
             if backward:
                 rows.reverse()
-            first_scalar = db.execute('SELECT scalar FROM positions WHERE source=? AND ref=? AND ordinal=?', rows[0][:3]).fetchone()[0] if rows else 0
+            first_scalar = db.execute('SELECT page,y,x,scalar FROM positions WHERE source=? AND ref=? AND ordinal=?', rows[0][:3]).fetchone() if rows else ()
             start_offset = db.execute('SELECT count(*)'+joins+
-                ' AND (p.source,p.scalar,p.ordinal,c.relative)<(?,?,?,?)', [*params,rows[0][0],first_scalar,*rows[0][2:]]).fetchone()[0] if rows else 0
+                ' AND (p.source,p.page,p.y,p.x,p.scalar,p.ordinal,c.relative)<(?,?,?,?,?,?,?)', [*params,rows[0][0],*first_scalar,*rows[0][2:]]).fetchone()[0] if rows else 0
             items, byte_count = [], 0
             for source, ref, ordinal, relative in rows:
                 check()
@@ -346,6 +373,10 @@ class GraphSearchIndex:
                 end = _original_position(last[0],last[1],relative+len(word) if len(pieces)==1 else len(pieces[-1]),True)
                 item = {'sourceId':source, 'nativeRef':ref, 'start':start, 'end':end,
                     'locator':{**json.loads(first[2]),'nativeRef':ref,'startChar':start,'endChar':end}}
+                origins = [row[0] for row in db.execute(
+                    'SELECT origin FROM origins WHERE source=? AND ref=? ORDER BY origin', (source, ref))]
+                if origins:
+                    item['locator']['doclingRefs'] = list(dict.fromkeys(item['locator'].get('doclingRefs', []) + origins))
                 byte_count += len(json.dumps(item, ensure_ascii=False).encode())
                 if byte_count > 262144:
                     raise ValueError('native keyword response exceeds byte budget')
