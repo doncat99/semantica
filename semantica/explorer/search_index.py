@@ -119,7 +119,7 @@ class IndexedNodeDocument:
 class GraphSearchIndex:
     @staticmethod
     def native_positions_recipe_digest():
-        return sha256(b'GraphSearchIndex:native-page-geometry-docling-origin-literal-positions').hexdigest()
+        return sha256(b'GraphSearchIndex:page-native-reading-order-clipped-provenance-literal-positions').hexdigest()
 
     @staticmethod
     def publish_native_positions(index_path, *, project, generation, readers):
@@ -258,7 +258,7 @@ class GraphSearchIndex:
                 # Build the inverted B-tree once, rather than random writes per token.
                 db.set_progress_handler(lambda: (check_query_cancellation() or 0), 1000)
                 try:
-                    db.execute('CREATE INDEX positions_term ON positions(term,source,page,y,x,scalar,ordinal)')
+                    db.execute('CREATE INDEX positions_term ON positions(term,source,page,scalar,ordinal)')
                 finally:
                     db.set_progress_handler(None, 0)
             with index_path.open('rb') as stream:
@@ -361,18 +361,18 @@ class GraphSearchIndex:
                         raise ValueError('native keyword position has no page navigation address')
                     cursor_sql, cursor_params = (' AND p.source=? AND p.page'+comparison+'?', [after[0],row[0]])
                 else:
-                    scalar_row = db.execute('SELECT page,y,x,scalar FROM positions WHERE source=? AND ref=? AND ordinal=?',after[:3]).fetchone()
+                    scalar_row = db.execute('SELECT page,scalar FROM positions WHERE source=? AND ref=? AND ordinal=?',after[:3]).fetchone()
                     if scalar_row is None:
                         raise ValueError('native keyword cursor is not an installed position')
-                    cursor_sql, cursor_params = ' AND (p.source,p.page,p.y,p.x,p.scalar,p.ordinal,c.relative)'+comparison+'(?,?,?,?,?,?,?)', [after[0],*scalar_row,*after[2:]]
+                    cursor_sql, cursor_params = ' AND (p.source,p.page,p.scalar,p.ordinal,c.relative)'+comparison+'(?,?,?,?,?)', [after[0],*scalar_row,*after[2:]]
             rows = db.execute('SELECT p.source,p.ref,p.ordinal,c.relative'+joins+cursor_sql+
-                (' ORDER BY p.source DESC,p.page DESC,p.y DESC,p.x DESC,p.scalar DESC,p.ordinal DESC,c.relative DESC' if backward else ' ORDER BY p.source,p.page,p.y,p.x,p.scalar,p.ordinal,c.relative')+
+                (' ORDER BY p.source DESC,p.page DESC,p.scalar DESC,p.ordinal DESC,c.relative DESC' if backward else ' ORDER BY p.source,p.page,p.scalar,p.ordinal,c.relative')+
                 ' LIMIT ?', [*params, *cursor_params,limit]).fetchall()
             if backward:
                 rows.reverse()
-            first_scalar = db.execute('SELECT page,y,x,scalar FROM positions WHERE source=? AND ref=? AND ordinal=?', rows[0][:3]).fetchone() if rows else ()
+            first_scalar = db.execute('SELECT page,scalar FROM positions WHERE source=? AND ref=? AND ordinal=?', rows[0][:3]).fetchone() if rows else ()
             start_offset = db.execute('SELECT count(*)'+joins+
-                ' AND (p.source,p.page,p.y,p.x,p.scalar,p.ordinal,c.relative)<(?,?,?,?,?,?,?)', [*params,rows[0][0],*first_scalar,*rows[0][2:]]).fetchone()[0] if rows else 0
+                ' AND (p.source,p.page,p.scalar,p.ordinal,c.relative)<(?,?,?,?,?)', [*params,rows[0][0],*first_scalar,*rows[0][2:]]).fetchone()[0] if rows else 0
             items, byte_count = [], 0
             for source, ref, ordinal, relative in rows:
                 check()

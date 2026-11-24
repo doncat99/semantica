@@ -208,6 +208,45 @@ def verify_native_installation(request, *, cancelled=lambda: False, progress=lam
         owner.close()
 
 
+def rebuild_reader_index(request):
+    """Offline projection upgrade, one bounded saved representation at a time.
+
+    Never invokes a parser or model; only the canonical address writer is used.
+    Originals stay immutable, and the caller adopts the new index atomically.
+    """
+    from .semantic_document_reader import write_reader_artifact, _identity
+    from .semantic_query_schema import DocumentReaderRequest
+    if not isinstance(request, dict) or set(request) != {'reader', 'targetPath'}:
+        raise ValueError('Invalid reader index rebuild request')
+    reader = DocumentReaderRequest.model_validate(request['reader'])
+    source = Path(reader.artifact.path)
+    target = Path(request['targetPath'])
+    if (not source.is_absolute() or source.is_symlink() or not source.is_file()
+            or not target.is_absolute() or target.is_symlink()
+            or source.resolve() == target.resolve()):
+        raise ValueError('Reader upgrade requires distinct installed and staging paths')
+    before = _identity(source)
+    if before != reader.artifact.installation.identity:
+        raise ValueError('Reader installation identity differs')
+    # Explicit offline maintenance may traverse one complete document, never a project.
+    with source.open('rb') as stream:
+        raw = stream.read(64 * 1024 * 1024 + 1)
+    if len(raw) > 64 * 1024 * 1024:
+        raise ValueError('Reader upgrade exceeds 64MiB per-document budget')
+    if 'sha256:' + hashlib.sha256(raw).hexdigest() != reader.artifact.digest:
+        raise ValueError('Reader artifact digest differs')
+    payload = json.loads(raw)
+    del raw
+    if (payload.get('materialRevision') != reader.material_revision
+            or payload.get('document', {}).get('representation_revision') != reader.representation_revision):
+        raise ValueError('Reader representation identity differs')
+    artifact_digest, index_digest, header = write_reader_artifact(target, payload)
+    if artifact_digest != reader.artifact.digest or _identity(source) != before:
+        raise ValueError('Reader upgrade changed representation digest or installation identity')
+    return dict(artifactDigest=artifact_digest, readerIndexDigest=index_digest,
+        readerIndexPath=str(target.with_suffix('.reader.sqlite')), readerHeader=header)
+
+
 def rebuild_keyword_index(request, *, cancelled=lambda: False, progress=lambda counts: None):
     """Rebuild only the native lexical projection from installed readers."""
     from .explorer.search_index import GraphSearchIndex, _file_identity
@@ -451,16 +490,19 @@ def main():
         help='Explicit offline upgrade of the accepted embedding range lookup index')
     parser.add_argument('--rebuild-keyword-index', action='store_true',
         help='Rebuild a stale derived keyword index from installed document readers')
+    parser.add_argument('--rebuild-reader-index', action='store_true')
     parser.add_argument('--execute', action='store_true')
     args = parser.parse_args()
-    if sum((args.index_source_projection, args.rebind_source_projection, args.index_embedding_scope, args.rebuild_keyword_index)) > 1:
+    if sum((args.index_source_projection, args.rebind_source_projection, args.index_embedding_scope, args.rebuild_keyword_index, args.rebuild_reader_index)) > 1:
         parser.error('Choose exactly one maintenance operation')
     with open(args.request_file, 'rb') as stream:
         raw = stream.read(65537)
     if len(raw) > 65536:
         raise ProcessingError('Native maintenance request exceeds 64KiB')
     request=json.loads(raw)
-    if args.rebuild_keyword_index:
+    if args.rebuild_reader_index:
+        result = rebuild_reader_index(request)
+    elif args.rebuild_keyword_index:
         result = rebuild_keyword_index(request)
     elif args.index_embedding_scope:
         from .vector_store.sqlite_vec_store import SQLiteVecStore

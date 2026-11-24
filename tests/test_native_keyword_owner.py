@@ -16,7 +16,7 @@ from semantica.semantic_query_schema import DocumentReaderSelection
 from tests.test_native_document_reader import payload, request
 
 
-def test_pdf_positions_follow_page_geometry_across_reversible_pages(tmp_path):
+def test_pdf_positions_follow_page_then_native_reading_order_across_reversible_pages(tmp_path):
     from docling_core.types.doc import DoclingDocument
     from docling_core.types.doc.base import BoundingBox, Size, CoordOrigin
     from docling_core.types.doc.document import ProvenanceItem
@@ -42,7 +42,7 @@ def test_pdf_positions_follow_page_geometry_across_reversible_pages(tmp_path):
     first = owner.search_native_positions('ESG', limit=128)
     second = owner.search_native_positions('ESG', limit=128, after=first['nextCursor'])
     hits = first['items'] + second['items']
-    assert [item['nativeRef'].split('/')[4] for item in hits] == ['3'] + ['2'] * 70 + ['1'] * 70 + ['0']
+    assert [item['nativeRef'].split('/')[4] for item in hits] == ['1'] * 70 + ['2'] * 70 + ['3'] + ['0']
     previous = owner.search_native_positions('ESG', limit=128,
         after=second['previousCursor'], navigation='previous')
     assert previous['items'] == first['items']
@@ -413,3 +413,19 @@ def test_identical_docling_regions_are_not_proof_of_duplicate_glyphs(tmp_path):
     assert [item['locator']['doclingRefs'] for item in result['items'][::2]] == [
         ['#/texts/0'], ['#/texts/1'], ['#/texts/2']]
     owner.close_native_positions()
+
+
+def test_reader_index_upgrade_preserves_saved_bytes_and_is_restartable(tmp_path):
+    from semantica.native_maintenance import rebuild_reader_index
+    source = tmp_path / 'saved.json'
+    digests = write_reader_artifact(source, payload({'format': 'text', 'text': 'ESG saved result'}))
+    reader = request(source, digests)
+    original = source.read_bytes()
+    operation = dict(reader=reader.model_dump(by_alias=True, exclude_none=True), targetPath=str(tmp_path / 'rebuilt.json'))
+    first = rebuild_reader_index(operation)
+    assert source.read_bytes() == original
+    assert first['artifactDigest'] == digests[0]
+    assert first == rebuild_reader_index(operation)
+    operation['reader']['artifact']['digest'] = 'sha256:' + '0' * 64
+    with pytest.raises((ValueError, RuntimeError), match='digest|identity|representation|installations'):
+        rebuild_reader_index(operation)

@@ -444,6 +444,16 @@ def project_document_reader(document: dict[str, Any], *, sink=None) -> dict[str,
         active.remove(ref)
         seen.add(ref)
 
+    def scalar_span(prov, value):
+        start, end = prov['charspan']
+        if type(start) is not int or type(end) is not int or start < 0 or end < start:
+            raise ValueError('invalid native character span')
+        # Docling provenance may include trailing separators trimmed from text.
+        start, end = max(0, start), min(len(value), end)
+        if start > end or (start == end and value):
+            raise ValueError('native character span does not address this scalar')
+        return start, end
+
     def scalar(item_ref, item, value, native_ref, table_cell=None, cell_box=None, native_cell=False):
         ref = '#/document/document/' + native_ref[2:]
         loc = {'doclingRefs': [item_ref], 'locationState': 'coarse'}
@@ -457,9 +467,7 @@ def project_document_reader(document: dict[str, Any], *, sink=None) -> dict[str,
                         continue
                     _box(cell_box, page)
                 else:
-                    start, end = prov['charspan']
-                    if not 0 <= start <= end <= len(value):
-                        raise ValueError('invalid native character span')
+                    start, end = scalar_span(prov, value)
                     _box(prov['bbox'], page)
                 loc['locationState'] = 'located'
             except (ValueError, TypeError, KeyError):
@@ -495,8 +503,7 @@ def project_document_reader(document: dict[str, Any], *, sink=None) -> dict[str,
                     start, end = 0, len(value)
                     box = _box(cell_box, page)
                 else:
-                    if not 0 <= start <= end <= len(value):
-                        raise ValueError('invalid native character span')
+                    start, end = scalar_span(prov, value)
                     box = _box(prov['bbox'], page)
                 for descriptor in _ranges(ref, value, **loc):
                     a, b = max(start, descriptor['start']), min(end, descriptor['end'])

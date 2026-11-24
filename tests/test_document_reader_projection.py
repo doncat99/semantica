@@ -51,7 +51,7 @@ def test_invalid_provenance_remains_explicit_without_hiding_native_content():
     doc = DoclingDocument(name='source')
     doc.add_page(page_no=1, size=Size(width=600, height=800))
     doc.add_text(label='text', text='short', prov=ProvenanceItem(page_no=1,
-        charspan=(0, 20), bbox=BoundingBox(l=1, t=1, r=10, b=10)))
+        charspan=(20, 25), bbox=BoundingBox(l=1, t=1, r=10, b=10)))
     result = project_document_reader({'format': 'docling', 'document': doc.export_to_dict()})
     assert result['pages'][0]['state'] == 'invalid_layout'
     assert result['chunks'][0]['locator']['locationState'] == 'invalid'
@@ -61,3 +61,16 @@ def test_invalid_provenance_remains_explicit_without_hiding_native_content():
 def test_reader_does_not_accept_transient_extraction_text_as_native_content():
     with pytest.raises(KeyError, match='text'):
         project_document_reader({'format': 'text'})
+
+
+def test_native_provenance_overhang_is_intersected_with_saved_scalar():
+    doc = DoclingDocument(name='trimmed-scalar')
+    doc.add_page(page_no=1, size=Size(width=600, height=800))
+    doc.add_text(label='text', text='ESG', prov=ProvenanceItem(page_no=1,
+        charspan=(0, 5), bbox=BoundingBox(l=10, t=20, r=100, b=40, coord_origin=CoordOrigin.TOPLEFT)))
+    result = project_document_reader({'format': 'docling', 'document': doc.export_to_dict()})
+    assert result['chunks'][0]['locator']['locationState'] == 'located'
+    assert result['pages'][0]['start'] == 0
+    assert result['pages'][0]['end'] == 3
+    assert result['pages'][0]['pageNumber'] == 1
+    assert result['pages'][0]['state'] != 'invalid_layout'
