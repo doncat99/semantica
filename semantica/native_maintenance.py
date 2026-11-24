@@ -208,6 +208,88 @@ def verify_native_installation(request, *, cancelled=lambda: False, progress=lam
         owner.close()
 
 
+def upgrade_saved_source(request):
+    """Explicit v2 -> current artifact migration; never an ordinary reader path.
+
+    Preserve the historical representation identity and immutable original. Only
+    redundant serialized mirrors are removed from the new native carrier.
+    """
+    from types import SimpleNamespace
+    from .semantic_document_reader import _identity
+    from .semantic_source_artifact import _write_parsed_source_artifact, _has_representation_identity, _safe_id
+    from .source import normalized_processing_profile
+    from .parse.document_contract import document_suffix
+    if not isinstance(request, dict) or set(request) != {'artifactPath', 'artifactDigest', 'targetPath'}:
+        raise ValueError('Invalid saved source upgrade request')
+    source, target = Path(request['artifactPath']), Path(request['targetPath'])
+    if (not source.is_absolute() or source.is_symlink() or not source.is_file()
+            or not target.is_absolute() or target.is_symlink() or source.resolve() == target.resolve()):
+        raise ValueError('Saved source upgrade requires distinct installed and staging paths')
+    before = _identity(source)
+    with source.open('rb') as stream:
+        raw = stream.read(64 * 1024 * 1024 + 1)
+    if len(raw) > 64 * 1024 * 1024:
+        raise ValueError('Saved source upgrade exceeds 64MiB budget')
+    if 'sha256:' + hashlib.sha256(raw).hexdigest() != request['artifactDigest']:
+        raise ValueError('Saved source upgrade artifact digest differs')
+    payload = json.loads(raw)
+    del raw
+    document = payload.get('document')
+    if (payload.get('protocol') != 'semantica.parsed-source.v2'
+            or not isinstance(document, dict) or not _has_representation_identity(document)
+            or not isinstance(payload.get('sourceId'), str) or not payload['sourceId']
+            or document.get('content_hash') != payload.get('materialRevision')
+            or not isinstance(payload.get('materialRevision'), str)
+            or not isinstance(payload.get('mimeType'), str)
+            or type(payload.get('forceOcr')) is not bool
+            or not isinstance(payload.get('name'), str)
+            or not isinstance(payload.get('parser'), str) or not payload['parser']
+            or not isinstance(payload.get('parserVersion'), str) or not payload['parserVersion']
+            or payload.get('origin') not in {'native', 'ocr', 'mixed', 'external', 'adapter'}
+            or payload.get('processingRevision') != 'semantica-document-processing-v1'):
+        raise ValueError('Unsupported or invalid historical saved source')
+    previous_profile = payload.get('documentProcessing')
+    if (not isinstance(previous_profile, dict) or previous_profile.get('pdfTextOrder') != 'coordinates'
+            or previous_profile.get('processingRevision') != payload['processingRevision']):
+        raise ValueError('Unsupported historical processing profile')
+    profile = normalized_processing_profile({k: previous_profile[k] for k in
+        ('mode', 'endpoint', 'bindingId', 'remoteCancellation') if previous_profile.get(k) is not None})
+    suffix = document_suffix(source, payload['name'], payload['mimeType'], False)
+    # Record the actual historical recipe, not today's implementation provenance.
+    provenance = dict(protocol=payload['protocol'], processingRevision=payload['processingRevision'],
+        profile=previous_profile, parser=payload['parser'], parserVersion=payload['parserVersion'],
+        mimeType=payload['mimeType'], suffix=suffix, forceOcr=payload['forceOcr'])
+    processing = 'sha256:' + hashlib.sha256(json.dumps(provenance, sort_keys=True,
+        separators=(',', ':')).encode()).hexdigest()
+    if document.get('format') == 'docling':
+        if not isinstance(document.get('document'), dict):
+            raise ValueError('Historical Docling native document is missing')
+        for key in ('text', 'plain_text', 'doctags', 'reader', 'source'):
+            document.pop(key, None)
+    elif document.get('format') == 'plain-text':
+        if not isinstance(document.get('text'), str):
+            raise ValueError('Historical text scalar is missing')
+        document.pop('source', None)
+        document['format'] = 'text'
+    else:
+        raise ValueError('Unsupported historical native document format')
+    current = {k: payload[k] for k in ('materialRevision', 'mimeType', 'forceOcr',
+        'parser', 'parserVersion', 'origin')}
+    current.update(protocol='semantica.parsed-source.v3', documentProcessing=profile,
+        processingRevision=processing, document=document)
+    source_id = payload['sourceId']
+    output = target.parent / f'parsed-{_safe_id(source_id)}.json'
+    if output.is_symlink() or output.resolve() == source.resolve():
+        raise ValueError('Saved source upgrade output aliases its original')
+    # Delegate serialization and indexing to the sole current native writer.
+    operation = SimpleNamespace(output_dir=str(target.parent), source=SimpleNamespace(source_id=source_id))
+    result = _write_parsed_source_artifact(operation, current)
+    if _identity(source) != before:
+        raise ValueError('Saved source changed during offline upgrade')
+    result.update(sourceExtension=suffix, documentParserDigest=processing, forceOcr=payload['forceOcr'])
+    return result
+
+
 def rebuild_reader_index(request):
     """Offline projection upgrade, one bounded saved representation at a time.
 
@@ -491,16 +573,19 @@ def main():
     parser.add_argument('--rebuild-keyword-index', action='store_true',
         help='Rebuild a stale derived keyword index from installed document readers')
     parser.add_argument('--rebuild-reader-index', action='store_true')
+    parser.add_argument('--upgrade-saved-source', action='store_true')
     parser.add_argument('--execute', action='store_true')
     args = parser.parse_args()
-    if sum((args.index_source_projection, args.rebind_source_projection, args.index_embedding_scope, args.rebuild_keyword_index, args.rebuild_reader_index)) > 1:
+    if sum((args.index_source_projection, args.rebind_source_projection, args.index_embedding_scope, args.rebuild_keyword_index, args.rebuild_reader_index, args.upgrade_saved_source)) > 1:
         parser.error('Choose exactly one maintenance operation')
     with open(args.request_file, 'rb') as stream:
         raw = stream.read(65537)
     if len(raw) > 65536:
         raise ProcessingError('Native maintenance request exceeds 64KiB')
     request=json.loads(raw)
-    if args.rebuild_reader_index:
+    if args.upgrade_saved_source:
+        result = upgrade_saved_source(request)
+    elif args.rebuild_reader_index:
         result = rebuild_reader_index(request)
     elif args.rebuild_keyword_index:
         result = rebuild_keyword_index(request)

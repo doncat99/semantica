@@ -429,3 +429,30 @@ def test_reader_index_upgrade_preserves_saved_bytes_and_is_restartable(tmp_path)
     operation['reader']['artifact']['digest'] = 'sha256:' + '0' * 64
     with pytest.raises((ValueError, RuntimeError), match='digest|identity|representation|installations'):
         rebuild_reader_index(operation)
+
+
+def test_offline_v2_upgrade_preserves_historical_identity_without_parsing(tmp_path, monkeypatch):
+    from semantica.native_maintenance import upgrade_saved_source
+    monkeypatch.setattr('semantica.source.parse_source', lambda *a, **kw: pytest.fail('must not parse'))
+    old = payload({'format': 'plain-text', 'text': 'ESG saved result', 'content_hash': 'material:m'})
+    old['document']['representation_revision'] = 'sha256:' + 'a' * 64
+    old.update(mimeType='text/plain', forceOcr=False, parser='semantica.text', parserVersion='1', origin='native')
+    old.update(protocol='semantica.parsed-source.v2', sourceId='s', name='note.txt',
+               processingRevision='semantica-document-processing-v1')
+    old['documentProcessing'] = dict(mode='local', pdfTextOrder='coordinates',
+        processingRevision='semantica-document-processing-v1', endpoint=None,
+        bindingId=None, remoteCancellation='unsupported')
+    source = tmp_path / 'saved.json'
+    raw = json.dumps(old).encode(); source.write_bytes(raw)
+    operation = dict(artifactPath=str(source), artifactDigest='sha256:' + sha256(raw).hexdigest(),
+        targetPath=str(tmp_path / 'upgraded.json'))
+    first = upgrade_saved_source(operation)
+    assert source.read_bytes() == raw
+    assert first['representationRevision'] == old['document']['representation_revision']
+    assert first['sourceId'] == 's'
+    assert first['sourceHeader']['protocol'] == 'semantica.parsed-source.v3'
+    assert first['readerHeader']['indexFormat'] == 'semantica.document-reader-index.v3'
+    assert first == upgrade_saved_source(operation)
+    operation['artifactDigest'] = 'sha256:' + '0' * 64
+    with pytest.raises(ValueError, match='digest'):
+        upgrade_saved_source(operation)
