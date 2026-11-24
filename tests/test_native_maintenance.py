@@ -138,6 +138,8 @@ def test_rebuild_keyword_index_uses_saved_reader_and_recovers_native_receipt(tmp
         def close(self): pass
 
     class Publication:
+        registry_head = registry = None
+        def _pointer(self, _head, _predicate, _graph): return SimpleNamespace(value=expected_generation)
         def __init__(self, _owner, _project): pass
         def status(self): return copy.deepcopy(state['publication'])
         def source_binding(self, _generation, source_id):

@@ -30,7 +30,7 @@ original parser provenance in published receipts.
 ## Evidence and limits
 
 Red test reproduced the absent migration entry. 52 native keyword/reader/PDF
-ownership tests passed. Read-only local trials on the three actual historical
+ownership tests and 9 native maintenance tests passed. The maintenance fixture now supplies the canonical publication generation pointer. Read-only local trials on the three actual historical
 artifacts produced indexes for 38 pages, 555 pages and one text scalar, with
 unchanged historical representation revisions. Packaged qualification and host
 startup acceptance remain subsequent gates. Only known v2 local/remote profiles
