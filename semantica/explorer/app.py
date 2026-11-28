@@ -152,31 +152,24 @@ def create_app(
         current_session = getattr(app.state, "session", active_session)
         if (native_service or current_session is not None and current_session.read_only) and request.method not in {"GET", "HEAD", "OPTIONS"}:
             # The viewer's POST queries do not modify the loaded graph.
-            if not (native_service and request.url.path == "/api/native-service/session" and request.method == "DELETE") and (request.method != "POST" or request.url.path not in {
-                "/api/graph/search", "/api/graph/distance-matrix",
+            if not (native_service and request.url.path == "/api/native-service/session" and request.method == "DELETE") and (request.method != "POST" or (request.url.path not in {
+                "/api/graph/search", "/api/graph/distance-matrix", "/api/reason",
                 "/api/export", "/api/export/distance-enriched", "/api/sparql",
                 "/api/ontology/preview", "/api/ontology/skos/search",
+                # These POST routes calculate a response from request input or
+                # the bound graph; they never publish changes to the graph.
+                "/api/enrich/extract", "/api/enrich/links", "/api/enrich/dedup",
+                "/api/ontology/suggest-alignments", "/api/ontology/shacl/generate",
+                "/api/ontology/shacl/validate",
                 "/api/native-scope/select",
                 "/api/native-scope/cancel",
                 "/api/native-service/session", "/api/native-service/cancel",
-            }):
+            } and not (
+                request.url.path.startswith("/api/ontology/versions/")
+                and request.url.path.endswith("/compare")
+            ))):
                 return JSONResponse(status_code=403, content={"detail": "Published graph is read-only"})
         return await call_next(request)
-
-    # allow_credentials lets browsers send cookies/auth headers cross-origin.
-    # Credentials aren't needed for the X-API-Key auth scheme below, and
-    # enabling them when origins are broadened creates cross-site request
-    # risk. Set EXPLORER_CORS_CREDENTIALS=true explicitly to opt in (e.g.
-    # for a reverse-proxy setup that injects its own cookie-based auth).
-    _allow_credentials = os.environ.get("EXPLORER_CORS_CREDENTIALS", "false").lower() == "true"
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=settings["allowed_origins"],
-        allow_credentials=_allow_credentials,
-        allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-        allow_headers=["Content-Type", "Authorization", "X-API-Key"],
-        max_age=600,
-    )
 
     import logging as _logging
     _logger = _logging.getLogger(__name__)
@@ -219,6 +212,25 @@ def create_app(
     if native_service:
         from .native_service import install_native_service
         install_native_service(app)
+
+    # Keep CORS outside the native session fence so browser callers can read
+    # typed 401/403/503 responses from that boundary instead of seeing a
+    # generic CORS failure. The native fence still decides whether each
+    # request is authorized for the currently bound Project.
+    # Credentials aren't needed for X-API-Key auth; opting in remains explicit.
+    _allow_credentials = (
+        not native_service
+        and os.environ.get("EXPLORER_CORS_CREDENTIALS", "false").lower() == "true"
+    )
+    app.add_middleware(
+        CORSMiddleware,
+        allow_origins=settings["allowed_origins"],
+        allow_credentials=_allow_credentials,
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
+        allow_headers=["Content-Type", "Authorization", "X-API-Key"],
+        max_age=600,
+    )
+
     app.include_router(graph_router, dependencies=_auth)
     app.include_router(analytics_router, dependencies=_auth)
     app.include_router(decisions_router, dependencies=_auth)

@@ -7,7 +7,7 @@ import logging
 import re
 from typing import Dict, List, Optional, Tuple
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import ValidationError
 
 from ..dependencies import get_session
@@ -388,8 +388,14 @@ async def graph_reasoning_facts(
 @router.post("/api/reason", response_model=ReasoningResponse)
 async def run_reasoning(
     body: ReasoningRequest,
+    request: Request,
     session: GraphSession = Depends(get_session),
 ):
+    if body.apply_to_graph and (
+        getattr(request.app.state, "native_service", None) is not None or session.read_only
+    ):
+        raise HTTPException(status_code=403, detail="Published graph is read-only")
+
     inferred_facts: List[str] = []
     try:
         from ...reasoning.reasoner import Reasoner

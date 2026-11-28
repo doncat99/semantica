@@ -43,16 +43,98 @@ def test_service_boot_does_not_open_project_and_unbind_keeps_health(native):
     with TestClient(app) as client:
         assert client.get('/api/health').status_code == 200
         assert native == []
-        assert client.get('/api/graph/stats').status_code == 503
+        unbound = client.get('/api/graph/stats', headers={'Origin': 'http://127.0.0.1:55666'})
+        assert unbound.status_code == 503
+        assert unbound.json()['detail'] == 'No Project session is bound'
+        assert unbound.headers['access-control-allow-origin'] == '*'
         assert client.post('/api/native-service/session', json=BIND).status_code == 401
         assert client.post('/api/native-service/session', json=BIND, headers=CONTROL).status_code == 200
         key = {'X-API-Key': BIND['apiKey'], 'Origin': BIND['origin']}
         assert client.get('/api/graph/stats', headers=key).json()['node_count'] == 1
         assert client.get('/api/native-scope', headers=key).json()['project'] == 'project'
+        wrong_origin = client.get('/api/graph/stats', headers={**key, 'Origin': 'http://127.0.0.1:55666'})
+        assert wrong_origin.status_code == 403
+        assert wrong_origin.json()['detail'] == 'Project session origin does not match'
+        assert wrong_origin.headers['access-control-allow-origin'] == '*'
+        invalid_key = client.get('/api/graph/stats', headers={**key, 'X-API-Key': 'invalid'})
+        assert invalid_key.status_code == 401
+        assert invalid_key.json()['detail'] == 'Invalid Project session key'
+        assert invalid_key.headers['access-control-allow-origin'] == '*'
         assert client.delete('/api/native-service/session', headers=CONTROL).status_code == 200
         assert client.get('/api/health').status_code == 200
-        assert client.get('/api/graph/stats', headers=key).status_code == 503
+        unbound_again = client.get('/api/graph/stats', headers=key)
+        assert unbound_again.status_code == 503
+        assert unbound_again.headers['access-control-allow-origin'] == '*'
         assert native[-1] == ('close', 'project')
+
+
+def test_native_read_only_reasoning_and_patch_preflight(native):
+    app = create_app(native_service=True)
+    with TestClient(app) as client:
+        client.post('/api/native-service/session', json=BIND, headers=CONTROL).raise_for_status()
+        headers = {'X-API-Key': BIND['apiKey'], 'Origin': BIND['origin']}
+
+        preview = client.post('/api/reason', headers=headers, json={
+            'facts': ['inhibits(Metformin, mTOR)', 'causes(mTOR, Neurodegeneration)'],
+            'rules': ['IF inhibits(Metformin, mTOR) AND causes(mTOR, Neurodegeneration) THEN candidate(Metformin, Alzheimer)'],
+            'apply_to_graph': False,
+        })
+        assert preview.status_code == 200, preview.text
+        assert preview.json()['mutated'] is False
+
+        write = client.post('/api/reason', headers=headers, json={
+            'facts': ['inhibits(Metformin, mTOR)'],
+            'rules': ['IF inhibits(Metformin, mTOR) THEN candidate(Metformin, Alzheimer)'],
+            'apply_to_graph': True,
+        })
+        assert write.status_code == 403
+        assert write.json()['detail'] == 'Published graph is read-only'
+
+        preflight = client.options('/api/ontology/example/toggle', headers={
+            'Origin': BIND['origin'],
+            'Access-Control-Request-Method': 'PATCH',
+            'Access-Control-Request-Headers': 'content-type,x-api-key',
+        })
+        assert preflight.status_code == 200, preflight.text
+        # Native HTTP routes apply the exact bound-origin check after the
+        # preflight; CORS stays wildcard so the dynamic session origin works.
+        assert preflight.headers['access-control-allow-origin'] == '*'
+        assert 'PATCH' in preflight.headers['access-control-allow-methods']
+        assert 'x-api-key' in preflight.headers['access-control-allow-headers'].lower()
+
+        # Native HTTP access is protected by the exact session origin and API
+        # key. CORS stays non-credentialed because the browser sends X-API-Key.
+        assert 'access-control-allow-credentials' not in preflight.headers
+
+
+def test_native_read_only_allows_calculation_posts_but_rejects_mutations(native):
+    app = create_app(native_service=True)
+    with TestClient(app) as client:
+        client.post('/api/native-service/session', json=BIND, headers=CONTROL).raise_for_status()
+        headers = {'X-API-Key': BIND['apiKey'], 'Origin': BIND['origin']}
+
+        # Invalid/empty payloads must reach each endpoint's own request or
+        # domain validation. A generic 403 here means the read-only fence has
+        # silently disconnected a browser calculation.
+        read_only_posts = [
+            '/api/enrich/extract',
+            '/api/enrich/links',
+            '/api/enrich/dedup',
+            '/api/ontology/suggest-alignments',
+            '/api/ontology/shacl/generate',
+            '/api/ontology/shacl/validate',
+            '/api/ontology/versions/example/compare',
+        ]
+        for path in read_only_posts:
+            response = client.post(path, headers=headers, json={})
+            assert response.status_code != 403, (path, response.text)
+            assert response.headers.get('access-control-allow-origin') == '*'
+
+        for path in ['/api/import', '/api/enrich/merge', '/api/ontology/create']:
+            response = client.post(path, headers=headers, json={})
+            assert response.status_code == 403, (path, response.text)
+            assert response.json()['detail'] == 'Published graph is read-only'
+            assert response.headers.get('access-control-allow-origin') == '*'
 
 
 def test_scope_switch_revokes_http_websocket_and_old_origin(native):
